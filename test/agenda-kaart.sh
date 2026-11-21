@@ -30,7 +30,7 @@ toets('3 body bij kaart: n, a, h, t', JSON.stringify(ctx.appAgendaKnopBody(K, 'j
 toets('3 body zonder kaart: alleen n, a', JSON.stringify(ctx.appAgendaKnopBody(K0, 'nee')) === JSON.stringify({ n: N, a: 'nee' }));
 toets('3 andere tekst = andere t', ctx.appAgendaKnopNieuw(U({ nonce: N, soort: 'uitvoeren', verloopt: nu + 1000, hash: H }), tekst + ' ').th !== K.th);
 toets('4 berichtNieuw gebruikt appAgendaKnopNieuw met de ruwe tekst', /agk\[id\]\.knoppen\[ag\.soort\] = appAgendaKnopNieuw\(ag, d\.tekst\)/.test(src));
-toets('4 appAgendaRoute stuurt appAgendaKnopBody', /appAgendaKnopN8n\(appAgendaKnopBody\(K, keuze\)\)/.test(fn('appAgendaRoute')));
+toets('4 appAgendaRoute stuurt appAgendaKnopBody (via appAgendaNaarN8n, wv3740)', /appAgendaNaarN8n\(id, knop, keuze, K, e\)/.test(fn('appAgendaRoute')) && /appAgendaKnopN8n\(appAgendaKnopBody\(K, keuze\)\)/.test(fn('appAgendaNaarN8n')));
 toets('4 nonce/hash nooit in appAgendaVorm', !/hash|nonce|\.th\b/.test(fn('appAgendaVorm')));
 console.log(goed + ' groen, ' + fout + ' rood');
 process.exit(fout ? 1 : 0);

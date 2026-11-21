@@ -6114,7 +6114,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/sleutels/nieuw', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
-  'POST /app/reactie', 'POST /app/agenda', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/te-lezen']);   // wv2245: afvinken of bewaren = David die leest   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
+  'POST /app/reactie', 'POST /app/agenda', 'POST /app/agenda/reeks', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/te-lezen']);   // wv2245: afvinken of bewaren = David die leest   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });
 APP_GLIJD_ROUTES.add('POST /app/nieuws/gezien');   // wv3689: iets in het loket gezien = David die leest
 APP_GLIJD_ROUTES.add('POST /app/briefing/punt');   // wv3685: een tik onder een briefingpunt = David die werkt
@@ -6298,6 +6298,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
   'POST /app/personeelsscherm/koppel', 'POST /app/personeelsscherm/intrek',   // wv2991: sleutel van het kastje aan de tv maken of intrekken
   'POST /app/agenda',      // wv315 (zie hieronder)
+  'POST /app/agenda/reeks',   // wv3740: de reekskaart volgt dezelfde schakelaar als de losse ✅
   'POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus', 'POST /app/facturen/leverancier/verzendwijze',   // wv2480: per leverancier direct verzenden
   'POST /app/docs/delen',
   'POST /app/werkers/schakel']);   // wv1901 (Opus-review ZOU 4): een werker uit- of aanzetten raakt n8n zoals modellen; nooit vanaf een vaste plek    // wv1382: een pagina naar buiten zetten alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk; review #10). Intrekken staat in APP_SLOT_VRIJ: dat maakt alleen dichter    // wv833: boekhoud-/afschriftadres en verzendmodus alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk)
@@ -6309,7 +6310,7 @@ function appBeheerVanafVast(route, a, d) {
   if (route === 'POST /app/apparaat/intrekken' && String((d && d.id) || '') === a.id) return false;
   // wv2554 (review MOET 2): het noodapparaat mag goedkeuren en afwijzen, ook als APP_VAST_BEHEER_DICHT weer aan zou staan
   if (route === 'POST /app/koppel/goedkeur' || route === 'POST /app/koppel/afwijs') { try { if (appNoodApparaat(appRegister(), a)) return false; } catch (e) {} }
-  if (route === 'POST /app/agenda') return APP_VAST_AGENDA_DICHT;   // wv2369; eigen terugrol, los van APP_VAST_BEHEER_DICHT (review wv2547 ZOU 1)
+  if (route === 'POST /app/agenda' || route === 'POST /app/agenda/reeks') return APP_VAST_AGENDA_DICHT;   // wv2369; eigen terugrol, los van APP_VAST_BEHEER_DICHT (review wv2547 ZOU 1)
   if (!APP_VAST_BEHEER_DICHT) return false;   // wv2547: alle plekken mogen alles (invoerslot + verse vingerafdruk van dit apparaat)
   return true;
 }
@@ -16117,7 +16118,7 @@ function handleApp(req, res) {
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10); sinds
         // wv1931 geen BSN-masker meer op Davids invoer. Daarna verder met slotKlaar = true (apparaat en sessie opnieuw gecontroleerd).
         if (appBeheerVanafVast(route, a, d))
-          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/sleutels/weg' ? 'sleutels weggooien' : route === 'POST /app/sleutels/nieuw' ? 'een sleutel toevoegen' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : route === 'POST /app/docs/delen' ? 'een pagina delen' : route === 'POST /app/werkers/schakel' ? 'een werker aan- of uitzetten' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
+          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/sleutels/weg' ? 'sleutels weggooien' : route === 'POST /app/sleutels/nieuw' ? 'een sleutel toevoegen' : (route === 'POST /app/agenda' || route === 'POST /app/agenda/reeks') ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : route === 'POST /app/docs/delen' ? 'een pagina delen' : route === 'POST /app/werkers/schakel' ? 'een werker aan- of uitzetten' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
@@ -16182,6 +16183,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/aanwezig') return appAanwezig(req, res, a, s);   // wv374
         if (route === 'POST /app/reactie') return appReactieRoute(req, res, a, d);   // wv304
         if (route === 'POST /app/agenda') return appAgendaRoute(req, res, a, s, d);   // wv315
+        if (route === 'POST /app/agenda/reeks') return appAgendaReeksRoute(req, res, a, s, d);   // wv3740
         if (route.indexOf('GET /app/concept/') === 0) return appConceptRoute(req, res, a, route.slice('GET /app/concept/'.length));
         if (route === 'POST /app/concept') return appConceptZet(req, res, a, d);
         if (route === 'POST /app/spraak') return appSpraak(req, res, a);   // wv172
@@ -17614,6 +17616,7 @@ async function berichtNieuw(res, d) {
   const agk = ag ? appAgendaKnoppen() : null;
   if (ag) {
     agk[id] = { kanaal: kanaal, t: t, knoppen: {} };
+    if (ag.reeks) agk[id].reeks = ag.reeks;   // wv3740: regel van een reekskaart
     agk[id].knoppen[ag.soort] = appAgendaKnopNieuw(ag, d.tekst);   // wv3687: met kaart-hash als n8n die meegaf
     if (smsV) agk[id].sms = smsV;   // wv3664: de ✅ verstuurt dan deze sms (appSmsKnop) in plaats van Agenda-knoppen aan te roepen
     if (!appAgendaKnoppenBewaar()) { delete agk[id]; return berichtStuur(res, 500, { ok: false, fout: 'agendaknop niet op te slaan', terugval: true }); }
@@ -18034,6 +18037,13 @@ function appAgendaUitBericht(x, nu) {
   if (x.hash !== undefined && (typeof x.hash !== 'string' || !/^[0-9a-f]{64}$/.test(x.hash) || x.soort !== 'uitvoeren')) return 'agenda.hash is 64 hex en alleen bij uitvoeren';
   const r = { nonce: x.nonce, soort: x.soort, verloopt: Math.round(x.verloopt) };
   if (x.hash !== undefined) r.hash = x.hash;
+  // wv3740 (besluit nr 443): een kaart die bij een reeks hoort (alleen een kaart: n8n geeft de reeks alleen dan mee)
+  if (x.reeks !== undefined) {
+    if (r.hash === undefined) return 'agenda.reeks alleen bij een kaart';
+    const rk = appAgendaReeksUit(x.reeks);
+    if (typeof rk === 'string') return rk;
+    r.reeks = rk;
+  }
   return r;
 }
 // wv3687 (besluit nr 369 / 3C69): een knop bij een nieuw bericht. Bij een agendakaart bewaart de pod de kaart-hash van n8n en de sha256
@@ -18078,7 +18088,7 @@ function appAgendaVorm(e, nu) {
     return { knop: k, open: !bezig && K.stand !== 'klaar' && Number.isFinite(v) && nu < v + APP_AGENDA_MARGE_MS, verloopt: Number.isFinite(v) ? new Date(v).toISOString() : null,
       pagina: bezig ? 'bezig' : typeof K.pagina === 'string' ? K.pagina : null, uitkomst: typeof K.uitkomst === 'string' ? K.uitkomst : null,
       link: K.pagina === 'uitgevoerd' ? appAgendaLink(K.link) : null };   // wv3703
-  }) };
+  }), reeks: e.reeks && typeof e.reeks === 'object' ? { id: e.reeks.id, nr: e.reeks.nr, van: e.reeks.van } : undefined };   // wv3740
 }
 // wv3703 (besluit nr 353, David Ja 21-11-2026): de Google-link van de afspraak die n8n na een ✅ meegeeft; alleen de bekende vorm,
 // anders geen link (nooit verzinnen of doorgeven wat n8n niet als afspraaklink herkende).
@@ -18247,6 +18257,13 @@ async function appAgendaRoute(req, res, a, s, d) {
     terug(); return appWeiger(res, 503, 'versturen van sms zit niet in deze versie van de pod', 'sms ontbreekt');
   }
   if (!appKnopSleutel()) { terug(); return appWeiger(res, 503, 'de agendaknoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'agenda geen sleutel'); }
+  const u = await appAgendaNaarN8n(id, knop, keuze, K, e);   // wv3740: gedeeld met de reekskaart
+  res._app.reden = u.reden;
+  return appStuur(res, u.status, u.body);
+}
+// wv3740: vanaf de aanroep van Agenda-knoppen, voor één knop die deze druk al op bezig zette (losse ✅ én elke regel van een reeks).
+// Geeft { status, reden, body, pagina?, sleutel? }; schrijft zelf niets naar de app.
+async function appAgendaNaarN8n(id, knop, keuze, K, e) {
   let j = null, fout = null;
   try { j = await appAgendaKnopN8n(appAgendaKnopBody(K, keuze)); } catch (x) { fout = x; }   // wv3687: h en t bij een kaart
   const pagina = j && typeof j.pagina === 'string' ? j.pagina : '';
@@ -18257,7 +18274,7 @@ async function appAgendaRoute(req, res, a, s, d) {
     // Fable wv173 M1: n8n kent de sleutel niet (geroteerd zonder de vingerafdruk in Knop lezen bij te werken) -> storing, geen "onbekend"
     open(null);
     logError('app-agenda', new Error('Agenda-knoppen weigert de sleutel van het schrijfluik (vingerafdruk in Knop lezen bijwerken?)'));
-    return appWeiger(res, 503, 'de agendaknoppen zijn hier nu niet ingericht; probeer het later opnieuw', 'agenda sleutel');
+    return { status: 503, reden: 'agenda sleutel', sleutel: true, body: { ok: false, fout: 'de agendaknoppen zijn hier nu niet ingericht; probeer het later opnieuw' } };
   }
   if (fout || !Object.hasOwn(APP_AGENDA_UITKOMST, pagina)) {
     // Time-out, 5xx of geen leesbaar antwoord: de claim kan al gebeurd zijn. Open laten (n8n weigert een tweede claim) en zeggen
@@ -18265,15 +18282,13 @@ async function appAgendaRoute(req, res, a, s, d) {
     open(APP_AGENDA_GEEN_ANTWOORD);
     const waarom = fout ? (/timeout|abort/i.test(String(fout.name) + ' ' + String(fout.message)) ? 'time-out' : (String(fout.message).match(/http \d{3}|sleutel ontbreekt|niet gevonden/) || ['onleesbaar'])[0]) : 'onbekende pagina';
     logError('app-agenda', new Error('Agenda-knoppen gaf geen bruikbaar antwoord (' + waarom + ')'));
-    res._app.reden = 'agenda ' + knop + ' ' + keuze + ' -> geen antwoord (' + waarom + ')';
-    return appStuur(res, 503, { ok: false, fout: APP_AGENDA_GEEN_ANTWOORD, melding: APP_AGENDA_GEEN_ANTWOORD, agenda: appAgendaVorm(e2) });
+    return { status: 503, reden: 'agenda ' + knop + ' ' + keuze + ' -> geen antwoord (' + waarom + ')', body: { ok: false, fout: APP_AGENDA_GEEN_ANTWOORD, melding: APP_AGENDA_GEEN_ANTWOORD, agenda: appAgendaVorm(e2) } };
   }
   const tekst = appAgendaPlat(j.tekst);
   const uitkomst = pagina === 'uitgevoerd' ? '✅ ' + (tekst || 'Gedaan.') : pagina === 'mislukt' ? '⚠️ ' + (tekst || 'Niet gelukt.') : APP_AGENDA_UITKOMST[pagina];
   // Fable-review diff wv315 #4: kwam een eerdere druk intussen terug met "uitgevoerd", dan overschrijft een latere "gebruikt" dat niet
   if (pagina === 'gebruikt' && K2.stand === 'klaar' && K2.pagina === 'uitgevoerd') {
-    res._app.reden = 'agenda ' + knop + ' ' + keuze + ' -> gebruikt (al uitgevoerd)';
-    return appStuur(res, 409, { ok: false, al_afgehandeld: true, fout: 'Al afgehandeld: ' + K2.uitkomst, melding: 'Al afgehandeld: ' + K2.uitkomst, agenda: appAgendaVorm(e2) });
+    return { status: 409, reden: 'agenda ' + knop + ' ' + keuze + ' -> gebruikt (al uitgevoerd)', body: { ok: false, al_afgehandeld: true, fout: 'Al afgehandeld: ' + K2.uitkomst, melding: 'Al afgehandeld: ' + K2.uitkomst, agenda: appAgendaVorm(e2) } };
   }
   K2.stand = 'klaar'; K2.sinds = null; K2.pagina = pagina; K2.uitkomst = uitkomst;
   K2.link = pagina === 'uitgevoerd' ? appAgendaLink(j.link) : null;   // wv3703 (besluit nr 353): Open in Google Agenda
@@ -18281,9 +18296,89 @@ async function appAgendaRoute(req, res, a, s, d) {
   if (typeof j.ongedaan_nonce === 'string' && APP_AGENDA_NONCE_RE.test(j.ongedaan_nonce))
     e2.knoppen.ongedaan = { nonce: j.ongedaan_nonce, verloopt: Date.now() + APP_AGENDA_ONGEDAAN_MS, stand: 'open', sinds: null, pagina: null, uitkomst: knop === 'ongedaan' ? uitkomst : null };
   appAgendaKnoppenBewaar();   // mislukt: gelogd; de stand in het geheugen geldt tot een herstart
-  res._app.reden = 'agenda ' + knop + ' ' + keuze + ' -> ' + pagina;
-  appStuur(res, 200, { ok: pagina === 'uitgevoerd' || pagina === 'afgewezen', pagina: pagina, melding: uitkomst, agenda: appAgendaVorm(e2) });
+  return { status: 200, reden: 'agenda ' + knop + ' ' + keuze + ' -> ' + pagina, pagina: pagina, body: { ok: pagina === 'uitgevoerd' || pagina === 'afgewezen', pagina: pagina, melding: uitkomst, agenda: appAgendaVorm(e2) } };
 }
+// ── wv3740 (besluitenpagina nr 443 = 3C143, David Ja 21-11-2026 13:12): een reeks losse afspraken op één kaart, één vingerafdruk ──
+// Elke regel van een reeks (bijv. een jaarrooster) is een gewone agendakaart (wv3687): een eigen aanroep van AI - Socev Agenda met de
+// vaste regels, het Poortwachter-log en een kaart-hash. n8n geeft bij zo'n kaart agenda.reeks {id, nr, van} mee; de pod bewaart die bij
+// het bericht en de app tekent de berichten van één reeks als één kaart met vinkjes. Davids besluit: een reeks op één kaart = één
+// bevestiging per aangevinkte regel. POST /app/agenda/reeks {kanaal, reeks, knop: uitvoeren|ongedaan, keuze: ja|nee, ids: [job_id]}:
+// één verse vingerafdruk (bij ja) geldt voor precies de aangevinkte regels van díe reeks in dít kanaal; daarna per regel dezelfde weg
+// als een losse ✅ (bezig, claim en hash-toets in n8n), na elkaar. Regels die al klaar, bezig of verlopen zijn slaat de pod over.
+// Na APP_AGENDA_REEKS_MS stopt hij: de rest blijft open en opnieuw drukken is veilig (dubbel uitvoeren kan niet: claim in n8n).
+const APP_AGENDA_REEKS_RE = /^[a-z0-9-]{6,40}$/;
+const APP_AGENDA_REEKS_MAX = 30;
+const APP_AGENDA_REEKS_MS = 50 * 1000;   // ruim onder de 100 s van Cloudflare (één regel kan zelf tot 45 s duren)
+function appAgendaReeksUit(x) {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return 'agenda.reeks is een object';
+  if (typeof x.id !== 'string' || !APP_AGENDA_REEKS_RE.test(x.id)) return 'agenda.reeks.id is 6-40 tekens a-z, 0-9 of -';
+  if (!Number.isInteger(x.van) || x.van < 2 || x.van > APP_AGENDA_REEKS_MAX) return 'agenda.reeks.van is 2 tot en met ' + APP_AGENDA_REEKS_MAX;
+  if (!Number.isInteger(x.nr) || x.nr < 1 || x.nr > x.van) return 'agenda.reeks.nr is 1 tot en met van';
+  return { id: x.id, nr: x.nr, van: x.van };
+}
+async function appAgendaReeksRoute(req, res, a, s, d) {
+  const kanaal = String(d.kanaal || ''), reeks = String(d.reeks || ''), knop = String(d.knop || ''), keuze = String(d.keuze || '');
+  const ids = Array.isArray(d.ids) ? d.ids.map(String) : null;
+  if (!Object.hasOwn(APP_KANALEN, kanaal) || !APP_AGENDA_REEKS_RE.test(reeks) || APP_AGENDA_SOORTEN.indexOf(knop) < 0 || ['ja', 'nee'].indexOf(keuze) < 0 ||
+    !ids || ids.length < 1 || ids.length > APP_AGENDA_REEKS_MAX || new Set(ids).size !== ids.length || !ids.every(function (x) { return APP_JOB_RE.test(x); }))
+    return appWeiger(res, 400, 'ongeldige reeks', 'reeks velden');
+  if (keuze === 'nee' && knop !== 'uitvoeren') return appWeiger(res, 400, 'ongedaan maken kent geen ❌', 'reeks nee bij ongedaan');
+  const alle = appAgendaKnoppen(), nu = Date.now(), te = [];
+  // Elke id moet een regel van déze reeks in dít kanaal zijn (geen sms, geen losse kaart); anders weigert de pod alles.
+  for (let i = 0; i < ids.length; i++) {
+    const e = alle[ids[i]];
+    if (!e || e.kanaal !== kanaal || e.sms || !e.reeks || e.reeks.id !== reeks) return appWeiger(res, 404, 'deze reeks ken ik niet (meer)', 'reeks onbekend');
+    const K = appAgendaKnop(ids[i], knop);
+    if (K && !appAgendaBezig(K, nu) && K.stand !== 'klaar' && nu <= Number(K.verloopt) + APP_AGENDA_MARGE_MS) te.push({ id: ids[i], e: e, K: K, vorig: { stand: K.stand, sinds: K.sinds === undefined ? null : K.sinds } });
+  }
+  const stand = function () { return ids.map(function (id) { const e = appAgendaKnoppen()[id]; return { job_id: id, agenda: e ? appAgendaVorm(e) : null }; }); };
+  if (!te.length) {
+    const t = 'Niets meer open in deze reeks; zie de uitkomst per regel.';
+    res._app.reden = 'reeks niets open'; return appStuur(res, 409, { ok: false, fout: t, melding: t, al_afgehandeld: true, regels: stand() });
+  }
+  let versOud = null;
+  if (keuze === 'ja') {
+    if (!appVersOk(a, s)) { res._app.reden = 'reeks, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
+    versOud = s.vers_tot; s.vers_tot = 0;
+  }
+  te.forEach(function (x) { x.K.stand = 'bezig'; x.K.sinds = nu; });
+  const terugEen = function (x) {
+    const K2 = appAgendaKnop(x.id, knop);
+    if (K2 && K2.stand === 'bezig' && K2.sinds === nu) { K2.stand = x.vorig.stand; K2.sinds = x.vorig.sinds; }
+  };
+  const terug = function () { te.forEach(terugEen); appAgendaKnoppenBewaar(); if (versOud !== null && s.vers_tot === 0) s.vers_tot = versOud; };
+  if (!appAgendaKnoppenBewaar()) { terug(); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo opnieuw', 'agenda-knoppen.json'); }
+  if (!appTeller('agenda', APP_AGENDA_PER_UUR, 3600000)) { terug(); return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_AGENDA_PER_UUR + '); probeer het straks opnieuw', 'grens agenda'); }   // één druk = één tel
+  if (!(await appRolOk())) { terug(); return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later opnieuw', 'rol passief'); }
+  if (!appKnopSleutel()) { terug(); return appWeiger(res, 503, 'de agendaknoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'agenda geen sleutel'); }
+  const tellen = {}, regels = [];
+  let gestopt = '';
+  for (let i = 0; i < te.length; i++) {
+    const x = te[i];
+    if (gestopt) { terugEen(x); continue; }
+    const u = await appAgendaNaarN8n(x.id, knop, keuze, x.K, x.e);
+    const p = u.sleutel ? 'storing' : u.pagina || (u.status === 409 ? 'gebruikt' : 'geen antwoord');
+    tellen[p] = (tellen[p] || 0) + 1;
+    regels.push({ job_id: x.id, pagina: p, melding: u.body && u.body.melding || u.body && u.body.fout || '' });
+    if (u.sleutel) gestopt = 'storing';
+    else if (Date.now() - nu > APP_AGENDA_REEKS_MS && i < te.length - 1) gestopt = 'tijd';
+  }
+  appAgendaKnoppenBewaar();
+  const n = function (k) { return tellen[k] || 0; };
+  const delen = [];
+  if (knop === 'ongedaan') { if (n('uitgevoerd')) delen.push('↩️ ' + n('uitgevoerd') + ' ongedaan gemaakt'); }
+  else if (keuze === 'ja') { if (n('uitgevoerd')) delen.push('✅ ' + n('uitgevoerd') + ' in je agenda gezet'); }
+  else if (n('afgewezen')) delen.push('❌ ' + n('afgewezen') + ' niet gedaan');
+  if (n('mislukt')) delen.push('⚠️ ' + n('mislukt') + ' niet gelukt (zie de regel)');
+  if (n('gebruikt')) delen.push(n('gebruikt') + ' al afgehandeld');
+  if (n('verlopen')) delen.push(n('verlopen') + ' verlopen');
+  if (n('geen antwoord') || n('onbekend') || n('storing')) delen.push((n('geen antwoord') + n('onbekend') + n('storing')) + ' zonder antwoord; kijk in je agenda (opnieuw drukken is veilig)');
+  if (gestopt) delen.push((te.length - regels.length) + ' nog open (' + (gestopt === 'tijd' ? 'de tijd was op' : 'storing') + '); druk nog eens');
+  const melding = delen.join(' · ') || 'Niets gedaan.';
+  res._app.reden = 'reeks ' + knop + ' ' + keuze + ' ' + te.length + '/' + ids.length + ' -> ' + Object.keys(tellen).map(function (k) { return k + ' ' + tellen[k]; }).join(', ') + (gestopt ? ', gestopt: ' + gestopt : '');
+  return appStuur(res, 200, { ok: !gestopt && regels.every(function (r) { return r.pagina === 'uitgevoerd' || r.pagina === 'afgewezen'; }), melding: melding, uitkomsten: regels, regels: stand() });
+}
+// ── einde wv3740 ──
 function berichtInfo() {
   try {
     const idx = berichtIndex(), ids = Object.keys(idx);
