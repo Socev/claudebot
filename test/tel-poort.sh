@@ -102,7 +102,7 @@ const ctxGlobals = () => ({ require, fs, path, crypto, Buffer, console, URL, set
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-const EXPORT = '\n;globalThis.__h = { handleApp, appIsPad, handleTel, telIsPad, telStaat, appStaat, appNoodstop, appAan, appOntmasker, telAfsluiten, telSpreektekst, telOpname, telInfo, appInfo, telOpruim, TEL_ROUTE_RE, telMerkAgent, telZelfStart, telZelfNaRun, telAanwezig, telBelletje, agentsReg, TEL_ZELF_AANKONDIGING, telOnderwegVelden, telVraagzin, appBriefingLaad, __zet: function (n, f) { globalThis[n] = f; } };';
+const EXPORT = '\n;globalThis.__h = { handleApp, appIsPad, handleTel, telIsPad, telStaat, appStaat, appNoodstop, appAan, appOntmasker, telAfsluiten, telSpreektekst, telOpname, telInfo, appInfo, telOpruim, TEL_ROUTE_RE, telMerkAgent, telZelfStart, telZelfNaRun, telAanwezig, telBelletje, agentsReg, TEL_ZELF_AANKONDIGING, telOnderwegVelden, telVraagzin, appBriefingLaad, telRij, telRitLaad: typeof telRitLaad === "function" ? telRitLaad : function () { return { open: {}, ritten: [] }; }, telRitNu: typeof telRitNu === "function" ? telRitNu : function () { return {}; }, telRitten: typeof telRitten === "function" ? telRitten : function () { return []; }, __zet: function (n, f) { globalThis[n] = f; } };';
 function laad() { const c = vm.createContext(ctxGlobals()); vm.runInContext(blok + EXPORT, c, { filename: 'server.js#app' }); return c.__h; }
 let H = laad();
 let srv = http.createServer((q, s) => { if (H.telIsPad(q)) return H.handleTel(q, s); if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
@@ -840,6 +840,96 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('8c kaartstem dagplafond: 429', r.status === 429, r.j);
     H.appStaat.tellers['tel-kaartstem'] = [];
     toets('8c geen onverwachte fouten (wv3771)', !logs.some((l) => /tel-voorstel|tel-kaartstem/.test(l)), logs.filter((l) => /tel-voorstel|tel-kaartstem/.test(l)));
+    // ── 8r. wv3779: ritten onthouden (nr 324) en GET /app/ritten (nr 426) ──
+    const RITF = path.join(DATA, 'tel-ritten.json');
+    const ritLees = () => JSON.parse(fs.readFileSync(RITF, 'utf8'));
+    try { fs.unlinkSync(RITF); } catch (e) {}
+    H.telStaat.ritten = null;
+    await tel('GET', '/tel/uit?plek=Auto', { sleutel: TK3 });
+    toets('8r Tasker meldt Auto: geen rit', !fs.existsSync(RITF) && H.telInfo().onderweg.rijdt === false, H.telInfo().onderweg);
+    await tel('GET', '/tel/uit?plek=Weg', { sleutel: OW2 });
+    toets('8r Onderweg zonder ritdienst (plek Weg): geen rit', !fs.existsSync(RITF));
+    const tA = Date.now();
+    await tel('GET', '/tel/uit?plek=Auto', { sleutel: OW2 });
+    let inf = H.telInfo().onderweg;
+    toets('8r Onderweg meldt Auto: rit open, /health rijdt en sinds', inf.rijdt === true && Math.abs(Date.parse(inf.sinds) - tA) < 2000, inf);
+    let rf = ritLees();
+    toets('8r bestand 0600, alleen begin/eind/soort (geen apparaat, plek of inhoud)', (fs.statSync(RITF).mode & 0o777) === 0o600 && JSON.stringify(Object.keys(rf).sort()) === '["open","ritten","versie"]' &&
+      JSON.stringify(Object.keys(rf.open).sort()) === '["begin","laatst","soort"]' && rf.open.soort === 'onderweg' && !/[0-9a-f]{16}/.test(JSON.stringify(rf)), rf);
+    // herstart: verse context, zelfde opslag
+    H = laad();
+    sessie(PIXEL, 'credP', false);
+    inf = H.telInfo().onderweg;
+    toets('8r na een herstart rijdt hij nog (sinds gelijk)', inf.rijdt === true && Math.abs(Date.parse(inf.sinds) - tA) < 2000, inf);
+    // 2 min stil, dan weer Auto: dezelfde rit
+    H.telRitLaad().open.laatst -= 2 * 60000;
+    await tel('GET', '/tel/uit?plek=Auto', { sleutel: OW2 });
+    inf = H.telInfo().onderweg;
+    toets('8r Auto na 2 min stilte: dezelfde rit', inf.rijdt === true && Math.abs(Date.parse(inf.sinds) - tA) < 2000 && H.telRitLaad().ritten.length === 0, H.telRitLaad());
+    // > 3 min geen Auto (telefoon stil): dicht, eind = laatste Auto
+    H.telRitLaad().open.begin -= 30 * 60000; H.telRitLaad().open.laatst -= 4 * 60000;
+    const eindVerwacht = H.telRitLaad().open.laatst;
+    H.telOpruim();   // ook zonder melding (de minuuttik roept telOpruim); daarna alleen het bestand meten (geen lezer die zelf sluit; Codex ZOU 2)
+    rf = ritLees();
+    toets('8r telefoon stil > 3 min: telOpruim sluit de rit, eind = laatste Auto (bestand)', rf.open === null && rf.ritten.length === 1 && Date.parse(rf.ritten[0].eind) === eindVerwacht, rf);
+    // plek Weg verlengt niet
+    await tel('GET', '/tel/uit?plek=Auto', { sleutel: OW2 });
+    H.telRitLaad().open.laatst -= 4 * 60000;
+    await tel('GET', '/tel/uit?plek=Weg', { sleutel: OW2 });
+    toets('8r plek Weg verlengt de rit niet; > 3 min = dicht', H.telRitNu().rijdt === false && H.telRitLaad().ritten.length === 2, H.telRitLaad());
+    // Auto na > 3 min: nieuwe rit
+    await tel('GET', '/tel/uit?plek=Auto', { sleutel: OW2 });
+    toets('8r Auto na een dichte rit: nieuwe rit', H.telRitNu().rijdt === true && H.telRitLaad().ritten.length === 2 && H.telRitten(10).length === 3 && H.telRitten(10)[0].loopt === true, H.telRitten(10));
+    // bewaren: 90 dagen, hooguit 500
+    const oudR = []; for (let i = 0; i < 520; i++) oudR.push({ begin: new Date(Date.now() - (600 - i) * 3600000).toISOString(), eind: new Date(Date.now() - (600 - i) * 3600000 + 60000).toISOString(), soort: 'onderweg' });
+    oudR.unshift({ begin: new Date(Date.now() - 100 * 86400000).toISOString(), eind: new Date(Date.now() - 100 * 86400000 + 60000).toISOString(), soort: 'onderweg' });
+    fs.writeFileSync(RITF, JSON.stringify({ versie: 1, open: null, ritten: oudR }));
+    H.telStaat.ritten = null; H.telRitNu();
+    toets('8r bewaren: ouder dan 90 dagen weg, hooguit 500', ritLees().ritten.length === 500 && Date.now() - Date.parse(ritLees().ritten[0].begin) < 90 * 86400000, ritLees().ritten.length);
+    // GET /app/ritten
+    const m = 60000, T = Date.now();
+    fs.writeFileSync(RITF, JSON.stringify({ versie: 1, open: null, ritten: [
+      { begin: new Date(T - 300 * m).toISOString(), eind: new Date(T - 280 * m).toISOString(), soort: 'onderweg' },   // rit 1: zonder vraag
+      { begin: new Date(T - 120 * m).toISOString(), eind: new Date(T - 90 * m).toISOString(), soort: 'onderweg' },    // rit 2
+      { begin: new Date(T - 40 * m).toISOString(), eind: new Date(T - 20 * m).toISOString(), soort: 'onderweg' },     // rit 3
+      { begin: new Date(T - 15 * m).toISOString(), eind: new Date(T - 15 * m).toISOString(), soort: 'onderweg' }] })); // losse Auto-tik
+    H.telStaat.ritten = null;
+    const HOOFDr = path.join(LOGDIR, 'hoofd.jsonl');
+    const hoofdVoorR = fs.existsSync(HOOFDr) ? fs.readFileSync(HOOFDr, 'utf8') : '';
+    const regel = (job, tMin, extra) => JSON.stringify(Object.assign({ t: new Date(T + tMin * m + 5000).toISOString(), getypt: new Date(T + tMin * m).toISOString(), job_id: job, beurt_id: null, soort: 'tel', apparaat: PIXEL, ok: true, bestanden: [] }, extra)) + '\n';
+    fs.writeFileSync(HOOFDr,   // alleen deze regels (eerdere secties schreven ook tel-beurten van nu)
+      regel('e1e1e1e1e1e1e1e1', -110, { tekst: '[AUTO] Wat staat er morgen in mijn proefagenda?', antwoord: 'Morgen om tien uur proefoverleg.\n\n**Verder in de app:**\n- Proefdetail één\n- Proefdetail twee' }) +
+      regel('e2e2e2e2e2e2e2e2', -80, { tekst: '[AUTO] Nog een proefvraag na de rit', antwoord: 'Alles voorgelezen.' }) +
+      regel('e3e3e3e3e3e3e3e3', -60, { tekst: '[AUTO] Te laat voor rit 2', antwoord: 'Hoort nergens bij.' }) +
+      regel('e4e4e4e4e4e4e4e4', -30, { tekst: '[AUTO] Vraag in rit 3', antwoord: 'Antwoord drie.', ok: false }) +
+      regel('e5e5e5e5e5e5e5e5', -35, { soort: 'bericht', tekst: 'Getypt tijdens rit 3', antwoord: 'Geen autobeurt.' }));
+    const idBezig = 'f0f0f0f0f0f0f0f0';
+    jobs[idBezig] = { status: 'running', created: T - 25 * m, app: { tekst: '[AUTO] Loopt nog in rit 3' } };
+    H.telRij().push({ id: idBezig, apparaat: 'x', soort: 'bezig', t_start: T - 25 * m, tot: T + 20 * m, k: {} });
+    r = await app('GET', '/app/ritten', undefined, { apparaat: PIXEL, sessie: 'f'.repeat(64) });
+    toets('8r /app/ritten zonder geldige sessie: geweigerd, geen ritten', r.status >= 400 && !r.j.ritten, { status: r.status, j: r.j });
+    const sR = sessie(PIXEL, 'credP', false);
+    r = await app('GET', '/app/ritten', undefined, { apparaat: PIXEL, sessie: sR });
+    const rt = r.j.ritten || [];
+    toets('8r /app/ritten: 200, nieuwste eerst, losse Auto-tik zonder vraag weg', r.status === 200 && rt.length === 3 && Date.parse(rt[0].begin) === T - 40 * m && rt[0].eind === new Date(T - 20 * m).toISOString() && r.j.rijdt === false, r.j);
+    const r2 = rt[1] || { beurten: [] };
+    toets('8r rit 2: vraag in de rit en binnen 15 min erna, niet daarna', JSON.stringify(r2.beurten.map((b) => b.job_id)) === '["e1e1e1e1e1e1e1e1","e2e2e2e2e2e2e2e2"]', r2.beurten.map((b) => b.job_id));
+    const b1 = r2.beurten[0] || {};
+    toets('8r vraag zonder [AUTO]', b1.vraag === 'Wat staat er morgen in mijn proefagenda?', b1);
+    toets('8r knip: voorgelezen tot "Verder in de app", rest zonder die kop', b1.voorgelezen === 'Morgen om tien uur proefoverleg.' && b1.rest === '- Proefdetail één\n- Proefdetail twee', b1);
+    toets('8r alles voorgelezen: rest leeg', r2.beurten[1] && r2.beurten[1].rest === '' && r2.beurten[1].voorgelezen === 'Alles voorgelezen.', r2.beurten[1]);
+    const r3 = rt[0] || { beurten: [] };
+    toets('8r rit 3: mislukte beurt (ok false) en wat nog loopt; getypt bericht niet', r3.beurten.length === 2 && r3.beurten[0].job_id === 'e4e4e4e4e4e4e4e4' && r3.beurten[0].ok === false &&
+      r3.beurten[1].job_id === idBezig && r3.beurten[1].bezig === true && r3.beurten[1].vraag === 'Loopt nog in rit 3', r3.beurten);
+    toets('8r rit 1 zonder vragen staat er (20 min) met lege lijst', rt[2] && rt[2].beurten.length === 0, rt[2]);
+    toets('8r e3 (> 15 min na rit 2, vóór rit 3) hoort bij geen rit', !JSON.stringify(rt).includes('e3e3e3e3e3e3e3e3'));
+    // lopende rit: eind null, venster tot nu
+    await tel('GET', '/tel/uit?plek=Auto', { sleutel: OW2 });
+    r = await app('GET', '/app/ritten', undefined, { apparaat: PIXEL, sessie: sR });
+    toets('8r lopende rit vooraan: loopt, eind null, rijdt', r.status === 200 && r.j.rijdt === true && r.j.ritten[0].loopt === true && r.j.ritten[0].eind === null, r.j.ritten && r.j.ritten[0]);
+    const iB = H.telRij().findIndex((x) => x.id === idBezig); if (iB >= 0) H.telRij().splice(iB, 1); delete jobs[idBezig];
+    fs.writeFileSync(HOOFDr, hoofdVoorR);
+    toets('8r geen fouten in logError (rit)', !logs.some((l) => /tel-rit|app-ritten/.test(l)), logs.filter((l) => /rit/.test(l)));
     toets('8 geen onverwachte fouten (wv3700)', !logs.some((l) => /tel-voorjou/.test(l) && !/databank weg/.test(l)), logs.filter((l) => /tel-voorjou/.test(l)));
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }
   srv.close();

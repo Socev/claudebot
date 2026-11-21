@@ -16181,6 +16181,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/zoek-snel/overal') return typeof appZoekSnelOveral === 'function' ? appZoekSnelOveral(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'zoek-snel overal');   // wv3742
         if (route === 'GET /app/broedstoof') return appBroedstoof(req, res, a);   // wv891: apparaat (privé-kaart op een vaste plek)
         if (route === 'GET /app/briefing') return appBriefingRoute(req, res, a);   // wv891
+        if (route === 'GET /app/ritten') return appRittenRoute(req, res, a);   // wv3779: Uit je rit
         if (route === 'POST /app/briefing/punt') return appBriefingPuntRoute(req, res, a, d);   // wv3685
         if (route === 'GET /app/nieuws') return appNieuwsRoute(req, res, a);   // wv3689: redactie-loket
         if (route === 'GET /app/nieuws/tellers') return appNieuwsTellersRoute(req, res, a);   // wv3689
@@ -18572,6 +18573,7 @@ function telRijBewaar() {
 }
 function telOpruim() {
   const nu = Date.now(), rij = telRij();
+  try { telRitSluit(nu); } catch (e) { logError('tel-rit', e); }   // wv3779: rit dicht als de telefoon stilvalt (minuuttik en elke melding)
   // Een beurt die niet meer loopt maar nooit afkwam (vervallen door de noodstop, job opgeruimd): fout-item, anders blijft
   // 'bezig' staan en houdt hij de grens van 3 bezet.
   let om = false;
@@ -18899,6 +18901,7 @@ function telUitRoute(req, res, t) {
   telStaat.hartslag[t.id] = Date.now();
   // wv275: Tasker v6 meldt zijn plek mee (&plek=%SocevPlek); ongezet stuurt Tasker de letterlijke naam = niet Auto
   if (q.has('plek')) telStaat.plek[t.id] = { t: Date.now(), auto: /^auto$/i.test(String(q.get('plek') || '').trim()) };
+  if (q.has('plek') && telStaat.plek[t.id].auto) { try { telRitAuto(t); } catch (e) { logError('tel-rit', e); } }   // wv3779: ritten (alleen Onderweg)
   telAntwoordPoll(t.id, { ok: true, bezig: telBezig(t.id), reden: 'vervangen' });   // één open lange vraag per apparaat (vóór het opruimen: Fable #3)
   telOpruim();
   telTelefoonMeldt(t, q);
@@ -18937,6 +18940,133 @@ function telTelefoonMeldt(t, q) {
     if (los) telRijBewaar();
     regel('telefoon netwerkgat', { fouten: f, los: los });
   }
+}
+
+// ── wv3779 (besluitenpagina nr 324 = 3C24, David Ja 21-11; Onderweg fase 2a): ritten onthouden ──────────────────────────────────
+// Een rit = een Onderweg-sleutel meldt in GET /tel/uit plek=Auto (Onderweg doet dat zolang zijn ritdienst BubbleService loopt, ± elke
+// 50 s) tot er > 3 min geen Auto meer kwam; eind = de laatste Auto-melding. Ook dicht als de telefoon helemaal stilvalt (telOpruim,
+// elke minuut, en elke lezer). Een Tasker-sleutel telt niet (die meldt geen ritdienst). Opslag tel-ritten.json (0600, appSchrijfJson):
+// per rit alleen begin, eind en apparaatsoort; geen inhoud, geen plaats, geen apparaat-id. 90 dagen, hooguit 500. Overleeft een
+// herstart (telStaat.plek niet). Lezers: telRitNu() {rijdt, sinds} (/health tel.onderweg, skill waar-is-david) en telRitten(n).
+// GET /app/ritten (nr 426 = 3C126, scherm "Uit je rit"): de laatste ritten met de /tel-beurten uit het hoofdkanaal-log.
+// Toets: test/tel-poort.sh § 8r.
+const TEL_RITTEN = path.join(APP_DATA, 'tel-ritten.json');
+const TEL_RIT_STIL_MS = 3 * 60 * 1000;
+const TEL_RIT_BEWAAR_MS = 90 * 86400000;
+const TEL_RIT_MAX = 500;
+telStaat.ritten = null;   // {open: {begin, laatst, soort} | null, ritten: [{begin, eind, soort}]} (ms), oudste eerst
+function telRitLaad() {
+  if (telStaat.ritten) return telStaat.ritten;
+  let j = null;
+  try { j = appLeesStreng(TEL_RITTEN, { versie: 1, open: null, ritten: [] }); } catch (e) { logError('tel-rit', e); j = { versie: 1, open: null, ritten: [] }; }
+  const ms = function (v) { const n = Date.parse(v); return Number.isFinite(n) ? n : null; };
+  const ritten = (Array.isArray(j.ritten) ? j.ritten : []).map(function (r) { return r && { begin: ms(r.begin), eind: ms(r.eind), soort: 'onderweg' }; })
+    .filter(function (r) { return r && r.begin && r.eind && r.eind >= r.begin; }).sort(function (a, b) { return a.begin - b.begin; });
+  const o = j.open && ms(j.open.begin) && ms(j.open.laatst) ? { begin: ms(j.open.begin), laatst: ms(j.open.laatst), soort: 'onderweg' } : null;
+  telStaat.ritten = { open: o, ritten: ritten };
+  return telStaat.ritten;
+}
+function telRitBewaar() {
+  const r = telStaat.ritten, iso = function (t) { return new Date(t).toISOString(); };
+  try {
+    appSchrijfJson(TEL_RITTEN, { versie: 1, open: r.open ? { begin: iso(r.open.begin), laatst: iso(r.open.laatst), soort: r.open.soort } : null,
+      ritten: r.ritten.map(function (x) { return { begin: iso(x.begin), eind: iso(x.eind), soort: x.soort }; }) });
+  } catch (e) { logError('tel-rit-schrijf', e); }
+}
+// Sluit een open rit die > 3 min geen Auto meer kreeg en ruimt op (90 dagen, 500). true = er veranderde iets (dan bewaard).
+function telRitSluit(nu) {
+  const r = telRitLaad();
+  let om = false;
+  if (r.open && nu - r.open.laatst > TEL_RIT_STIL_MS) { r.ritten.push({ begin: r.open.begin, eind: r.open.laatst, soort: r.open.soort }); r.open = null; om = true; }
+  const voor = r.ritten.length;
+  r.ritten = r.ritten.filter(function (x) { return nu - x.eind <= TEL_RIT_BEWAAR_MS; }).slice(-TEL_RIT_MAX);
+  if (om || r.ritten.length !== voor) { telRitBewaar(); return true; }
+  return false;
+}
+// Een melding van een Onderweg-sleutel met plek=Auto: rit openen of verlengen.
+function telRitAuto(t) {
+  if (telSoort(t) !== 'onderweg') return;
+  const nu = Date.now();
+  telRitSluit(nu);
+  const r = telRitLaad();
+  if (r.open) r.open.laatst = Math.max(r.open.laatst, nu);
+  else r.open = { begin: nu, laatst: nu, soort: 'onderweg' };
+  telRitBewaar();
+}
+function telRitNu() {
+  try {
+    const nu = Date.now();
+    telRitSluit(nu);
+    const o = telRitLaad().open;
+    return o ? { rijdt: true, sinds: new Date(o.begin).toISOString() } : { rijdt: false, sinds: null };
+  } catch (e) { logError('tel-rit', e); return { rijdt: null, sinds: null }; }
+}
+// De laatste n ritten, nieuwste eerst; een lopende rit vooraan met eind null.
+function telRitten(n) {
+  const nu = Date.now();
+  telRitSluit(nu);
+  const r = telRitLaad();
+  const l = r.ritten.slice(-n).reverse().map(function (x) { return { begin: x.begin, eind: x.eind, loopt: false }; });
+  if (r.open) l.unshift({ begin: r.open.begin, eind: null, laatst: r.open.laatst, loopt: true });
+  return l.slice(0, n);
+}
+
+// GET /app/ritten (wv3779, nr 426): de laatste ritten (10) met per rit de /tel-beurten uit het hoofdkanaal-log (soort 'tel'), gevraagd
+// binnen [begin − 1 min, eind + 15 min]: de vraag zonder [AUTO], wat werd voorgelezen en wat niet (knip bij "Verder in de app:", zoals
+// telSpreektekst en socev-app src/autoBericht.ts), plus wat nog loopt (telRij, soort bezig). Een beurt hoort bij één rit (de jongste
+// waarvan het begin ervoor ligt). Alleen lezen; stil (de app leest hem met het Overzicht).
+const APP_RITTEN_N = 10;
+const APP_RIT_VOOR_MS = 60 * 1000;
+const APP_RIT_NA_MS = 15 * 60 * 1000;
+const APP_RIT_TEKST_MAX = 6000;
+const TEL_VERDER_RE = /^[^\S\n]*[*_]*Verder in (de app|Telegram)\s*:[*_]*[^\S\n]*\n?/im;
+function appRitKnip(antwoord) {
+  const t = String(antwoord || '').replace(/\r\n?/g, '\n');
+  const m = TEL_VERDER_RE.exec(t);
+  const snij = function (s) { s = s.trim(); return s.length > APP_RIT_TEKST_MAX ? s.slice(0, APP_RIT_TEKST_MAX - 1) + '…' : s; };
+  if (!m) return { voorgelezen: snij(t), rest: '' };
+  return { voorgelezen: snij(t.slice(0, m.index)), rest: snij(t.slice(m.index + m[0].length)) };
+}
+async function appRittenRoute(req, res, a) {
+  res._app.stil = true;
+  let ritten;
+  try { ritten = telRitten(APP_RITTEN_N); } catch (e) { logError('app-ritten', e); return appStuur(res, 200, { ok: true, rijdt: null, ritten: [], fout: 'je ritten zijn nu niet te lezen' }); }
+  const nu = Date.now();
+  let log = [], fout = null;
+  if (ritten.length) {
+    try { log = await appLogLees('hoofd'); } catch (e) { if (!(e && e.code === 'ENOENT')) { logError('app-ritten', e); fout = 'het gesprek is nu niet te lezen'; } }
+  }
+  const vak = ritten.map(function (r) { return { r: r, van: r.begin - APP_RIT_VOOR_MS, tot: (r.eind == null ? nu : r.eind) + APP_RIT_NA_MS, beurten: [] }; });
+  const bij = function (t) {   // de jongste rit waarvan het venster t bevat (vak is nieuwste eerst)
+    return vak.find(function (v) { return t >= v.van && t <= v.tot; }) || null;
+  };
+  const gezien = {};
+  log.forEach(function (x) {
+    if (!x || x.soort !== 'tel' || !APP_JOB_RE.test(String(x.job_id || ''))) return;
+    const t = Date.parse(x.getypt || x.t);
+    const v = Number.isFinite(t) ? bij(t) : null;
+    if (!v) return;
+    gezien[x.job_id] = true;
+    const k = appRitKnip(x.antwoord);
+    v.beurten.push({ job_id: x.job_id, t: new Date(t).toISOString(), vraag: appKort(String(x.tekst || '').replace(/^\s*\[AUTO\]\s*/, ''), 600),
+      voorgelezen: k.voorgelezen, rest: k.rest, ok: x.ok !== false, bezig: false });
+  });
+  try {
+    telRij().forEach(function (x) {
+      if (x.soort !== 'bezig' || gezien[x.id]) return;
+      const v = bij(Number(x.t_start) || 0);
+      if (!v) return;
+      const j = typeof jobs !== 'undefined' ? jobs[x.id] : null;
+      const tekst = j && j.app && typeof j.app.tekst === 'string' ? j.app.tekst : '';
+      v.beurten.push({ job_id: x.id, t: new Date(x.t_start).toISOString(), vraag: appKort(tekst.replace(/^\s*\[AUTO\]\s*/, ''), 600), voorgelezen: '', rest: '', ok: true, bezig: true });
+    });
+  } catch (e) { logError('app-ritten', e); }
+  const uit = vak.map(function (v) {
+    v.beurten.sort(function (p, q) { return Date.parse(p.t) - Date.parse(q.t); });
+    return { id: new Date(v.r.begin).toISOString(), begin: new Date(v.r.begin).toISOString(), eind: v.r.eind == null ? null : new Date(v.r.eind).toISOString(), loopt: v.r.loopt, beurten: v.beurten };
+  }).filter(function (r) { return r.loopt || r.beurten.length || Date.parse(r.eind) - Date.parse(r.begin) >= APP_RIT_VOOR_MS; });   // een losse Auto-tik zonder vraag is geen rit om te tonen
+  const n = telRitNu();
+  appStuur(res, 200, { ok: true, rijdt: n.rijdt, sinds: n.sinds, ritten: uit, fout: fout });
 }
 
 // wv3700: de open Ja/Nee-kaarten voor Onderweg, zoals de app ze toont (zelfde vraagtekst en voorstel; al beantwoord of elders = weg).
@@ -19209,7 +19339,7 @@ function telInfo() {
   return { ingericht: telIngericht(), uit: telUit(), register: kapot ? 'kapot' : 'ok', gekoppeld: !!t, verloopt: t ? t.verloopt : null,
     luistert: t ? telLuistert(t.id) : false, lange_vragen: Object.keys(telStaat.polls).length,
     tasker_versie: t && telSoort(t) === 'tasker' && telStaat.telefoon[t.id] ? telStaat.telefoon[t.id].versie : null,   // wv622: &v= van de lus (null = v6 of ouder)
-    onderweg: ow ? { verloopt: ow.verloopt, luistert: telLuistert(ow.id), versie: telStaat.telefoon[ow.id] ? telStaat.telefoon[ow.id].versie : null } : null,   // wv3700
+    onderweg: ow ? Object.assign({ verloopt: ow.verloopt, luistert: telLuistert(ow.id), versie: telStaat.telefoon[ow.id] ? telStaat.telefoon[ow.id].versie : null }, telRitNu()) : null,   // wv3700; wv3779: rijdt/sinds
     beurten_lopend: rij.filter(function (x) { return x.soort === 'bezig'; }).length, items_klaar: rij.filter(function (x) { return x.soort !== 'bezig' && !x.gespeeld; }).length,
     zelf: Object.assign({ aanwezig: (function () { try { const w = telAanwezig(); return w.ok ? 'ja' : w.reden; } catch (e) { return 'fout'; } })() }, telStaat.zelf) };
 }
