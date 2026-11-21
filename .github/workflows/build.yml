@@ -641,6 +641,10 @@ jobs:
       - name: "besluiten (wv3588, Besluitenpagina: voorstellen uit de reviews)"
         if: ${{ !cancelled() }}
         run: node --test test/besluiten.test.js
+      # wv3732 (3C74 + 3C102): Agents — uitkomstzin per klus en "Wat ik vroeg" (agents-af.js; verzonnen werkvoorraadrijen).
+      - name: "agents-af (wv3732, Wat is er af + Wat ik vroeg)"
+        if: ${{ !cancelled() }}
+        run: node --test test/agents-af.test.js
       # OVIS OSINT (wv2694): osint.py — centrale poort vóór elke externe aanroep (BSN-/HIS-vorm → niets, herkomst mogelijk medisch → alleen
       # eigen bronnen, persoon alleen met doel en Davids vraag), logboek in osint.sqlite (0600) telt hetzelfde; zonder netwerk (OSINT_NEP_NET).
       - name: "osint (wv2694, OVIS OSINT-poort)"

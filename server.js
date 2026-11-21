@@ -3283,7 +3283,9 @@ const AGENT_EINDREGEL = '[Systeem, eindregel: eindig je beurt nooit met een wach
   'Moet je wachten, wacht dan binnen je beurt met een Bash-commando in de VOORGROND: een begrensde lus ' +
   '(bv. for i in $(seq 1 35); do <controle> && break; sleep 15; done) met een expliciete timeout tot 600000 ms, zo nodig herhaald. ' +
   'Achtergrondwerk (run_in_background) mag voor parallel werk: aan het eind wacht de CLI erop (Bash tot zijn eigen timeout, ' +
-  'standaard 10 min, max 2 uur) en je krijgt het resultaat; verwerk dat in je eindrapport. Na 20 min zonder enig teken van leven stopt de pod de hele run.]';
+  'standaard 10 min, max 2 uur) en je krijgt het resultaat; verwerk dat in je eindrapport. Na 20 min zonder enig teken van leven stopt de pod de hele run. ' +
+  // wv3732 (besluitenpagina nr 374 = 3C74): de app toont per afgeronde klus deze ene zin (Agents › Wat is er af, Wat ik vroeg, OVIS Code)
+  'Begin je eindrapport met één regel "Uitkomst: …": één zin in gewone taal over wat er nu af of anders is, of wat je vond; lukte het niet, zeg dat in die zin.]';
 
 function eindSlaap(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
@@ -10036,6 +10038,40 @@ async function appWerkvoorraad() {
   return d;
 }
 const APP_AGENTS_RECENT_MS = 48 * 3600 * 1000, APP_AGENTS_RECENT_MIN = 30, APP_AGENTS_RECENT_MAX = 300;   // wv3607
+// ── wv3732 (besluitenpagina nr 374 = 3C74 + nr 402 = 3C102): uitkomstzin per klus en "Wat ik vroeg" (zie agents-af.js) ──
+let AGENTS_AF = null;
+try { AGENTS_AF = require(path.join(__dirname, 'agents-af.js')); } catch (e) { AGENTS_AF = null; }
+const appUitkomstCache = new Map();   // job_id -> { op, u }; een bewaard rapport verandert niet meer
+function appAgentUitkomst(jobId, m) {
+  if (!AGENTS_AF || !m || !m.rapport || !m.dag || !APP_JOB_RE.test(String(jobId))) return null;
+  const c = appUitkomstCache.get(jobId);
+  if (c && c.op === m.op) return c.u;
+  let u = null, fd;
+  try {
+    fd = fs.openSync(path.join(APP_BESTANDEN_DIR, m.dag, jobId, 'rapport.md'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const b = Buffer.alloc(65536); const n = fs.readSync(fd, b, 0, b.length, 0);
+    u = AGENTS_AF.uitkomstUitRapport(b.slice(0, n).toString('utf8'));
+  } catch (e) { u = null; } finally { if (fd != null) try { fs.closeSync(fd); } catch (e) {} }
+  if (appUitkomstCache.size > 2000) appUitkomstCache.clear();
+  appUitkomstCache.set(jobId, { op: m.op, u: u });
+  return u;
+}
+// De vraag van de besluitenpagina bij een nummer (Davids Ja op die vraag = zijn opdracht), op mtime onthouden (voorstellen.json ± 0,5 MB)
+function appBesluitVraag(nr) {
+  const dir = typeof BESLUITEN_DIR === 'string' ? BESLUITEN_DIR : null;
+  if (!dir) return null;
+  try {
+    const p = path.join(dir, 'voorstellen.json'), st = fs.statSync(p);
+    let c = appStaat.besluitVragen;
+    if (!c || c.mtime !== st.mtimeMs || c.size !== st.size) {
+      const j = st.size < 4 * 1024 * 1024 ? JSON.parse(fs.readFileSync(p, 'utf8')) : null;
+      const per = {};
+      ((j && Array.isArray(j.voorstellen)) ? j.voorstellen : []).forEach(function (v) { if (v && v.nr != null && v.vraag) per[String(v.nr)] = String(v.vraag); });
+      c = appStaat.besluitVragen = { mtime: st.mtimeMs, size: st.size, per: per };
+    }
+    return c.per[String(nr)] || null;
+  } catch (e) { return null; }
+}
 const APP_AGENT_STATUS = { pending: 'wacht', running: 'loopt', 'afgebroken-containerherstart': 'afgebroken' };
 async function appAgents(req, res, a) {
   res._app.stil = true;   // ververst elke 15 s zolang de tab open is: geen auditregel bij 200
@@ -10061,7 +10097,8 @@ async function appAgents(req, res, a) {
       gestart: a.started ? new Date(a.started).toISOString() : null, geeindigd: a.ended ? new Date(a.ended).toISOString() : null,
       herstart: a.herstart ? String(a.herstart).slice(0, 80) : null,
       rapport_bezorgd: rap === 'verzonden' ? 'ja' : rap === 'stil' ? null : (rap.indexOf('herkansing-') === 0 || rap === 'wacht-op-primair') ? 'opnieuw' : rap.indexOf('mislukt') === 0 || rap === 'geen-webhook-geconfigureerd' ? 'nee' : null,
-      rapport: !!(m && m.rapport), bestanden: m ? m.bestanden.length : 0 };
+      rapport: !!(m && m.rapport), bestanden: m ? m.bestanden.length : 0,
+      uitkomst: (function () { const u = appAgentUitkomst(a.job_id || id, m); return u ? u.zin : null; })() };   // wv3732 (3C74)
   });
   const lopend = agents.filter(function (a) { return a.status === 'loopt' || a.status === 'wacht'; })
     .sort(function (a, b) { return String(a.gestart).localeCompare(String(b.gestart)); });
@@ -10119,8 +10156,17 @@ async function appAgents(req, res, a) {
       try { const ooit = await appVjWvGekoppeld(); los = los.filter(function (w) { return !ooit.has(Number(w.wv)); }); } catch (e) { logError('app-agents', e); }
     }
   } catch (e) { logError('app-agents', e); voorJou = null; los = null; }
+  // wv3732 (3C102): Davids opdrachten met stand, teller en uitkomst; null = niet te maken (oude module of geen werkvoorraad)
+  let gevraagd = null;
+  if (AGENTS_AF && wv) {
+    try {
+      gevraagd = AGENTS_AF.gevraagd(wvItems, { max: 80, besluitVraag: appBesluitVraag,
+        uitkomstVan: function (j) { return appAgentUitkomst(j, bewaard[j]); }, rapportVan: function (j) { return !!(bewaard[j] && bewaard[j].rapport); } });
+    } catch (e) { logError('app-agents-gevraagd', e); gevraagd = null; }
+  }
   appStuur(res, 200, { ok: true, max: maxAgents(), lopend: lopend, rij: rij, rij_totaal: open.length, wacht_op_david: wachtOpDavid,
-    voor_jou: voorJou, wacht_op_david_los: los, recent: recent, recent_totaal: afgerond.length, recent_uren: APP_AGENTS_RECENT_MS / 3600000, ruimte: ru, fout: fout });
+    voor_jou: voorJou, wacht_op_david_los: los, recent: recent, recent_totaal: afgerond.length, recent_uren: APP_AGENTS_RECENT_MS / 3600000, ruimte: ru, fout: fout,
+    gevraagd: gevraagd, gevraagd_dagen: 3 });
 }
 // ── wv1029: idee 14 fase 2 — klussen als tabjes in de machinekamer (ontwerp "Machinekamer - parallelle draden" § 4.3.2 a) ──
 // Eén draad = één werkvoorraadrij met label machinekamer:. Rapport → draad via (1) het wv-nummer in het registerlabel, (2)
