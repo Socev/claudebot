@@ -469,7 +469,13 @@ function maak(opt) {
     return namen.set;
   }
 
-  function nooitDelen(p) {
+  function nooitDelen(p, b) {
+    // wv3688 (3C100): een werkbestand ("werk:<job>/<n>") is geen vaultpad; de mapregels gelden niet, de rest van de poort (masker, namen) wel.
+    // Een herinnering met gevoelig: prive in de frontmatter (zoals de Lezer hem als Privé toont) deel je ook als werkbestand niet.
+    if (String(p).indexOf('werk:') === 0) {
+      const fm = /^\uFEFF?---[ \t]*\n([\s\S]*?)\n---[ \t]*(\n|$)/.exec(String(b && b.tekst || '').replace(/\r\n?/g, '\n'));   // Codex MOET 1: ook CRLF
+      return fm && /^gevoelig:[ \t]*["']?prive["']?[ \t]*$/m.test(fm[1]) ? 'een privé-herinnering deel je alleen vanuit MemoryLane' : null;
+    }
     const naam = p.split('/').pop().toLowerCase();
     // wv2118 (ontwerp fase R § 5): herinneringen nooit via een deelpagina, ook niet als de vaste-plekregels later wijzigen; delen van een
     // herinnering gaat alleen via MemoryLane › Delen (Davids eigen schakelaar per kring, wv2114)
@@ -488,9 +494,9 @@ function maak(opt) {
     const b = opt.bron(d && d.pad, ctx);
     if (!b) return { status: 404, j: { ok: false, fout: 'deze pagina is er niet (meer)' }, audit: { domein: null, h: typeof (d && d.pad) === 'string' ? opt.hmac(d.pad.slice(0, 600)) : null } };
     const audit = { domein: b.d, h: opt.hmac(b.p) };
-    const nooit = nooitDelen(b.p);
+    const nooit = nooitDelen(b.p, b);
     if (nooit) return { status: 403, j: { ok: false, fout: nooit, kan_niet: true }, audit: audit, b: b };
-    const r = render(b.tekst, b.p);
+    const r = render(b.tekst, b.naam || b.p);   // wv3688: een werkbestand heet naar zijn bestandsnaam, niet naar werk:<job>/<n>
     if (Buffer.byteLength(r.html, 'utf8') > MAX_HTML) return { status: 413, j: { ok: false, fout: 'deze pagina is te groot om te delen', kan_niet: true }, audit: audit, b: b };
     const proef = r.titel + '\n' + r.zichtbaar + '\n' + r.hrefs.join('\n') + '\n' + r.rijen;
     // wv3405 (A32): strenge poortstand van het masker (4e argument), ook korte wachtwoorden, tabelcel, URL met inlog, token na een /
@@ -504,7 +510,7 @@ function maak(opt) {
 
   function huidigeDeling(reg, h) { return reg.delingen.find((x) => x.h === h) || null; }
   const naarApp = (x) => x ? Object.assign({ slug: x.slug, url: url(x.slug, x.soort), soort: x.soort, titel: x.titel, sinds: x.sinds, bijgewerkt: x.bijgewerkt || x.sinds },
-    x.soort === 'beveiligd' ? { ontvangers: Array.isArray(x.ontvangers) ? x.ontvangers.slice() : [] } : {}) : null;
+    x.soort === 'beveiligd' ? { ontvangers: Array.isArray(x.ontvangers) ? x.ontvangers.slice() : [] } : {}, x.bron_tot ? { bron_tot: x.bron_tot } : {}) : null;
 
   // Is deze pagina gedeeld, en kan hij gedeeld worden? (licht: geen render)
   function stand(d, ctx) {
@@ -512,10 +518,10 @@ function maak(opt) {
     if (!b) return { status: 404, j: { ok: false, fout: 'deze pagina is er niet (meer)' } };
     const h = opt.hmac(b.p);
     const x = huidigeDeling(leesRegister(), h);
-    const nooit = ctx.vast ? 'delen kan niet vanaf een apparaat met een vaste plek' : nooitDelen(b.p);
+    const nooit = ctx.vast ? 'delen kan niet vanaf een apparaat met een vaste plek' : nooitDelen(b.p, b);
     const bronSha = crypto.createHash('sha256').update(String(b.tekst), 'utf8').digest('hex');
-    return { status: 200, audit: { domein: b.d, h: h }, j: { ok: true, kan_delen: !nooit, reden: nooit, gedeeld: naarApp(x),
-      veranderd: x ? x.bron_sha !== bronSha : false } };
+    return { status: 200, audit: { domein: b.d, h: h }, j: Object.assign({ ok: true, kan_delen: !nooit, reden: nooit, gedeeld: naarApp(x),
+      veranderd: x ? x.bron_sha !== bronSha : false }, b.tot ? { bron_tot: b.tot, naam: b.naam } : {}) };   // wv3688: naam = de app ziet of het juiste werkbestand gevonden is
   }
 
   function voorbeeld(d, ctx) {
@@ -523,7 +529,7 @@ function maak(opt) {
     if (v.status !== 200) return { status: v.status, j: v.j, audit: v.audit };
     const x = huidigeDeling(leesRegister(), v.audit.h);
     return { status: 200, audit: v.audit, j: { ok: true, titel: v.r.titel, body: v.r.body, sha: v.r.sha, namen: v.namen, gedeeld: naarApp(x),
-      host: HOST, beveiligd: !!ACC } };
+      host: HOST, beveiligd: !!ACC, bron_tot: v.b.tot || null } };
   }
 
   const D1_ZET = 'INSERT INTO deel (slug, soort, titel, html, sinds, bijgewerkt, aud, ontvangers, access_app) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ' +
@@ -560,6 +566,7 @@ function maak(opt) {
     const bronSha = crypto.createHash('sha256').update(String(v.b.tekst), 'utf8').digest('hex');
     const nieuw = { h: v.audit.h, slug: slug, soort: soort, titel: v.r.titel, sinds: oud ? oud.sinds : tijd, bijgewerkt: tijd, sha: v.r.sha,
       bron_sha: bronSha, namen_bevestigd: v.namen.length };
+    if (v.b.tot) nieuw.bron_tot = v.b.tot;   // wv3688: werkbestand; na deze datum ruimt de pod de bron op (de link blijft de laatst gedeelde kopie tonen)
     if (soort === 'beveiligd') Object.assign(nieuw, { ontvangers: ontvangers, access_app: oud ? oud.access_app || null : null, aud: oud ? oud.aud || null : null });
     // eerst het register (dan staat elke deling die buiten kan staan erin, ook als D1 daarna faalt; en de toestaanlijst kent de slug), dan
     // bij beveiligd de Access-app, dan D1. Mislukt een latere stap, dan gaat wat er al stond terug.
@@ -622,6 +629,7 @@ function maak(opt) {
         const x = perSlug.get(r.slug);
         const rij = { slug: r.slug, url: url(r.slug, r.soort), soort: r.soort, titel: r.titel, sinds: r.sinds, bijgewerkt: r.bijgewerkt, in_register: !!x };
         if (r.soort === 'beveiligd') rij.ontvangers = x && Array.isArray(x.ontvangers) ? x.ontvangers.slice() : [];
+        if (x && x.bron_tot) rij.bron_tot = x.bron_tot;   // wv3688
         uit.push(rij);
         perSlug.delete(r.slug);
       }
@@ -686,7 +694,7 @@ function maak(opt) {
   function health() {
     const reg = leesRegister();
     return { aan: true, host: HOST, gedeeld: reg.delingen.length, beveiligd: reg.delingen.filter((x) => x.soort === 'beveiligd').length,
-      beveiligd_aan: !!ACC, opruimen_open: reg.delingen.filter((x) => x.access_open).length, register_kapot: !!reg.kapot };
+      werk: reg.delingen.filter((x) => x.bron_tot).length, beveiligd_aan: !!ACC, opruimen_open: reg.delingen.filter((x) => x.access_open).length, register_kapot: !!reg.kapot };
   }
 
   return { app: app, health: health };

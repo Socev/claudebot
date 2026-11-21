@@ -24650,7 +24650,8 @@ const docsDelen = (function () {
   try {
     const S = require(path.join(__dirname, 'secondbrain.js'));
     // wv3446: de pagina lezen kent geen vaste-plekafscherming meer; ctx.vast blijft het echte soort voor "niet delen vanaf een vaste plek"
-    const bron = function (pad, ctx) { return secondbrain.bron(pad, {}); };
+    // wv3688 (3C100): een markdown-werkbestand (pad "werk:<job>/<n>") deelt via dezelfde poort; tot = wanneer de pod het opruimt
+    const bron = function (pad, ctx) { return typeof pad === 'string' && pad.indexOf('werk:') === 0 ? appWerkBron(pad) : secondbrain.bron(pad, {}); };
     return require(p).maak({ dir: DOCS_DIR, vault: VAULT, host: DOCS_HOST, fout: typeof foutOfKapot === 'function' ? foutOfKapot : logError, bron: bron, access: docsAccess,
       masker: S.masker, isVastDicht: S.isVastDicht, isVerborgen: S.isVerborgen, bsnMasker: function (t) { return appBsnMasker(t); },
       lees: function (x) { return VV().lees(x, 'utf8'); },
@@ -26627,7 +26628,110 @@ async function smalOsint(d, socev) {
   return { status: r.ok ? 200 : (r.fout === 'lege zoekterm' || r.fout === 'onbekende ingang' ? 400 : 503), j: r };
 }
 // ── einde OVIS OSINT ──
+// ── Werkbestanden delen en bewerken (wv3688, besluitenpagina nr 400 = 3C100; David Ja 21-11-2026 12:42 met vingerafdruk) ──
+// WAAROM. "Wil je de stukken die Socev voor je maakt direct als link kunnen delen en bewerken, zonder ze eerst naar Brain te zetten?" Delen en
+// Bewerken zaten alleen op Brain-pagina's. Een markdown-werkbestand (Werkbestanden, de Lezer, een bestand onder een bericht) heet hier
+// "werk:<job>/<n>": docs-delen.js deelt het met dezelfde poort (voorbeeld, sleutel-/IBAN-/BSN-masker, namenvraag, verse vingerafdruk, nooit
+// vanaf een vaste plek). Bewerken schrijft het werkbestand zelf terug (versie = sha, 409 bij een tussentijdse wijziging; de vorige inhoud
+// blijft als b/<n>.vorige naast het bestand). Alleen .md/.markdown: html deelt de pod niet (de deelrenderer is markdown en escapet alles; een
+// html-stuk van een agent kan scripts en externe bronnen bevatten). 30 dagen: de deelpagina is een eigen kopie in D1, de link blijft dus werken
+// als de pod het werkbestand opruimt; daarna kun je hem niet meer bijwerken, alleen intrekken (het register onthoudt bron_tot, Gedeeld toont het).
+const WERK_PAD_RE = /^werk:([a-f0-9]{16})\/(\d{1,3})$/;
+const WERK_MAX_MD = 2 * 1024 * 1024;
+// pad → { pad, abs, naam, tot, metaPad, n } van het echte bestand (een verwijzing van een bericht wijst naar het bestand van de agent), of null
+function appWerkZoek(pad) {
+  const m = WERK_PAD_RE.exec(String(pad == null ? '' : pad));
+  if (!m) return null;
+  const meta = appBewaardVan(m[1]), n = Number(m[2]);
+  const b = meta && Array.isArray(meta.bestanden) ? meta.bestanden.find(function (x) { return x && x.n === n; }) : null;
+  if (!b || !/\.(md|markdown)$/i.test(String(b.naam || ''))) return null;
+  let em = meta, eb = b;
+  if (b.van) {
+    em = appBewaardVan(b.van.job_id);
+    eb = em && Array.isArray(em.bestanden) ? em.bestanden.find(function (x) { return x && x.n === b.van.n && !x.van; }) : null;
+    if (!eb) return null;
+  }
+  const abs = appBestandPad(meta, b);
+  if (!abs) return null;
+  return { pad: 'werk:' + m[1] + '/' + n, abs: abs, naam: String(b.naam), n: eb.n, metaPad: path.join(APP_BESTANDEN_DIR, em.dag, em.job_id, 'meta.json'),
+    tot: new Date(Date.parse(em.op) + APP_BESTANDEN_MS).toISOString() };
+}
+function appWerkLees(abs) {
+  const fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > WERK_MAX_MD) return null;
+    return fs.readFileSync(fd, 'utf8');
+  } finally { fs.closeSync(fd); }
+}
+// de bron voor docs-delen.js (zelfde vorm als secondbrain.bron, plus tot)
+function appWerkBron(pad) {
+  const z = appWerkZoek(pad);
+  if (!z) return null;
+  let t;
+  try { t = appWerkLees(z.abs); } catch (e) { return null; }
+  return t == null ? null : { p: z.pad, d: 'werk', tekst: t, tot: z.tot, naam: z.naam };
+}
+const appWerkSha = function (t) { return crypto.createHash('sha256').update(String(t), 'utf8').digest('hex').slice(0, 32); };
+// frontmatter en BOM blijven buiten de editor (zoals bij Brain-pagina's) en gaan er bij opslaan ongewijzigd weer voor
+function appWerkDeel(t) {
+  const bom = /^﻿/.test(t) ? '﻿' : '';
+  const r = bom ? t.slice(1) : t;
+  const fm = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(r);
+  return { bom: bom, fm: fm ? fm[0] : '', body: fm ? r.slice(fm[0].length) : r, crlf: /\r\n/.test(r) };
+}
+function appWerkBewerk(res, a, d, route) {
+  const z = appWerkZoek(d && d.pad);
+  const h = crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(z ? z.pad : (d && d.pad) || '').slice(0, 600)).digest('hex').slice(0, 16);
+  res._app.reden = 'docs ' + route.slice('POST /app/docs/'.length) + ' werk h=' + h;
+  const weg = 'dit werkbestand is er niet (meer); de pod bewaart werkbestanden 30 dagen';
+  if (!z) return appWeiger(res, 404, weg, 'werk weg');
+  let t;
+  try { t = appWerkLees(z.abs); } catch (e) { return appWeiger(res, 404, weg, 'werk onleesbaar'); }
+  if (t == null) return appWeiger(res, 413, 'dit werkbestand is te groot om hier te bewerken', 'werk te groot');
+  const vast = appVastBeheerDicht(a);
+  const dl = appWerkDeel(t);
+  if (route === 'POST /app/docs/werk-bewerk')
+    return appStuur(res, 200, { ok: true, pad: z.pad, naam: z.naam, versie: appWerkSha(t), bewerkbaar: !vast, reden: vast ? 'op een vaste plek kun je hier alleen lezen' : null,
+      eigenschappen: [], md: dl.body.replace(/\r\n/g, '\n') });
+  // werk-bewaar
+  const md = d && d.md, versie = d && d.versie;
+  if (typeof md !== 'string' || typeof versie !== 'string' || !/^[0-9a-f]{32}$/.test(versie)) return appWeiger(res, 400, 'onvolledig verzoek', 'werk bewaar invoer');
+  if (Buffer.byteLength(md, 'utf8') > WERK_MAX_MD || md.indexOf('\u0000') >= 0) return appWeiger(res, 413, 'deze tekst is te groot om op te slaan', 'werk bewaar groot');
+  if (vast) return appWeiger(res, 403, 'op een vaste plek kun je hier alleen lezen', 'werk bewaar vast');
+  let S = null;
+  try { S = require(path.join(__dirname, 'secondbrain.js')); } catch (e) { S = null; }
+  if (!S || typeof S.masker !== 'function') return appWeiger(res, 503, 'opslaan kan in deze versie van de pod niet', 'werk bewaar masker');
+  if (S.masker(md, false, null) !== md) return appWeiger(res, 422, 'in je tekst staat iets dat op een sleutel lijkt; zo\'n tekst bewaar ik niet', 'werk bewaar sleutel');
+  if (appWerkSha(t) !== versie) return appStuur(res, 409, { ok: false, fout: 'dit werkbestand is intussen veranderd. Je tekst staat nog hier: kopieer hem, of laad de nieuwe versie.' });
+  let body = md.replace(/\r\n/g, '\n');
+  if (/\n$/.test(dl.body) && !/\n$/.test(body)) body += '\n';
+  if (dl.crlf) body = body.replace(/\n/g, '\r\n');
+  const nieuw = dl.bom + dl.fm + body;
+  if (nieuw === t) return appStuur(res, 200, { ok: true, versie: versie, gewijzigd: false });
+  const buf = Buffer.from(nieuw, 'utf8');
+  if (buf.length > WERK_MAX_MD) return appWeiger(res, 413, 'deze tekst is te groot om op te slaan', 'werk bewaar groot');   // Codex ZOU 1: na frontmatter en CRLF
+  // alles synchroon tussen lezen en vervangen: geen tweede verzoek ertussen
+  try {
+    const tmp = z.abs + '.nieuw' + process.pid + '-' + crypto.randomBytes(3).toString('hex');
+    fs.writeFileSync(z.abs + '.vorige', t, { mode: 0o600 });
+    fs.writeFileSync(tmp, buf, { mode: 0o600, flag: 'wx' });
+    fs.renameSync(tmp, z.abs);
+    // meta: de nieuwe grootte (Werkbestanden toont hem; de telling van de 2 GB-grens loopt bij de volgende opruimronde mee)
+    const mj = appLeesJson(z.metaPad, null);
+    if (mj && Array.isArray(mj.bestanden)) {
+      const x = mj.bestanden.find(function (y) { return y && y.n === z.n && !y.van; });
+      if (x) { x.grootte = buf.length; x.bewerkt = new Date().toISOString(); const mt = z.metaPad + '.nieuw'; fs.writeFileSync(mt, JSON.stringify(mj), { mode: 0o600 }); fs.renameSync(mt, z.metaPad); }
+    }
+    appStaat.bestandenIndex = null;
+  } catch (e) { logError('app-werk-bewaar', e); return appWeiger(res, 500, 'opslaan lukte niet; je tekst staat nog hier', 'werk bewaar fout'); }
+  return appStuur(res, 200, { ok: true, versie: appWerkSha(nieuw), gewijzigd: true });
+}
 async function appDocs(req, res, a, s, d, route) {
+  if (route === 'POST /app/docs/werk-bewerk' || route === 'POST /app/docs/werk-bewaar') {
+    if (!appTeller('docs-werk', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs werk');
+    return appWerkBewerk(res, a, d || {}, route);
+  }
   if (!docsDelen) return appWeiger(res, 404, 'Delen zit niet in deze versie van de pod', 'docs ontbreekt');
   if (!appTeller('docs', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs');
   if (route === 'POST /app/docs/delen' && !appVersOk(a, s)) { res._app.reden = 'docs delen, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het delen met je vingerafdruk', vers_nodig: true }); }
