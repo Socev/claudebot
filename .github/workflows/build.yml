@@ -573,6 +573,10 @@ jobs:
       - name: "kalender-app (wv2333, OVIS Calendar in de app)"
         if: ${{ !cancelled() }}
         run: bash test/kalender-app.sh
+      # Potloodlaag (wv3741, besluit nr 486): agenda-potlood.js met nep-luik (plafond, nooit dubbel, weggehaald = klopt niet, proefmodus).
+      - name: "agenda-potlood (wv3741, potloodlaag Socev-kalender)"
+        if: ${{ !cancelled() }}
+        run: bash test/agenda-potlood.sh
       # OVIS Shopper S3 (wv2264): shopper.js (alleen zoektochtpagina's in de vaste mappen, entiteit uit de map, id = hash, geen symlink, koop-link
       # alleen https) en het server.js-blok (routes, Niet meer nodig = enige schrijfactie, gekocht niet via de App, /health aantallen + tijdstip).
       - name: "shopper (wv2264, zoektochten in de app)"

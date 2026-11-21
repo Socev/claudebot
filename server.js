@@ -4722,6 +4722,7 @@ function handleRequest(req, res) {
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
       weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
       contactringen: typeof contactringenInfo === 'function' ? contactringenInfo() : { aan: false },   // wv2894: zondagseintje binnenste kring (stand, geen namen of nummers)
+      agenda_potlood: typeof agendaPotloodInfo === 'function' ? agendaPotloodInfo() : { aan: false },   // wv3741: potloodlaag (laatste ronde, alleen aantallen)
       kalender: typeof kalenderInfo === 'function' ? kalenderInfo() : { aan: false },   // wv2333: OVIS Calendar in de app (laatste lijst: aantal, duur; geen titels)
       shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
       ophalen: typeof ophalen !== 'undefined' && ophalen ? ophalen.info() : { aan: false },   // wv3254: vaste ophaalroute (motor, scherm, tellers; geen url's)
@@ -25205,6 +25206,53 @@ async function appKalender(req, res, a, route, d) {
   return appStuur(res, u.status, u.body);
 }
 // ── einde OVIS Calendar ──
+// ── wv3741 (besluitenpagina nr 486 = 3C186, David Ja 21-11-2026 13:12): potloodlaag in Socevs eigen kalender ──
+// agenda-potlood.js zet vondsten van de datumdetector (kalenderApp gevonden, wv3679) als ✏️-potlood in de Socev-kalender (n8n AI - Socev
+// Agenda, socev_plaatsen: alleen die kalender) met één kaart "Bevestig in je agenda" (david_plaatsen, kaart: true: alleen Davids ✅ plaatst);
+// weggehaald in Google = klopt niet. Tik elke 5 min, werkt alleen 07:05–10:59 (kaarten niet in de stille uren), hooguit eens per uur en
+// tot het dagplafond (5). Uit: bestand KLOKKEN_DIR/agenda-potlood.uit of AGENDA_POTLOOD=uit. Register (0600, geen titels):
+// KLOKKEN_DIR/agenda-potlood.json. Toestemmingsrij agenda-socev-potlood. /health.agenda_potlood = laatste ronde (alleen aantallen).
+const SOCEV_AGENDA_WF = process.env.SOCEV_AGENDA_WF || '3oiAigcCz6LNmeBd';   // AI - Socev Agenda (schrijfluik)
+async function socevAgendaLuik(body) {
+  const geheim = process.env.N8N_WEBHOOK_SOCEV_AGENDA;
+  if (!geheim) throw new Error('socev-agendaluik niet ingericht');
+  for (let poging = 0; poging < 2; poging++) {
+    const url = await appWebhookUrl(SOCEV_AGENDA_WF, 'Socev webhook', 'socevAgendaUrl', poging > 0);
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(Object.assign({}, body, { secret: geheim })), signal: AbortSignal.timeout(90000) });
+    if (r.status === 404 && poging === 0) continue;
+    let j = null;
+    try { j = await r.json(); } catch (e) { j = null; }
+    if (j && typeof j === 'object') return j;   // ook een 400/409 met uitleg: de module kijkt naar ok / knop_verstuurd
+    throw new Error('socev-agendaluik http ' + r.status);
+  }
+  throw new Error('socev-agendaluik niet gevonden');
+}
+const agendaPotlood = (function () {
+  const p = path.join(__dirname, 'agenda-potlood.js');
+  if (!fs.existsSync(p) || !kalenderApp) return null;
+  try {
+    return require(p).maak({
+      gevonden: async function (nu) { const u = await kalenderApp.app({ methode: 'GET', pad: '/app/kalender/gevonden', nu: nu }); return u && u.status === 200 ? u.body : null; },
+      oordeel: function (id, oordeel) { return kalenderApp.app({ methode: 'POST', pad: '/app/kalender/gevonden', nu: Date.now(), body: { id: id, oordeel: oordeel } }); },
+      luik: socevAgendaLuik,
+      staatPad: path.join(KLOKKEN_DIR, 'agenda-potlood.json'),
+      log: function (x) { schrijfLog(nu() + ' agenda-potlood ' + velden({ ok: x.ok, nieuw: x.nieuw, weg: x.weg, overgenomen: x.overgenomen, verlopen: x.verlopen, kaart: x.kaart, kaart_fout: x.kaart_fout, fout: x.fout || 0, mutaties: x.mutaties })); },
+    });
+  } catch (e) { logError('agenda-potlood', e); return null; }
+})();
+function agendaPotloodInfo() { if (!agendaPotlood) return { aan: false }; try { return Object.assign(agendaPotlood.info(), agendaPotloodUit() ? { uit: true } : {}); } catch (e) { return { fout: true }; } }
+function agendaPotloodUit() { return process.env.AGENDA_POTLOOD === 'uit' || fs.existsSync(path.join(KLOKKEN_DIR, 'agenda-potlood.uit')); }
+let agendaPotloodVorige = 0;
+async function agendaPotloodTik() {
+  if (!agendaPotlood || !SERVER_ECHT || !rolPrimair() || agendaPotloodUit()) return;
+  const a = ovisAms();
+  if (a.uur < 7 || (a.uur === 7 && a.min < 5) || a.uur >= 11) return;
+  if (Date.now() - agendaPotloodVorige < 55 * 60000 || agendaPotlood.vandaagVol(Date.now())) return;
+  agendaPotloodVorige = Date.now();
+  try { await agendaPotlood.ronde({ nu: Date.now() }); } catch (e) { logError('agenda-potlood-tik', e); }
+}
+if (agendaPotlood && SERVER_ECHT) { setInterval(function () { agendaPotloodTik(); }, 5 * 60000).unref(); }
 // ── Promedico-laag in Calendar (wv3143) ──
 // wv3143 (15-11-2026): Promedico-agenda als eigen laag in Apps › Calendar (fase A, bouwplan "Promedico-agenda meelezen" § Kalender-laag).
 //   GET /app/promedico/<van>/<tot>     YYYY-MM-DD, hooguit 62 dagen
