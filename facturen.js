@@ -145,7 +145,7 @@ function kernCtx(fdb, nu) {
   return {
     vandaag: dagAmsterdam(nu),
     entiteiten: entiteitenRijen(fdb).map((e) => ({ sleutel: e.sleutel, naam: e.naam, naam_kort: e.naam_kort, aliassen: e.aliassen || [], kvk: e.kvk,
-      actief: e.actief === 1, boekhoud_doel: e.boekhoud_doel, ibans: ibans[e.sleutel] || [] })),
+      actief: e.actief === 1, boekhoud_doel: e.boekhoud_doel, btw: e.btw || null, ibans: ibans[e.sleutel] || [] })),
     drempelCenten: Number.isSafeInteger(drempel) && drempel > 0 ? drempel : undefined,
     eerdereBetalingen: (q) => eerdereBetalingen(fdb, q),   // wv2143: de € 2.500-waarschuwing zwijgt bij een gebruikelijk bedrag (kern)
     ibanHistorie: (iban) => ibanHistorie(fdb, iban),        // wv2356: IBAN bekend uit eigen betalingen of het archief (kern ibanPoort)

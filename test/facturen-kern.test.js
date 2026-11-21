@@ -925,7 +925,10 @@ test('B2: scan zonder OCR-tekst → kandidaat genegeerd; met OCR-tekst zonder ke
   assert.equal(met.incl, 142850);
   assert.deepEqual(met.model_zonder_steun, [], 'bedrag staat in de OCR-tekst');
   const pat = K.beslisBericht({ bericht: BERICHT_A, documenten: [scan({ model_kandidaat: mk, ocr_tekst: ocr + '\nBSN: 111222333' })] }, ctxBasis()).facturen[0];
-  assert.equal(pat.nummer, null);
+  // wv3660: kenmerk → geen model, wel de velden uit de lokale OCR als voorstel, en alleen voor de eigenaar
+  assert.equal(pat.nummer, 'S-77');
+  assert.ok(pat.besluiten.some((b) => b.veld === 'nummer' && b.toelichting === 'uit lokale OCR (voorstel)'));
+  assert.equal(pat.alleen_eigenaar, true);
   assert.ok(!pat.besluiten.some((b) => b.bron === 'model'));
 });
 

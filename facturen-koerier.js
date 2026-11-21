@@ -567,6 +567,25 @@ function schaduwPdf(fdb, io, berichtId, bericht, documenten, ruw, facturen, over
 
 // Vóór de transactie (wv1921). docs: [{ sha256, naam, mime, tekst?, ubl_xml?, patientkenmerk_koerier }], ruw: Map sha256 → bytes. Zet per
 // document model_kandidaat en ocr_tekst (vluchtig; de koerier wist ze na de transactie). → aantal gelezen documenten.
+// wv3660 (David 21-11-2026): een scan (PDF zonder bruikbare tekstlaag) die Claude niet las (lezer niet live, Jev boven de drempel, of na
+// "gewoon verwerken" van een stuk met patiëntmarker) kreeg geen enkele lezing: Beoordelen zei "velden met de hand invullen". Nu lokale OCR
+// (io.ocrLokaal: pdftoppm + tesseract op de pod, niets gaat naar buiten); de kern haalt er de velden als voorstel uit, toetst het
+// patiëntkenmerk en herkent een uitgaande factuur. Nooit een taalmodel. Vluchtig zoals de rest (gewist na de transactie). → aantal gelezen.
+async function ocrZonderModel(io, docs, ruw, o) {
+  if (!io || typeof io.ocrLokaal !== 'function') return 0;
+  let n = 0;
+  for (const d of docs) {
+    if (o && typeof o.klok === 'function' && o.klok() - o.start > GRENS.rondeMs) break;   // review ZOU 4: rondebudget op → volgende keer met de hand
+    if (d.mime !== 'application/pdf' || typeof d.ocr_tekst === 'string' || d.model_kandidaat) continue;
+    if (d.tekstlaag !== false && String(d.tekst || '').trim().length >= 20) continue;   // gelijk aan K.stapSoort: dit is geen scan
+    const b = ruw.get(d.sha256);
+    if (!b) continue;
+    let r = null;
+    try { r = await io.ocrLokaal(b); } catch (e) { r = null; }
+    if (r && r.ok && typeof r.tekst === 'string') { d.ocr_tekst = r.tekst; n++; }
+  }
+  return n;
+}
 async function pdfLive(io, bericht, docs, ruw, overgeslagen, o) {
   if (typeof io.pdfLive !== 'function' || !docs.some((d) => d.tekst != null || d.mime === 'application/pdf')) return 0;
   if (o && typeof o.klok === 'function' && o.klok() - o.start > GRENS.rondeMs) return 0;   // rondebudget op: deze keer de tekstregels
@@ -600,6 +619,7 @@ async function leesUploads(fdb, pdf, o) {
       const docs = [{ sha256: d.sha256, naam: d.naam, mime: d.mime || 'application/pdf', bytes: d.bytes, tekst: t.tekst, tekstlaag: t.tekstlaag }];
       const ruw = new Map([[d.sha256, bytes]]);
       tel.claude = (tel.claude || 0) + await pdfLive(o.io || {}, null, docs, ruw, 0, o);
+      await ocrZonderModel(o.io || {}, docs, ruw, o);   // wv3660 (review ZOU 6): ook een geüploade scan
       const v = F.verwerkBericht(fdb, { bericht: null, documenten: docs }, { wie: o.wie, nu: o.klok(), geupload_door: d.geupload_door });
       schaduwPdf(fdb, o.io || {}, null, null, docs, ruw, v.facturen, 0);
       for (const x of docs) { x.tekst = null; x.ocr_tekst = null; x.model_kandidaat = null; }
@@ -718,6 +738,7 @@ async function leesBericht(fdb, bron, io, pdf, m, eigen, o, tel, nietGelezen) {
   const ruw = new Map();
   for (const d of documenten) { const st = D.stukSchrijf(fdb, d._bytes); d.sha256 = st.sha256; ruw.set(d.sha256, d._bytes); delete d._bytes; }
   if (documenten.length) tel.claude = (tel.claude || 0) + await pdfLive(io, { afzender, onderwerp: m.onderwerp }, documenten, ruw, totaalBijlagen - documenten.length, o);
+  if (documenten.length) await ocrZonderModel(io, documenten, ruw, o);   // wv3660
   let n = 0, nieuwId = null, vf = null;
   D.transactie(fdb, function () {
     if (fdb.db.prepare('SELECT 1 FROM bericht WHERE bron = ? AND message_id = ?').get(bron.id, m.id)) return;
@@ -828,6 +849,10 @@ async function leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel) {
   for (const d of documenten) { const st = D.stukSchrijf(fdb, d._bytes); d.sha256 = st.sha256; ruw.set(d.sha256, d._bytes); delete d._bytes; }
   const model = s.jev === 'onder' && !s.na_keuze;   // gelijk aan de kennislens: geen model zonder Jev onder de drempel of na "gewoon verwerken"
   if (documenten.length && model) tel.claude += await pdfLive(io, { afzender, onderwerp: s.onderwerp }, documenten, ruw, 0, o);
+  if (documenten.length) await ocrZonderModel(io, documenten, ruw, o);   // wv3660: scan zonder Claude → lokale OCR
+  // wv3660: een scan die David vrijgaf na de patiëntmarker van Intake ("gewoon verwerken") en die Facturen zelf niet kon lezen (geen OCR-tekst):
+  // alleen de eigenaar. Een leesbaar stuk toetst de kern zelf (review ZOU 3: anders viel elke vrijgegeven inkoopfactuur uit de betaalstroom).
+  if (s.na_keuze === true) for (const d of documenten) if (d.mime === 'application/pdf' && !(d.tekstlaag !== false && String(d.tekst || '').trim().length >= 20) && typeof d.ocr_tekst !== 'string') d.patientkenmerk_koerier = true;
   let vf = null, nieuwId = null, al = false;
   D.transactie(fdb, function () {
     if (fdb.db.prepare('SELECT 1 FROM bericht WHERE bron = ? AND message_id = ?').get(bron.id, mid)) { al = true; return; }
@@ -878,4 +903,4 @@ async function knoopVul(fdb, io, factuurIds, domein, o) {
   return n;
 }
 
-module.exports = { ronde, leesIntake, eigenVerzondenAanAnderen, knoopVul, controleer, pdfNaarTekst, oorspronkelijkeAfzender, isDoorgestuurd, tokenVan, mailVoor, zoekToken, naamMetExtensie, uniekeNamen, exactPaginas, LuikFout, GRENS, EXACT, PDFTOTEXT, TOKEN_RE };
+module.exports = { ronde, leesIntake, ocrZonderModel, eigenVerzondenAanAnderen, knoopVul, controleer, pdfNaarTekst, oorspronkelijkeAfzender, isDoorgestuurd, tokenVan, mailVoor, zoekToken, naamMetExtensie, uniekeNamen, exactPaginas, LuikFout, GRENS, EXACT, PDFTOTEXT, TOKEN_RE };

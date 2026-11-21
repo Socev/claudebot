@@ -491,7 +491,7 @@ function stapSoort(doc) {
   const isPdf = /pdf/.test(mime) || /\.pdf$/i.test(naam);
   const isBeeld = /^image\//.test(mime) || /\.(jpe?g|png|heic|tiff?|webp)$/i.test(naam);
   if (isPdf && doc.tekstlaag !== false && String(doc.tekst || '').trim().length >= 20) return { soort: 'pdf', besluiten: [besluit('soort', 'soort', 'pdf', 'regel', 'PDF met tekstlaag')] };
-  if (isPdf || isBeeld) return { soort: 'scan', besluiten: [besluit('soort', 'soort', 'scan', 'regel', (isPdf ? 'PDF' : 'afbeelding') + ' zonder tekstlaag: geen OCR in v1, velden met de hand')] };
+  if (isPdf || isBeeld) return { soort: 'scan', besluiten: [besluit('soort', 'soort', 'scan', 'regel', (isPdf ? 'PDF' : 'afbeelding') + ' zonder tekstlaag: velden uit lokale OCR (voorstel) of met de hand')] };
   return { soort: 'overig', reden: 'onbekend_bestand', besluiten: [besluit('soort', 'soort', 'overig', 'regel', 'geen PDF, UBL of afbeelding')] };
 }
 
@@ -538,6 +538,55 @@ function stapGeenFactuur(tekst, bericht, ctx) {
   const geenWoord = GEEN_FACTUURWOORD.exec(t);
   if (geenWoord && !heeftWoord) return { geen: true, besluiten: [besluit('geen_factuur', 'is_factuur', 0, 'regel', geenWoord[1].toLowerCase() + ' zonder factuurwoord')] };
   return { geen: false, besluiten: [besluit('geen_factuur', 'is_factuur', 1, 'regel', heeftWoord ? 'factuurwoord aanwezig' : 'geen kenmerk van een andere soort stuk')] };
+}
+
+// ───────────────────────────── stap 6a: uitgaande factuur van een eigen entiteit (wv3660) ─────────────────────────────
+
+// David 21-11-2026: een vaccinatienota van Groenhouten AAN een patiënt (gescand, verstuurd vanaf het eigen praktijkadres) stond als
+// inkoopfactuur in Beoordelen. Een stuk is een UITGAANDE factuur als (alle vier):
+//  1. de afzender een eigen praktijkdomein is (EIGEN_DOMEINEN) en het bericht geen doorgestuurde mail is (Fwd:/FW:/Doorst:): David stuurt
+//     inkoopfacturen door vanaf zijn praktijkadres, die blijven inkoop;
+//  2. er lokaal gelezen tekst is (tekstlaag of lokale OCR, ≥ 40 tekens);
+//  3. de entiteit van dat domein op het stuk staat (KvK of naam/alias) en geen andere actieve eigen entiteit (geen interne factuur);
+//  4. er geen spoor van een externe leverancier op staat: geen vreemd KvK-nummer, geen vreemd btw-nummer, geen geldig IBAN dat niet van ons is.
+// Gemeten op de 67 facturen in de echte db (21-11): alleen de twee vaccinatienota's voldoen. Restrisico: een leverancier zonder KvK, btw en IBAN
+// op de factuur die een medewerker zonder "FW:" vanaf het praktijkadres doorstuurt; die komt dan in Geen factuur (zichtbaar, "toch factuur" kan).
+const EIGEN_DOMEINEN = { 'hapleusden.nl': 'groenhouten', 'hpgroenhouten.nl': 'groenhouten', 'huisartsentolgaarde.nl': 'tolgaarde' };
+// review KAN 7: ook "Doorgestuurd:", "[EXTERN] FW:" en "Re: FW:"
+const DOORGESTUURD = /^\s*(?:\[[^\]]{0,40}\]\s*)*(?:(?:re|aw|antw)\s*:\s*)*(?:fwd?|fw|doorst(?:uurd)?|doorgestuurd|tr|wg)\s*:/i;
+function domeinEntiteit(adres, ctx) {
+  const dom = String(adres || '').split('@')[1] || '';
+  const tabel = (ctx && ctx.eigenDomeinen) || EIGEN_DOMEINEN;
+  for (const d of Object.keys(tabel)) if (dom === d || dom.endsWith('.' + d)) return tabel[d];
+  return null;
+}
+function stapUitgaand(tekst, velden, bericht, ctx) {
+  const ent = domeinEntiteit(adresVanAfzender(bericht && bericht.afzender), ctx);
+  if (!ent) return { uitgaand: false, besluiten: [] };
+  const nee = (r) => ({ uitgaand: false, besluiten: [besluit('uitgaand', 'uitgaand', 0, 'regel', r)] });
+  if (DOORGESTUURD.test(String((bericht && bericht.onderwerp) || ''))) return nee('afzender is een eigen domein, maar doorgestuurde mail: inkoop');
+  const t = schoon(tekst || '');
+  if (t.replace(/\s/g, '').length < 40) return nee('afzender is een eigen domein, maar geen lokaal gelezen tekst');
+  const ents = ((ctx && ctx.entiteiten) || []).filter((e) => e.actief !== false && e.sleutel !== 'prive');
+  const tn = zonderAccenten(t).toLowerCase().replace(/\s+/g, ' ');
+  const kvks = (velden && velden.kvks) || [];
+  const genoemd = (e) => (!!e.kvk && kvks.includes(e.kvk)) || [e.naam].concat((e.aliassen || []).map((a) => (typeof a === 'string' ? a : a && a.tekst))).some((n) => n && bevat(tn, n));
+  const eigen = ents.find((e) => e.sleutel === ent);
+  if (!eigen || !genoemd(eigen)) return nee('afzender is een eigen domein, maar ' + entNaam(ctx, ent) + ' staat niet op het stuk');
+  const ander = ents.find((e) => e.sleutel !== ent && genoemd(e));
+  if (ander) return nee('ook ' + entNaam(ctx, ander.sleutel) + ' op het stuk: mogelijk een interne factuur');
+  const kvkE = eigenKvks(ctx), ibE = eigenIbans(ctx);
+  const btwE = new Set(ents.map((e) => String(e.btw || '').replace(/[\s.]/g, '').toUpperCase()).filter(Boolean));   // review KAN 8
+  if (kvks.some((k) => !kvkE.has(k))) return nee('vreemd KvK-nummer op het stuk: inkoop');
+  if (((velden && velden.btwnrs) || []).some((b) => !btwE.has(b))) return nee('vreemd btw-nummer op het stuk: inkoop');
+  // review MOET 1: ook een IBAN dat de mod-97 niet haalt (OCR las één teken fout) is een spoor van een leverancier
+  if (((velden && velden.ibans) || []).some((i) => !ibE.has(i.iban))) return nee('vreemd IBAN op het stuk: inkoop');
+  // review ZOU 2: positief bewijs dat de eigen entiteit de uitgever is: haar eigen KvK, btw-nummer of rekening staat op het stuk
+  const eigenBtw = String(eigen.btw || '').replace(/[\s.]/g, '').toUpperCase();
+  const bewijs = (!!eigen.kvk && kvks.includes(eigen.kvk)) || (!!eigenBtw && ((velden && velden.btwnrs) || []).includes(eigenBtw)) ||
+    ((velden && velden.ibans) || []).some((i) => i.geldig && ibE.get(i.iban) === ent);
+  if (!bewijs) return nee('geen KvK, btw-nummer of rekening van ' + entNaam(ctx, ent) + ' op het stuk');
+  return { uitgaand: true, entiteit: ent, besluiten: [besluit('uitgaand', 'uitgaand', 1, 'regel', 'uitgaande factuur van ' + entNaam(ctx, ent) + ' (eigen afzender, eigen naam op het stuk, geen externe leverancier)')] };
 }
 
 // ───────────────────────────── stap 6b: herinnering, aanmaning, offerte (wv2969) ─────────────────────────────
@@ -669,7 +718,7 @@ function stapVelden(groep, ctx, opties) {
       if (v === 'iban' || uit[v] != null || pdf[v] == null) continue;
       if (v === 'valuta' && ubl) continue;
       if (v === 'soort' && ubl) continue;
-      uit[v] = pdf[v]; besluiten.push(besluit('velden', v, pdf[v], 'regel', ubl ? 'uit PDF (ontbrak in UBL)' : 'uit PDF-tekst'));
+      uit[v] = pdf[v]; besluiten.push(besluit('velden', v, pdf[v], 'regel', ubl ? 'uit PDF (ontbrak in UBL)' : pdf._ocr ? 'uit lokale OCR (voorstel)' : 'uit PDF-tekst'));
     }
     uit.kvks = pdf.kvks; uit.btwnrs = pdf.btwnrs;
     for (const i of pdf.ibans) {
@@ -1212,6 +1261,8 @@ function beslisBericht(invoer, ctx) {
     const doc = { sha256: d.sha256, naam: d.naam || null, soort: s.soort, ubl: s.ubl || null, tekst: s.soort === 'pdf' ? d.tekst : null, koerier: !!d.patientkenmerk_koerier, besluiten: db.besluiten.concat(s.besluiten),
       model_kandidaat: isObj(d.model_kandidaat) ? d.model_kandidaat : null, ocr_tekst: typeof d.ocr_tekst === 'string' ? d.ocr_tekst : null };
     if (s.soort === 'pdf') doc.velden = leesPdfTekst(d.tekst);
+    // wv3660: scan met lokale OCR-tekst → velden uit dezelfde tekstregels; alleen gebruikt als er geen live modelkandidaat meetelt (zie hieronder)
+    if (s.soort === 'scan' && doc.ocr_tekst && doc.ocr_tekst.replace(/\s/g, '').length >= 40) doc.velden_ocr = leesPdfTekst(doc.ocr_tekst);
     if (s.soort === 'overig') { docUit.push({ sha256: d.sha256, uitkomst: 'geen_factuur', reden: s.reden, besluiten: doc.besluiten }); continue; }
     docs.push(doc);
   }
@@ -1222,14 +1273,18 @@ function beslisBericht(invoer, ctx) {
     const tekst = teksten.join('\n');
     const besluiten = [].concat(g.pdf ? g.pdf.besluiten : [], g.ubl ? g.ubl.besluiten : []);
     const redenen = [];
-    const pk = stapPatientkenmerk(teksten, (g.pdf && g.pdf.koerier) || (g.ubl && g.ubl.koerier));
+    // wv3660: de lokale OCR van een scan telt mee voor het patiëntkenmerk (een BSN op een gescande nota → alleen de eigenaar)
+    const pk = stapPatientkenmerk(teksten.concat(g.pdf && g.pdf.soort === 'scan' && g.pdf.ocr_tekst ? [g.pdf.ocr_tekst] : []), (g.pdf && g.pdf.koerier) || (g.ubl && g.ubl.koerier));
     besluiten.push(...pk.besluiten);
     let mk = g.pdf && g.pdf.model_kandidaat;
     if (mk && mkDicht) { besluiten.push(besluit('velden', 'model_kandidaat', 0, 'regel', 'modelkandidaat niet gebruikt: ' + mkDicht)); mk = null; }
     const steunTekst = [g.pdf && g.pdf.tekst, g.pdf && g.pdf.ocr_tekst, g.ubl && g.ubl.ubl._tekst].filter(Boolean).join('\n');
     if (pk.kenmerk) redenen.push('Kenmerk van patiëntgegevens: alleen de eigenaar ziet deze factuur, geen taalmodel');
     const scan = !!(g.pdf && g.pdf.soort === 'scan' && !g.ubl);
-    if (scan) redenen.push(mk && mk.live ? 'Scan: velden gelezen door Claude, de lokale OCR is de controle' : 'Scan zonder tekstlaag: velden met de hand invullen');
+    // wv3660: zonder (live) model de velden uit de lokale OCR als voorstel; nooit een taalmodel
+    const ocrVoorstel = scan && !(mk && mk.live) && !!g.pdf.velden_ocr;
+    if (ocrVoorstel) g.pdf.velden = Object.assign({}, g.pdf.velden_ocr, { _ocr: true });
+    if (scan) redenen.push(mk && mk.live ? 'Scan: velden gelezen door Claude, de lokale OCR is de controle' : ocrVoorstel ? 'Scan zonder tekstlaag: velden lokaal gelezen (OCR), alleen een voorstel: nakijken' : 'Scan zonder tekstlaag: velden met de hand invullen');
     const sv = stapVelden(g, ctx, { bericht, model_kandidaat: mk, patientkenmerk: pk.kenmerk, steun_tekst: steunTekst });
     const v = sv.velden; besluiten.push(...sv.besluiten);
     redenen.push(...(sv.opmerkingen || []));
@@ -1266,6 +1321,15 @@ function beslisBericht(invoer, ctx) {
       const gf = stapGeenFactuur(tekst, bericht, Object.assign({}, ctx, { leverancier: lev }));
       besluiten.push(...gf.besluiten);
       if (gf.geen) { status = 'geen_factuur'; redenen.unshift('Geen factuur: ' + gf.besluiten[0].toelichting); }
+    }
+    // wv3660: uitgaande factuur van een eigen entiteit (ook een scan met lokale OCR) → Geen factuur, niet in Beoordelen
+    if (status === 'te_beoordelen' && g.pdf && !g.ubl) {
+      const ug = stapUitgaand(scan ? g.pdf.ocr_tekst : g.pdf.tekst, g.pdf.velden || g.pdf.velden_ocr, bericht, ctx);
+      besluiten.push(...ug.besluiten);
+      if (ug.uitgaand) {
+        status = 'geen_factuur'; redenen.unshift('Geen factuur: ' + ug.besluiten[0].toelichting); if (!se.entiteit) se.entiteit = ug.entiteit;
+        basis.alleen_eigenaar = true;   // review ZOU 5: een uitgaande nota van een praktijk is vrijwel altijd aan een patiënt
+      }
     }
     // wv2969: herinnering/aanmaning/offerte zichtbaar in Beoordelen (de factuur blijft daar; Bevestigen naar Exact weigert met deze reden)
     if (status === 'te_beoordelen' && g.pdf) {
@@ -1656,7 +1720,7 @@ module.exports = {
   leesXml, leesUbl, leesPdfTekst,
   // besliskader per stap (§ 4.5)
   stapDubbelBestand, stapDubbelInhoud, factuurSleutel, stapSoort, groepeerBericht, stapPatientkenmerk, stapVelden, herkenLeverancier, compactNaam, naamVerwant, ibanNaamPast, VERZAMEL_RE,
-  stapEntiteit, stapGeenFactuur, stapSoortStuk, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, gebruikelijkBedrag, GEBRUIKELIJK_MIN_EERDER, ibanPoort, naamZelfde, ibanHistorieBekend, eerderBetaaldOnbekend, eerderTekst, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
+  stapEntiteit, stapGeenFactuur, stapUitgaand, EIGEN_DOMEINEN, stapSoortStuk, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, gebruikelijkBedrag, GEBRUIKELIJK_MIN_EERDER, ibanPoort, naamZelfde, ibanHistorieBekend, eerderBetaaldOnbekend, eerderTekst, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
   // leren
   leerUitBevestiging,
   // overgangen (§ 4.4)

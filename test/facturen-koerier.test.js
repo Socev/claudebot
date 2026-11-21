@@ -1266,3 +1266,38 @@ test('wv3074 rem: meer dan 3 concepten tegelijk "weg" → niets veranderen, fout
   for (const x of b) assert.equal(t.fac(x.f.id).status, 'concept_klaar');
   assert.match(JSON.parse(D.metaLees(t.fdb, 'koerier_ronde')).fout, /concept_weg:rem/);
 });
+
+// wv3660 (David 21-11-2026): een scan uit Intake zonder Claude (Jev niet onder, of na "gewoon verwerken") kreeg geen enkele lezing. Nu lokale
+// OCR (io.ocrLokaal), velden als voorstel; een vrijgegeven markerstuk is alleen voor de eigenaar; een uitgaande nota van het eigen domein → Geen factuur.
+test('wv3660: Intake-scan zonder model → lokale OCR als voorstel; na gewoon verwerken alleen eigenaar; uitgaande nota → geen_factuur', async () => {
+  const t = opzet(), g = nepGmail();
+  const ghIban = t.fdb.db.prepare("SELECT iban FROM rekening WHERE entiteit = 'groenhouten'").get().iban;
+  const ocr = { 'GH-SCAN': ['Huisartsenpraktijk Groenhouten', 'Nota', 'Notanummer: GH-2026-0042', 'Notadatum: 18-11-2026', 'Totaal te betalen € 25,00', 'Graag overmaken op ' + ghIban, 'Merkwoord Zeeanemoon'].join('\n'),
+    'IN-SCAN': ['Leverancier A B.V.', 'Factuur', 'Factuurnummer: SCAN-0007', 'Factuurdatum: 19-11-2026', 'Totaal incl. btw: EUR 42,35', 'Huisartsenpraktijk Tolgaarde B.V.', 'Merkwoord Zeeanemoon'].join('\n') };
+  const n = nepIntake([
+    intakeStuk('stk_20261121_0000aaaa', Z.pdf(['GH-SCAN']), { bron: 'gmail:groenhouten', van: 'info@hapleusden.nl', onderwerp: 'Nota', jev: 'onder', na_keuze: true, bron_id: '69a2b3c4d5e6f7a8' }),
+    intakeStuk('stk_20261121_0000bbbb', Z.pdf(['IN-SCAN']), { jev: 'boven', bron_id: '79a2b3c4d5e6f7a8' }),
+    intakeStuk('stk_20261121_0000cccc', Z.pdf(['Factuur', 'Factuurnummer: TEKST-0001', 'Totaal incl. btw: EUR 7,00', 'Huisartsenpraktijk Tolgaarde B.V.']), { jev: 'boven', bron_id: '89a2b3c4d5e6f7a8' })]);
+  const ocrGevraagd = [];
+  const io = (gg) => Object.assign(n.io(gg), { ocrLokaal: async (b) => { const s = b.toString('latin1'); const k = Object.keys(ocr).find((x) => s.indexOf(x) >= 0); ocrGevraagd.push(k || 'tekst'); return k ? { ok: true, tekst: ocr[k] } : { ok: false }; } });
+  const u = await KO.ronde(t.fdb, io(g), { nu: NU, klok: () => NU });
+  assert.equal(u.intake.ok, true, JSON.stringify(u.intake));
+  assert.deepEqual(ocrGevraagd.sort(), ['GH-SCAN', 'IN-SCAN'], 'alleen scans krijgen OCR, geen PDF met tekstlaag');
+  assert.equal(n.live.length, 0, 'geen Claude');
+  const fb = (mid) => t.fdb.db.prepare('SELECT f.* FROM factuur f JOIN bericht b ON b.id = f.bericht WHERE b.message_id = ?').get(mid);
+  const gh = fb('69a2b3c4d5e6f7a8'), inn = fb('79a2b3c4d5e6f7a8');
+  assert.equal(gh.status, 'geen_factuur'); assert.match(JSON.parse(gh.redenen)[0], /uitgaande factuur van/);
+  assert.equal(gh.alleen_eigenaar, 1, 'uitgaande nota: alleen de eigenaar');
+  assert.equal(inn.status, 'te_beoordelen'); assert.equal(inn.nummer, 'SCAN-0007'); assert.equal(inn.incl, 4235); assert.equal(inn.alleen_eigenaar, 0);
+  assert.ok(JSON.parse(inn.redenen).some((r) => /lokaal gelezen \(OCR\)/.test(r)));
+  t.fdb.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  for (const s of ['', '-wal']) { const p = t.fdb.pad + s; if (fs.existsSync(p)) assert.ok(fs.readFileSync(p).indexOf('Zeeanemoon') < 0, 'OCR-tekst niet in ' + path.basename(p)); }
+  // review ZOU 3: na gewoon verwerken alleen een scan die Facturen zelf niet kon lezen → alleen de eigenaar; een leesbaar stuk toetst de kern zelf
+  const n2 = nepIntake([intakeStuk('stk_20261121_0000dddd', Z.pdf(['ONLEESBAAR']), { jev: 'onder', na_keuze: true, bron_id: '99a2b3c4d5e6f7a8' }),
+    intakeStuk('stk_20261121_0000eeee', Z.pdf(['Factuur', 'Factuurnummer: VRIJ-0001', 'Totaal incl. btw: EUR 9,00', 'Huisartsenpraktijk Tolgaarde B.V.']), { jev: 'onder', na_keuze: true, bron_id: 'a9a2b3c4d5e6f7a8' })]);
+  await KO.ronde(t.fdb, Object.assign(n2.io(g), { ocrLokaal: async () => ({ ok: false }) }), { nu: NU + MIN, klok: () => NU + MIN });
+  assert.equal(fb('99a2b3c4d5e6f7a8').alleen_eigenaar, 1, 'onleesbare vrijgegeven scan');
+  assert.equal(fb('a9a2b3c4d5e6f7a8').alleen_eigenaar, 0, 'leesbare vrijgegeven factuur blijft in de betaalstroom');
+  // zonder io.ocrLokaal (oude server.js): zoals vroeger
+  assert.equal(await KO.ocrZonderModel({}, [], new Map()), 0);
+});
