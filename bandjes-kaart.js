@@ -157,7 +157,8 @@ function plan(x) {
     o.bandjes.forEach(function (k) {
       const st = bandjeStand[k];
       if (!st) { af = false; return; }
-      if (st.af) { const bestaat = punten.has(st.af) || uit.zet.some(function (z) { return z.sleutel === st.af; }); if (!bestaat) af = false; else doel = doel || st.af; }
+      // Codex MOET 1 (ronde 2): alleen een kaart die al bestaat telt (een geplande kan nog mislukken); dan sluit de volgende ronde hem
+      if (st.af) { if (!punten.has(st.af)) af = false; else doel = doel || st.af; }
       else if (!(st.centrale >= 1 && st.versie <= st.centrale)) af = false;
     });
     if (!af) return;

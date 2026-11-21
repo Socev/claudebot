@@ -112,7 +112,7 @@ const R = B.routes({ opslag: S, dir: DIR, primair: () => true, studio: studio })
   const oud = pl.dicht.find((x) => x.sleutel === 'wv3073');
   toets('oude verzamelkaart gaat op in de nieuwe zodra beide bandjes gedekt zijn', oud && oud.samengevoegd_in === 'bandjes-af-groenhouten-gh-koffiepauze-v2', pl.dicht);
   pl = K.plan({ praktijken: R2.kaartStand(), punten: [{ sleutel: 'wv3073', status: 'later' }], nu: nu });
-  toets('oude verzamelkaart blijft als de nieuwe kaart er nog niet is… behalve via het plan zelf', pl.dicht.some((x) => x.sleutel === 'wv3073'), pl);
+  toets('oude verzamelkaart blijft zolang de nieuwe kaart nog niet bestaat (Codex ronde 2 MOET 1)', !pl.dicht.some((x) => x.sleutel === 'wv3073') && pl.zet.length >= 1, pl);
   pl = K.plan({ praktijken: [{ id: 'groenhouten', ok: true, dicht: 'conflictkopie', bandjes: [] }], punten: punten.concat([{ sleutel: 'wv3073', status: 'later' }]), nu: nu });
   toets('register dicht: niets aan de kaarten van die praktijk', pl.zet.length === 0 && pl.dicht.length === 0, pl);
 
