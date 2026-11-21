@@ -23,4 +23,5 @@ B=$(awk '/── OVIS Beleggen \(wv2982/,/── einde OVIS Beleggen ──/' se
 if echo "$B" | grep -nE "logError\([^)]*(e\.message|String\(e|d\.|u\.body)"; then echo "ROOD  server.js: Beleggen logt inhoud"; f=1; fi
 [ $f = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS"
 node --test test/beleggen.test.js 2>&1 | tail -n 12 | grep -E "^# (pass|fail)" ; node --test test/beleggen.test.js >/dev/null 2>&1 || { echo "ROOD  test/beleggen.test.js"; f=1; }
+node --test test/beleggen-dash.test.js >/dev/null 2>&1 && echo "GROEN test/beleggen-dash.test.js (daglijn, wereldindex, geld-tegels; wv3754)" || { echo "ROOD  test/beleggen-dash.test.js"; f=1; }
 exit $f

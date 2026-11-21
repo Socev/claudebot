@@ -323,7 +323,7 @@ function leesBestand(tekst) {
       telling[basis] = (telling[basis] || 0) + 1;
       uit.push({ sleutel: 'tx:' + sha(basis + '#' + telling[basis]).slice(0, 32), datum, tijd, naam, isin, beurs: veld(rij, kaart.beurs) || null,
         aantal: aantal.tekst, koers: koers.g.tekst, valuta, lokaal_cent: lokaal.cent, waarde_eur_cent: waarde.cent, wisselkoers: wk ? wk.tekst : null,
-        kosten_eur_cent: (kosten ? kosten.cent : 0) + (autofx ? autofx.cent : 0), totaal_eur_cent: totaal.cent, order_id: order || null, regel });
+        kosten_eur_cent: (kosten ? kosten.cent : 0) + (autofx ? autofx.cent : 0), autofx_eur_cent: autofx ? autofx.cent : (kaart.autofx ? 0 : null), totaal_eur_cent: totaal.cent, order_id: order || null, regel });
     }
   } else if (soort === 'portefeuille') {
     const gezien = new Set();
@@ -633,30 +633,174 @@ function aankoopPer(posities, transacties) {
   return uit;
 }
 
+// ── wv3754 (besluiten nr 905 = L05 en nr 909 = L09, David Ja 21-11 13:18/13:19): levend dashboard en geld-tegels ──
+// Daglijn: de waarde van je posities per beursdag uit de dagkoersen (ochtendronde) en de ECB-koers van die dag. Aantal per dag = het aantal nu
+// min wat er daarna gekocht is (plus wat er daarna verkocht is), uit je eigen transacties; komt dat onder nul, dan dekken je transacties de stand
+// niet en telt die positie op die dag als 0 (onvolledig). Een positie zonder enige dagkoers doet niet mee (posities_zonder). Een dag zonder koers
+// (feestdag) neemt de vorige slotkoers tot 4 dagen terug; ontbreekt een koers of wisselkoers langer, dan valt die dag weg (niet raden).
+// Vergelijking: rendement per dag op de posities van de dag ervoor (koers en wisselkoers, zonder bijstorten), naast het wereldindexfonds in euro,
+// beide 100 op de eerste gezamenlijke dag. Eigen keuzes = soort tech of health; zonder die soort: al je aandelen (en dat staat in de naam).
+const WERELD = { sleutel: 'IDX:URTH', code: 'URTH', naam: 'Wereldindex (MSCI World)' };
+const RE_INDEX = /^IDX:[A-Z]{1,6}$/;
+const LIJN_MAX = 260;
+function koersOp(rij, datum) {   // rij oplopend; laatste slot op of vóór datum, hooguit 4 dagen oud
+  let k = null;
+  for (const x of rij) { if (x.datum > datum) break; k = x; }
+  return k && k.datum >= plusDagen(datum, -KOERS_OUD_DAGEN) ? k : null;
+}
+function wisselRecent(wissels, valuta, datum) {   // wissels aflopend; hooguit 7 dagen oud
+  if (valuta === 'EUR') return 1;
+  const r = (wissels[valuta] || []).find((w) => w.datum <= datum && w.datum >= plusDagen(datum, -7));
+  const n = r ? Number(r.per_eur) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+function daglijn(posities, transacties, reeks, wissels, soorten, vandaag) {
+  const effect = posities.filter((p) => p.regelsoort === 'effect');
+  const mee = effect.filter((p) => p.isin && (reeks[p.isin] || []).length && Number(p.aantal) > 0);
+  const uit = { punten: [], posities_in: mee.length, posities_zonder: effect.length - mee.length, onvolledig: false, vergelijk: null };
+  if (!mee.length) return uit;
+  const txVan = {};
+  for (const t of transacties) if (t.isin && Number.isFinite(Number(t.aantal))) (txVan[t.isin] || (txVan[t.isin] = [])).push(t);
+  const aantalOp = (p, d) => {
+    let a = Number(p.aantal);
+    for (const t of txVan[p.isin] || []) if (t.datum > d) a -= Number(t.aantal);
+    if (a < -1e-6) { uit.onvolledig = true; return 0; }
+    return a < 1e-9 ? 0 : a;
+  };
+  const dagen = [...new Set(mee.flatMap((p) => reeks[p.isin].map((x) => x.datum)))].filter((d) => d < vandaag).sort();
+  const eigenSoort = mee.some((p) => soorten[p.sleutel] === 'tech' || soorten[p.sleutel] === 'health');
+  const inEigen = (p) => !eigenSoort || soorten[p.sleutel] === 'tech' || soorten[p.sleutel] === 'health';
+  const prijs = (p, d) => { const k = koersOp(reeks[p.isin], d); if (!k) return null; const fx = wisselRecent(wissels, k.valuta, d); return fx == null ? null : Number(k.slot) / fx; };
+  const rij = [];
+  for (const d of dagen) {
+    let w = 0, ok = true, iets = false;
+    const a = {}, pr = {};
+    for (const p of mee) {
+      a[p.sleutel] = aantalOp(p, d);
+      if (!a[p.sleutel]) continue;
+      pr[p.sleutel] = prijs(p, d);
+      if (pr[p.sleutel] == null) { ok = false; break; }
+      w += a[p.sleutel] * pr[p.sleutel]; iets = true;
+    }
+    if (ok && iets) rij.push({ datum: d, waarde_cent: Math.round(w * 100), a, pr });
+  }
+  const laatste = rij.slice(-LIJN_MAX);
+  uit.punten = laatste.map((x) => ({ datum: x.datum, waarde_cent: x.waarde_cent }));
+  // vergelijking (review wv3754 ronde 2): eerst een eigen keten per beursdag van de daglijn (rendement op de stukken van de dag ervoor; zonder
+  // eigen stukken op de dag ervoor of zonder prijs schuift de keten door met behoud van het opgebouwde rendement), daarna alleen de dagen waarop
+  // ook het wereldindexfonds een koers heeft, beide 100 op de eerste gezamenlijke dag.
+  const idx = reeks[WERELD.sleutel] || [];
+  if (laatste.length >= 2 && idx.length) {
+    const keten = [];
+    let e = null;
+    for (let i = 0; i < laatste.length; i++) {
+      const x = laatste[i], g = i ? laatste[i - 1] : null;
+      if (e == null) { if (mee.some((p) => inEigen(p) && x.a[p.sleutel])) e = 1; else continue; keten.push({ x, e }); continue; }
+      let oud = 0, nieuw = 0, ok = true;
+      for (const p of mee) {
+        if (!inEigen(p) || !g.a[p.sleutel]) continue;
+        const pn = x.pr[p.sleutel] != null ? x.pr[p.sleutel] : prijs(p, x.datum);
+        if (pn == null || g.pr[p.sleutel] == null) { ok = false; break; }
+        oud += g.a[p.sleutel] * g.pr[p.sleutel]; nieuw += g.a[p.sleutel] * pn;
+      }
+      if (ok && oud > 0) e *= nieuw / oud;
+      keten.push({ x, e });
+    }
+    const punten = [];
+    let e0 = null, i0 = null;
+    for (const { x, e: ex } of keten) {
+      const ki = koersOp(idx, x.datum), fx = ki ? wisselRecent(wissels, ki.valuta, x.datum) : null;
+      const iw = ki && fx != null ? Number(ki.slot) / fx : null;
+      if (iw == null) continue;
+      if (e0 == null) { e0 = ex; i0 = iw; }
+      punten.push({ datum: x.datum, eigen: Math.round((ex / e0) * 10000) / 100, index: Math.round((iw / i0) * 10000) / 100 });
+    }
+    if (punten.length >= 2) uit.vergelijk = { eigen_naam: eigenSoort ? 'Je eigen keuzes' : 'Je aandelen', index_naam: WERELD.naam, index_code: WERELD.code, punten };
+  }
+  return uit;
+}
+
+// Geld-tegels (L09): alleen uit Davids eigen exports. Ingelegd = stortingen min opnames in het rekeningoverzicht (euro; de reservering van een
+// iDEAL-storting en het terugdraaien ervan heffen elkaar op). Kosten = transactiekosten en AutoFX-kosten uit de transacties + overige kosten uit het
+// rekeningoverzicht (aansluiting e.d.; de transactiekosten staan daar ook, die tellen niet nog eens). Resultaat na kosten = waarde vandaag min de
+// aankoopwaarde incl. kosten, plus wat verkopen opleverden na kosten, plus dividend na dividendbelasting, min overige kosten. Ontbreekt een post,
+// dan staat dat erbij (nooit raden). Bedragen in centen; kosten positief.
+const GELD_RE = /storting|deposit|ideal|opname|withdrawal/i;
+const OVERIG_KOSTEN_RE = /kosten|fee|aansluit|connection/i;
+const GEEN_OVERIG_RE = /transactiekosten|transaction|autofx|valuta|currency/i;
+function geldOverzicht(x) {
+  const reken = x.rekening || [], tx = x.transacties || [], vw = x.vandaag || null;
+  const u = { ingelegd_cent: null, ingelegd_van: null, ingelegd_tot: null, ingelegd_zonder: 0, rekening: reken.length > 0, transacties: tx.length,
+    kosten_cent: null, kosten_transactie_cent: 0, kosten_valuta_cent: 0, kosten_overig_cent: 0, kosten_splits_onbekend: 0, kosten_zonder: 0,
+    dividend_cent: 0, dividend_zonder: 0, gerealiseerd_cent: x.gerealiseerd ? x.gerealiseerd.cent : 0, gerealiseerd_onbekend: x.gerealiseerd ? x.gerealiseerd.onbekend : 0,
+    resultaat_cent: null, resultaat_reden: null };
+  if (reken.length) {
+    let som = 0, stort = 0;
+    for (const r of reken) {
+      if (!r.datum) continue;
+      if (!u.ingelegd_van || r.datum < u.ingelegd_van) u.ingelegd_van = r.datum;
+      if (!u.ingelegd_tot || r.datum > u.ingelegd_tot) u.ingelegd_tot = r.datum;
+      const o = String(r.omschrijving || ''), m = r.mutatie_cent;
+      if (m == null) continue;
+      const eur = (r.mutatie_valuta || 'EUR') === 'EUR';
+      if (GELD_RE.test(o) && !/valuta/i.test(o)) { stort++; if (eur) som += m; else u.ingelegd_zonder++; }
+      else if (/dividend/i.test(o)) {
+        const fx = eur ? 1 : wisselOp(x.wissels || {}, r.mutatie_valuta, r.datum);
+        if (fx == null) u.dividend_zonder++; else u.dividend_cent += Math.round(m / fx);
+      } else if (OVERIG_KOSTEN_RE.test(o) && !GEEN_OVERIG_RE.test(o)) { if (eur) u.kosten_overig_cent += -m; else u.kosten_zonder++; }
+    }
+    u.ingelegd_cent = stort ? som : null;   // geen enkele storting in het overzicht = niet vast te stellen (export begint later dan je eerste storting)
+  }
+  if (tx.length) {
+    const fx = x.autofx || new Map();
+    for (const t of tx) {
+      const k = -(t.kosten_eur_cent || 0);
+      const a = t.bron === 'hand' ? 0 : fx.has(t.sleutel) ? fx.get(t.sleutel) : null;
+      if (a == null) { u.kosten_splits_onbekend++; u.kosten_transactie_cent += k; continue; }
+      u.kosten_valuta_cent += -a; u.kosten_transactie_cent += k + a;
+    }
+  }
+  // review MOET 3: zonder Transacties geen totaal (de transactiekosten zouden als 0 meetellen); de tegel zegt dan "Lees je Transacties in"
+  if (tx.length) u.kosten_cent = u.kosten_transactie_cent + u.kosten_valuta_cent + u.kosten_overig_cent;
+  if (!vw || vw.waarde_cent == null) u.resultaat_reden = 'koers';
+  else if (vw.verschil_aankoop_cent == null) u.resultaat_reden = 'aankoop';
+  else u.resultaat_cent = vw.verschil_aankoop_cent + u.gerealiseerd_cent + u.dividend_cent - u.kosten_overig_cent;
+  return u;
+}
+
 // wv3030: stand uit transacties zolang er geen portefeuille en geen handpositie is (een ingelezen portefeuille of handpositie gaat altijd voor).
 // Per ISIN (anders naam): aantal en aankoopwaarde incl. kosten; een verkoop haalt naar rato aankoopwaarde weg (gemiddelde kostprijs). Geen koersen:
 // dit is de waarde bij aankoop, niet de huidige waarde. Ontbreekt een totaal of verkoopt een rij meer dan er was, dan 'onvolledig' (niet raden).
 function aankoopStand(transacties) {
   const per = new Map();
+  let gerealiseerd = 0, gerealiseerdOnbekend = 0;
   const tijd = (t) => t.datum + ' ' + (t.tijd || '');
   for (const t of transacties.slice().sort((a, b) => (tijd(a) < tijd(b) ? -1 : tijd(a) > tijd(b) ? 1 : 0))) {
     const n = Number(t.aantal);
     if (!Number.isFinite(n) || n === 0) continue;
     const sl = t.isin ? 'isin:' + t.isin : 'naam:' + String(t.naam).toLowerCase();
-    const p = per.get(sl) || { sleutel: sl, naam: t.naam, isin: t.isin || null, valuta: t.valuta || null, aantal: 0, kost: 0, transacties: 0, onvolledig: false };
+    const p = per.get(sl) || { sleutel: sl, naam: t.naam, isin: t.isin || null, valuta: t.valuta || null, aantal: 0, kost: 0, transacties: 0, onvolledig: false, ger: 0, gerOnbekend: 0 };
     p.transacties++; p.naam = t.naam;
     if (n > 0) {
       const tot = t.totaal_eur_cent != null ? t.totaal_eur_cent : t.waarde_eur_cent != null ? t.waarde_eur_cent + (t.kosten_eur_cent || 0) : null;
       if (tot == null || tot > 0) p.onvolledig = true; else p.kost += -tot;
       p.aantal += n;
-    } else if (-n > p.aantal + 1e-9) { p.onvolledig = true; p.aantal = 0; p.kost = 0; }
-    else { p.kost = Math.round(p.kost * (1 + n / p.aantal)); p.aantal += n; }
+    } else if (-n > p.aantal + 1e-9) { p.onvolledig = true; p.aantal = 0; p.kost = 0; p.gerOnbekend++; }
+    else {
+      // wv3754 (L09): gerealiseerd bij verkoop = opbrengst na kosten (totaal) min het deel van de aankoopwaarde (incl. kosten) dat weggaat
+      const rest = Math.round(p.kost * (1 + n / p.aantal)), deel = p.kost - rest;
+      const opbrengst = t.totaal_eur_cent != null ? t.totaal_eur_cent : t.waarde_eur_cent != null ? t.waarde_eur_cent + (t.kosten_eur_cent || 0) : null;
+      if (opbrengst == null || opbrengst < 0) p.gerOnbekend++; else p.ger += opbrengst - deel;
+      p.kost = rest; p.aantal += n;
+    }
     if (Math.abs(p.aantal) < 1e-9) { p.aantal = 0; p.kost = 0; }
     per.set(sl, p);
   }
   // review wv3030 MOET 2: onvolledig ook op standniveau (een verkoop zonder bekende aankoop laat de positie weg, maar de stand is dan niet compleet)
   const alle = Array.from(per.values());
-  return { onvolledig: alle.some((p) => p.onvolledig), posities: alle.filter((p) => p.aantal > 0).map((p) => ({ sleutel: p.sleutel, regelsoort: 'effect', naam: p.naam, isin: p.isin,
+  // review wv3754 MOET 2: gerealiseerd per positie; een positie met onvolledige transacties telt niet mee (en wordt geteld), de rest wel
+  for (const p of alle) { if (p.onvolledig) { if (p.ger || p.gerOnbekend) gerealiseerdOnbekend++; } else { gerealiseerd += p.ger; gerealiseerdOnbekend += p.gerOnbekend; } }
+  return { onvolledig: alle.some((p) => p.onvolledig), gerealiseerd_cent: gerealiseerd, gerealiseerd_onbekend: gerealiseerdOnbekend, posities: alle.filter((p) => p.aantal > 0).map((p) => ({ sleutel: p.sleutel, regelsoort: 'effect', naam: p.naam, isin: p.isin,
     aantal: String(Number(p.aantal.toFixed(6))), koers: null, valuta: p.valuta, lokaal_cent: null, waarde_eur_cent: p.kost, bron: 'aankoop', transacties: p.transacties, onvolledig: p.onvolledig })) };
 }
 function metAankoop(d) {
@@ -805,6 +949,31 @@ function maak(o) {
     }
     return { koersen, wissels };
   }
+  // wv3754: alle dagkoersen (≤ 400 dagen, oplopend) en wisselkoersen (aflopend) voor de daglijn en de koerslijntjes
+  function reeksUit(db) {
+    const reeks = {}, wissels = {};
+    if (!db) return { reeks, wissels };
+    for (const r of db.prepare('SELECT isin, datum, slot, valuta FROM koers ORDER BY isin, datum').all()) (reeks[r.isin] || (reeks[r.isin] = [])).push({ datum: r.datum, slot: r.slot, valuta: r.valuta });
+    for (const r of db.prepare('SELECT valuta, datum, per_eur FROM wissel ORDER BY valuta, datum DESC').all()) (wissels[r.valuta] || (wissels[r.valuta] = [])).push({ datum: r.datum, per_eur: r.per_eur });
+    return { reeks, wissels };
+  }
+  // wv3754: AutoFX-kosten per transactie (de tabel bewaart transactie- en AutoFX-kosten samen); opnieuw gelezen uit de bewaarde bestanden, cache op sha256
+  const autofxCache = new Map();
+  function autofxUit(db) {
+    const m = new Map();
+    if (!db) return m;
+    for (const r of db.prepare("SELECT id, sha256 FROM bestand WHERE soort = 'transacties' ORDER BY id").all()) {
+      let l = autofxCache.get(r.sha256);
+      if (!l) {
+        try { const x = leesBestand(db.prepare('SELECT inhoud FROM bestand WHERE id = ?').get(r.id).inhoud); if (x.soort !== 'transacties') continue; l = x.rijen.map((y) => [y.sleutel, y.autofx_eur_cent]); }
+        catch (e) { continue; }
+        if (autofxCache.size >= 200) autofxCache.clear();
+        autofxCache.set(r.sha256, l);
+      }
+      for (const [k, v] of l) if (v != null && !m.has(k)) m.set(k, v);
+    }
+    return m;
+  }
   // Wat de ochtendronde nodig heeft: posities (ISIN, naam, valuta; geen aantallen of bedragen), bedrijven om vanzelf een kaartje voor te maken
   // (geen kaartje en niet door David uitgezet), en de codes die al gevonden zijn.
   function koersData() {
@@ -821,8 +990,13 @@ function maak(o) {
       if (db) for (const r of db.prepare('SELECT sleutel, code, cik FROM bedrijf').all()) if (!codes[r.sleutel] && r.code) codes[r.sleutel] = { code: r.code, cik: r.cik, op: null, fout: null, kaartje: true };
       // review ZOU 2: kaartjes zonder SEC-nummer of zonder beurscode (eerdere zoektocht faalde, of David vulde ze niet in) worden opnieuw gezocht
       const aanvullen = db ? db.prepare('SELECT sleutel, naam, namen, code FROM bedrijf WHERE cik IS NULL OR code IS NULL').all().map((r) => ({ sleutel: r.sleutel, naam: r.naam, namen: JSON.parse(r.namen), code: r.code })) : [];
-      return { posities, bedrijven, aanvullen, codes, valuta: [...new Set(posities.map((p) => p.valuta).filter((v) => v && v !== 'EUR'))] };
-    }, false) || { posities: [], bedrijven: [], aanvullen: [], codes: {}, valuta: [] };
+      // wv3754: hoeveel dagkoersen er per ISIN al zijn (de eerste keer haalt de ronde ± 2 maanden op voor de koerslijntjes) en het wereldindexfonds
+      const aantal = {};
+      if (db) for (const r of db.prepare('SELECT isin, COUNT(*) AS n FROM koers GROUP BY isin').all()) aantal[r.isin] = r.n;
+      if (db) for (const r of db.prepare('SELECT valuta, COUNT(*) AS n FROM wissel GROUP BY valuta').all()) aantal['wissel:' + r.valuta] = r.n;
+      return { posities, bedrijven, aanvullen, codes, valuta: [...new Set(posities.map((p) => p.valuta).filter((v) => v && v !== 'EUR'))], aantal_koersen: aantal,
+        index: { sleutel: WERELD.sleutel, code: WERELD.code } };
+    }, false) || { posities: [], bedrijven: [], aanvullen: [], codes: {}, valuta: [], aantal_koersen: {}, index: null };
   }
   const RE_SLOT = /^\d{1,9}(\.\d{1,8})?$/;
   const RE_DAG = /^\d{4}-\d{2}-\d{2}$/;
@@ -840,7 +1014,7 @@ function maak(o) {
       const sk = db.prepare('INSERT INTO koers (isin, datum, slot, valuta, bron, op) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(isin, datum) DO UPDATE SET slot = excluded.slot, valuta = excluded.valuta, bron = excluded.bron, op = excluded.op');
       const vorige = db.prepare('SELECT slot, valuta FROM koers WHERE isin = ? AND datum < ? ORDER BY datum DESC LIMIT 1');
       for (const k of (x.koersen || []).slice().sort((a, b) => (a.datum < b.datum ? -1 : 1))) {
-        if (!RE_ISIN.test(String(k.isin)) || !RE_DAG.test(String(k.datum)) || !RE_SLOT.test(String(k.slot)) || !(Number(k.slot) > 0) || !RE_VALUTA.test(String(k.valuta))) { tel.geweigerd++; continue; }
+        if (!(RE_ISIN.test(String(k.isin)) || RE_INDEX.test(String(k.isin))) || !RE_DAG.test(String(k.datum)) || !RE_SLOT.test(String(k.slot)) || !(Number(k.slot) > 0) || !RE_VALUTA.test(String(k.valuta))) { tel.geweigerd++; continue; }
         // vangnet tegen een verkeerde koers (andere aandelenklasse, splitsing, fout in de bron): meer dan een factor 2 t.o.v. de vorige dag = weigeren
         const v = vorige.get(k.isin, k.datum);
         if (v && (v.valuta !== k.valuta || Number(k.slot) > 2 * Number(v.slot) || Number(k.slot) < Number(v.slot) / 2)) { tel.geweigerd++; continue; }
@@ -895,9 +1069,16 @@ function maak(o) {
       const bedrijven = bedrijvenUit(db, d, k).map((b) => ({ sleutel: b.sleutel, naam: b.naam, bron: b.bron, kaartje: b.kaartje, voorstel: b.voorstel, uit: uitSet.has(b.sleutel) }));   // wv3728: uit = Davids "Geen nieuws meer"
       const kd = koersenUit(db);
       const vandaagW = waardeVandaag(k.posities, kd.koersen, kd.wissels, aankoopPer(d.posities, d.transacties), vandaag);   // wv3728: waarde van vandaag
+      // wv3754: daglijn, koerslijntjes per positie (± 30 beursdagen, eigen valuta), wereldindex ernaast en de geld-tegels
+      const rk = reeksUit(db);
+      const lijn = daglijn(k.posities, d.transacties, rk.reeks, rk.wissels, d.soorten, vandaag);
+      if (vandaagW) for (const p of k.posities) { const x = vandaagW.posities[p.sleutel]; const r = p.isin && rk.reeks[p.isin]; if (x && x.koers && r) x.reeks = r.filter((y) => y.valuta === x.valuta && y.datum < vandaag).slice(-30).map((y) => ({ datum: y.datum, slot: y.slot })); }
+      const as = aankoopStand(d.transacties);
+      const geld = geldOverzicht({ rekening: db ? db.prepare('SELECT datum, omschrijving, mutatie_cent, mutatie_valuta FROM rekening').all() : [], transacties: d.transacties,
+        autofx: autofxUit(db), vandaag: vandaagW, wissels: rk.wissels, gerealiseerd: { cent: as.gerealiseerd_cent, onbekend: as.gerealiseerd_onbekend } });
       for (const p of k.posities) delete p._ruw;
       return { ok: true, vandaag, vragen: VRAGEN, antwoorden: d.antwoorden, regels: d.regels, versies: d.versies, stand: { datum: d.stand_datum, bron: d.stand_bron,
-        verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig, historie: historieUit(db), onvolledig: !!d.aankoop_onvolledig, vandaag: vandaagW }, transacties: d.transacties, dagboek, volglijst: volg,
+        verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig, historie: historieUit(db), onvolledig: !!d.aankoop_onvolledig, vandaag: vandaagW, daglijn: lijn }, geld, transacties: d.transacties, dagboek, volglijst: volg,
         signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, exports: d.exports, rekening_rijen: d.rekening_rijen, stortingen: d.stortingen,
         soort_namen: SOORT_NAAM, vault: { ok: vaultOk, op: laatsteVault }, bedrijven,
         beursgang_klaar: Object.keys(d.keuzes).filter((x) => x.startsWith('beursgang:')).map((x) => x.slice(10)) };   // wv3727: afgeronde beursgangen (code)
@@ -1347,4 +1528,4 @@ function maak(o) {
   return { app, info, _overzicht: overzicht, nieuwsData, koersData, zetKoersen, zetAutoBedrijven, vulBedrijfAan, metDb, vandaag: vandaagF };
 }
 
-module.exports = { maak, leesBestand, bereken, aankoopStand, waardeVandaag, aankoopPer, regelsUit, VRAGEN, LeesFout, ANTHROPIC_ZIN, plusMaanden };
+module.exports = { maak, leesBestand, bereken, aankoopStand, waardeVandaag, aankoopPer, daglijn, geldOverzicht, WERELD, regelsUit, VRAGEN, LeesFout, ANTHROPIC_ZIN, plusMaanden };

@@ -133,7 +133,9 @@ const BRON_NAAM = { koers: 'Nasdaq (slotkoersen)', ecb: 'ECB (wisselkoers)', sec
 // valuta, (4) een kaartje "Nieuws over dit bedrijf" voor elk bedrijf zonder kaartje dat David niet uitzette. Geen aantallen of bedragen naar
 // buiten; de waarde rekent beleggen.js op de pod uit. Alleen Amerikaanse beurscodes in USD (de bron geeft alleen die); een positie in een andere
 // valuta blijft "zonder koers". Valt een bron uit, dan blijft de laatst bekende koers met zijn datum staan; na drie dagen een box-rij (zoals nieuws).
-const KOERS = { dagen: 12, code_opnieuw_dagen: 7, valuta: 'USD' };
+const KOERS = { dagen: 12, eerste_dagen: 60, eerste_onder: 20, code_opnieuw_dagen: 7, valuta: 'USD' };
+// wv3754 (L05): zolang er voor een ISIN minder dan 20 dagkoersen zijn, haalt de ronde ± 2 maanden op (koerslijntje per positie en daglijn vanaf de
+// eerste dag); daarna de gewone 12 dagen. Plus het wereldindexfonds (URTH, MSCI World) als vergelijking: alleen die vaste code gaat de deur uit.
 const RECHTSVORM = /\b(INC|INCORPORATED|CORP|CORPORATION|CO|COMPANY|NV|N V|SA|SE|AG|PLC|LTD|LIMITED|HOLDINGS?|GROUP|A\/S|AS|ASA|AB|SPA|BV|PBC|LLC|LP|CLASS [A-C]|CL [A-C]|ADR|ORD|REG|SHS|THE)\b/g;
 function kaal(n) { return String(n || '').toUpperCase().replace(/&/g, ' AND ').replace(/[,.()'’]/g, ' ').replace(RECHTSVORM, ' ').replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim(); }
 // SEC-bedrijfszoeker: { hits: { hits: [{ _id: '1045810', _source: { entity: 'NVIDIA CORP (NVDA)', tickers: 'NVDA' } }] } }.
@@ -174,7 +176,7 @@ function nasdaqRijen(tekst, code, vandaag) {
   const d = j && j.data;
   if (!d || String(d.symbol || '').toUpperCase() !== String(code).toUpperCase() || !d.tradesTable || !Array.isArray(d.tradesTable.rows)) return null;
   const uit = [];
-  for (const r of d.tradesTable.rows.slice(0, 40)) {
+  for (const r of d.tradesTable.rows.slice(0, 80)) {
     const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(r && r.date || ''));
     const slot = slotUit(r && r.close);
     if (!m || !slot) continue;
@@ -342,17 +344,26 @@ function maak(o) {
       const c = bekend(p.sleutel);
       // alleen USD-posities met een Amerikaanse ISIN (de bron geeft Amerikaanse noteringen in USD; review MOET 1: geen buitenlands aandeel op een ADR-koers)
       if (!c || !c.code || !/^US/.test(p.isin) || (p.valuta && p.valuta !== KOERS.valuta)) continue;
-      const rijen = await r.vraag('koers', 'https://api.nasdaq.com/api/quote/' + encodeURIComponent(c.code) + '/historical?assetclass=stocks&fromdate=' + plusDagen(vandaag, -KOERS.dagen) + '&todate=' + vandaag + '&limit=20', 'application/json', haalKoers,
+      const dagen = ((kd.aantal_koersen || {})[p.isin] || 0) < KOERS.eerste_onder ? KOERS.eerste_dagen : KOERS.dagen;
+      const rijen = await r.vraag('koers', 'https://api.nasdaq.com/api/quote/' + encodeURIComponent(c.code) + '/historical?assetclass=stocks&fromdate=' + plusDagen(vandaag, -dagen) + '&todate=' + vandaag + '&limit=' + (dagen > 20 ? 60 : 20), 'application/json', haalKoers,
         (t) => nasdaqRijen(t, c.code, vandaag));
       if (rijen == null) continue;
       for (const x of rijen) koersen.push({ isin: p.isin, datum: x.datum, slot: x.slot, valuta: KOERS.valuta, bron: 'nasdaq' });
       valuta.add(KOERS.valuta);
+      kt.met_koers = (kt.met_koers || 0) + 1;
       await pauze(200);
+    }
+    // wv3754: het wereldindexfonds, alleen als er minstens één positie een koers kreeg (anders valt er niets te vergelijken)
+    if (kt.met_koers && kd.index && /^[A-Z]{1,6}$/.test(kd.index.code)) {
+      const dagen = ((kd.aantal_koersen || {})[kd.index.sleutel] || 0) < KOERS.eerste_onder ? KOERS.eerste_dagen : KOERS.dagen;
+      const rijen = await r.vraag('koers', 'https://api.nasdaq.com/api/quote/' + kd.index.code + '/historical?assetclass=etf&fromdate=' + plusDagen(vandaag, -dagen) + '&todate=' + vandaag + '&limit=' + (dagen > 20 ? 60 : 20), 'application/json', haalKoers,
+        (t) => nasdaqRijen(t, kd.index.code, vandaag));
+      if (rijen != null) { for (const x of rijen) koersen.push({ isin: kd.index.sleutel, datum: x.datum, slot: x.slot, valuta: KOERS.valuta, bron: 'nasdaq' }); kt.index = rijen.length; }
     }
     const wissels = [];
     for (const v of valuta) {
       if (!/^[A-Z]{3}$/.test(v) || v === 'EUR') continue;
-      const rijen = await r.vraag('ecb', 'https://data-api.ecb.europa.eu/service/data/EXR/D.' + v + '.EUR.SP00.A?lastNObservations=15&format=csvdata', 'text/csv', null, (t) => { const x = ecbRijen(t); return x && x.length ? x : null; });
+      const rijen = await r.vraag('ecb', 'https://data-api.ecb.europa.eu/service/data/EXR/D.' + v + '.EUR.SP00.A?lastNObservations=' + (((kd.aantal_koersen || {})['wissel:' + v] || 0) < 30 ? 45 : 15) + '&format=csvdata', 'text/csv', null, (t) => { const x = ecbRijen(t); return x && x.length ? x : null; });
       if (rijen == null) continue;
       for (const x of rijen) wissels.push({ valuta: v, datum: x.datum, per_eur: x.per_eur });
     }

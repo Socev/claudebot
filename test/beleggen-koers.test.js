@@ -84,11 +84,12 @@ test('ochtendronde: ≥ 2 bedrijven, codes + SEC-nummer zelf gevonden, waarde va
   assert.ok(w.koersUA, 'Nasdaq via haalKoers (browser-UA)');
   // uitgaand: alleen de vaste hosts; geen aantal, koers of bedrag in een adres
   const koersAdressen = w.uit.filter((u) => /efts\.sec\.gov|api\.nasdaq\.com|data-api\.ecb/.test(u));
-  assert.ok(koersAdressen.length === 4, koersAdressen.join('\n'));
+  assert.ok(koersAdressen.length === 5, koersAdressen.join('\n'));   // wv3754: + het vaste wereldindexfonds (URTH)
+  assert.ok(koersAdressen.some((u) => u.includes('/quote/URTH/historical?assetclass=etf')), 'wereldindexfonds opgehaald');
   for (const u of w.uit) {
     for (const x of [AANTAL, AANTAL.replace('.', ''), AANTAL.replace('.', ','), KOERS, KOERS.replace('.', ''), '3313', '3316', String(v.waarde_cent), ISIN]) assert.ok(!u.includes(x), 'uitgaand adres bevat ' + x + ': ' + u);
   }
-  for (const u of koersAdressen) assert.match(u, /^https:\/\/(efts\.sec\.gov\/LATEST\/search-index\?keysTyped=[a-z0-9%]+|api\.nasdaq\.com\/api\/quote\/[A-Z0-9.-]+\/historical\?assetclass=stocks&fromdate=\d{4}-\d\d-\d\d&todate=\d{4}-\d\d-\d\d&limit=20|data-api\.ecb\.europa\.eu\/service\/data\/EXR\/D\.[A-Z]{3}\.EUR\.SP00\.A\?lastNObservations=15&format=csvdata)$/);
+  for (const u of koersAdressen) assert.match(u, /^https:\/\/(efts\.sec\.gov\/LATEST\/search-index\?keysTyped=[a-z0-9%]+|api\.nasdaq\.com\/api\/quote\/[A-Z0-9.-]+\/historical\?assetclass=(stocks|etf)&fromdate=\d{4}-\d\d-\d\d&todate=\d{4}-\d\d-\d\d&limit=(20|60)|data-api\.ecb\.europa\.eu\/service\/data\/EXR\/D\.[A-Z]{3}\.EUR\.SP00\.A\?lastNObservations=(15|45)&format=csvdata)$/);
   // log: alleen aantallen
   assert.ok(!JSON.stringify(w.log).match(/VOORBEELD|Voorbeeld|VBCX|VBAI|271|1337/), JSON.stringify(w.log));
   // nieuws loopt nu voor beide bedrijven: SEC-stukken op het gevonden nummer
@@ -180,7 +181,7 @@ test('review MOET 1: een positie met een niet-Amerikaanse ISIN krijgt geen Nasda
   const w = wereld();
   w.P('transactie', { actie: 'zet', richting: 'erbij', datum: '2026-11-13', naam: 'VOORBEELD CHIPS HOLDINGS', isin: 'NL0000000014', aantal: '1', koers: '10', valuta: 'USD', waarde_eur: '9', kosten_eur: '0' });
   await w.n.ophaal(w.vandaag);
-  assert.strictEqual(w.uit.filter((u) => u.includes('api.nasdaq.com')).length, 1, 'alleen de US-ISIN');
+  assert.strictEqual(w.uit.filter((u) => u.includes('api.nasdaq.com') && !u.includes('/URTH/')).length, 1, 'alleen de US-ISIN');   // wv3754: + het vaste wereldindexfonds
   const v = w.get().stand.vandaag;
   assert.strictEqual(v.volledig, false); assert.strictEqual(v.posities['isin:NL0000000014'].reden, 'nog geen koers');
 });
