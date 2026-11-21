@@ -4699,6 +4699,7 @@ function handleRequest(req, res) {
       mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },
       pot_app: typeof potAppInfo === 'function' ? potAppInfo() : { aan: false },   // wv1894: OVIS POT (lezen)   // wv1269: App Mediatheek (aantallen, geen inhoud)
       weekinhaal: typeof weekinhaalInfo === 'function' ? weekinhaalInfo() : { aan: false },
+      storingsdienst: typeof storingsdienstInfo === 'function' ? storingsdienstInfo() : null,   // wv3712: onderzoek per alarm (laatste ronde, wacht, vandaag, verbruik)
       hartslag_alarm: typeof hartslagAlarmInfo === 'object' ? hartslagAlarmInfo : null,   // wv3484: verlopen hartslag → box (laatste ronde, gemeld, overgeslagen)   // wv3194: inhaal gemiste weekrondes (laatste tik, aantallen deze week, bezig)
       nieuwsbrief: nieuwsbriefInfo(),   // wv2190: nieuwsbrief-bloemlezing (laatste ronde, bezig; geen inhoud)
       te_lezen: { aan: typeof teLezenMod !== 'undefined' && !!teLezenMod },   // wv2245: Te lezen in Voor jou (module in de release)
@@ -10866,6 +10867,8 @@ async function appMeldingenVerzamel() {
       herstel: { stand: 'nog-fout', op: st.laatste_executie || null, tekst: st.laatste_executie ? 'Laatste aanvoer ' + appDagKlok(st.laatste_executie) + '.' : '' },
       techniek: 'Stiltewachter · drempel ' + st.drempel_uren + ' effectieve uren' });
   });
+  // wv3712: het onderzoek van de storingsdienst (oorzaak, gevolg, afloop) op de kaart
+  if (typeof storingsdienstVoorKaart === 'function') items.forEach(function (x) { if (!x.kaart) return; const o = storingsdienstVoorKaart(x.kaart, x.rij); if (o) x.onderzoek = o; });
   items.sort(function (a, b) { return Date.parse(b.wanneer) - Date.parse(a.wanneer); });
   // Stand van nu, bovenaan in gewone taal.
   let aanvoer = null;
@@ -22565,6 +22568,121 @@ async function hartslagAlarmTik() {
 }
 /* hartslagAlarm:einde */
 if (SERVER_ECHT === true) { setTimeout(function () { hartslagAlarmTik(); }, 300000).unref(); setInterval(function () { hartslagAlarmTik(); }, 15 * 60000).unref(); }
+// wv3712 (21-11-2026, besluit nr 453 / 3C153 stap 1): storingsdienst. Elke 5 min (echte pod, rol primair, noodrem STORINGSDIENST=0):
+// nieuwe alarmen van de Foutmelder/Stiltewachter uit ochtend_buffer → na 15 min een klein onderzoek (Sonnet zonder gereedschap, feiten
+// door de pod verzameld, geen vrije fouttekst) → drie regels op de kaart in Meldingen en als bericht (bericht.py), opgelost alleen met
+// bewijs, Voor jou alleen als David iets mist of moet doen. Logica in storingsdienst.js; staat in klokken/storingsdienst.json.
+/* storingsdienst:begin */
+const STORINGSDIENST_PAD = path.join(KLOKKEN_DIR, 'storingsdienst.json');
+const STORINGSDIENST_INHAAL_TABEL = process.env.STORINGSDIENST_INHAAL_TABEL || 'vak9gyhFHvKwXxFr';   // n8n Data Table inhaal_wachtrij (wv3169)
+let storingsdienstBezig = false, storingsdienstBuffer = [];
+const storingsdienst = (function () {
+  const p = path.join(__dirname, 'storingsdienst.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({
+      nu: function () { return Date.now(); },
+      uit: function () { return process.env.STORINGSDIENST === '0'; },
+      leesStaat: function () {
+        try { return JSON.parse(fs.readFileSync(STORINGSDIENST_PAD, 'utf8')); }
+        catch (e) { if (e && e.code === 'ENOENT') return {}; throw e; }   // onleesbaar: niet leeg beginnen (watermerk weg = alles opnieuw)
+      },
+      schrijfStaat: function (s) {
+        fs.mkdirSync(KLOKKEN_DIR, { recursive: true });
+        const t = STORINGSDIENST_PAD + '.tmp'; fs.writeFileSync(t, JSON.stringify(s), { mode: 0o600 }); fs.renameSync(t, STORINGSDIENST_PAD);
+      },
+      bufferRijen: async function () {
+        const r = await appN8nRijen(APP_MELD_TABEL, { type: 'or', filters: [{ columnName: 'bron', condition: 'eq', value: 'foutmelder' }, { columnName: 'bron', condition: 'eq', value: 'stiltewachter' }] }, 100);
+        storingsdienstBuffer = r;
+        return r;
+      },
+      leesFout: appFoutmelderLees,
+      foutSoort: function (f) { return appFoutUitleg(f).soort; },
+      leesStil: appStilLees,
+      kaartStoring: function (sleutel) { return 'k' + appSha(sleutel).slice(0, 12); },
+      kaartStil: function (naam, rij) { return 's' + appSha(naam).slice(0, 12) + '-' + rij; },
+      hash: function (s) { return appSha('storing:' + s); },
+      afloop: async function (a) {
+        if (a.soort === 'stil') {
+          const st = (await appN8nRijen(APP_STILTE_TABEL, null, 100)).find(function (s) { return s && String(s.naam) === a.naam; });
+          return { stilte: st ? { status: String(st.status || ''), laatste_executie: st.laatste_executie || null } : null };
+        }
+        const h = {};
+        if (a.workflow_id) {
+          const [runs, wf] = await Promise.all([
+            appN8n('/executions?workflowId=' + encodeURIComponent(a.workflow_id) + '&limit=10').catch(function () { return null; }),
+            appN8n('/workflows/' + encodeURIComponent(a.workflow_id)).catch(function () { return null; })]);
+          h.runs = (Array.isArray(runs && runs.data) ? runs.data : []).map(function (x) { return { id: x.id, status: x.status, startedAt: x.startedAt, mode: x.mode }; });
+          if (wf) {
+            h.beschrijving = wf.description || null;
+            h.alleen_fouten = !!(wf.settings && wf.settings.saveDataSuccessExecution === 'none');
+            const rr = (wf.nodes || []).filter(function (n) { return /scheduleTrigger|cron/i.test(n.type); }).map(function (n) { return JSON.stringify(n.parameters && n.parameters.rule || n.parameters || {}); });
+            h.rooster = rr.length ? rr.join(' ; ').slice(0, 200) : 'geen vast rooster (start op aanroep of webhook)';
+          }
+        }
+        if (a.executie) {
+          try {
+            const r = await appN8nRijen(STORINGSDIENST_INHAAL_TABEL, { type: 'and', filters: [{ columnName: 'execution_id', condition: 'eq', value: String(a.executie) }] }, 5);
+            if (r[0]) h.inhaal = { status: String(r[0].status || ''), op: r[0].bijgewerkt || r[0].updatedAt || null };
+          } catch (e) {}
+        }
+        return h;
+      },
+      rondom: async function (lijst) {
+        const t0 = Math.min.apply(null, lijst.map(function (a) { return a.t; })) - 7200000, t1 = Math.max.apply(null, lijst.map(function (a) { return a.t; })) + 7200000;
+        const eigen = new Set(lijst.map(function (a) { return a.rij; }));
+        return storingsdienstBuffer.filter(function (x) { const t = Date.parse(x.createdAt); return t >= t0 && t <= t1 && !eigen.has(Number(x.id)); })
+          .sort(function (a, b) { return Date.parse(a.createdAt) - Date.parse(b.createdAt); }).map(function (x) {
+            const k = appKlok(x.createdAt);
+            if (x.bron === 'stiltewachter') return k + ' stil: ' + appStilLees(x.tekst).map(function (s) { return s.naam; }).join(', ').slice(0, 120);
+            const f = appFoutmelderLees(x.tekst);
+            return k + ' ' + String(f.workflow).slice(0, 60) + ' · knoop ' + String(f.knoop).slice(0, 50) + ' · ' + appFoutUitleg(f.fout).soort;
+          });
+      },
+      podFeiten: function () {
+        return 'Socev-pod draait sinds ' + new Date(Date.now() - process.uptime() * 1000).toISOString().slice(0, 16) + 'Z (herstart = uitrol of crash); rol ' + rol.rol +
+          ' sinds ' + new Date(rol.sinds_rol).toISOString().slice(0, 16) + 'Z.';
+      },
+      claude: function (systeem, prompt, schema) { return harvesterClaude(systeem, prompt, schema, { timeoutMs: 240000 }); },
+      meldAf: async function (kaart, alarmMs) {
+        appStaat.meld = null;   // vers lezen
+        const m = await appMeldingen();
+        const item = appMeldMetSeintjes(m.items).find(function (x) { return appMeldRef(x) === kaart; });
+        if (!item || Date.parse(item.wanneer) > alarmMs + 60000) return false;   // nieuwere melding op de kaart: niet dichtzetten
+        const j = appLeesStreng(APP_MELD_AF, {});
+        const k = j.kaarten && typeof j.kaarten === 'object' ? j.kaarten : {};
+        k[kaart] = { laatst: item.wanneer, aantal: Number(item.aantal) || 1, op: new Date().toISOString(), door: 'storingsdienst' };
+        appSchrijfJson(APP_MELD_AF, { kaarten: k });
+        return true;
+      },
+      voorJou: async function (kaart) { const r = await appSbRpc('mk_voor_jou_zet', { p: kaart }); appStaat.vjCache = null; if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet'); return r; },
+      box: function (t) { return ovisBoxRij(t); },
+      bericht: function (tekst, sleutel) {
+        return new Promise(function (klaar, faal) {
+          let k;
+          try { k = spawn('python3', [process.env.STORINGSDIENST_BERICHT || '/opt/data/mk-scripts/bericht.py', '--klasse', 'normaal', '--sleutel', sleutel, '-'], { stdio: ['pipe', 'ignore', 'ignore'], env: process.env }); }
+          catch (e) { return faal(e); }
+          const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, 60000);
+          k.on('error', function (e) { clearTimeout(tm); faal(e); });
+          k.on('close', function (code) { clearTimeout(tm); code === 0 ? klaar(true) : faal(new Error('bericht.py exit ' + code)); });
+          k.stdin.on('error', function () {});
+          k.stdin.end(tekst);
+        });
+      },
+      log: function (r) { schrijfLog(nu() + ' ' + r); },
+    });
+  } catch (e) { logError('storingsdienst', e); return null; }
+})();
+function storingsdienstVoorKaart(kaart, rij) { try { return storingsdienst ? storingsdienst.voorKaart(kaart, rij) : null; } catch (e) { return null; } }
+function storingsdienstInfo() { if (!storingsdienst) return { module: false }; try { return storingsdienst.health(); } catch (e) { return { fout: true }; } }
+async function storingsdienstTik() {
+  if (!storingsdienst || SERVER_ECHT !== true || storingsdienstBezig) return;
+  try { if (!rolPrimair()) return; } catch (e) { return; }
+  storingsdienstBezig = true;
+  try { await storingsdienst.tik(); } catch (e) { logError('storingsdienst', e); } finally { storingsdienstBezig = false; }
+}
+/* storingsdienst:einde */
+if (storingsdienst && SERVER_ECHT === true) { setTimeout(function () { storingsdienstTik(); }, 240000).unref(); setInterval(function () { storingsdienstTik(); }, 5 * 60000).unref(); }
 // ── wv2016 (SB2 fase 6b): maandklok van de herstelproef (waarom, moment en proefdag in sb2-nacht.js maakMaandRonde) ──
 // Elke 5 min (echte pod, rol primair, schakelaar aan): vanaf de eerste zondag van de maand 10:00–22:59 (inhalen tot 2 dagen later), één
 // ronde per maand op de kopie van de 1e: socev-run --naam sb2-herstelproef --max-min 30 -- herstelproef.py draai --dag <JJJJ-MM-01> --klok.
