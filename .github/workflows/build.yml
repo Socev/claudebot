@@ -390,6 +390,7 @@ jobs:
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
           t test/facturen-kern.sh   # wv797: kern — besliskader, UBL, validators, IBAN-poort, patiëntkenmerk, overgangen, vingerafdruk
           t test/facturen-uitgaand.sh   # wv3660: uitgaande factuur van een eigen entiteit → geen factuur; scan zonder model → lokale OCR als voorstel
+          t test/facturen-herlees.sh   # wv3701: knop Opnieuw lezen bij een scan (lokale OCR, alleen lege velden)
           t test/facturen-bank.sh   # wv798: bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
           t test/facturen-db.sh   # wv824: opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
           t test/facturen-routes.sh   # wv833: routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen

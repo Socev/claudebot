@@ -63,7 +63,7 @@ const ROUTES = {
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'feit', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering',
     'betaaldatum', 'sepa-batch', 'sepa-bestand', 'sepa-specificatie', 'regel', 'regel-weg', 'afzender-voorstel', 'maand-specificatie', 'bank-keuze',
-    'leverancier/verzendwijze', 'bevestig-groep', 'koppel-zeker', 'naar-cynthia', 'ontkoppel'],
+    'leverancier/verzendwijze', 'bevestig-groep', 'koppel-zeker', 'naar-cynthia', 'ontkoppel', 'herlees'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (sinds wv2547 ook vanaf een vaste plek, onder het invoerslot) én die hier een verse vingerafdruk vragen.
 const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus', 'POST /app/facturen/leverancier/verzendwijze'];
@@ -366,8 +366,9 @@ function detail(fdb, r, id, nu, nogBetalen) {
   const ip = K.ibanPoort(f, poort.leverancier, ctx);
   const doc = (did) => {
     if (!did) return null;
-    const d = fdb.db.prepare('SELECT id, naam, mime, bytes, soort FROM document WHERE id = ?').get(did);
-    return d ? { id: d.id, naam: d.naam, mime: d.mime, bytes: d.bytes, soort: d.soort } : null;
+    const d = fdb.db.prepare('SELECT id, naam, mime, bytes, soort, tekstlaag FROM document WHERE id = ?').get(did);
+    // wv3701: scan = PDF zonder tekstlaag (de app toont dan de knop Opnieuw lezen)
+    return d ? { id: d.id, naam: d.naam, mime: d.mime, bytes: d.bytes, soort: d.soort, scan: d.soort === 'pdf' && d.tekstlaag === 0 } : null;
   };
   const lev = magLeverancier(r, poort.leverancier) ? poort.leverancier : null;
   const ents = entiteitenRijen(fdb).filter((e) => e.actief === 1 && magEntiteit(r, e.sleutel))
@@ -1196,6 +1197,119 @@ function wijzig(fdb, r, d, nu) {
     const nu2 = D.factuurVoorKern(fdb, f.id);
     return { gewijzigd: true, iban_poort: { iban_nieuw: ip.iban_nieuw, reden: ip.reden }, bevestigen: K.magBevestigen(nu2, { leverancier: lev, ctx }), versie: nu2.versie,
       leverancier_bekend: bekend.length };
+  });
+}
+/*
+ * wv3701 (David 21-11-2026 13:26: "Waarom staan er bij Facturen ook pdf's die 'geen text bevatten'? … zou wel moeten (zijn scans)"):
+ * knop Opnieuw lezen bij een scan in Beoordelen. server.js leest het stuk eerst met de lokale OCR (pdftoppm + tesseract op de pod, geen
+ * taalmodel, niets naar buiten) en geeft de tekst als vo.ocrTekst mee (nooit uit het verzoek zelf). Daarna hetzelfde besliskader als bij
+ * binnenkomst (K.beslisBericht, scan met ocr_tekst → velden uit lokale OCR als voorstel). Alleen de eigenaar, alleen te_beoordelen, alleen
+ * een PDF zonder tekstlaag. Wat al ingevuld is blijft staan (ook wat David met de hand zette): alleen lege velden worden gevuld. Het
+ * patiëntkenmerk en alleen-eigenaar gaan hooguit omhoog. De status blijft Beoordelen; zegt de kern nu "geen factuur" of "dubbel", dan staat
+ * dat bovenaan bij Kijk na en beslist David zelf.
+ */
+const HERLEES_VELDEN = ['leverancier_naam', 'leverancier_kvk', 'nummer', 'factuurdatum', 'vervaldatum', 'excl', 'btw', 'incl', 'iban', 'kenmerk', 'entiteit'];
+function herleesScan(fdb, r, d) {
+  eisEigenaar(r);
+  const id = vraagId(d, 'id');
+  const f = factuurOf404(fdb, r, id);
+  if (d.versie !== undefined && d.versie !== f.versie) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw', { versie: f.versie });
+  if (f.status !== 'te_beoordelen') weiger(409, 'opnieuw lezen kan alleen in Beoordelen (status ' + f.status + ')');
+  if (f.ubl_document_id) weiger(409, 'deze factuur heeft een e-factuur (UBL); opnieuw lezen is alleen voor een scan');
+  const doc = fdb.db.prepare('SELECT id, sha256, naam, mime, soort, tekstlaag FROM document WHERE id = ?').get(f.document_id);
+  if (!doc || doc.soort !== 'pdf' || doc.tekstlaag !== 0) weiger(409, 'opnieuw lezen is alleen voor een scan (PDF zonder tekstlaag)');
+  return { f, doc };
+}
+// Voor server.js: mag dit stuk opnieuw gelezen worden, en zo ja de bytes (dan pas de OCR). → { ok, bytes } of de route-fout.
+function herleesStuk(fdb, r, d) {
+  const { doc } = herleesScan(fdb, r, d || {});
+  return { ok: true, bytes: D.stukLees(fdb, doc.sha256) };
+}
+function herlees(fdb, r, d, nu, vo) {
+  if (typeof vo.ocrTekst !== 'string') weiger(503, 'de lokale tekstherkenning (OCR) is hier niet beschikbaar of liep niet; probeer het later opnieuw');
+  if (vo.ocrTekst.replace(/\s/g, '').length < 40) weiger(422, 'de tekstherkenning las te weinig tekst van dit stuk; vul de velden zelf in');
+  return D.transactie(fdb, function () {
+    const { f, doc } = herleesScan(fdb, r, d);
+    const wanneer = nuIso(nu);
+    const ctx = Object.assign(kernCtx(fdb, nu), {
+      leveranciers: leverancierLijst(fdb),
+      tekstankers: fdb.db.prepare('SELECT tekst, entiteit FROM tekstanker WHERE actief = 1').all(),
+      afzenderRegels: afzenderRegels(fdb),
+      geenFactuur: fdb.db.prepare('SELECT patroon, leverancier AS leverancier_id FROM geen_factuur WHERE actief = 1').all(),
+      bekendeSha256: [],
+      bestaandeFacturen: fdb.db.prepare("SELECT id, leverancier AS leverancier_id, leverancier_kvk, leverancier_naam, nummer, incl FROM factuur WHERE status <> 'geen_factuur' AND id <> ?").all(f.id),
+    });
+    const b = f.bericht ? fdb.db.prepare('SELECT message_id, afzender, onderwerp FROM bericht WHERE id = ?').get(f.bericht) : null;
+    const uit = K.beslisBericht({ bericht: b ? { message_id: b.message_id, afzender: b.afzender, onderwerp: b.onderwerp } : null,
+      documenten: [{ sha256: doc.sha256, naam: doc.naam, mime: 'application/pdf', tekst: '', tekstlaag: false, ocr_tekst: vo.ocrTekst }] }, ctx);
+    const k = uit.facturen[0];
+    if (!k) weiger(422, 'de tekstherkenning gaf geen bruikbaar voorstel; vul de velden zelf in');
+    // wat David met de hand zette (besluit bron mens) blijft altijd staan, ook als het veld nu leeg is
+    const hand = new Set(fdb.db.prepare("SELECT veld FROM besluit WHERE factuur = ? AND bron = 'mens'").all(f.id).map((x) => x.veld));
+    const nieuw = Object.assign({}, f), gevuld = [];
+    const leeg = (v) => v == null || v === '';
+    // review ZOU 2: staat er al een (andere) leverancier, dan niets wat bij de herkende leverancier hoort (KvK, entiteit, betaalwijze)
+    const ander = !!(f.leverancier_id && k.leverancier_id && k.leverancier_id !== f.leverancier_id);
+    const levHand = hand.has('leverancier') || hand.has('leverancier_naam');
+    if (leeg(f.leverancier_id) && k.leverancier_id && !levHand) {
+      nieuw.leverancier_id = k.leverancier_id; gevuld.push('leverancier');
+      if (!leeg(k.leverancier_naam) && k.leverancier_naam !== f.leverancier_naam) { nieuw.leverancier_naam = k.leverancier_naam; gevuld.push('leverancier_naam'); }   // review ZOU 3
+    }
+    const vanLev = ['leverancier_kvk', 'entiteit'];
+    for (const v of HERLEES_VELDEN) {
+      if (gevuld.includes(v) || !leeg(f[v]) || leeg(k[v]) || hand.has(v)) continue;
+      if (v === 'leverancier_naam' && (nieuw.leverancier_id || levHand)) continue;
+      if (ander && vanLev.includes(v)) continue;
+      nieuw[v] = k[v]; gevuld.push(v);
+    }
+    if (!ander && f.betaalwijze === 'onbekend' && k.betaalwijze && k.betaalwijze !== 'onbekend' && !hand.has('betaalwijze')) { nieuw.betaalwijze = k.betaalwijze; gevuld.push('betaalwijze'); }
+    if ((!Array.isArray(f.ibans_betaal) || !f.ibans_betaal.length) && Array.isArray(k.ibans_betaal) && k.ibans_betaal.length) nieuw.ibans_betaal = k.ibans_betaal;
+    if (gevuld.includes('incl') && !leeg(k.valuta) && !hand.has('valuta')) nieuw.valuta = k.valuta;
+    if (gevuld.includes('incl') && k.soort && k.soort !== f.soort && !hand.has('soort')) { nieuw.soort = k.soort; gevuld.push('soort'); }   // review KAN 7: creditnota
+    const pk = !!(f.patientkenmerk || k.patientkenmerk), ae = !!(f.alleen_eigenaar || k.alleen_eigenaar || pk);
+    // review KAN 8: niets nieuws (geen veld, geen kenmerk, zelfde uitkomst) → niets schrijven
+    if (!gevuld.length && pk === !!f.patientkenmerk && ae === !!f.alleen_eigenaar && k.status === 'te_beoordelen' && !(k.besluiten || []).some((b) => b.stap === 'soort_stuk' && b.waarde))
+      return { herlezen: true, velden: [], uitkomst_kern: k.status, versie: f.versie, bevestigen: K.magBevestigen(f, poortVoor(fdb, f, ctx)) };
+    const lev = leverancierKern(fdb, nieuw.leverancier_id);
+    const va = K.valideer(nieuw, ctx, { leverancier: lev });
+    const ip = K.ibanPoort(nieuw, lev, ctx);
+    // redenen: die van het nieuwe voorstel; een andere uitkomst van de kern (geen factuur, dubbel) bovenaan, de status blijft Beoordelen.
+    // Bij een andere leverancier alleen de redenen over het stuk zelf. Oude redenen die de kern nu niet kan afleiden (een eerdere lezing door
+    // Claude) blijven staan (review ZOU 4).
+    const OVER_LEV = /^(Leverancier factureert eerder aan |Betaalwijze |Interne factuur|Regel voor afzender |Dit IBAN werd eerder betaald door )/;
+    const redenen = (k.redenen || []).filter((x) => !(ander && OVER_LEV.test(String(x))));
+    for (const x of (Array.isArray(f.redenen) ? f.redenen : [])) if (/Claude/.test(String(x)) && !redenen.includes(x)) redenen.push(x);
+    if (ander) redenen.unshift('De tekstherkenning ziet een andere leverancier (' + kort(k.leverancier_naam || 'onbekend', 80) + ') dan hier gekozen: kijk na');
+    if (k.status === 'dubbel') redenen.unshift('Na opnieuw lezen: lijkt dubbel met een bestaande factuur; kijk het na');
+    if (k.status === 'geen_factuur') redenen.unshift('Na opnieuw lezen: lijkt geen inkoopfactuur; kies zelf Geen factuur als dat klopt');
+    const u = fdb.db.prepare('UPDATE factuur SET soort = ?, leverancier = ?, leverancier_naam = ?, leverancier_kvk = ?, nummer = ?, factuurdatum = ?, vervaldatum = ?, excl = ?, btw = ?, incl = ?, ' +
+      'valuta = ?, incl_eur = ?, iban = ?, ibans_betaal = ?, kenmerk = ?, entiteit = ?, betaalwijze = ?, redenen = ?, controles = ?, intern = ?, iban_nieuw = ?, ibans_onbekend = ?, ' +
+      'patientkenmerk = ?, alleen_eigenaar = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND versie = ? AND status = ?')
+      .run(nieuw.soort || 'factuur', nieuw.leverancier_id || null, kort(nieuw.leverancier_naam, 200) || null, nieuw.leverancier_kvk || null, kort(nieuw.nummer, 100) || null, nieuw.factuurdatum || null,
+        nieuw.vervaldatum || null, int(nieuw.excl), int(nieuw.btw), int(nieuw.incl), nieuw.valuta || 'EUR', (nieuw.valuta || 'EUR') === 'EUR' ? int(nieuw.incl) : (f.incl_eur == null ? null : f.incl_eur),
+        nieuw.iban || null, JSON.stringify(nieuw.ibans_betaal || []), kort(nieuw.kenmerk, 100) || null, nieuw.entiteit || null, nieuw.betaalwijze || 'onbekend',
+        JSON.stringify(redenen.map((x) => kort(x, 300))), JSON.stringify(va.controles), va.intern ? 1 : 0, ip.iban_nieuw ? 1 : 0, JSON.stringify(ip.onbekend),
+        pk ? 1 : 0, ae ? 1 : 0, wanneer, f.id, f.versie, 'te_beoordelen');
+    if (u.changes !== 1) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw');
+    // review MOET 1: het besluitspoor van de kern zoals bij binnenkomst (soort_stuk voor de Exact-poort, betaalwijze, patiëntkenmerk, …);
+    // de veldwaarden zelf alleen voor wat echt gevuld is (rijen 'herlezen' hieronder); bij een andere leverancier niets over die leverancier
+    for (const b of k.besluiten || []) {
+      if (b.stap === 'velden' || (ander && ['leverancier', 'entiteit', 'betaalwijze'].includes(b.stap))) continue;
+      besluitRij(fdb, f.id, b, null, wanneer);
+    }
+    for (const v of gevuld) {
+      const w = v === 'leverancier' ? nieuw.leverancier_id : nieuw[v];
+      besluitRij(fdb, f.id, K.besluit('herlezen', v, w == null ? null : (v === 'iban' ? eind4(w) : w), 'regel', 'opnieuw gelezen met de lokale OCR (voorstel)'), r.wie, wanneer);
+    }
+    if (pk && !f.patientkenmerk) {
+      besluitRij(fdb, f.id, K.besluit('herlezen', 'patientkenmerk', 1, 'regel', 'kenmerk van patiëntgegevens in de lokale OCR: alleen de eigenaar'), r.wie, wanneer);
+      fdb.db.prepare('UPDATE document SET patientkenmerk = 1 WHERE id = ?').run(doc.id);
+    }
+    // alleen de namen van de velden (waarden staan in de besluitrijen; zie wijzig)
+    D.audit(fdb, { wie: r.wie, wat: 'factuur_herlezen', object_soort: 'factuur', object_id: f.id, entiteit: nieuw.entiteit || f.entiteit,
+      na: { velden: gevuld, uitkomst_kern: k.status, patientkenmerk: pk, bron: 'lokale OCR' }, wanneer });
+    const na = D.factuurVoorKern(fdb, f.id);
+    return { herlezen: true, velden: gevuld, uitkomst_kern: k.status, versie: na.versie, bevestigen: K.magBevestigen(na, { leverancier: lev, ctx }) };
   });
 }
 
@@ -4504,7 +4618,8 @@ function maak(opties) {
       const vo = { versOk: typeof v.versOk === 'function' ? v.versOk : () => false, versVerbruik: typeof v.versVerbruik === 'function' ? v.versVerbruik : () => {}, uploadNeem: v.uploadNeem,
         sepaDoor: v.sepaDoor,   // wv2465: 'auto' | 'concept' | anders niets (server.js FACTUREN_SEPA_DOOR)
         nogBetalen: v.nogBetalen,   // wv3369: 'auto' | anders niets (server.js FACTUREN_NOGBETALEN)
-        pdfTekst: typeof v.pdfTekst === 'function' ? v.pdfTekst : undefined };   // wv2958: ICS-overzicht als PDF herkennen (server.js facturenPdfTekst)
+        pdfTekst: typeof v.pdfTekst === 'function' ? v.pdfTekst : undefined,   // wv2958: ICS-overzicht als PDF herkennen (server.js facturenPdfTekst)
+        ocrTekst: typeof v.ocrTekst === 'string' ? v.ocrTekst : undefined };   // wv3701: lokale OCR van server.js (knop Opnieuw lezen), nooit uit het verzoek
       switch (rest) {
         case 'bevestig': return ok(bevestig(fdb, r, d, nu, { nogBetalen: vo.nogBetalen }), 'bevestig ' + kort(d.id, 16));
         case 'bevestig-groep': { const j = bevestigGroep(fdb, r, d, nu, vo); return ok(j, 'bevestig-groep ' + j.bevestigd.length + '/' + (j.bevestigd.length + j.geweigerd.length)); }   // wv2661
@@ -4518,6 +4633,7 @@ function maak(opties) {
         case 'opnieuw': return ok(gebeurtenisRoute(fdb, r, d, 'opnieuw_proberen', nu));
         case 'terug-naar-beoordelen': return ok(gebeurtenisRoute(fdb, r, d, 'terug_naar_beoordelen', nu));
         case 'wijzig': return ok(wijzig(fdb, r, d, nu));
+        case 'herlees': { const j = herlees(fdb, r, d, nu, vo); return ok(j, 'herlees ' + kort(d.id, 16) + ' ' + j.velden.length + ' velden'); }   // wv3701
         case 'ingevoerd': return ok(ingevoerd(fdb, r, d, nu, false));
         case 'ingevoerd-ongedaan': return ok(ingevoerd(fdb, r, d, nu, true));
         case 'betaaldatum': return ok(betaaldatum(fdb, r, d, nu));
@@ -4609,7 +4725,9 @@ function maak(opties) {
       PER_DAG: NB_HERINNER.per_dag,
     },
   };
-  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, maandspec, sepaDoor, nogBetalen, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, betaalMeldingJob, betaalMeldingKlaar, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
+  // wv3701: server.js vraagt eerst de bytes van een scan (zelfde poort als de route), leest ze lokaal (OCR) en roept dan POST herlees aan
+  const herleesBytes = (fdb, r, d) => { try { if (!fdb) weiger(503, 'de facturendatabase is nu niet te openen'); return herleesStuk(fdb, r, d); } catch (e) { return alsFout(e, opties.fout); } };
+  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, herleesBytes, maandspec, sepaDoor, nogBetalen, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, betaalMeldingJob, betaalMeldingKlaar, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
 }
 function ok(j, reden) { return { status: 200, j: Object.assign({ ok: true }, j), reden: reden || null }; }
 // Fouten naar een status. Triggers van facturen-db.js geven vaste teksten ("opdracht_prive: …"): die mogen door. Een CHECK of UNIQUE noemt

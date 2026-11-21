@@ -19202,11 +19202,25 @@ async function appFacturen(req, res, a, s, d, route) {
     res._app.reden = 'facturen maandspec-concept ' + (x.j && x.j.specificatie ? x.j.specificatie.status : x.status);
     return appStuur(res, x.status, x.j);
   }
+  // wv3701: knop Opnieuw lezen bij een scan — eerst dezelfde poort als de route (eigenaar, Beoordelen, PDF zonder tekstlaag), dan de lokale OCR
+  // (pdftoppm + tesseract op de pod, geen taalmodel, niets naar buiten); de tekst gaat als ocrTekst naar de route, nooit uit het verzoek zelf
+  let ocrTekst;
+  if (req.method === 'POST' && pad === '/app/facturen/herlees' && rolPrimair() === true && typeof facturenRoutes.herleesBytes === 'function') {
+    const st = facturenRoutes.herleesBytes(fdb, rol, d || {});
+    if (!st || st.status) { res._app.reden = 'facturen herlees ' + (st ? st.status : 500); return appStuur(res, st ? st.status : 500, st ? st.j : { ok: false, fout: 'onbekend' }); }
+    // review ZOU 5 / KAN 10: OCR liep maar las niets → '' (422: vul zelf in); fout of langer dan 80 s → geen tekst (503: later opnieuw)
+    let o = null, tm = null;
+    try { o = await Promise.race([facturenIo().ocrLokaal(st.bytes), new Promise(function (k) { tm = setTimeout(function () { k(null); }, 80000); })]); }
+    catch (e) { logError('facturen-herlees-ocr', e); o = null; }
+    finally { if (tm) clearTimeout(tm); }
+    if (o && typeof o === 'object') ocrTekst = o.ok && typeof o.tekst === 'string' ? o.tekst : '';
+  }
   const r = facturenRoutes.app(fdb, { methode: req.method, pad: pad, d: d || {}, rol: rol, primair: rolPrimair(),
     versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; },
     uploadNeem: function (b, n) { return facturenUploadNeem(a, b, n); }, bankluisPad: FACTUREN_BANKLUIS, pdfTekst: facturenPdfTekst,   // wv2958
     sepaDoor: typeof sdModus === 'function' ? sdModus() : null,   // wv2465
-    nogBetalen: typeof nbModus === 'function' && nbAan() ? nbModus() : null });   // wv3369: alleen 'auto' maakt een rij
+    nogBetalen: typeof nbModus === 'function' && nbAan() ? nbModus() : null,   // wv3369: alleen 'auto' maakt een rij
+    ocrTekst: ocrTekst });   // wv3701
   if (req.method === 'GET' && pad.indexOf('/app/facturen/document/') !== 0 && r.status === 200) res._app.stil = true;
   if (req.method !== 'GET' && r.status === 200) facturenKaartPlan(3000);   // wv1705: verzamelkaart bijwerken (bevestigen, terugdraaien, upload)
   // wv2025: na een nieuwe batch (bestand gemaakt) het concept met de specificatie op de achtergrond; het antwoord wacht er niet op
