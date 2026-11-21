@@ -64,7 +64,7 @@ function jwt(over) {
   return k + '.' + i + '.' + crypto.sign('RSA-SHA256', Buffer.from(k + '.' + i), privateKey).toString('base64url');
 }
 async function nepFetch(url, opt) {
-  url = String(url);
+  url = String(url); (st.urls = st.urls || []).push(url);   // wv3771: welke diensten er geraakt werden
   const antw = (status, j, kop) => ({ ok: status < 300, status, json: async () => j, text: async () => JSON.stringify(j), headers: { get: (n) => (kop || {})[String(n).toLowerCase()] || null } });
   if (/whisper-large-v3-turbo$/.test(url)) {
     st.stt.push(JSON.parse(opt.body));
@@ -764,6 +764,82 @@ srv.listen(0, '127.0.0.1', async () => {
     r = await tel('GET', '/tel/uit', { sleutel: OW2 });
     toets('8b uitgifte voor Onderweg: vraagzin bij een knopvraag', r.j.id === id8V && r.j.knopvraag === 'ja' && r.j.vraagzin === 'Zal ik de mail klaarzetten?', r.j);
     await tel('POST', '/tel/gespeeld/' + id8V, { sleutel: OW2 });
+    // ── 8c. wv3771: klaargezet antwoord uit de auto op de kaart (378 + 466) en de kaart ingesproken ──
+    H.appStaat.tellers['tel-alles'] = [];
+    H.__zet('appVjPunten', async () => [
+      { id: 11, sleutel: 'k11', soort: 'besluit', status: 'open', titel: 'Zal ik **iets** doen?', herkomst: {} },
+      { id: 12, sleutel: 'k12', soort: 'doen', status: 'open', titel: 'Klusje', herkomst: {} },
+      { id: 13, sleutel: 'k13', soort: 'besluit', status: 'gedaan', titel: 'Al dicht?', herkomst: {} }]);
+    const VS = path.join(DATA, 'tel-voorstellen.json');
+    const vragenPad = path.join(DATA, 'vragen.json');
+    const vragenVoor = fs.existsSync(vragenPad) ? fs.readFileSync(vragenPad, 'utf8') : null;
+    r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: OW2 });
+    const TID = r.j.voorjou && r.j.voorjou[0] && r.j.voorjou[0].tekst_id;
+    toets('8c voorjou geeft tekst_id en nog geen klaargezet antwoord', r.status === 200 && /^[a-f0-9]{8}$/.test(String(TID)) && r.j.voorjou[0].auto === null, r.j);
+    const vst = (id, body, sl) => tel('GET', '/tel/uit?lijst=voorstel&id=' + id + '&keuze=' + encodeURIComponent(body.keuze) + '&tekst_id=' + encodeURIComponent(body.tekst_id), { sleutel: sl || OW2 });
+    r = await vst(11, { keuze: 'ja', tekst_id: TID }, TK3);
+    toets('8c voorstel met een Tasker-sleutel: 404', r.status === 404, r.j);
+    Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
+    r = await vst(11, { keuze: 'ja', tekst_id: TID });
+    toets('8c voorstel zonder app-sessie: 423', r.status === 423 && /Socev-app/.test(r.j.fout), r.j);
+    const sP8 = sessie(PIXEL, 'credP', false);
+    r = await vst(11, { keuze: 'misschien', tekst_id: TID });
+    toets('8c onbekende keuze: 400', r.status === 400, r.j);
+    r = await vst(11, { keuze: 'ja', tekst_id: 'deadbeef' === TID ? 'feedbeef' : 'deadbeef' });
+    toets('8c andere tekst_id (vraag veranderd): 409, niets opgeslagen', r.status === 409 && /veranderd/.test(r.j.fout) && !fs.existsSync(VS), r.j);
+    r = await vst(13, { keuze: 'ja', tekst_id: TID });
+    toets('8c gesloten kaart: 409', r.status === 409, r.j);
+    r = await vst(12, { keuze: 'ja', tekst_id: TID });
+    toets('8c doe-kaart (geen besluit): 409', r.status === 409, r.j);
+    const gestartVoor = gestart.length, chatVoor = st.chatlog.length, urlsVoor = st.urls.length;
+    r = await vst(11, { keuze: 'ja', tekst_id: TID });
+    toets('8c voorstel ja: 200', r.status === 200 && r.j.ok === true && r.j.auto === 'ja', r.j);
+    const vsJ = JSON.parse(fs.readFileSync(VS, 'utf8'));
+    toets('8c voorstelbestand 0600, alleen keuze/tekst_id/t/apparaat (geen inhoud)', (fs.statSync(VS).mode & 0o777) === 0o600 && Object.keys(vsJ.items['11']).sort().join() === 'apparaat,keuze,t,tekst_id' && !/iets|Zal ik/.test(JSON.stringify(vsJ)), vsJ);
+    toets('8c EEN VOORSTEL IS GEEN KNOPDRUK: geen beurt, geen chat_log, vragen.json gelijk, geen databank/n8n', gestart.length === gestartVoor && st.chatlog.length === chatVoor &&
+      (fs.existsSync(vragenPad) ? fs.readFileSync(vragenPad, 'utf8') : null) === vragenVoor && st.urls.slice(urlsVoor).every((u) => !/sb\.toets|n8n|telegram/.test(u)), { beurten: gestart.length - gestartVoor, urls: st.urls.slice(urlsVoor) });
+    r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: OW2 });
+    toets('8c voorjou toont het klaargezette antwoord', r.j.voorjou && r.j.voorjou[0].auto === 'ja', r.j);
+    r = await app('GET', '/app/voor-jou/kanaal', undefined, { apparaat: PIXEL, sessie: sP8 });
+    const p11 = r.j.punten && r.j.punten.find((x) => x.id === 11), p12 = r.j.punten && r.j.punten.find((x) => x.id === 12);
+    toets('8c app-lijst: kaart 11 met auto {keuze ja, tekst_id}, doe-kaart zonder', r.status === 200 && p11 && p11.auto && p11.auto.keuze === 'ja' && p11.auto.tekst_id === TID && p12 && p12.auto === undefined, { status: r.status, p11, p12, fout: r.j.fout });
+    toets('8c app-lijst: kaart blijft open en onbeantwoord', p11 && !p11.beantwoord && p11.status === 'open', p11);
+    r = await app('GET', '/app/voor-jou/11', undefined, { apparaat: PIXEL, sessie: sP8 });
+    toets('8c app-detail: auto naast de gewone knop (zelfde tekst_id, knop kan nog)', r.status === 200 && r.j.auto && r.j.auto.keuze === 'ja' && r.j.knop && r.j.knop.kan === true && r.j.knop.tekst_id === r.j.auto.tekst_id, { status: r.status, auto: r.j.auto, knop: r.j.knop });
+    r = await vst(11, { keuze: 'nee', tekst_id: TID });
+    toets('8c nee vervangt ja', r.status === 200 && JSON.parse(fs.readFileSync(VS, 'utf8')).items['11'].keuze === 'nee', r.j);
+    r = await vst(11, { keuze: 'weg', tekst_id: TID });
+    toets('8c weg (Later) wist het voorstel', r.status === 200 && r.j.auto === null && !JSON.parse(fs.readFileSync(VS, 'utf8')).items['11'], r.j);
+    // 48 uur
+    fs.writeFileSync(VS, JSON.stringify({ versie: 1, items: { 11: { keuze: 'ja', tekst_id: TID, t: new Date(Date.now() - 49 * 3600000).toISOString(), apparaat: 'x' } } }));
+    r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: OW2 });
+    toets('8c ouder dan 48 uur telt niet meer', r.j.voorjou && r.j.voorjou[0].auto === null, r.j);
+    H.appStaat.tellers['tel-voorstel'] = Array(130).fill(Date.now());
+    r = await vst(11, { keuze: 'ja', tekst_id: TID });
+    toets('8c grens per uur: 429', r.status === 429, r.j);
+    H.appStaat.tellers['tel-voorstel'] = [];
+    // kaartstem
+    r = await tel('GET', '/tel/uit?lijst=kaartstem&id=11', { sleutel: TK3 });
+    toets('8c kaartstem met een Tasker-sleutel: 404', r.status === 404, r.j);
+    Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
+    r = await tel('GET', '/tel/uit?lijst=kaartstem&id=11', { sleutel: OW2 });
+    toets('8c kaartstem zonder app-sessie: 423', r.status === 423, r.j);
+    sessie(PIXEL, 'credP', false);
+    const ttsVoor = st.tts.length;
+    r = await tel('GET', '/tel/uit?lijst=kaartstem&id=11', { sleutel: OW2 });
+    toets('8c kaartstem: wav met titel en vraag, zonder opmaak', r.status === 200 && /audio\/wav/.test(r.ct) && st.tts.length === ttsVoor + 1 && /Zal ik iets doen\?/.test(st.tts[st.tts.length - 1]) && !/\*\*/.test(st.tts[st.tts.length - 1]), { status: r.status, tekst: st.tts.slice(ttsVoor) });
+    r = await tel('GET', '/tel/uit?lijst=kaartstem&id=11', { sleutel: OW2 });
+    toets('8c kaartstem tweede keer uit het geheugen (geen nieuwe Gemini-aanroep)', r.status === 200 && st.tts.length === ttsVoor + 1, st.tts.length - ttsVoor);
+    r = await tel('GET', '/tel/uit?lijst=kaartstem&id=13', { sleutel: OW2 });
+    toets('8c kaartstem van een gesloten kaart: 404', r.status === 404, r.j);
+    r = await tel('GET', '/tel/uit?lijst=kaartstem&id=abc', { sleutel: OW2 });
+    toets('8c kaartstem ongeldig id: 400', r.status === 400, r.j);
+    H.telStaat.kaartstem = {};
+    H.appStaat.tellers['tel-kaartstem'] = Array(40).fill(Date.now());
+    r = await tel('GET', '/tel/uit?lijst=kaartstem&id=11', { sleutel: OW2 });
+    toets('8c kaartstem dagplafond: 429', r.status === 429, r.j);
+    H.appStaat.tellers['tel-kaartstem'] = [];
+    toets('8c geen onverwachte fouten (wv3771)', !logs.some((l) => /tel-voorstel|tel-kaartstem/.test(l)), logs.filter((l) => /tel-voorstel|tel-kaartstem/.test(l)));
     toets('8 geen onverwachte fouten (wv3700)', !logs.some((l) => /tel-voorjou/.test(l) && !/databank weg/.test(l)), logs.filter((l) => /tel-voorjou/.test(l)));
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }
   srv.close();

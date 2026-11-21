@@ -12629,7 +12629,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   let vr = {};
   try { vr = appVragen(); } catch (e) { vr = {}; }
   const af = await appVjAfgeleid(punten, nu);   // wv1018: vóór de lijst (beantwoord leest de afgeleide koppeling ook)
-  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), appVjDoel(p, a), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map) }); });   // wv1706: module + doel
+  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), appVjDoel(p, a), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map), auto: p.soort === 'besluit' && typeof telVoorstelKort === 'function' ? telVoorstelKort(p.id) : undefined }); });   // wv1706: module + doel; wv3771: klaargezet in de auto (alleen weergave)
   // wv3100 (David 14-11 23:28, "inbox zero"): wat David vandaag zelf afhandelde (Gedaan, Niet meer nodig, Ja / Nee / Anders op de kaart) en
   // niet meer in de lijst staat, voor de ingeklapte regel "Afgehandeld vandaag" onderaan Voor jou. De app haalt beantwoorde en net gekozen
   // punten zelf uit de lijst; dit is alleen de terugvindplek. Geen lijst van de ronde of een agent (gesloten_door david), hooguit 30.
@@ -13273,6 +13273,7 @@ async function appVoorJouDetail(req, res, a, idTekst) {
   const stappen = (Array.isArray(p.stappen) ? p.stappen : []).slice(0, 12).map(appVjStap);
   const sw = await appSwSetVoor(p);   // wv3250: steekwoordkeuzes per woord; dan geen Ja / Nee / Anders voor de hele rij
   appStuur(res, 200, Object.assign(appVjKort(p, vandaag), { ok: true, woorden: sw || undefined,
+    auto: p.soort === 'besluit' && typeof telVoorstelKort === 'function' ? telVoorstelKort(p.id) : undefined,   // wv3771: klaargezet in de auto (weergave; de knop blijft de knop)
     waarom: p.waarom ? appKort(appVjGewoon(p.waarom), 600) : null, stappen: stappen, herkomst: herkomst, vraag: vraag,
     meting: p.meting ? appKort(appVjGewoon(p.meting), 400) : null, laatst_gemeten: p.laatst_gemeten || null,
     bewijs: p.bewijs ? appKort(appVjGewoon(p.bewijs), 400) : null, gesloten_door: p.gesloten_door || null, gesloten_op: p.gesloten_op || null,
@@ -18882,9 +18883,11 @@ function telUitRoute(req, res, t) {
   const q = new URLSearchParams(String(req.url || '').split('?')[1] || '');
   const w = q.has('wacht') ? Number(q.get('wacht')) : 0;
   if (!Number.isInteger(w) || w < 0 || w > TEL_WACHT_MAX_S) return telWeiger(res, 400, 'wacht moet 0 tot ' + TEL_WACHT_MAX_S + ' zijn', 'wacht');
-  if (q.has('lijst')) {   // wv3700 voorjou, wv3770 dagbericht
+  if (q.has('lijst')) {   // wv3700 voorjou, wv3770 dagbericht, wv3771 voorstel en kaartstem
     if (q.get('lijst') === 'voorjou') return telVoorJou(req, res, t);
     if (q.get('lijst') === 'dagbericht') return telDagbericht(req, res, t, q.get('audio') === '1');
+    if (q.get('lijst') === 'kaartstem') return telKaartStem(req, res, t, String(q.get('id') || ''));   // wv3771
+    if (q.get('lijst') === 'voorstel') return telVoorstelRoute(req, res, t, String(q.get('id') || ''), String(q.get('keuze') || ''), String(q.get('tekst_id') || ''));   // wv3771
     return telWeiger(res, 400, 'onbekende lijst', 'lijst');
   }
   res._tel.stil = true;   // de hartslag (± 1 per minuut) niet in het auditlog; alleen weigeringen
@@ -18983,13 +18986,123 @@ async function telVoorJou(req, res, t) {
   for (const p of open) {
     if (lijst.length >= TEL_VOORJOU_MAX) break;
     let k;
-    try { k = appVjKnopVorm(appVjKnopStand(p, await appVjRegisterVraag(p), afMap)); } catch (e) { logError('tel-voorjou', e); continue; }
-    if (!k.kan) continue;
-    lijst.push({ id: p.id, titel: appKort(appVjGewoon(appVjOpmaakWeg(p.titel)), 160), vraag: k.vraag ? appKort(k.vraag, 600) : null, voorstel: k.voorstel ? appKort(k.voorstel, 400) : null,
-      deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) ? p.deadline : null });
+    try { k = await telVjKaart(p, afMap); } catch (e) { logError('tel-voorjou', e); continue; }
+    if (!k) continue;
+    const vs = telVoorstelVan(p.id);   // wv3771: wat er in de auto al klaargezet is (alleen als het nog op deze tekst slaat)
+    lijst.push(Object.assign(k, { auto: vs && vs.tekst_id === k.tekst_id ? vs.keuze : null }));
   }
   res._tel.reden = 'voorjou ' + lijst.length;
   telStuur(res, 200, { ok: true, voorjou: lijst });
+}
+
+// wv3700/wv3771: één open Ja/Nee-kaart zoals Onderweg hem krijgt (null = geen knop mogelijk); tekst_id = dezelfde als onder de knop in de app
+async function telVjKaart(p, afMap) {
+  const st = appVjKnopStand(p, await appVjRegisterVraag(p), afMap);
+  const k = appVjKnopVorm(st);
+  if (!k.kan) return null;
+  return { id: p.id, titel: appKort(appVjGewoon(appVjOpmaakWeg(p.titel)), 160), vraag: k.vraag ? appKort(k.vraag, 600) : null, voorstel: k.voorstel ? appKort(k.voorstel, 400) : null,
+    deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) ? p.deadline : null, tekst_id: k.tekst_id };
+}
+async function telVjKaartVers(id) {
+  const punten = await appVjPunten();
+  const p = punten.find(function (x) { return x && x.id === id; });
+  if (!p || p.soort !== 'besluit' || !appVjZichtbaar(p, appYmd(Date.now()))) return null;
+  let afMap = {};
+  try { afMap = (await appVjAfgeleid(punten, Date.now())).map || {}; } catch (e) { logError('tel-voorstel', e); }
+  return telVjKaart(p, afMap);
+}
+
+// ── wv3771 (Onderweg fase 2b; besluitenpagina 378 + 466, David Ja 21-11): een klaargezet antwoord uit de auto op de Voor jou-kaart ──
+// GET /tel/uit?lijst=voorstel&id=<kaart>&keuze=ja|nee|weg&tekst_id=<8 hex> (zelfde pad als Voor jou: tunnel en Access blijven gelijk;
+// alleen deze vijf /tel-paden komen door, tools/tunnel-inrichten.js): alleen een Onderweg-sleutel, app-sessie-eis, primaire kant. De pod leest de
+// kaart vers: open besluit met een knop en dezelfde tekst_id (anders 409). Opslag tel-voorstellen.json (0600): per kaart keuze, tekst_id,
+// tijd en apparaat; geen titel, vraag of andere inhoud. 48 uur, hooguit 50. EEN VOORSTEL IS NOOIT EEN KNOPDRUK: deze code raakt geen
+// vragen.json, appKnop, kaartstatus, chat_log of Socev-beurt. De app toont het op de kaart ("in de auto zei je: Ja") en "Bevestig alles"
+// in de app doet per kaart de gewone knop-POST (David tikt). Toets: test/tel-poort.sh § 8c.
+const TEL_VOORSTEL = path.join(APP_DATA, 'tel-voorstellen.json');
+const TEL_VOORSTEL_MS = 48 * 3600 * 1000;
+const TEL_VOORSTEL_MAX = 50;
+const TEL_VOORSTEL_PER_UUR = 120;
+const TEL_KAARTSTEM_PER_DAG = 40;   // ± $0,005 per kaart (Gemini-stem, ± 20 s audio); max ± $0,20 per dag
+appStaat.tellers['tel-voorstel'] = [];
+appStaat.tellers['tel-kaartstem'] = [];
+function telVoorstellen() {
+  let j;
+  try { j = appLeesStreng(TEL_VOORSTEL, { versie: 1, items: {} }); } catch (e) { logError('tel-voorstel', e); return {}; }
+  const nu = Date.now(), uit = {};
+  Object.keys(j.items && typeof j.items === 'object' ? j.items : {}).forEach(function (id) {
+    const x = j.items[id];
+    if (/^[1-9]\d{0,8}$/.test(id) && x && (x.keuze === 'ja' || x.keuze === 'nee') && /^[a-f0-9]{8}$/.test(String(x.tekst_id)) && nu - Date.parse(x.t) < TEL_VOORSTEL_MS) uit[id] = x;
+  });
+  return uit;
+}
+function telVoorstelBewaar(items) {
+  const ids = Object.keys(items).sort(function (a, b) { return Date.parse(items[b].t) - Date.parse(items[a].t); }).slice(0, TEL_VOORSTEL_MAX);
+  const o = {};
+  ids.forEach(function (id) { const x = items[id]; o[id] = { keuze: x.keuze, tekst_id: x.tekst_id, t: x.t, apparaat: x.apparaat }; });
+  appSchrijfJson(TEL_VOORSTEL, { versie: 1, items: o });
+}
+function telVoorstelVan(id) { const x = telVoorstellen()[String(id)]; return x || null; }
+// Voor de app-routes (lijst en detail van Voor jou): alleen weergave.
+function telVoorstelKort(id) { const x = telVoorstelVan(id); return x ? { keuze: x.keuze, t: x.t, tekst_id: x.tekst_id } : undefined; }
+async function telVoorstelRoute(req, res, t, idTekst, keuze, tid) {
+  if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'voorstel: geen onderweg-sleutel');
+  if (!telSessieOk(t)) return telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (voorstel)');
+  if (!appTeller('tel-voorstel', TEL_VOORSTEL_PER_UUR, 3600000)) return telWeiger(res, 429, 'te vaak dit uur', 'grens voorstel');
+  if (!/^[1-9]\d{0,8}$/.test(idTekst) || ['ja', 'nee', 'weg'].indexOf(keuze) < 0 || !/^[a-f0-9]{8}$/.test(tid)) return telWeiger(res, 400, 'ongeldig voorstel', 'voorstel velden');
+  if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (voorstel)');
+  const id = Number(idTekst);
+  const items = telVoorstellen();
+  if (keuze === 'weg') {
+    const was = !!items[String(id)];
+    delete items[String(id)];
+    if (was) telVoorstelBewaar(items);
+    res._tel.reden = 'voorstel weg #' + id;
+    return telStuur(res, 200, { ok: true, auto: null });
+  }
+  let k;
+  try { k = await telVjKaartVers(id); } catch (e) { logError('tel-voorstel', e); return telWeiger(res, 503, 'de lijst is nu niet te lezen', 'voorstel lezen'); }
+  if (!k) return telWeiger(res, 409, 'deze kaart staat niet meer open of heeft geen knop', 'voorstel kaart weg #' + id);
+  if (k.tekst_id !== tid) return telWeiger(res, 409, 'de vraag is intussen veranderd', 'voorstel tekst gewijzigd #' + id);
+  items[String(id)] = { keuze: keuze, tekst_id: tid, t: new Date().toISOString(), apparaat: t.id };
+  telVoorstelBewaar(items);
+  res._tel.reden = 'voorstel ' + keuze + ' #' + id;
+  telStuur(res, 200, { ok: true, auto: keuze });
+}
+// GET /tel/uit?lijst=kaartstem&id=<kaart>: de kaart (titel, vraag, voorstel) ingesproken met de pod-stem, alleen na een tik in Onderweg
+// (passagiers). Zelfde sloten als Voor jou; 40 per dag; in het geheugen per (kaart, tekst_id).
+telStaat.kaartstem = {};
+async function telKaartStem(req, res, t, idTekst) {
+  if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'kaartstem: geen onderweg-sleutel');
+  if (!telSessieOk(t)) return telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (kaartstem)');
+  if (!/^[1-9]\d{0,8}$/.test(idTekst)) return telWeiger(res, 400, 'ongeldige kaart', 'kaartstem id');
+  if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (kaartstem)');
+  let k;
+  try { k = await telVjKaartVers(Number(idTekst)); } catch (e) { logError('tel-kaartstem', e); return telWeiger(res, 503, 'de lijst is nu niet te lezen', 'kaartstem lezen'); }
+  if (!k) return telWeiger(res, 404, 'deze kaart staat niet meer open', 'kaartstem kaart weg');
+  const sl = k.id + ':' + k.tekst_id;
+  let wav = telStaat.kaartstem[sl];
+  if (!wav) {
+    if (!process.env.GEMINI_API_KEY_AUTO) return telWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'geen gemini-sleutel');
+    if (!appTeller('tel-kaartstem', TEL_KAARTSTEM_PER_DAG, 86400000)) return telWeiger(res, 429, 'genoeg voorgelezen voor vandaag', 'grens kaartstem dag');
+    const zin = function (x) { x = String(x || '').trim(); return x && !/[.?!]$/.test(x) ? x + '.' : x; };
+    const tekst = [zin(k.titel), k.vraag && k.vraag !== k.titel ? zin(k.vraag) : '', k.voorstel ? 'Voorstel: ' + zin(k.voorstel) : ''].filter(Boolean).join(' ');
+    try {
+      let tm = null;
+      wav = await Promise.race([appGeminiStem(tekst, {}), new Promise(function (_, nee) { tm = setTimeout(function () { nee(Object.assign(new Error('duurde te lang'), { traag: true })); }, TEL_WACHT_MAX_S * 1000); })]);
+      clearTimeout(tm);
+    } catch (e) {
+      if (!(e && e.traag)) logError('tel-kaartstem', e);
+      return telWeiger(res, 503, 'inspreken lukte niet', 'kaartstem gemini');
+    }
+    const sleutels = Object.keys(telStaat.kaartstem);
+    if (sleutels.length >= 20) delete telStaat.kaartstem[sleutels[0]];
+    telStaat.kaartstem[sl] = wav;
+  }
+  res._tel.reden = 'kaartstem #' + k.id;
+  if (res.headersSent) return;
+  res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, 'Cache-Control': 'no-store' });
+  res.end(wav);
 }
 
 async function telDeel(req, res, t, id, n) {
