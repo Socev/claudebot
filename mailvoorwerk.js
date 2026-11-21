@@ -155,10 +155,9 @@ function schoon(d) {
   const invullen = (Array.isArray(d.invullen) ? d.invullen : []).map(function (x) { return str(x, 160); }).filter(Boolean).slice(0, 8);
   return { vraag, voorstel, antwoord: antwoord, concept, invullen };
 }
-// BSN-achtige getallen nooit bewaren, ook niet in wat alleen David ziet
-function zonderBsn(t) { let x = t; P.scan(t).filter(function (v) { return v.soort === 'bsn'; }).reverse().forEach(function (v) { x = x.slice(0, v.i) + '[BSN weggelaten]' + x.slice(v.j); }); return x; }
+// wv3675 (2C12, David 21-11): wat alleen David ziet blijft volledig (vroeger zonderBsn); de poort op wat naar derden gaat staat in voorwerk-poort.js
 function lijstVan(a, n, velden) {
-  return (Array.isArray(a) ? a : []).slice(0, n).filter(isObj).map(function (o) { const u = {}; velden.forEach(function (k) { u[k[0]] = zonderBsn(str(o[k[0]], k[1])); }); return u; });
+  return (Array.isArray(a) ? a : []).slice(0, n).filter(isObj).map(function (o) { const u = {}; velden.forEach(function (k) { u[k[0]] = str(o[k[0]], k[1]); }); return u; });
 }
 // Stap 1 van voorwerk-2: als schoon() plus gevraagd
 function schoonStap1(d) {
@@ -177,7 +176,7 @@ function schoonStap3(d) {
   if (antwoord && concept.length < 10) return null;
   return { vraag, voorstel, antwoord, concept,
     feiten: (Array.isArray(d.feiten) ? d.feiten : []).slice(0, 20).filter(isObj).map(function (f) {
-      return { persoon: str(f.persoon, 120), waarde: zonderBsn(str(f.waarde, 300)), bron: str(f.bron, 20), datum_stuk: str(f.datum_stuk, 40), soort: /^(persoonsgegeven|werk|overig)$/.test(f.soort) ? f.soort : 'overig' };
+      return { persoon: str(f.persoon, 120), waarde: str(f.waarde, 300), bron: str(f.bron, 20), datum_stuk: str(f.datum_stuk, 40), soort: /^(persoonsgegeven|werk|overig)$/.test(f.soort) ? f.soort : 'overig' };
     }).filter(function (f) { return f.waarde; }),
     keuzes: lijstVan(d.keuzes, 3, [['voorstel', 300], ['anders', 300]]).filter(function (k) { return k.voorstel; }),
     niet_gevonden: lijstVan(d.niet_gevonden, 8, [['wat', 200], ['gezocht', 300]]).filter(function (k) { return k.wat; }),

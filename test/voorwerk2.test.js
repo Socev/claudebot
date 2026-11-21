@@ -82,6 +82,17 @@ test('gevoeligheidspoort: BSN altijd dicht (ook naar verwerker, ook als het in d
   // wat al in de binnengekomen mail stond, is geen nieuw gegeven (geen BSN)
   assert.equal(P.gevoelig('Bel me op 06-12345678', { mail: 'bel 0612345678', aan: 'x@ander.invalid', verwerkers: VERWERKERS }).dicht, false);
 });
+test('wv3675 (2C12): stap 3 bewaart een BSN-achtig getal volledig voor David; de poort naar derden blijft dicht', () => {
+  const bsn = '111222333';   // verzonnen, voldoet aan de 11-proef
+  const w = V.schoonStap3({ antwoord_nodig: true, vraag: 'Welk nummer?', voorstel: 'x', concept: 'Hoi,\n\nBSN ' + bsn + '.\n\nGroet, David',
+    feiten: [{ persoon: 'Petra Proefmans', waarde: 'BSN ' + bsn, bron: 'S1', datum_stuk: '2026-11-03', soort: 'persoonsgegeven' }],
+    keuzes: [{ voorstel: 'noem ' + bsn, anders: '' }], niet_gevonden: [], gevoelig: [{ wat: 'BSN ' + bsn, waarom: 'x', andere_weg: 'y' }] });
+  assert.equal(w.feiten[0].waarde, 'BSN ' + bsn); assert.equal(w.keuzes[0].voorstel, 'noem ' + bsn); assert.equal(w.gevoelig[0].wat, 'BSN ' + bsn);
+  assert.ok(!/weggelaten/.test(JSON.stringify(w)));
+  const g = P.gevoelig(w.concept, { mail: '', aan: 'loket@loonproef.invalid', verwerkers: VERWERKERS, bewezen: w.feiten, feiten: w.feiten });
+  assert.equal(g.dicht, true); assert.equal(g.redenen[0].soort, 'bsn');
+});
+
 test('onderbouwing: waarde buiten mail, feiten en keuzes = niet onderbouwd', () => {
   const no = P.onderbouwing('Ingang 1 december 2026, 24 uur, € 1.500,00.', { mail: 'Graag de ingangsdatum.', bewezen: [{ waarde: 'per 1 december 2026' }], keuzes: [] });
   assert.deepEqual(no.map(function (x) { return x.soort; }).sort(), ['bedrag', 'uren']);

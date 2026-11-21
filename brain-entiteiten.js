@@ -18,7 +18,6 @@ const crypto = require('crypto');
 
 const CACHE_MS = 60000;
 const PAGINA_RE = /^(10_Zakelijk|20_Prive)\/(?:[^/\0]+\/)*[^/\0]+\.md$/;
-const IBAN_IN_TEKST = /\b[A-Z]{2}[0-9]{2}(?:[\s.\-\u00a0]?[A-Z0-9]{4}){2,7}(?:[\s.\-\u00a0]?[A-Z0-9]{1,4})?\b/gi;   // diffreview ZOU 6: ook kleine letters, punt, streep
 const MAX_TEKST = 60000;
 const GOOGLE_RE = /^people\/c[0-9]{1,30}$/;
 // "+31 6 1234 5678" → "0612345678"; buitenland "+220 …" → "00220…" (zelfde normaalvorm als het register)
@@ -57,15 +56,6 @@ function groepVan(k) { return isPersoon(k) ? 'persoon' : (GROEP[k.rol] || (isEig
 function norm(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
 // Woorden voor naamvergelijking: zonder accenten, kleine letters, alles wat geen letter of cijfer is een spatie ("K. Verzonnen" → "k verzonnen")
 function woorden(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
-function ibanNorm(x) { return String(x || '').replace(/[\s.\- ]/g, '').toUpperCase(); }
-// Het eigen rekeningnummer van een eigen entiteit blijft staan, elk ander wordt gemaskeerd (alleen nog voor de schrijfwijzen in bankVan)
-function maskeerIban(t, eigen) {
-  return String(t).replace(IBAN_IN_TEKST, function (m) {
-    const n = ibanNorm(m);
-    if (!/\d{6}/.test(n)) return m;
-    return eigen && ibanNorm(eigen) === n ? m : '[rekeningnummer]';
-  });
-}
 function geenMasker(t) { return String(t == null ? '' : t); }
 
 // Frontmatter: de ruwe tekst tussen de eerste twee ---regels ('' als die er niet is)
@@ -188,8 +178,8 @@ function maak(o) {
 
   // Facturen per knoop, uit de Facturen-app (factuur) en het FV2-archief (factuur_archief): leverancier.knoop_id, anders een unieke
   // naam/alias-match (zelfde regel als rekeningenPerDoel in ovis-register.js); een eigen entiteit telt de facturen op haar naam. Alleen
-  // telling, datum, bedrag (in centen, zoals in de Facturen-app) en status: geen leveranciersnaam (bij een eigen entiteit kan dat een persoon zijn), geen regels met een
-  // patiëntkenmerk. Alleen-eigenaar-regels tellen mee: de app is van David (de eigenaar); op een vaste plek komt dit blok er niet.
+  // telling, datum, bedrag (in centen, zoals in de Facturen-app) en status: geen leveranciersnaam (bij een eigen entiteit kan dat een persoon zijn). Regels met een
+  // patiëntkenmerk tellen sinds wv3675 (2C12, David 21-11) gewoon mee. Alleen-eigenaar-regels tellen mee: de app is van David (de eigenaar); op een vaste plek komt dit blok er niet.
   function facturenVan(k, reg) {
     const ENT = { TG: 'tolgaarde', GH: 'groenhouten', HOLD: 'holding', KM: 'kostenmaatschap', POT: 'pot', PHBV: 'praktijkhouders_bv', PRIVE: 'prive', SLOEL: 'sloel',
       HAGRO: 'hagro', SEL: 'sel', DBH: 'dbh', GHAWA: 'ghawa' };
@@ -198,7 +188,7 @@ function maak(o) {
       if (isEigen(k)) {
         const e = ENT[String(k.id).toUpperCase()];
         if (!e) return { aantal: 0, laatste: [] };
-        const a = leesSqlite(facturenPad, 'select factuurdatum, incl_eur as bedrag, status from factuur where lower(entiteit) = ? and coalesce(patientkenmerk,0) = 0 and coalesce(intern,0) = 0', [e]);
+        const a = leesSqlite(facturenPad, 'select factuurdatum, incl_eur as bedrag, status from factuur where lower(entiteit) = ? and coalesce(intern,0) = 0', [e]);
         if (a === null) return null;
         rijen = a.concat(leesSqlite(facturenPad, 'select factuurdatum, incl as bedrag, status from factuur_archief where lower(entiteit) = ?', [e]) || []);
       } else {
@@ -212,7 +202,7 @@ function maak(o) {
         });
         const hoort = function (naam) { const s = opNaam[norm(naam)]; return !!(s && s.size === 1 && s.has(k.id)); };
         const ids = lev.filter(function (l) { return l.knoop_id ? l.knoop_id === k.id : hoort(l.naam); }).map(function (l) { return l.id; });
-        if (ids.length) rijen = leesSqlite(facturenPad, 'select factuurdatum, incl_eur as bedrag, status from factuur where leverancier in (' + ids.map(function () { return '?'; }).join(',') + ') and coalesce(patientkenmerk,0) = 0', ids) || [];
+        if (ids.length) rijen = leesSqlite(facturenPad, 'select factuurdatum, incl_eur as bedrag, status from factuur where leverancier in (' + ids.map(function () { return '?'; }).join(',') + ')', ids) || [];
         const arch = leesSqlite(facturenPad, 'select leverancier_naam, factuurdatum, incl as bedrag, status from factuur_archief', []) || [];
         rijen = rijen.concat(arch.filter(function (f) { return hoort(f.leverancier_naam); }));
       }
@@ -234,7 +224,7 @@ function maak(o) {
       }
       const b = bankMod.blokVoor(bankCache.idx, k.id);
       if (!b) return null;
-      [b.zakelijk, b.prive].forEach(function (x) { if (x && x.schrijfwijzen) x.schrijfwijzen = x.schrijfwijzen.map(function (n) { return masker(maskeerIban(n)); }); });
+      [b.zakelijk, b.prive].forEach(function (x) { if (x && x.schrijfwijzen) x.schrijfwijzen = x.schrijfwijzen.map(function (n) { return masker(n); }); });
       return b;
     } catch (e) { return null; }
   }
@@ -490,5 +480,5 @@ function maak(o) {
   return { lijst: lijst, zoek: zoek, detail: detail, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; bankCache = null; } };
 }
 
-module.exports = { telNl: telNl, maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, maskeerIban: maskeerIban, zichtbaar: zichtbaar, groepVan: groepVan,
+module.exports = { telNl: telNl, maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, zichtbaar: zichtbaar, groepVan: groepVan,
   naamPatronen: naamPatronen, bevatNaam: bevatNaam, fmAliassen: fmAliassen };

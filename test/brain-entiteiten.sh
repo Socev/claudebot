@@ -5,7 +5,7 @@
 # prive, de stamboom alleen via zoeken; medewerker met hele pagina, kenmerken, deadlines (ook HR) en Dossier (Gesprekken, Contracten,
 # Bronnen op naam of alias, nieuwste eerst); IBAN onverkort en het gegenereerde blok op de pagina; Wat OVIS weet ook voor PRIVE; het
 # sleutelmasker blijft; met de vaste-plekschakelaar aan alleen organisaties aan de zakelijke kant, IBAN van derden gemaskeerd, zonder
-# facturen, deadlines of Dossier; facturen op naam/alias en knoop_id, zonder patiëntkenmerk; uitrol.sh, Dockerfile en CI.
+# facturen, deadlines of Dossier; facturen op naam/alias en knoop_id, sinds wv3675 (2C12) ook met patiëntkenmerk; schrijfwijzen in het bankblok onverkort; uitrol.sh, Dockerfile en CI.
 # wv1771: contactgegevens uit Google bij een persoon met een Google-koppeling, niet op een vaste plek. wv1948: ook een voorgestelde
 # koppeling (gelabeld voorgesteld), plus adressen en verjaardag. wv2077: naamTreffers (Brain › Zoeken: entiteitpagina bovenaan).
 # Alle namen en nummers hieronder zijn verzonnen (openbare repo).
@@ -151,7 +151,7 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   toets('9 wikilink als tekst', /of de ander\./.test(d.j.tekst));
   toets('10 kenmerken: vervallen eruit, status in woorden', d.j.weet.handvatten.length === 2 && d.j.weet.handvatten.some((h) => h.status === 'wacht op je Ja') && !JSON.stringify(d.j).includes('oud@'), d.j.weet.handvatten);
   const f = d.j.weet.facturen;
-  toets('11 facturen: alias + knoop_id + archief op alias, zonder patiëntkenmerk, niet op andermans naam', f && f.aantal === 3 && f.laatste[0].datum === '2026-10-05' && f.laatste[0].bedrag_cent === 500 && !f.laatste.some((x) => x.bedrag_cent === 999 || x.bedrag_cent === 1), f);
+  toets('11 facturen: alias + knoop_id + archief op alias, ook met patiëntkenmerk (wv3675), niet op andermans naam', f && f.aantal === 4 && f.laatste[0].datum === '2026-10-06' && f.laatste[0].bedrag_cent === 999 && f.laatste[1].bedrag_cent === 500 && !f.laatste.some((x) => x.bedrag_cent === 1), f);
   toets('11b facturen zonder leveranciersnaam', !/Levering|Iets Anders|Niemand/.test(JSON.stringify(f)));
   toets('11c organisatie: geen Dossier', d.j.dossier === null);
 
@@ -251,6 +251,16 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   rpcFout = true; T.vergeet();
   toets('23f register weg: wel privépersonen, geen fout', (await nt('Bram', false)).length > 0);
   rpcFout = false; T.vergeet();
+
+  // wv3675 (2C12): eigen entiteit telt facturen met patiëntkenmerk mee; schrijfwijzen in het bankblok niet meer gemaskeerd (sleutelmasker blijft)
+  const rpc3 = async (fn) => { if (fn !== 'ovis_register_lees') return { contacten: [] }; return { knopen: [{ id: 'TG', soort: 'entiteit', rol: 'eigen', naam: 'Tolgaarde (proef)', vault_pagina: null, actief: true, voor: [] },
+    { id: 'org:proefbank', soort: 'organisatie', rol: 'leverancier', naam: 'Proefleverancier', vault_pagina: null, actief: true, voor: [] }], handvatten: [] }; };
+  const bankStub = { index: () => ({}), blokVoor: () => ({ zakelijk: { posten: 1, schrijfwijzen: ['Proefleverancier ' + IBAN, 'Proef nl11 test 0000 1111 22', 'sk-' + 'b'.repeat(40)] }, prive: null }) };
+  const T3 = B.maak({ rpc: rpc3, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturenPad: fpad, bankPad: fpad, bankPartij: bankStub, masker, nu: () => Date.parse('2026-10-27T12:00:00Z') });
+  const tg = await T3.detail('TG', false);
+  toets('24 wv3675: eigen entiteit telt de factuur met patiëntkenmerk mee', tg.status === 200 && tg.j.weet.facturen && tg.j.weet.facturen.aantal === 7 && tg.j.weet.facturen.laatste.some((x) => x.bedrag_cent === 999), tg.j.weet && tg.j.weet.facturen);
+  const pb = await T3.detail('org:proefbank', false), sw = pb.j && pb.j.weet && pb.j.weet.bank && pb.j.weet.bank.zakelijk.schrijfwijzen;
+  toets('24b wv3675: rekeningnummers in de schrijfwijzen onverkort, sleutel nog wel gemaskeerd', Array.isArray(sw) && sw[0].includes(IBAN) && /nl11 test 0000 1111 22/.test(sw[1]) && !JSON.stringify(sw).includes('b'.repeat(40)) && !/\[rekeningnummer\]/.test(JSON.stringify(pb.j)), pb.j && pb.j.weet);
 
   const srv = fs.readFileSync('server.js', 'utf8');
   toets('22 server.js: routes (ook zoeken), geen vaste-plekvlag meer, sleutelmasker en kaart mee', /route === 'GET \/app\/brain\/entiteiten' \|\| route\.indexOf\('GET \/app\/brain\/entiteit\/'\) === 0 \|\| route\.indexOf\('GET \/app\/brain\/entiteiten\/zoek\/'\) === 0/.test(srv) && /B\.detail\(id\)/.test(srv) && /B\.zoek\(q\)/.test(srv) &&

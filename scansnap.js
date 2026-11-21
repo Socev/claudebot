@@ -254,8 +254,8 @@ function maak(o) {
       try { const u = o.marker.beoordeel({ teksten: [oms + '\n' + reden + '\n' + (ontv || '')], bijlagenamen: [], onderwerp: '', afzender: '' }, {}); if (u && u.tegenhouden) patient = true; }
       catch (e) { patient = true; }
     }
-    if (patient) return { omschrijving: 'mogelijk een stuk over een patiënt', route: d.route, entiteit: d.entiteit, ontvanger: null, reden: '', patient: true };
-    return { omschrijving: oms, route: d.route, entiteit: d.entiteit, ontvanger: ontv, reden, patient: false };
+    // wv3675 (2C12, David 21-11): de kaart is van David; bij een patiëntkenmerk blijft de omschrijving staan (vroeger vervangen), alleen de vlag gaat mee
+    return { omschrijving: oms, route: d.route, entiteit: d.entiteit, ontvanger: ontv, reden, patient };
   }
   function voorstelKort(v) {   // voor de titel (≤ 90 tekens samen met de omschrijving)
     const ent = { prive: 'Privé', gambia: 'Gambia', pot: 'POT', phbv: 'PH BV', ghawa: 'GHAWA' }[v.entiteit] || ENTITEITEN[v.entiteit];
@@ -300,7 +300,7 @@ function maak(o) {
     const basis = { sleutel, soort: 'besluit', waar: 'overal', prive: true, duur_min: 1, volgorde: 30, deadline, meting, herkomst: { handmatig: 'scansnap', stuk: r.stuk_id } };
     if (v) {
       const titel = knip('Scan: ' + v.omschrijving, 90 - (' — ' + voorstelKort(v) + '?').length) + ' — ' + voorstelKort(v) + '?';
-      const waarom = knip('Je ScanSnap scande dit op ' + t + pag + '. ' + (v.reden ? 'Waarom dit voorstel: ' + v.reden + ' ' : '') +
+      const waarom = knip('Je ScanSnap scande dit op ' + t + pag + '. ' + (v.patient ? 'Het lijkt over een patiënt te gaan. ' : '') + (v.reden ? 'Waarom dit voorstel: ' + v.reden + ' ' : '') +
         'De scan staat alleen op de pod, niet in de vault; zonder jouw keuze gebeurt er niets mee.', 400);
       return Object.assign(basis, { titel: knip(titel, 90), waarom, stappen: ['Ja: ' + voorstelZin(v) + (v.route === 'doorsturen' ? ' (je verstuurt hem zelf)' : '') + '.', nee, anders] });
     }

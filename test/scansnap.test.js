@@ -195,7 +195,10 @@ test('veiligheid: md5 wijkt af → niet aangeleverd; storing → één box-rij p
     const t = o.ss._toetsVoorstel;
     assert.strictEqual(t({ omschrijving: 'mail naar a@b.nl', route: 'archiveren', entiteit: 'prive', reden: '', patientdocument: false }), null);
     assert.strictEqual(t({ omschrijving: 'x', route: 'hack', entiteit: 'prive', reden: '', patientdocument: false }), null);
-    assert.strictEqual(t({ omschrijving: 'Brief', route: 'archiveren', entiteit: 'tolgaarde', reden: '', patientdocument: true }).omschrijving, 'mogelijk een stuk over een patiënt');
+    // wv3675 (2C12): bij een patiëntkenmerk blijft de omschrijving staan, alleen de vlag gaat mee (verzonnen naam)
+    const pv = t({ omschrijving: 'Verwijsbrief Proefje Verzonnen', route: 'doorsturen', entiteit: 'tolgaarde', ontvanger: 'je collega', reden: 'gaat over Proefje', patientdocument: true });
+    assert.deepStrictEqual([pv.omschrijving, pv.ontvanger, pv.reden, pv.patient], ['Verwijsbrief Proefje Verzonnen', 'je collega', 'gaat over Proefje', true]);
+    assert.strictEqual(t({ omschrijving: 'Brief', route: 'archiveren', entiteit: 'tolgaarde', reden: '', patientdocument: false }).patient, false);
     const v = t({ omschrijving: 'Contract', route: 'archiveren', entiteit: 'prive', ontvanger: 'iemand', reden: 'klaar', patientdocument: false });
     assert.strictEqual(v.ontvanger, null, 'ontvanger alleen bij doorsturen');
   } finally { o.sluit(); }
