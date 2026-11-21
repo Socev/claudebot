@@ -11050,6 +11050,9 @@ async function appNieuwBronnen() {
 // doel en valt op tab terug. Nu is doel bij alle vier gelijk aan tab; de tabel is de plek voor een later afwijkend doel. Focus geeft de
 // pod (nog) niet: een seintje zegt alleen welk gesprek of welke lijst, nooit een stuk (geen id in de push-weg).
 const APP_SEINTJE_DOEL = { hoofd: 'hoofd', machinekamer: 'machinekamer', 'cijfer-meester': 'cijfer-meester', 'ovis-nza': 'ovis-nza', meldingen: 'meldingen' };
+// wv3680 (3C02): een seintje dat alleen over het actielijstje ging, opent het paneel Vandaag te doen (doel.scherm 'tedoen'; tab blijft
+// het kanaal, dus een app van vóór wv3680 opent zoals vroeger het hoofdgesprek). Alleen namen uit deze tabel komen in s.laatst.doel.
+const APP_SEINTJE_EXTRA_DOEL = { tedoen: { kanaal: 'hoofd', bronnen: ['actielijst'] } };
 function appSeintjeTab(id) {
   let s = null;
   try { s = appPushLees().apparaten[id] || null; } catch (e) { return null; }
@@ -11059,6 +11062,8 @@ function appSeintjeTab(id) {
   const tab = m ? m[1] : l.reden === 'meldingen' ? 'meldingen' : null;
   const cid = tab ? codeIdVanKanaal(tab) : null;   // wv3227: OVIS Code → plek code met de app als focus; onbekend id = geen doel
   if (tab && !cid && tab.indexOf('code-') === 0) return null;
+  const ex = l.doel && Object.hasOwn(APP_SEINTJE_EXTRA_DOEL, String(l.doel)) ? APP_SEINTJE_EXTRA_DOEL[l.doel] : null;   // wv3680
+  if (tab && ex && ex.kanaal === tab) return { tab: tab, doel: { scherm: l.doel }, op: l.op };
   return tab ? { tab: cid ? 'code' : tab, doel: cid ? { scherm: 'code', focus: cid } : { scherm: APP_SEINTJE_DOEL[tab] }, op: l.op } : null;
 }
 async function appNieuwRoute(req, res, a) {
@@ -14859,7 +14864,8 @@ function appVapidJwt(v, aud) {
 // Eén seintje naar één apparaat. Alleen naar een actief apparaat uit het register, nooit tijdens een noodstop.
 // wv804 (ontwerp § 5): poets = {voor: iso}: een lege push (TTL 600, Urgency low, Topic socev) die een nog niet bezorgd echt seintje
 // bij de pushdienst vervangt; de SW vraagt de stand en vervangt de melding. Schrijft laatst/laatst_per niet, wel s.poets.
-async function appPushStuur(id, reden, poets) {
+// wv3680: extra = { doel } (alleen een vaste naam uit APP_SEINTJE_EXTRA_DOEL): waar een tik op dit seintje landt, naast het kanaal in reden.
+async function appPushStuur(id, reden, poets, extra) {
   if (fs.existsSync(APP_UIT)) return { ok: false, reden: 'app staat uit' };
   let a = null;
   try { a = appRegister().apparaten.find(function (x) { return x.id === id; }); } catch (e) { return { ok: false, reden: 'register onleesbaar' }; }
@@ -14906,7 +14912,7 @@ async function appPushStuur(id, reden, poets) {
       if (!s || s.endpoint !== sub.endpoint) return;
       const nu = new Date().toISOString();
       if (poets) s.poets = { op: nu, voor: poets.voor, status: status };   // wv804 (ontwerp § 5)
-      else s.laatst = { op: nu, status: status, reden: String(reden || '').slice(0, 30) };   // 30: 'antwoord machinekamer' is 21 (seintje -> tab, wv137)
+      else s.laatst = { op: nu, status: status, reden: String(reden || '').slice(0, 30), doel: extra && Object.hasOwn(APP_SEINTJE_EXTRA_DOEL, String(extra.doel)) ? extra.doel : undefined };   // wv3680   // 30: 'antwoord machinekamer' is 21 (seintje -> tab, wv137)
       // wv804 Fable B1/M2: per kanaal het laatste bezorgde (2xx) seintje; een mislukte push overschrijft niets
       if (!poets && ok && kanaalVan) (s.laatst_per = s.laatst_per || {})[kanaalVan[1]] = { op: nu };
       if (weg) { s.endpoint = null; s.verlopen = nu; appPushVerlopenMeld(p, id, a.naam, nu, status); }
@@ -14916,13 +14922,13 @@ async function appPushStuur(id, reden, poets) {
   appAudit({ route: 'push', m: 'POST', status: status, apparaat: id, reden: (poets ? 'poets' : String(reden || '').slice(0, 40)) + (weg ? ' (abonnement verlopen, bewaard)' : '') });
   return { ok: ok, status: status, reden: ok ? 'verstuurd' : weg ? 'abonnement verlopen' : status ? 'pushdienst gaf ' + status : 'pushdienst niet bereikbaar' };
 }
-async function appPushAlle(soort, reden, filter) {
+async function appPushAlle(soort, reden, filter, extra) {
   if (!(await appRolOk())) return [];   // alleen de actieve kant (uitwijk) geeft seintjes (Fable-review wv100 B7)
   let p;
   try { p = appPushLees(); } catch (e) { logError('app-push', e); return []; }
   const ids = Object.keys(p.apparaten).filter(function (id) { return !p.apparaten[id].verlopen && (p.apparaten[id].soorten || []).indexOf(soort) >= 0 && (!filter || filter(id)); });
   const uit = [];
-  for (const id of ids) uit.push(await appPushStuur(id, reden));
+  for (const id of ids) uit.push(await appPushStuur(id, reden, null, extra));
   return uit;
 }
 // wv1243: de app haalde op, maar het gesprek is niet in beeld (paneel rechts ingeklapt, of David typt elders): niet als gezien tellen
@@ -16421,7 +16427,9 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
 const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'pot-loonrun': 'dag' };
+// wv3680 (3C02, David Ja 21-11 12:40): actielijst = dag. Het lijstje van 07:05 kwam sinds wv804 als archief binnen (geen seintje);
+// in Telegram tikte David 17 van 18 regels aan (mediaan 7 min), in de app 28 van 80 (mediaan 289 min).
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'pot-loonrun': 'dag' };
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
@@ -16562,12 +16570,26 @@ function berichtPushZet(ids, uit) {
   ids.forEach(function (id) { if (idx[id]) idx[id].push = Object.assign({ op: new Date().toISOString() }, uit); });
   berichtIndexBewaar();
 }
+// wv3680 (3C02): ging elk bericht in dit seintje over één doel (nu: alleen het actielijstje), dan dat doel; anders null (gewoon het kanaal).
+function berichtPushDoel(kanaal, ids) {
+  let idx;
+  try { idx = berichtIndex(); } catch (e) { return null; }
+  const rijen = (ids || []).map(function (id) { return idx[id]; });
+  if (!rijen.length || rijen.some(function (r) { return !r; })) return null;
+  const namen = Object.keys(APP_SEINTJE_EXTRA_DOEL);
+  for (const n of namen) {
+    const ex = APP_SEINTJE_EXTRA_DOEL[n];
+    if (ex.kanaal === kanaal && rijen.every(function (r) { return ex.bronnen.indexOf(r.bron) >= 0; })) return n;
+  }
+  return null;
+}
 async function berichtPushNu(kanaal, ids) {
   // wv292 (Fable wv263 #10): noodstop tussen aankomst en seintje: geen seintje naar een app die uit staat
   if (fs.existsSync(APP_UIT)) return berichtPushZet(ids, { klaar: true, verstuurd: 0, noodstop: true });
   let uit = [];
   let gooide = false;
-  try { uit = await appPushAlle('antwoord', 'antwoord ' + kanaal, function (id) { return appPushMag(id); }); } catch (e) { logError('bericht-push', e); gooide = true; }   // wv804: alleen-Pixel
+  const doel = berichtPushDoel(kanaal, ids);   // wv3680
+  try { uit = await appPushAlle('antwoord', 'antwoord ' + kanaal, function (id) { return appPushMag(id); }, doel ? { doel: doel } : undefined); } catch (e) { logError('bericht-push', e); gooide = true; }   // wv804: alleen-Pixel
   const verstuurd = uit.filter(function (r) { return r && r.ok; }).length;
   // wv292 (Fable wv263 #7): faalden alle pushdiensten, dan het volgende bericht niet bundelen (n8n ziet het dan na 1 min)
   berichtPushStaat(kanaal).mislukt = verstuurd === 0 && (uit.length > 0 || (gooide && berichtPushGewenst() > 0));   // Fable wv292 #6
