@@ -50,6 +50,9 @@ process.on('exit', () => { if (!klaar) { console.log('ROOD  toets eindigde voort
     const o = laad(OUD, { vault: VAULT }), n = laad(NIEUW, { vault: VAULT });
     const po = o.appProjecten(), pn = n.appProjecten();
     delete po.op; delete pn.op;
+    const etOk = pn.deadlines.every((x) => ['jij', 'socev', 'info'].indexOf(x.etiket) >= 0);   // wv3706: alleen het veld etiket erbij
+    pn.deadlines.forEach((x) => { delete x.etiket; });
+    toets('1b wv3706: elke deadline heeft etiket jij/socev/info', etOk);
     toets('1 regressie: appProjecten() op de echte vault gelijk aan main (' + po.deadlines.length + ' deadlines, ' + po.lopend.length + ' lopend)', JSON.stringify(po) === JSON.stringify(pn));
   } else console.log('OVERGESLAGEN 1 (geen vault)');
 
@@ -99,7 +102,7 @@ process.on('exit', () => { if (!klaar) { console.log('ROOD  toets eindigde voort
   toets('2j BSN in de titel gemaskeerd, rij blijft', D.items.some((x) => /BSN/.test(x.titel) && !/111222333/.test(x.titel) && /weggelaten/i.test(x.titel)), D.items.filter((x) => /BSN/.test(x.titel)));
   toets('2k pipe in wikilink: zes cellen, titel met alias', T('Pipe in alias titel') && T('Pipe in alias titel').entiteit === 'POT', D.items.map((x) => x.titel));
   toets('2l houder = tekst vóór de dubbele punt', T('Ver maar sein').houder === 'Cynthia');
-  toets('2m uitvoer op datum gesorteerd, velden exact', D.items.every((x, i) => i === 0 || D.items[i - 1].datum <= x.datum) && D.items.every((x) => JSON.stringify(Object.keys(x)) === '["datum","titel","houder","dagen","sein","entiteit"]'));
+  toets('2m uitvoer op datum gesorteerd, velden exact', D.items.every((x, i) => i === 0 || D.items[i - 1].datum <= x.datum) && D.items.every((x) => JSON.stringify(Object.keys(x)) === '["datum","titel","houder","etiket","dagen","sein","entiteit"]'));
   const em = { 'Groenhouten': 'Groenhouten', 'Tolgaarde / ONTIE': 'Tolgaarde', 'Tolgaarde ↔ Groenhouten': 'Tolgaarde', 'POT POH-GGZ': 'POT', 'POT / HAGRO': 'POT', 'DBH (raakt praktijken)': 'DBH',
     'HAGRO / beide praktijken': 'HAGRO', 'Privé / Gambia': 'Gambia', 'Privé (Shizzle)': 'Privé', 'Privé / GHAWA': 'Privé', 'Familie': 'Privé', 'Systeem': 'Systeem',
     'Holding / Privé': 'Overig', 'Projecten/OurMind': 'Overig', 'LHV Midden-Nederland': 'HAGRO', 'David (beroep)': 'Overig', '': 'Overig' };
@@ -112,6 +115,15 @@ process.on('exit', () => { if (!klaar) { console.log('ROOD  toets eindigde voort
   const P = H.wkDeadlines(kop + veel.join('\n'), vandaag);
   toets('2o plafond 40: sein eerst, afgekapt 5 in veld en melding, gesorteerd', P.items.length === 40 && P.afgekapt === 5 && P.items.filter((x) => /^Sein ver/.test(x.titel)).length === 5 && /5 latere deadlines niet getoond/.test(P.melding) && !P.items.some((x) => /^Gewoon 3[5-9]$/.test(x.titel)), [P.items.length, P.afgekapt, P.melding]);
   toets('2p deterministisch: twee keer dezelfde uitvoer', JSON.stringify(H.wkDeadlines(kop + reg.join('\n'), vandaag)) === JSON.stringify(D));
+  // wv3706: etiket vooraan in Actie; houder zonder etiket; zonder etiket Systeem → socev, anders jij
+  const EK = H.wkDeadlines(kop + [rij(plus(3), 'Tolgaarde', '**Et jij**', '[jij] Cynthia: bellen', 3), rij(plus(3), 'Holding', '**Et socev**', '[Socev] Machinekamer: x', 3),
+    rij(plus(3), 'Privé', '**Et info**', '[ter info] geen actie — ter info', 3), rij(plus(3), 'Systeem', '**Et oud systeem**', 'Machinekamer: x', 3),
+    rij(plus(3), 'Groenhouten', '**Et oud**', 'David: x', 3), rij(plus(3), 'Systeem', '**Et JIJ**', '[JIJ] David: rollen', 3)].join('\n'), vandaag);
+  const ET = (t) => EK.items.find((x) => x.titel === t) || {};
+  toets('2r etiket jij/socev/info uit [..] vooraan in Actie (hoofdletterongevoelig); houder zonder etiket; zonder etiket Systeem → socev, anders jij',
+    ET('Et jij').etiket === 'jij' && ET('Et jij').houder === 'Cynthia' && ET('Et socev').etiket === 'socev' && ET('Et socev').houder === 'Machinekamer'
+    && ET('Et info').etiket === 'info' && ET('Et info').houder === 'geen actie (ter info)' && ET('Et oud systeem').etiket === 'socev' && ET('Et oud').etiket === 'jij'
+    && ET("Et JIJ").etiket === "jij", EK.items);
   toets('2q geen sectie Actueel -> fout (paneel overslaan), geen items', (function () { const x = H.wkDeadlines('# leeg\n', vandaag); return x.fout && !x.items.length; })());
 
   // ── 3. documenten op een wegwerpvault ──

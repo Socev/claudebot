@@ -273,7 +273,8 @@ function maak(o) {
     else return null;
     return d.filter(function (x) { return hoort(x) && x.dagen >= -7 && x.dagen <= 400; })
       .sort(function (a, b) { return a.dagen - b.dagen; }).slice(0, 8)
-      .map(function (x) { return { datum: x.datum, dagen: x.dagen, titel: masker(String(x.titel || '').slice(0, 160)), hr: !!x.hr }; });
+      .map(function (x) { return { datum: x.datum, dagen: x.dagen, titel: masker(String(x.titel || '').slice(0, 160)), hr: !!x.hr,
+        etiket: x.etiket === 'socev' || x.etiket === 'info' ? x.etiket : 'jij' }; });   // wv3706: jij / socev / info (ter info)
   }
 
   // Privépersonen uit de vault (wv1930): persoonspagina's onder PRIVE_MAPPEN, gelezen via VV (lees); de stamboom alleen op naam (bestandsnaam,

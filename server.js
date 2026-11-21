@@ -14484,6 +14484,15 @@ function appProjCellen(regel) {
   const c = r.split(/(?<!\\)\|/).map(function (x) { return x.replace(/\u0001/g, '|').trim(); });
   return c.slice(1, c.length - 1);
 }
+// wv3706 (besluit nr 413 / 3C113, David Ja 21-11-2026): etiket per deadline vooraan in de kolom Actie: [jij], [Socev] of [ter info].
+// Geeft { etiket: 'jij'|'socev'|'info', actie: ruwe cel zonder etiket }. Zonder etiket: Systeem → socev, anders jij (twijfel = jij), zoals
+// kalender_deadlines.py (socev-scripts 1.3.0) voor_wie op de tijdlijn zet.
+const APP_DL_ETIKET = /^\s*\[(jij|socev|ter info)\]\s*/i;
+function appDlEtiket(actie, entiteit) {
+  const a = String(actie || ''), m = APP_DL_ETIKET.exec(a);
+  if (m) { const e = m[1].toLowerCase(); return { etiket: e === 'ter info' ? 'info' : e, actie: a.slice(m[0].length) }; }
+  return { etiket: /^\s*systeem\b/i.test(appProjPlat(entiteit)) ? 'socev' : 'jij', actie: a };
+}
 function appProjDeadlines(tekst, vandaag, fouten) {
   const sectie = String(tekst).split(/^## Actueel\s*$/m)[1];
   if (sectie === undefined) { fouten.push('het deadline-register heeft geen sectie Actueel'); return []; }
@@ -14493,7 +14502,8 @@ function appProjDeadlines(tekst, vandaag, fouten) {
     if (!/^\|\s*\d{4}-\d{2}/.test(regel)) return;
     const c = appProjCellen(regel);
     if (c.length !== 6) { scheef++; return; }
-    const datum = c[0], wat = c[2];
+    const datum = c[0], wat = c[2], et = appDlEtiket(c[3], c[1]);
+    c[3] = et.actie;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(datum)) return;
     const eerste = /^\s*\*\*([\s\S]+?)\*\*/.exec(wat);
     const kop = eerste ? appProjPlat(eerste[1]) : '';
@@ -14503,7 +14513,7 @@ function appProjDeadlines(tekst, vandaag, fouten) {
     const dagen = Math.round((Date.parse(datum + 'T12:00:00Z') - Date.parse(vandaag + 'T12:00:00Z')) / 86400000);
     const sein = Number(String(c[4]).replace(/\D/g, '')) || 0;
     const bronPad = appProjWikiPaden(c[5])[0] || null;
-    uit.push({ datum: datum, dagen: dagen, ents: ents,
+    uit.push({ datum: datum, dagen: dagen, ents: ents, etiket: et.etiket,
       titel: appKort(appProjTitel(wat), 160) || '(zonder titel)',
       actie: appKort(appProjPlat(c[3]), 120),
       sein: dagen >= 0 && dagen <= sein,
@@ -14670,7 +14680,7 @@ function wkDeadlines(tekst, vandaag) {
     if (!/^\|\s*\d{4}-\d{2}/.test(regel)) return;
     const c = appProjCellen(regel);
     if (c.length !== 6) { scheef++; return; }
-    const datum = c[0], wat = c[2], actie = appProjPlat(c[3]);
+    const et = appDlEtiket(c[3], c[1]), datum = c[0], wat = c[2], actie = appProjPlat(et.actie);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || isNaN(Date.parse(datum + 'T12:00:00Z'))) {
       // halve of ongeldige datum: alleen tellen als de maand nog in het venster kan vallen (een "2026-09" van vorige maand niet)
       const hm = /^(\d{4})-(\d{2})/.exec(datum), eind = hm ? new Date(Date.UTC(Number(hm[1]), Number(hm[2]), 0)).toISOString().slice(0, 10) : null;
@@ -14684,14 +14694,14 @@ function wkDeadlines(tekst, vandaag) {
     if (!sm && dagen >= 0 && dagen <= WK_VOORUIT) seinFout++;
     const sein = dagen >= 0 && dagen <= signaleer;
     if (!((dagen >= -WK_TERUG && dagen <= WK_VOORUIT) || sein)) return;
-    kand.push({ datum: datum, titel: wkTekst(appProjTitel(wat, WK_STATUS), 160) || '(zonder titel)', houder: wkTekst(wkHouder(actie), 60),
+    kand.push({ datum: datum, titel: wkTekst(appProjTitel(wat, WK_STATUS), 160) || '(zonder titel)', houder: wkTekst(wkHouder(actie), 60), etiket: et.etiket,
       dagen: dagen, sein: sein, entiteit: wkEntiteit(c[1]), volg: kand.length });
   });
   // Plafond met vaste volgorde (ontwerp regel 4): eerst sein of verlopen, dan de rest op datum, bij gelijke datum de registervolgorde.
   const opDatum = function (a, b) { return a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : a.volg - b.volg; };
   const voor = kand.filter(function (x) { return x.sein || x.dagen < 0; }).sort(opDatum), na = kand.filter(function (x) { return !(x.sein || x.dagen < 0); }).sort(opDatum);
   const items = voor.concat(na).slice(0, WK_MAX_DEADLINES).sort(opDatum).map(function (x) {
-    return { datum: x.datum, titel: x.titel, houder: x.houder, dagen: x.dagen, sein: x.sein, entiteit: x.entiteit };
+    return { datum: x.datum, titel: x.titel, houder: x.houder, etiket: x.etiket, dagen: x.dagen, sein: x.sein, entiteit: x.entiteit };
   });
   const afgekapt = Math.max(0, kand.length - WK_MAX_DEADLINES), m = [];
   if (afgekapt) m.push(afgekapt + ' latere deadlines niet getoond (plafond ' + WK_MAX_DEADLINES + ')');
