@@ -8791,7 +8791,11 @@ async function appBeurt(req, res, reg, a, s, d) {
 }
 
 // ── wv628: rij, tussendoor-regel en "Antwoord hierop" (ontwerp parallelle draden § 4.2) ──
-const APP_ANTWOORD_OP_MS = 72 * 3600 * 1000;
+// wv3607 (actieplan 3B07, Fable-review te-lezen idee 6): zo oud als het oudste wat Te lezen kan tonen (te-lezen.js BEWAAR_OUD_MS: een
+// bewaard bericht tot 16 dagen; vanzelf 7 dagen), want Te lezen › Reageer leidt hierheen. Was 72 uur: een punt van 4–7 dagen stond
+// in Te lezen maar was niet te beantwoorden. De app leest de grens uit antwoord_op_ms (geschiedenis), oude app = 72 uur.
+const APP_ANTWOORD_OP_MS = 16 * 24 * 3600 * 1000;
+const APP_ANTWOORD_OP_DAGEN = Math.round(APP_ANTWOORD_OP_MS / (24 * 3600 * 1000));
 const APP_ANTWOORD_OP_KANALEN = { machinekamer: true, hoofd: true };   // wv2964: ook het gesprek met Socev (David 12-11-2026)
 (typeof CODE_IDS === 'undefined' ? [] : CODE_IDS).forEach(function (id) { APP_ANTWOORD_OP_KANALEN[CODE_APPS.KANAAL_VOOR + id] = true; });   // wv3227
 const APP_ANTWOORD_OP_CITAAT = 600;
@@ -8832,7 +8836,7 @@ async function appAntwoordOpZoek(kanaal, id) {
     if (ruw.fout) { logError('app-log-lees', ruw.fout); return { fout: 'de geschiedenis is nu niet leesbaar; stuur je antwoord zonder citaat', status: 503, reden: 'antwoord_op log' }; }
     return { fout: 'dit bericht ken ik niet (meer); stuur je antwoord zonder citaat', status: 400, reden: 'antwoord_op onbekend' };
   }
-  if (!(Date.now() - Date.parse(x.t) <= APP_ANTWOORD_OP_MS)) return { fout: 'dit bericht is ouder dan 3 dagen; stuur je antwoord zonder citaat', status: 400, reden: 'antwoord_op te oud' };
+  if (!(Date.now() - Date.parse(x.t) <= APP_ANTWOORD_OP_MS)) return { fout: 'dit bericht is ouder dan ' + APP_ANTWOORD_OP_DAGEN + ' dagen; stuur je antwoord zonder citaat', status: 400, reden: 'antwoord_op te oud' };
   // open vraag die als gevoelig staat (versturen, agenda, geld; rij zonder veld = gevoelig): getypt telt niet
   let gevoeligOpen = false;
   if (x.vraag_hash) {
@@ -9214,7 +9218,7 @@ async function appGeschiedenis(req, res, reg, a, pad) {
   const uit = { ok: true, kanaal: kanaal, items: items, lopend: lopend, fout: fout, reacties: !!reacties };
   // wv628: wat deze pod kent (de app zet de Stuur-knop alleen open en toont Antwoord hierop als het er staat; oude pod = oud gedrag)
   if (appRijAan(kanaal)) { uit.rij_getypt = true; uit.rij_max = APP_RIJ_GETYPT_MAX; }
-  if (APP_ANTWOORD_OP_KANALEN[kanaal]) uit.antwoord_op = true;   // wv2964: ook hoofd
+  if (APP_ANTWOORD_OP_KANALEN[kanaal]) { uit.antwoord_op = true; uit.antwoord_op_ms = APP_ANTWOORD_OP_MS; }   // wv2964: ook hoofd; wv3607: grens mee
   if (anker) { uit.anker = anker; uit.meer_nieuw = meerNieuw; }
   appStuur(res, 200, uit);
 }
@@ -9847,6 +9851,7 @@ async function appWerkvoorraad() {
   appStaat.wvCache = { op: Date.now(), d: d };
   return d;
 }
+const APP_AGENTS_RECENT_MS = 48 * 3600 * 1000, APP_AGENTS_RECENT_MIN = 30, APP_AGENTS_RECENT_MAX = 300;   // wv3607
 const APP_AGENT_STATUS = { pending: 'wacht', running: 'loopt', 'afgebroken-containerherstart': 'afgebroken' };
 async function appAgents(req, res, a) {
   res._app.stil = true;   // ververst elke 15 s zolang de tab open is: geen auditregel bij 200
@@ -9876,8 +9881,14 @@ async function appAgents(req, res, a) {
   });
   const lopend = agents.filter(function (a) { return a.status === 'loopt' || a.status === 'wacht'; })
     .sort(function (a, b) { return String(a.gestart).localeCompare(String(b.gestart)); });
-  const recent = agents.filter(function (a) { return a.status !== 'loopt' && a.status !== 'wacht'; })
-    .sort(function (a, b) { return String(b.geeindigd || b.gestart).localeCompare(String(a.geeindigd || a.gestart)); }).slice(0, 30);
+  // wv3607 (actieplan 3B06, Fable-review agents idee 6): was .slice(0, 30), stil — op een drukke dag (136 klussen) zag je 's ochtends
+  // gistermiddag niet meer. Nu alles wat de laatste 48 uur afrondde (minstens de jongste 30, hooguit het registerplafond) en het
+  // totaal in het register, zodat de app zegt hoeveel er nog zijn.
+  const afgerond = agents.filter(function (a) { return a.status !== 'loopt' && a.status !== 'wacht'; })
+    .sort(function (a, b) { return String(b.geeindigd || b.gestart).localeCompare(String(a.geeindigd || a.gestart)); });
+  const recentVanaf = new Date(nu - APP_AGENTS_RECENT_MS).toISOString();
+  const recent = afgerond.filter(function (a, i) { return i < APP_AGENTS_RECENT_MIN || String(a.geeindigd || a.gestart || '') >= recentVanaf; })
+    .slice(0, APP_AGENTS_RECENT_MAX);
   // wv2594: de app deelt de rij in (nu aan de beurt / gepland / wacht op een andere klus). Daarvoor per rij wacht_klus: de klus waar hij
   // nu echt op wacht (zoals de claim van de tikker: item:-voorganger nog niet klaar volgens wacht_item_open, of een lopende job), null =
   // wacht nergens op; en nacontrole (gaat in de bundelronde). na blijft voor oudere apps (alle voorgangers, ook afgeronde).
@@ -9925,7 +9936,7 @@ async function appAgents(req, res, a) {
     }
   } catch (e) { logError('app-agents', e); voorJou = null; los = null; }
   appStuur(res, 200, { ok: true, max: maxAgents(), lopend: lopend, rij: rij, rij_totaal: open.length, wacht_op_david: wachtOpDavid,
-    voor_jou: voorJou, wacht_op_david_los: los, recent: recent, ruimte: ru, fout: fout });
+    voor_jou: voorJou, wacht_op_david_los: los, recent: recent, recent_totaal: afgerond.length, recent_uren: APP_AGENTS_RECENT_MS / 3600000, ruimte: ru, fout: fout });
 }
 // ── wv1029: idee 14 fase 2 — klussen als tabjes in de machinekamer (ontwerp "Machinekamer - parallelle draden" § 4.3.2 a) ──
 // Eén draad = één werkvoorraadrij met label machinekamer:. Rapport → draad via (1) het wv-nummer in het registerlabel, (2)

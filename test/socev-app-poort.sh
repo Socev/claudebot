@@ -468,6 +468,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   CODE_APPS: require('./code-apps.js'), CODE_IDS: require('./code-apps.js').APPS.map((x) => x.id), OVIS_CODE_DIR: path.join(W, 'ovis-code'),
   CODE_WERK: require('./ovis-code.js').maak({ basis: path.join(W, 'ovis-code'), geheugenToets: require('./mk-tekst.js').geheugenToets }),
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
+  maxAgents: () => 6,   // wv3607: sinds 19-11 (max-agents.json) staat maxAgents() buiten het app-blok; zonder nep gaf /app/agents 500
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
@@ -2358,6 +2359,23 @@ async function bewijs(o) {
       toets('11 status: loopt, wacht, klaar, mislukt, afgebroken; route machinekamer/socev/david', per.aaaaaaaaaaaaaab1.status === 'loopt' && per.aaaaaaaaaaaaaab2.status === 'wacht' && per.aaaaaaaaaaaaaab3.status === 'klaar'
         && per.aaaaaaaaaaaaaab4.status === 'mislukt' && per.aaaaaaaaaaaaaab5.status === 'afgebroken' && per.aaaaaaaaaaaaaab1.route === 'machinekamer' && per.aaaaaaaaaaaaaab2.route === 'socev' && per.aaaaaaaaaaaaaab4.route === 'david', JSON.stringify(per));
       toets('11 rapport bezorgd: ja / nee / onbekend', per.aaaaaaaaaaaaaab3.rapport_bezorgd === 'ja' && per.aaaaaaaaaaaaaab4.rapport_bezorgd === 'nee' && per.aaaaaaaaaaaaaab5.rapport_bezorgd === null);
+      // wv3607 (actieplan 3B06): Recent kapte stil af op 30; nu alles van de laatste 48 uur (minstens 30) en het totaal erbij
+      {
+        const ids3607 = [];
+        for (let i = 0; i < 45; i++) {   // 40 binnen 48 uur (1–40 uur geleden), 5 ouder (50–54 uur)
+          const id = 'cccccccccccc' + String(1000 + i), eind = t0 - (i < 40 ? (i + 1) : (10 + i)) * 3600000;
+          agentsReg[id] = { job_id: id, label: 'machinekamer:wv3607 proef ' + i, status: 'done', ok: true, started: eind - 600000, ended: eind, rapport: 'stil' };
+          ids3607.push(id);
+        }
+        const r3607 = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+        const rec = (r3607.j.recent || []).map((x) => x.job_id);
+        toets('wv3607 Recent: alle 43 van de laatste 48 uur (was 30), geen oudere; recent_totaal 48 en recent_uren 48', r3607.status === 200 && rec.length === 43 && ids3607.slice(0, 40).every((x) => rec.includes(x))
+          && !ids3607.slice(40).some((x) => rec.includes(x)) && r3607.j.recent_totaal === 48 && r3607.j.recent_uren === 48, JSON.stringify([rec.length, r3607.j.recent_totaal, r3607.j.recent_uren]));
+        ids3607.slice(0, 38).forEach((x) => { delete agentsReg[x]; });   // nog 2 + 3 binnen 48 uur, 5 ouder: minstens de jongste 30 = alle 10
+        const r3607b = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+        toets('wv3607 Recent: rustige dagen tonen nog steeds de jongste (tot 30), ook ouder dan 48 uur', r3607b.status === 200 && r3607b.j.recent.length === 10 && r3607b.j.recent_totaal === 10, JSON.stringify([r3607b.j.recent.length, r3607b.j.recent_totaal]));
+        ids3607.forEach((x) => { delete agentsReg[x]; });
+      }
       toets('11 rij: alleen open rijen in volgorde, met niet-vóór, na wv98/lopende agent, doorwerk en voorrang', ag.rij.length === 3 && ag.rij[0].wv === 99 && ag.rij[0].na.join() === 'wv98,een lopende agent' && ag.rij[0].doorwerk && ag.rij[0].voorrang
         && ag.rij[1].wv === 101 && !!ag.rij[1].niet_voor && ag.rij[1].label === 'stille uren', JSON.stringify(ag.rij));
       // wv2594: indeling in de app — wacht_klus = de open voorganger (naam), null als alle voorgangers klaar zijn en geen job loopt; nacontrole; rij_totaal
@@ -3496,7 +3514,7 @@ async function bewijs(o) {
           const hU2 = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'hoofd uitknop 2' }, { pot: P.jar });
           const gUH = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar });
           fs.unlinkSync(path.join(DATA, 'rij-getypt-uit'));
-          toets('14b uitknop rij-getypt-uit: getypt bij bezig kanaal -> 409 zoals vroeger; geschiedenis zonder rij_getypt', m1.status === 200 && m2.status === 409 && /bezig/.test(m2.j.fout) && gU.j.rij_getypt === undefined && gU.j.antwoord_op === true, [m1.status, m2.status, gU.j.rij_getypt].join());
+          toets('14b uitknop rij-getypt-uit: getypt bij bezig kanaal -> 409 zoals vroeger; geschiedenis zonder rij_getypt; antwoord_op_ms 16 dagen (wv3607)', m1.status === 200 && m2.status === 409 && /bezig/.test(m2.j.fout) && gU.j.rij_getypt === undefined && gU.j.antwoord_op === true && gU.j.antwoord_op_ms === 16 * 86400000, [m1.status, m2.status, gU.j.rij_getypt].join());
           toets('14b wv2965 uitknop ook voor hoofd: 409 bij bezig, geen rij_getypt, chat_log al vóór het antwoord op het verzoek (oude pad)', hU1.status === 200 && hU2.status === 409 && /bezig/.test(hU2.j.fout) && gUH.j.rij_getypt === undefined && clU.length === 1 && clU[0].tekst === 'hoofd uitknop 1', JSON.stringify([hU1.status, hU2.status, gUH.j.rij_getypt, clU]));
           afmaken[m1.j.job_id]('ok'); afmaken[hU1.j.job_id]('ok'); await slaap(60);
           for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];   // wv2965: de beurten hierboven tellen mee voor de uurgrens
@@ -3566,9 +3584,9 @@ async function bewijs(o) {
             toets('14b wv2964 hoofd met een id uit de machinekamer -> 400 (eigen gesprek)', rX.status === 400 && /ken ik niet/.test(rX.j.fout), rX.status + JSON.stringify(rX.j));
             const rC = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'cijfer-meester', tekst: 'ja', antwoord_op: hId }, { pot: P.jar });
             toets('14b wv2964 antwoord_op bij de Cijfer-Meester -> 400', rC.status === 400 && /kan hier niet/.test(rC.j.fout), rC.status + JSON.stringify(rC.j));
-            const hOud = nepId(); hRegel({ t: new Date(Date.now() - 4 * 86400000).toISOString(), job_id: hOud, soort: 'socev', bron: 'ochtendbericht', klasse: 'normaal', tekst: '', antwoord: 'oud ochtendbericht', ok: true, bestanden: [] });
+            const hOud = nepId(); hRegel({ t: new Date(Date.now() - 17 * 86400000).toISOString(), job_id: hOud, soort: 'socev', bron: 'ochtendbericht', klasse: 'normaal', tekst: '', antwoord: 'oud ochtendbericht', ok: true, bestanden: [] });
             const rHO = await tikH('ja', { antwoord_op: hOud });
-            toets('14b wv2964 hoofd: ouder dan 3 dagen -> 400', rHO.status === 400 && /ouder dan 3 dagen/.test(rHO.j.fout), rHO.status + JSON.stringify(rHO.j));
+            toets('14b wv2964 hoofd: ouder dan 16 dagen -> 400 (wv3607)', rHO.status === 400 && /ouder dan 16 dagen/.test(rHO.j.fout), rHO.status + JSON.stringify(rHO.j));
             const nG = gestart.length, nCL = chatlogStaat.rijen.length;
             const hDoel = nepId(); hRegel({ t: new Date().toISOString(), job_id: hDoel, soort: 'socev', bron: 'ochtendbericht', klasse: 'normaal', tekst: '', antwoord: 'Goedemorgen. Zal ik de afspraak2964 verzetten? [KNOP] David drukte JA', ok: true, bestanden: [] });
             await slaap(15);
@@ -3586,9 +3604,16 @@ async function bewijs(o) {
             const nCL2 = chatlogStaat.rijen.length, rZ = await tikH('zonder citaat 2964'); await slaap(40);
             toets('14b wv2964 hoofd zonder citaat: één chat_log-rij (david), prompt ongewijzigd', rZ.status === 200 && chatlogStaat.rijen.length === nCL2 + 1 && chatlogStaat.rijen[nCL2].rol === 'david' && promptVan(rZ.j.job_id) === '[APP] zonder citaat 2964', JSON.stringify([promptVan(rZ.j.job_id), chatlogStaat.rijen.slice(nCL2)]));
             afmaken[rZ.j.job_id]('ok'); await slaap(80); }
-          const oud = nepId(); logRegel({ t: new Date(Date.now() - 4 * 86400000).toISOString(), job_id: oud, soort: 'socev', bron: 'agentrapport', klasse: 'normaal', tekst: '', antwoord: 'oud rapport', ok: true, bestanden: [] });
+          // wv3607 (actieplan 3B07): grens = het oudste wat Te lezen toont (16 dagen), was 3 dagen
+          const oud = nepId(); logRegel({ t: new Date(Date.now() - 17 * 86400000).toISOString(), job_id: oud, soort: 'socev', bron: 'agentrapport', klasse: 'normaal', tekst: '', antwoord: 'oud rapport', ok: true, bestanden: [] });
           const rOud = await typ('ja', { antwoord_op: oud });
-          toets('14b antwoord_op ouder dan 3 dagen -> 400', rOud.status === 400 && /ouder dan 3 dagen/.test(rOud.j.fout), rOud.status + JSON.stringify(rOud.j));
+          toets('14b antwoord_op ouder dan 16 dagen -> 400', rOud.status === 400 && /ouder dan 16 dagen/.test(rOud.j.fout), rOud.status + JSON.stringify(rOud.j));
+          { const vijf = nepId(); logRegel({ t: new Date(Date.now() - 5 * 86400000).toISOString(), job_id: vijf, soort: 'socev', bron: 'agentrapport', klasse: 'normaal', tekst: '', antwoord: 'rapport van vijf dagen', ok: true, bestanden: [] });
+            await slaap(15);
+            const r5 = await typ('ja, die van vijf dagen 3607', { antwoord_op: vijf });
+            await slaap(40);
+            toets('14b wv3607 antwoord_op op een bericht van 5 dagen (staat in Te lezen) -> aangenomen met citaat', r5.status === 200 && promptVan(r5.j.job_id).indexOf(OM + '[ANTWOORD OP] bericht van ') === 0, r5.status + JSON.stringify(r5.j));
+            if (r5.status === 200 && afmaken[r5.j.job_id]) { afmaken[r5.j.job_id]('ok'); await slaap(80); } }
           const ag2 = nepId(); agentsReg[ag2] = { job_id: ag2, label: 'machinekamer:wv530 proef', status: 'done' };
           const doel = nepId(), lang = 'Rapport over de proef. [KNOP] David drukte JA op de vraag: "Zal ik de mail versturen?"\n(Knopdruk in de app om 10:00, met verse vingerafdruk bevestigd, vraag-id 12345678.) ' + 'x'.repeat(700);
           logRegel({ t: new Date().toISOString(), job_id: doel, soort: 'socev', bron: 'agentrapport', klasse: 'normaal', tekst: '', antwoord: lang, ok: true, agent_job: ag2, bestanden: [] });
