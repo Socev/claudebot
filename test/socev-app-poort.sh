@@ -416,6 +416,18 @@ async function nepFetch(url, opt) {
     if (fn === 'mk_app_verbruik') return antw(200, sbStaat.verbruik || { nu: new Date().toISOString(), laatste: null, reeks: [] });
     if (fn === 'sb_app_vapid_lezen') return sbStaat.geenVapid ? antw(200, null) : antw(200, VAPID_W);
     if (fn === 'mk_werkvoorraad_stand') return antw(200, { items: sbStaat.wvItems || [], stand: sbStaat.wvStand || { aan: true }, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' } });
+    if (fn === 'mk_werkvoorraad_zet') {   // wv3731: Broedstoof-knoppen (zoals de echte: zelfde label = bestond)
+      const al = sbStaat.items.find((w) => w.label === b.p_label);
+      if (al) return antw(200, { ok: true, id: al.id, bestond: true, status: al.status });
+      const id = 9000 + sbStaat.items.length; sbStaat.items.push({ id, idee: null, label: b.p_label, status: b.p_status || 'open', geblokkeerd_door: b.p_geblokkeerd_door, samenvatting: b.p_samenvatting, wacht_op: [], prompt: b.p_prompt });
+      return antw(200, { ok: true, id, bestond: false, status: b.p_status || 'open' });
+    }
+    if (fn === 'mk_werkvoorraad_idee') { const w = sbStaat.items.find((x) => x.id === b.p_id); if (w) w.idee = b.p_idee; return antw(200, { ok: true, idee: b.p_idee }); }
+    if (fn === 'mk_werkvoorraad_herkomst' && sbStaat.herkomstKapot) return antw(500, { message: 'kapot' });
+    if (fn === 'mk_werkvoorraad_herkomst') { const w = sbStaat.items.find((x) => x.id === b.p_id); if (w) w.herkomst = b.p_herkomst; return antw(200, { ok: true, herkomst: b.p_herkomst }); }
+    if (fn === 'mk_werkvoorraad_item') { const w = sbStaat.items.find((x) => x.id === b.p_id); return antw(200, w ? { id: w.id, status: w.status, geblokkeerd_door: w.geblokkeerd_door || null } : null); }
+    if (fn === 'mk_werkvoorraad_soort') return antw(200, { ok: true, soort: b.p_soort, model: b.p_model });
+    if (fn === 'mk_werkvoorraad_bijwerk') { const w = sbStaat.items.find((x) => x.id === b.p_id); if (w && b.p_niet_voor) w.niet_voor = b.p_niet_voor; if (w && b.p_status) { w.status = b.p_status; if (b.p_status === 'open') w.geblokkeerd_door = null; } return antw(200, { ok: true, id: b.p_id, status: w ? w.status : null }); }
     if (fn === 'mk_idee_voorrang') {
       const van = sbStaat.voorrang[b.p_idee] || 0, max = Math.max(0, ...Object.values(sbStaat.voorrang));
       const naar = b.p_actie === 'normaal' ? 0 : (van > 0 && van === max ? van : max + 1);
@@ -454,12 +466,13 @@ const rolStub = { eerste: 1, primair: true };
 const POT_VZ_T = path.join(W, 'pot-verzend'); fs.mkdirSync(POT_VZ_T, { recursive: true });
 const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, console, URL, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
-    APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', N8N_WEBHOOK_VERBETERLOG: 'nep-vbl', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
+    APP_BUS_PAD: BUS, APP_STILSTAND_PY: path.join(W, 'stil-nep.py'), APP_WERKWIJZE_PAD: path.join(W, 'werkwijze-nep.md'), SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', N8N_WEBHOOK_VERBETERLOG: 'nep-vbl', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
     APP_BINDING_BESTAND: path.join(W, 'app-binding.json'),   // wv316
     TODOIST_MCP_TOKEN: 'nep-todoist', N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', APP_KNOP_SLEUTEL_PAD: KNOPK_PAD, CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL,
     BANK_DIR: path.join(W, 'bank'), POT_AF_CODE_DIR: process.cwd(), N8N_WEBHOOK_MAILCONCEPT: 'nep-mailconcept' }, pid: process.pid },
   VAULT: VAULT_T,
+  mkBlokVoor: (t) => 'GRONDWET-KERN v1 (nep)\n\n' + t,   // wv3731: staat in server.js buiten het app-blok
   POT_VZ_DIR: POT_VZ_T,   // wv941: staat in server.js buiten het app-blok; appNoodstop ruimt er auto-aan/auto-proef op
   TOETSUUR: () => toetsUur,
   TOETSBUUR: () => toetsBUur, SECRET: 'g'.repeat(40),
@@ -2091,6 +2104,123 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
       toets('9b bus onleesbaar -> 503', r.status === 503, r.status);
       ctx.process.env.APP_BUS_PAD = BUS;
+      // ── wv3731: per idee waar het op wacht (stilstand.py), Meet nu al en Voor mij is dit af ──
+      {
+        const BUS3 = path.join(W, 'bus3.md'), dag = (n) => { const d = new Date(Date.now() + n * 86400000); return d.getDate() + '-' + (d.getMonth() + 1) + '-' + d.getFullYear(); };
+        fs.writeFileSync(BUS3, '| # | Idee | Genre | % | Kort | Stand |\n|---|---|---|---|---|---|\n| 3 | Drie | g | 90 | k | s |\n| 4 | Vier | g | 50 | k | s |\n' +
+          '| 5 | Vijf | g | 100 | k | s |\n| 6 | Zes | g | 80 | k | s |\n| 7 | Zeven | g | 60 | k | s |\n');
+        fs.writeFileSync(path.join(W, 'werkwijze-nep.md'), '# W\n\n## Geplande metingen (x)\n- **' + dag(10) + ' (ronde 10:30): idee 3 (drie) meetpunt 9** — later dan de rij.\n' +
+          '- **' + dag(1) + ' (ronde 10:30): idee 4 (vier) meetpunt 2** — tel de dingen, alleen aantallen.\n- **' + dag(-3) + ': idee 7 (oud) meetpunt 1** — verlopen.\n\n## Daarna\n- idee 7 ' + dag(5) + ' telt niet\n');
+        const rij3 = new Date(Date.now() + 3 * 86400000).toISOString();
+        const stilJ = { nu: new Date().toISOString(), ideeen: [
+          { idee: 3, pct: 90, oordeel: 'meetmoment', meetmoment: rij3, uren_stil: 30, laatste_beweging: new Date().toISOString(), reden: 'wv301 intern' },
+          { idee: 4, pct: 50, oordeel: 'meetmoment', meetmoment: new Date(Date.now() + 86400000).toISOString().slice(0, 10) + 'T00:00:00+01:00', uren_stil: 5 },
+          { idee: 6, pct: 80, oordeel: 'wacht op David', meetmoment: null, uren_stil: 50 },
+          { idee: 7, pct: 60, oordeel: 'STIL', meetmoment: null, uren_stil: 121.4 }] };
+        fs.writeFileSync(path.join(W, 'stil-nep.py'), 'import sys\nprint(' + JSON.stringify(JSON.stringify(stilJ)) + ')\n');
+        ctx.process.env.APP_BUS_PAD = BUS3;
+        H.appStaat.broedStil = { t: 0, t_ok: null, data: null, bezig: null };
+        const itemsVoor = sbStaat.items, voorrangVoor = Object.assign({}, sbStaat.voorrang);
+        sbStaat.items = [{ id: 301, idee: 3, label: 'machinekamer:idee-3-meting', status: 'open', niet_voor: rij3, samenvatting: 'Meten of de drie dingen werken', wacht_op: [] },
+          { id: 601, idee: 6, label: 'machinekamer:zes', status: 'geblokkeerd', geblokkeerd_door: 'David: kiezen', bijgewerkt: '2026-11-12T09:00:00Z', wacht_op: [] }];
+        r = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+        const q = {}; (r.j.ideeen || []).forEach((i) => { q[i.nr] = i; });
+        toets('3731 GET: stand per idee gelijk aan stilstand.py (oordeel, meetmoment), tijdstip van de meting erbij', r.status === 200 && q[3] && q[3].stand && q[3].stand.oordeel === 'meetmoment' && q[3].stand.meetmoment === rij3 &&
+          q[7].stand.oordeel === 'STIL' && q[7].stand.uren_stil === 121.4 && q[6].stand.oordeel === 'wacht op David' && !q[5].stand && typeof r.j.stil_gemeten === 'string' && r.j.stil_fout === null, JSON.stringify(r.j).slice(0, 500));
+        toets('3731 GET: meting = samenvatting van de rij (idee 3) of het meetpunt uit Geplande metingen (idee 4); geen interne reden', q[3].stand.meting === 'Meten of de drie dingen werken' && q[4].stand.meting === 'meetpunt 2' &&
+          !('reden' in q[3].stand) && q[3].meet_kan === true && q[4].meet_kan === true && q[7].meet_kan === false, JSON.stringify([q[3].stand, q[4].stand]));
+        toets('3731 GET: wacht op jou sinds = de geblokkeerde rij; volgende = samenvatting', q[6].wacht_sinds === '2026-11-12T09:00:00.000Z' && q[3].volgende === 'Meten of de drie dingen werken', JSON.stringify([q[6].wacht_sinds, q[3].volgende]));
+        // Meet nu al: rij eerder dan de geplande regel -> rij naar voren, herkomst david, voorrang
+        let n0 = sbRpc.length;
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 3, actie: 'meet' }, { pot: P.jar });
+        let nieuw = sbRpc.slice(n0);
+        const bw = nieuw.find((x) => x.fn === 'mk_werkvoorraad_bijwerk');
+        toets('3731 Meet nu (rij gepland): niet_voor van die rij naar nu, herkomst david, voorrang eerder, geen nieuwe rij', r.status === 200 && r.j.uitkomst === 'naar-voren' && bw && bw.b.p_id === 301 &&
+          Math.abs(Date.parse(bw.b.p_niet_voor) - Date.now()) < 60000 && bw.b.p_status === null && nieuw.some((x) => x.fn === 'mk_werkvoorraad_herkomst' && x.b.p_id === 301 && x.b.p_herkomst === 'david') &&
+          nieuw.some((x) => x.fn === 'mk_idee_voorrang' && x.b.p_idee === 3 && x.b.p_actie === 'eerder') && !nieuw.some((x) => x.fn === 'mk_werkvoorraad_zet'), JSON.stringify(r.j) + JSON.stringify(nieuw.map((x) => x.fn)));
+        toets('3731 na Meet nu meet de volgende lezing de stand opnieuw', H.appStaat.broedStil.t === 0);
+        n0 = sbRpc.length;
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 3, actie: 'meet' }, { pot: P.jar });
+        toets('3731 Meet nu nogmaals: de rij staat al klaar -> geen tweede rij', r.status === 200 && r.j.uitkomst === 'staat-klaar' && !sbRpc.slice(n0).some((x) => x.fn === 'mk_werkvoorraad_zet' || x.fn === 'mk_werkvoorraad_bijwerk'), JSON.stringify(r.j));
+        // Meet nu al: alleen een regel onder Geplande metingen -> één nieuwe rij met grondwetblok, idee, herkomst david
+        n0 = sbRpc.length;
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 4, actie: 'meet' }, { pot: P.jar });
+        nieuw = sbRpc.slice(n0);
+        const z4 = nieuw.find((x) => x.fn === 'mk_werkvoorraad_zet');
+        toets('3731 Meet nu (Geplande metingen): één rij met grondwetblok, de regel letterlijk, label per dag, idee 4, herkomst david, voorrang', r.status === 200 && r.j.uitkomst === 'nieuw' && z4 &&
+          /^GRONDWET-KERN v1/.test(z4.b.p_prompt) && /idee 4 \(vier\) meetpunt 2\*\* — tel de dingen/.test(z4.b.p_prompt) && /^machinekamer:idee-4-meet-nu-\d{8}$/.test(z4.b.p_label) &&
+          nieuw.some((x) => x.fn === 'mk_werkvoorraad_idee' && x.b.p_idee === 4) && nieuw.some((x) => x.fn === 'mk_werkvoorraad_herkomst' && x.b.p_herkomst === 'david') &&
+          nieuw.some((x) => x.fn === 'mk_idee_voorrang' && x.b.p_idee === 4), JSON.stringify(r.j) + JSON.stringify(nieuw.map((x) => x.fn)));
+        toets('3731 Codex MOET 1: rij komt geblokkeerd binnen en gaat pas na idee/herkomst op open', z4 && z4.b.p_status === 'geblokkeerd' && /wordt ingesteld/.test(z4.b.p_geblokkeerd_door) &&
+          nieuw.findIndex((x) => x.fn === 'mk_werkvoorraad_bijwerk' && x.b.p_status === 'open') > nieuw.findIndex((x) => x.fn === 'mk_werkvoorraad_herkomst') &&
+          sbStaat.items.find((w) => w.label === z4.b.p_label).status === 'open', JSON.stringify(nieuw.map((x) => x.fn + ':' + (x.b.p_status || ''))));
+        n0 = sbRpc.length;
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 4, actie: 'meet' }, { pot: P.jar });
+        toets('3731 Meet nu tweede tik: geen dubbele rij (loopt-al)', r.status === 200 && r.j.uitkomst === 'loopt-al' && !sbRpc.slice(n0).some((x) => x.fn === 'mk_werkvoorraad_zet'), JSON.stringify(r.j));
+        r = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+        toets('3731 GET na Meet nu: meet_gevraagd bij idee 4', (r.j.ideeen || []).find((i) => i.nr === 4).meet_gevraagd === true);
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 7, actie: 'meet' }, { pot: P.jar });
+        toets('3731 Meet nu zonder geplande meting (oude regel en regel buiten de sectie tellen niet) -> 404', r.status === 404, r.status + JSON.stringify(r.j));
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 5, actie: 'meet' }, { pot: P.jar });
+        toets('3731 knop op een idee van 100 % -> 409', r.status === 409);
+        // Voor mij is dit af
+        n0 = sbRpc.length;
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 6, actie: 'af' }, { pot: P.jar });
+        toets('3731 Af onder 85 % -> 409, databank niet geraakt', r.status === 409 && /85/.test(r.j.fout) && !sbRpc.slice(n0).some((x) => x.fn === 'mk_werkvoorraad_zet'), JSON.stringify(r.j));
+        // Codex MOET 1: instellen mislukt halverwege -> rij blijft geblokkeerd (tikker start hem niet); de volgende tik herstelt dezelfde rij
+        sbStaat.herkomstKapot = true;
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 3, actie: 'af' }, { pot: P.jar });
+        const half = sbStaat.items.find((w) => /:idee-3-af-/.test(w.label));
+        toets('3731 af: herkomst mislukt -> 502 en de rij blijft geblokkeerd met de instelmarkering', r.status === 502 && half && half.status === 'geblokkeerd' && /wordt ingesteld/.test(half.geblokkeerd_door), r.status + JSON.stringify(half));
+        sbStaat.herkomstKapot = false;
+        // een echte blokkade (andere reden) wordt nooit door een tik opgeheven
+        sbStaat.items.push({ id: 7001, idee: 6, label: 'machinekamer:idee-6-meet-nu-' + new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }).replace(/-/g, ''), status: 'geblokkeerd', geblokkeerd_door: 'David: eerst kiezen', wacht_op: [] });
+        fs.appendFileSync(path.join(W, 'werkwijze-nep.md'), '');
+        { const ww = fs.readFileSync(path.join(W, 'werkwijze-nep.md'), 'utf8').replace('## Daarna', '- **' + dag(2) + ': idee 6 (zes) meetpunt 3** — x\n\n## Daarna'); fs.writeFileSync(path.join(W, 'werkwijze-nep.md'), ww); }
+        const n7 = sbRpc.length;
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 6, actie: 'meet' }, { pot: P.jar });
+        toets('3731 Codex ronde 2: bestaande rij met een echte blokkade blijft geblokkeerd (uitkomst loopt-al)', r.j.uitkomst === 'loopt-al' && sbStaat.items.find((w) => w.id === 7001).status === 'geblokkeerd' &&
+          !sbRpc.slice(n7).some((x) => x.fn === 'mk_werkvoorraad_bijwerk' || x.fn === 'mk_werkvoorraad_herkomst'), JSON.stringify(sbRpc.slice(n7).map((x) => x.fn)));
+        n0 = sbRpc.length;
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 3, actie: 'af' }, { pot: P.jar });
+        nieuw = sbRpc.slice(n0);
+        const z3 = nieuw.find((x) => x.fn === 'mk_werkvoorraad_zet');
+        toets('3731 Af vanaf 85 %: dezelfde rij hersteld en open (grondwetblok, alleen meetrijen, wachters eerst omhangen, geen voorrang omhoog), Sonnet, herkomst david', r.status === 200 && r.j.uitkomst === 'af-gemeld' && z3 &&
+          /^GRONDWET-KERN v1/.test(z3.b.p_prompt) && /array_remove\(wacht_op/.test(z3.b.p_prompt) && /% van idee 3 op 100/.test(z3.b.p_prompt) && /^machinekamer:idee-3-af-\d{8}$/.test(z3.b.p_label) &&
+          nieuw.some((x) => x.fn === 'mk_werkvoorraad_soort' && x.b.p_model === 'sonnet') && nieuw.some((x) => x.fn === 'mk_werkvoorraad_herkomst' && x.b.p_herkomst === 'david') &&
+          !nieuw.some((x) => x.fn === 'mk_idee_voorrang') && half.status === 'open' && sbStaat.items.filter((w) => /:idee-3-af-/.test(w.label)).length === 1 && /ALLEEN de meetrijen/.test(z3.b.p_prompt),
+          JSON.stringify(r.j) + JSON.stringify(nieuw.map((x) => x.fn)));
+        n0 = sbRpc.length;
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 3, actie: 'af' }, { pot: P.jar });
+        toets('3731 Af tweede tik: al gemeld, geen tweede rij', r.status === 200 && r.j.uitkomst === 'al-af-gemeld' && !sbRpc.slice(n0).some((x) => x.fn === 'mk_werkvoorraad_zet'), JSON.stringify(r.j));
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 3, actie: 'meet' }, { pot: P.jar });
+        toets('3731 Meet nu na Af: niets nieuws (al gemeld)', r.status === 200 && r.j.uitkomst === 'al-af-gemeld', JSON.stringify(r.j));
+        r = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+        toets('3731 GET na Af: af_gemeld bij idee 3', (r.j.ideeen || []).find((i) => i.nr === 3).af_gemeld === true);
+        for (const [naam, body, st] of [['actie onbekend', { idee: 3, actie: 'weg' }, 400], ['idee tekst', { idee: '3', actie: 'af' }, 400], ['onbekend idee', { idee: 99, actie: 'meet' }, 404]]) {
+          r = await vraag('POST', '/app/broedstoof/knop', body, { pot: P.jar });
+          toets('3731 knop ' + naam + ' -> ' + st, r.status === st, r.status);
+        }
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 4, actie: 'meet' }, { pot: pot() });
+        toets('3731 knop zonder sessie -> 401', r.status === 401);
+        rolStub.primair = false;
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 4, actie: 'meet' }, { pot: P.jar });
+        toets('3731 knop op de passieve kant -> 409', r.status === 409, r.status);
+        rolStub.primair = true;
+        H.appStaat.tellers.broedknop = Array.from({ length: 20 }, () => Date.now());
+        r = await vraag('POST', '/app/broedstoof/knop', { idee: 4, actie: 'meet' }, { pot: P.jar });
+        toets('3731 21e knop in een uur -> 429', r.status === 429);
+        H.appStaat.tellers.broedknop = [];
+        // stilstandmeting faalt: scherm blijft werken, zonder stand
+        ctx.process.env.APP_STILSTAND_PY = path.join(W, 'bestaat-niet.py');
+        H.appStaat.broedStil = { t: 0, t_ok: null, data: null, bezig: null };
+        r = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+        toets('3731 stilstand.py faalt -> 200, stand null, stil_fout', r.status === 200 && r.j.ideeen.every((i) => i.stand === null) && /lukte nu niet/.test(r.j.stil_fout), JSON.stringify(r.j).slice(0, 300));
+        ctx.process.env.APP_STILSTAND_PY = path.join(W, 'stil-nep.py');
+        H.appStaat.broedStil = { t: 0, t_ok: null, data: null, bezig: null };
+        sbStaat.items = itemsVoor; sbStaat.voorrang = voorrangVoor;
+        ctx.process.env.APP_BUS_PAD = BUS;
+      }
       const auditB = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
       const nA0 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
       H.appStaat.aanvraag = null;

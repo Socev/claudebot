@@ -6038,7 +6038,7 @@ const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
 const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // vaste plek: wie bezig is, houdt over de dagdeelgrens heen 5 min glijdend (wv488; was fase 4: 5 min glijdend)
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/rij/terug', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
-  'POST /app/broedstoof/voorrang', 'POST /app/harvester/broedstoof', 'POST /app/harvester/weg', 'POST /app/harvester/terug', 'POST /app/harvester/bron-nieuw',
+  'POST /app/broedstoof/voorrang', 'POST /app/broedstoof/knop', 'POST /app/harvester/broedstoof', 'POST /app/harvester/weg', 'POST /app/harvester/terug', 'POST /app/harvester/bron-nieuw',
   'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/sleutels/nieuw', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
@@ -9441,6 +9441,8 @@ async function appBroedstoof(req, res, a) {
   let vj = null;
   if (items.some(appWachtOpDavid)) { try { vj = await appVjPunten(); } catch (e) { logError('app-broedstoof', e); vj = null; } }
   const vandaagB = appYmd(Date.now());
+  const stil = await appBroedStil();   // wv3731
+  const gepland = appBroedGepland();
   const voorrang = {};
   ((db && db.voorrang) || []).forEach(function (v) { voorrang[v.idee] = v; });
   const nu = Date.now();
@@ -9471,13 +9473,15 @@ async function appBroedstoof(req, res, a) {
       }).length,
       wacht_op_david: rijen.filter(appWachtOpDavid).length,
       wacht: [].concat.apply([], rijen.filter(appWachtOpDavid).map(function (w) { return appBroedWacht(w, vj, a, vandaagB); })).slice(0, APP_BROED_WACHT_MAX),   // wv891
-      volgende: open.length ? appLabelKort(open[0].label) : null };
+      volgende: open.length ? (appKort(appVjGewoon(String(open[0].samenvatting || '')), 140) || appLabelKort(open[0].label)) : null,   // wv3731: de zin voor David
+      ...appBroedStand(i, rijen, stil, gepland, nu) };
   });
   const ru = db && db.ruimte ? { mag: !!db.ruimte.mag, reden: String(db.ruimte.reden || '').slice(0, 160) } : null;
   // wat de tikker nu echt doet (dagmaximum, uitrol, laatste reden), niet alleen de ruimte (Fable-review wv92 #1)
   const tk = db && db.tikker ? { aan: db.tikker.aan !== false, reden: String(db.tikker.reden || '').slice(0, 160), laatste_tik: db.tikker.laatste_tik || null,
     starts_vandaag: Number(db.tikker.starts_vandaag) || 0, max_dag: Number(db.tikker.max_dag) || 0, alleen_doorwerk: db.tikker.alleen_doorwerk === true } : null;
-  appStuur(res, 200, { ok: true, ideeen: ideeen, bus_bijgewerkt: bus.bijgewerkt, ruimte: ru, tikker: tk, fout: fout });
+  appStuur(res, 200, { ok: true, ideeen: ideeen, bus_bijgewerkt: bus.bijgewerkt, ruimte: ru, tikker: tk, fout: fout,
+    stil_gemeten: appStaat.broedStil.t_ok, stil_fout: stil ? null : 'de stilstandmeting lukte nu niet' });   // wv3731
 }
 async function appBroedstoofVoorrang(req, res, reg, a, s, d) {
   const idee = d.idee, actie = String(d.actie || '');
@@ -9493,6 +9497,175 @@ async function appBroedstoofVoorrang(req, res, reg, a, s, d) {
   if (!r || r.ok !== true) return appWeiger(res, 502, 'opslaan lukte niet; probeer het zo nog eens', 'rpc voorrang leeg');
   res._app.reden = 'voorrang idee ' + idee + ' ' + actie + ' ' + r.van + '->' + r.voorrang;
   appStuur(res, 200, { ok: true, idee: idee, voorrang: r.voorrang, gewijzigd: r.gewijzigd === true });
+}
+
+// ── wv3731 (besluitenpagina nr 144 = 2C44 en nr 192 = 2C92, David Ja 21-11 13:21) ──
+// 2C44: per idee waar het op wacht, uit de stilstandmeting (mk-scripts/stilstand.py --json --niet-schrijven: leest alleen, ± 0,3 s),
+// met het tijdstip van de meting erbij (risico uit de review: een oud oordeel). Hooguit eens per 5 min gemeten; na een knop meteen
+// opnieuw. 2C92: "Meet nu al" (een geplande meting naar voren, als Davids opdracht, met voorrang) en "Voor mij is dit af" (vanaf 85 %:
+// één rij die het idee op 100 % zet en de meetstappen laat vervallen, eerst wachters omhangen). Beide via de werkvoorraad, met het
+// grondwetblok (mkBlokVoor), herkomst david, nooit twee tegelijk voor hetzelfde idee.
+const APP_BROED_STIL_MS = 5 * 60000;
+const APP_BROED_KNOP_PER_UUR = 20;
+const APP_BROED_AF_VANAF = 85;
+appStaat.broedStil = appStaat.broedStil || { t: 0, t_ok: null, data: null, bezig: null };
+function appBroedStilPad() { return process.env.APP_STILSTAND_PY || '/opt/data/mk-scripts/stilstand.py'; }
+function appWerkwijzePad() { return process.env.APP_WERKWIJZE_PAD || path.join(VAULT, '00_Systeem', 'Ideeënmotor (werkwijze).md'); }
+function appBroedStilMeet() {
+  const c = appStaat.broedStil;
+  if (c.bezig) return c.bezig;
+  c.bezig = new Promise(function (ok) {
+    require('child_process').execFile('python3', ['-I', appBroedStilPad(), '--json', '--niet-schrijven'], { timeout: 30000, maxBuffer: 4 * 1024 * 1024 }, function (e, uit, fout) {
+      let j = null;
+      try { j = JSON.parse(String(uit || '')); } catch (x) { j = null; }
+      if (j && Array.isArray(j.ideeen)) { c.data = j; c.t_ok = new Date().toISOString(); }
+      else logError('app-broedstoof', new Error('stilstand.py ' + (e ? 'exit ' + e.code : 'geen json') + ': ' + String(fout || '').slice(-200)));
+      c.t = Date.now(); c.bezig = null; ok();
+    });
+  });
+  return c.bezig;
+}
+async function appBroedStil() {
+  const c = appStaat.broedStil;
+  if (Date.now() - c.t > APP_BROED_STIL_MS) { const p = appBroedStilMeet(); if (!c.data) await p; }   // eerste keer wachten, daarna op de achtergrond
+  return c.data;
+}
+// § Geplande metingen van de werkwijze (zelfde lezing als stilstand.py): {idee: [{dag, wat, regel}]}, alleen vandaag of later.
+function appBroedGepland() {
+  let regels;
+  try { regels = fs.readFileSync(appWerkwijzePad(), 'utf8').split('\n'); } catch (e) { logError('app-broedstoof', e); return {}; }
+  const uit = {}, vandaag = appYmd(Date.now());
+  let binnen = false;
+  regels.forEach(function (r) {
+    if (/^## /.test(r)) { binnen = /^## Geplande metingen/.test(r); return; }
+    if (!binnen || !/^\s*- /.test(r)) return;
+    const mi = /idee (\d+)/.exec(r), md = /(\d{1,2})-(\d{1,2})-(20\d\d)/.exec(r);
+    if (!mi || !md) return;
+    const dag = md[3] + '-' + String(md[2]).padStart(2, '0') + '-' + String(md[1]).padStart(2, '0');
+    if (dag < vandaag) return;
+    // "**22-11-2026 (ronde 10:30): idee 15 (bank lezen) meetpunt 5** — …" -> "meetpunt 5"
+    const vet = /\*\*([^*]+)\*\*/.exec(r);
+    const wat = vet ? appPlat(vet[1].replace(/^.*?idee \d+\s*(\([^)]*\))?\s*/, '')) : '';
+    (uit[Number(mi[1])] = uit[Number(mi[1])] || []).push({ dag: dag, wat: appKort(wat, 60), regel: r.replace(/^\s*-\s*/, '').slice(0, 1500) });
+  });
+  Object.keys(uit).forEach(function (k) { uit[k].sort(function (x, y) { return x.dag < y.dag ? -1 : x.dag > y.dag ? 1 : 0; }); });
+  return uit;
+}
+const appBroedLoopt = function (w) { return w.status === 'open' || w.status === 'starten' || w.status === 'gestart'; };
+const appBroedAfRij = function (w) { return /:idee-\d+-af-\d{8}$/.test(String(w.label || '')) && appBroedLoopt(w); };
+const appBroedMeetRij = function (w) { return /:idee-\d+-meet-nu-\d{8}$/.test(String(w.label || '')) && appBroedLoopt(w); };
+// Velden per idee voor het scherm (geen wv-nummers of redenen met interne namen: de app maakt er één zin van).
+function appBroedStand(i, rijen, stil, gepland, nu) {
+  const st = stil ? stil.ideeen.find(function (x) { return x.idee === i.nr; }) : null;
+  const david = rijen.filter(appWachtOpDavid).map(function (w) { return Date.parse(w.bijgewerkt || ''); }).filter(function (x) { return !isNaN(x); });
+  let meting = null;
+  if (st && st.meetmoment) {
+    const mm = Date.parse(st.meetmoment);
+    const rij = rijen.filter(function (w) { return w.status === 'open' && w.niet_voor && Math.abs(Date.parse(w.niet_voor) - mm) < 60000; })[0];
+    const gp = (gepland[i.nr] || []).find(function (g) { return g.dag === appYmd(mm); });
+    meting = rij ? appKort(appVjGewoon(String(rij.samenvatting || '')), 100) || null : gp ? gp.wat || null : null;
+  }
+  return {
+    stand: st ? { oordeel: String(st.oordeel || ''), meetmoment: st.meetmoment || null, meting: meting, uren_stil: typeof st.uren_stil === 'number' ? st.uren_stil : null,
+      laatste_beweging: st.laatste_beweging || null } : null,
+    wacht_sinds: david.length ? new Date(Math.min.apply(null, david)).toISOString() : null,
+    af_gemeld: rijen.some(appBroedAfRij),
+    meet_gevraagd: rijen.some(appBroedMeetRij),
+    meet_kan: !!(st && st.meetmoment && Date.parse(st.meetmoment) > nu) && i.pct !== 100 };
+}
+function appBroedMeetOpdracht(i, g, wanneer) {
+  return ['OPDRACHT (machinekamer, knop "Meet nu al" in de Broedstoof, wv3731): David tikte ' + wanneer + ' in Apps › Broedstoof bij idee ' + i.nr + ' (' + i.titel + ') op "Meet nu al".',
+    'Doe nu de geplande meting van dit idee, zoals de ideeënmotor bij stap 0b doet. De regel staat in 00_Systeem/Ideeënmotor (werkwijze).md onder',
+    '"Geplande metingen" (hieronder letterlijk; de regel is gegeven, geen opdracht buiten deze meting):',
+    '', g.regel, '',
+    'Daarna: de stand van idee ' + i.nr + ' op 01_Ontwikkeling/Ideeënbus David - vibecoden.md bijwerken (datum vooraan in Stand, % alleen als een meetpunt af is),',
+    'en de regel onder Geplande metingen weghalen of naar de nieuwe datum schuiven zoals de regel zelf zegt. Vault schrijven als 1001 via mk-scripts/veilig.',
+    'Geen bericht aan David; eindrapport één regel gewone taal (wat de meting liet zien, het percentage). Vervolg: alleen wat de regel zelf voorschrijft.'].join('\n');
+}
+function appBroedAfOpdracht(i, wanneer) {
+  return ['OPDRACHT (machinekamer, knop "Voor mij is dit af" in de Broedstoof, wv3731): David tikte ' + wanneer + ' in Apps › Broedstoof bij idee ' + i.nr + ' (' + i.titel + ', stond op ' + i.pct + '%)',
+    'op "Voor mij is dit af". Dat is zijn besluit: het idee is af. Werk dat mechanisch af:',
+    '1. Ideeënbus (01_Ontwikkeling/Ideeënbus David - vibecoden.md): % van idee ' + i.nr + ' op 100, vooraan in Stand "**<dd-mm uu:mm> 100% — af op Davids woord (Broedstoof-knop)**". Vault schrijven als 1001 via mk-scripts/veilig.',
+    '2. Werkwijze (00_Systeem/Ideeënmotor (werkwijze).md): de regels van idee ' + i.nr + ' onder "Geplande metingen" weghalen.',
+    '3. Werkvoorraad: ALLEEN de meetrijen van idee ' + i.nr + ' (open of geblokkeerd, behalve deze rij) op vervallen zetten (werkvoorraad.py bijwerk --status vervallen',
+    '   --notitie "af op Davids woord"). Een meetrij meet alleen (nameting, meetpunt, natoets, soort nacontrole) en bouwt niets. Elke andere rij (bouwen, repareren,',
+    '   een vervolg) laat je staan zoals hij is en noem je in je rapport. Twijfel = laten staan.',
+    '   EERST per meetrij: wachten andere rijen erop (select id from machinekamer.werkvoorraad where wacht_op && array[\'item:<id>\'], via /app/sb-sql), haal die voorganger',
+    '   daar weg (update … set wacht_op = array_remove(wacht_op, \'item:<id>\')), anders zet de tikker de wachters op geblokkeerd.',
+    '4. Stond er voorrang op idee ' + i.nr + ': terug op normaal (RPC mk_idee_voorrang p_actie normaal, p_door "machinekamer: af op Davids woord").',
+    'Geen bericht aan David; eindrapport één regel gewone taal ("Idee ' + i.nr + ' staat op 100 %; N meetstappen vervallen"). Vervolg: geen.'].join('\n');
+}
+// Codex-review MOET 1: de rij komt geblokkeerd binnen (de tikker start hem niet) en gaat pas op open als idee, herkomst en model staan.
+// Mislukt dat halverwege, dan herstelt de volgende tik het (zelfde label = dezelfde rij, nog met de instelmarkering).
+const APP_BROED_INSTEL = 'pod: wordt ingesteld (wv3731)';
+async function appBroedZet(label, prompt, idee, samenvatting, notitie, model) {
+  const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: label, p_prompt: mkBlokVoor(prompt), p_status: 'geblokkeerd', p_geblokkeerd_door: APP_BROED_INSTEL,
+    p_max_minuten: 90, p_samenvatting: samenvatting, p_notitie: notitie, p_opnieuw: true }, 20000);
+  if (!z || !z.ok || !z.id) throw new Error('werkvoorraad gaf geen rij terug');
+  if (z.bestond && z.status !== 'geblokkeerd') return z;   // loopt al: niets aanraken
+  if (z.bestond) {   // Codex ronde 2: alleen een rij met onze instelmarkering herstellen; een echte blokkade blijft staan
+    const w = await appSbRpc('mk_werkvoorraad_item', { p_id: z.id });
+    if (!w || w.geblokkeerd_door !== APP_BROED_INSTEL) return z;
+  }
+  await appSbRpc('mk_werkvoorraad_idee', { p_id: z.id, p_idee: idee });
+  await appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' });
+  if (model) await appSbRpc('mk_werkvoorraad_soort', { p_id: z.id, p_soort: 'gewoon', p_model: model });
+  const o = await appSbRpc('mk_werkvoorraad_bijwerk', { p_id: z.id, p_status: 'open', p_geblokkeerd_door: null, p_notitie: null, p_volgorde: null, p_niet_voor: null });
+  if (!o || o.ok !== true) throw new Error('rij ' + z.id + ' niet op open gezet');
+  return Object.assign({}, z, { status: 'open' });
+}
+// POST /app/broedstoof/knop {idee, actie: meet|af}. Sessie, invoerslot, alleen de primaire kant, 20 per uur.
+async function appBroedstoofKnop(req, res, reg, a, s, d) {
+  const idee = d.idee, actie = String(d.actie || '');
+  if (typeof idee !== 'number' || !Number.isInteger(idee) || idee < 1 || idee > 999 || ['meet', 'af'].indexOf(actie) < 0) return appWeiger(res, 400, 'ongeldig verzoek', 'broedknop velden');
+  let bus;
+  try { bus = appBusLees(); } catch (e) { logError('app-broedstoof', e); return appWeiger(res, 503, 'de ideeënbus is nu niet leesbaar', 'bus onleesbaar'); }
+  const i = bus.ideeen.find(function (x) { return x.nr === idee; });
+  if (!i) return appWeiger(res, 404, 'dit idee staat niet (meer) op de ideeënbus', 'onbekend idee ' + idee);
+  if (i.pct === 100) return appWeiger(res, 409, 'dit idee is al af', 'broedknop al af ' + idee);
+  if (actie === 'af' && !(typeof i.pct === 'number' && i.pct >= APP_BROED_AF_VANAF)) return appWeiger(res, 409, '"Voor mij is dit af" kan vanaf ' + APP_BROED_AF_VANAF + ' %', 'broedknop af te laag ' + idee);
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
+  if (!appTeller('broedknop', APP_BROED_KNOP_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_BROED_KNOP_PER_UUR + ')', 'grens broedknop');
+  let db;
+  try { db = await appSbRpc('mk_broedstoof', {}); } catch (e) { logError('app-broedstoof', e); return appWeiger(res, 503, 'de werkvoorraad is nu niet leesbaar; probeer het zo opnieuw', 'broedknop rpc'); }
+  const rijen = ((db && db.items) || []).filter(function (w) { return w.idee === idee; });
+  const nu = Date.now(), ymd = appYmd(nu).replace(/-/g, '');
+  const wanneer = new Date(nu).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const door = 'app: ' + String(a.naam || '').slice(0, 40);
+  let uitkomst, wv = null;
+  try {
+    if (rijen.some(appBroedAfRij)) uitkomst = 'al-af-gemeld';
+    else if (actie === 'af') {
+      const z = await appBroedZet('machinekamer:idee-' + idee + '-af-' + ymd, appBroedAfOpdracht(i, wanneer), idee,
+        'Idee ' + idee + ' op 100 % zetten: David zegt dat het voor hem af is', 'pod wv3731: Broedstoof-knop Voor mij is dit af', 'sonnet');
+      uitkomst = z.status === 'open' ? 'af-gemeld' : 'al-af-gemeld'; wv = z.id;   // niet open = een bestaande rij met een echte blokkade
+    } else {
+      const loopt = rijen.filter(function (w) { return w.status === 'starten' || w.status === 'gestart'; });
+      const klaar = rijen.filter(function (w) { return w.status === 'open' && (!w.niet_voor || Date.parse(w.niet_voor) <= nu) && !w.wacht_op_item; });
+      const later = rijen.filter(function (w) { return w.status === 'open' && w.niet_voor && Date.parse(w.niet_voor) > nu; })
+        .sort(function (x, y) { return Date.parse(x.niet_voor) - Date.parse(y.niet_voor); });
+      const g = (appBroedGepland()[idee] || [])[0] || null;
+      if (loopt.length || rijen.some(appBroedMeetRij)) { uitkomst = 'loopt-al'; wv = (loopt[0] || rijen.find(appBroedMeetRij)).id; }
+      else if (klaar.length) { uitkomst = 'staat-klaar'; wv = klaar[0].id; }
+      else if (later.length && (!g || appYmd(Date.parse(later[0].niet_voor)) <= g.dag)) {   // de vroegste van rij en geplande regel, zoals stilstand.py
+        wv = later[0].id;
+        await appSbRpc('mk_werkvoorraad_bijwerk', { p_id: wv, p_status: null, p_geblokkeerd_door: null, p_notitie: 'David: Meet nu al (Broedstoof)', p_volgorde: null, p_niet_voor: new Date(nu).toISOString() });
+        try { await appSbRpc('mk_werkvoorraad_herkomst', { p_id: wv, p_herkomst: 'david' }); } catch (e) { logError('app-broedstoof', e); }
+        uitkomst = 'naar-voren';
+      } else if (g) {
+        const z = await appBroedZet('machinekamer:idee-' + idee + '-meet-nu-' + ymd, appBroedMeetOpdracht(i, g, wanneer), idee,
+          'Idee ' + idee + ': de geplande meting' + (g.wat ? ' (' + g.wat + ')' : '') + ' nu al doen, op Davids verzoek', 'pod wv3731: Broedstoof-knop Meet nu al', null);
+        uitkomst = z.status === 'open' ? 'nieuw' : 'loopt-al'; wv = z.id;
+      } else return appWeiger(res, 404, 'er staat geen meting gepland voor dit idee', 'broedknop geen meting ' + idee);
+    }
+  } catch (e) { logError('app-broedstoof', e); return appWeiger(res, 502, 'klaarzetten lukte niet; probeer het zo nog eens', 'broedknop zet'); }
+  // voorrang met rangnummer (zoals ↑ Eerder): de tikker start de stap van dit idee vóór de rest
+  if (actie === 'meet' && (uitkomst === 'naar-voren' || uitkomst === 'nieuw' || uitkomst === 'staat-klaar')) {
+    try { await appSbRpc('mk_idee_voorrang', { p_idee: idee, p_actie: 'eerder', p_door: door, p_apparaat: a.id }); } catch (e) { logError('app-voorrang', e); }
+  }
+  appStaat.broedStil.t = 0;   // volgende lezing meet opnieuw
+  res._app.reden = 'broedknop idee ' + idee + ' ' + actie + ' -> ' + uitkomst + (wv ? ' wv' + wv : '');
+  appStuur(res, 200, { ok: true, idee: idee, actie: actie, uitkomst: uitkomst });
 }
 
 // ── wv891: de ochtendbriefing op het Overzicht (mission control) ──
@@ -15481,6 +15654,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/broedstoof') return appBroedstoof(req, res, a);   // wv891: apparaat (privé-kaart op een vaste plek)
         if (route === 'GET /app/briefing') return appBriefingRoute(req, res, a);   // wv891
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
+        if (route === 'POST /app/broedstoof/knop') return appBroedstoofKnop(req, res, reg, a, s, d);   // wv3731
         if (route === 'GET /app/agents') return appAgents(req, res, a);
         if (route === 'GET /app/draden') return appDraden(req, res, a);   // wv1029: klussen als tabjes (idee 14 fase 2)
         if (route === 'GET /app/code/apps') return CODE_WERK ? appCodeApps(req, res, a) : appWeiger(res, 404, 'onbekend', 'code uit');   // wv3227
