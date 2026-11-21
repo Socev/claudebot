@@ -4728,6 +4728,7 @@ function handleRequest(req, res) {
       ophalen: typeof ophalen !== 'undefined' && ophalen ? ophalen.info() : { aan: false },   // wv3254: vaste ophaalroute (motor, scherm, tellers; geen url's)
       osint: typeof osintInfo === 'function' ? osintInfo() : { aan: false },   // wv2694: OVIS OSINT (osint.py in deze release? venv of systeem-python; geen zoektermen)
       ah_bonnen: typeof ahInfo === 'function' ? ahInfo() : { module: false },   // wv2703: AH-kassabonnen (gekoppeld, laatste ronde; geen token)
+      app_nieuws: typeof appNieuwsInfo === 'function' ? appNieuwsInfo() : { aan: false },   // wv3689: redactie-loket (aantallen per laan, schaduwfouten; geen tekst)
       pakjes: typeof pakjesInfo === 'function' ? pakjesInfo() : { aan: false },   // wv2593: OVIS Pakjes (aantallen, laatste ronde; geen codes, winkels of postcodes)
       memorylane_publiek: (function () { if (!memorylanePubliek) return { aan: false }; try { return Object.assign(memorylanePubliek.health(), { token: mlPubTokenSoort }); } catch (e) { return { fout: true }; } })(),   // wv2636: alleen aantallen; wv2738: token eigen|pod|null (nog niet gebruikt)
       memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
@@ -5257,6 +5258,26 @@ function handleRequest(req, res) {
       }, function (e) {
         logError('agenda-narekenen', e);
         res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, fout: 'pod kon het niet narekenen' }));
+      });
+    });
+  }
+
+  // wv3689 (2C59): een n8n-bron (of de live proef met App 'proef') meldt één regel bij het redactie-loket. Alleen laan editie of teller;
+  // nooit buffer (een n8n-bron schrijft niet via de pod in ochtend_buffer). Geheim zoals de andere n8n→pod-routes; geen tekst in het log.
+  if (req.method === 'POST' && req.url === '/nieuws/meld') {
+    return readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      { const gst = podGeheimStatus(d.secret); if (gst) return weigerGeheim(res, gst); }
+      const stuur = function (c, j) { res.writeHead(c, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(j)); };
+      if (typeof loketMeld !== 'function' || !AN) return stuur(404, { ok: false, fout: 'het loket zit niet in deze versie van de pod' });
+      if (d.buffer !== undefined || (d.laan !== 'editie' && d.laan !== 'teller')) return stuur(400, { ok: false, fout: 'alleen laan editie of teller, zonder buffer' });
+      const m = { app: d.app, onderwerp: d.onderwerp, laan: d.laan, tekst: d.tekst, aantal: d.aantal, datum: d.datum, editie: d.editie, vervalt: d.vervalt, doel: d.doel, taalmodel: d.taalmodel };
+      loketMeld(m).then(function (u) {
+        res._log = { nieuws: String(d.app || '').slice(0, 30) + '/' + u.uitkomst };
+        stuur(200, { ok: true, uitkomst: u.uitkomst, sleutel: u.sleutel, versie: u.versie });
+      }, function (e) {
+        if (e && e.loket) return stuur(400, { ok: false, fout: String(e.message).slice(0, 120) });
+        logError('app-nieuws-meld', e); stuur(500, { ok: false, fout: 'pod kon het niet vastleggen' });
       });
     });
   }
@@ -6080,6 +6101,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/sleutels/nieuw', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/te-lezen']);   // wv2245: afvinken of bewaren = David die leest   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });
+APP_GLIJD_ROUTES.add('POST /app/nieuws/gezien');   // wv3689: iets in het loket gezien = David die leest
 APP_GLIJD_ROUTES.add('POST /app/briefing/punt');   // wv3685: een tik onder een briefingpunt = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/voor-jou/woord');   // wv3250: een steekwoordkeuze is David die werkt   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
@@ -9861,6 +9883,7 @@ async function appBriefingCorrectieRij(datum, tekst) {
   const j = await appN8nZend('GET', '/data-tables/' + APP_MELD_TABEL + '/rows?limit=5&filter=' + encodeURIComponent(JSON.stringify(BRIEFING_CORRECTIE_FILTER)));
   const l = (Array.isArray(j && j.data) ? j.data : []).filter(function (r) { return r && r.bron === 'briefing_correctie' && r.datum === datum && String(r.tekst || '') === tekst; });
   if (!l.length) throw new Error('rij na het schrijven niet teruggelezen');
+  loketSchaduw('briefing_correctie', datum, tekst);   // wv3689 fase 1
 }
 // alleen binnen appBriefingPuntKeten aanroepen; geeft true als de rij voor morgen klopt
 async function appBriefingCorrectieDoor(dag) {
@@ -9901,6 +9924,125 @@ async function appBriefingPuntRoute(req, res, a, d) {
   try { r = await deze; } catch (e) { logError('briefing-punten', e); return appWeiger(res, 500, 'opslaan lukte niet; tik nog eens', 'briefing-punten.json schrijven'); }
   res._app.reden = 'briefingpunt ' + (stand || 'open') + (r.morgen === false ? ' (rij voor morgen mislukt)' : '');
   appStuur(res, 200, { ok: true, id: id, stand: stand, standen: r.standen, morgen: r.morgen });
+}
+
+// ── wv3689 (besluitenpagina nr 159 = 2C59, David Ja 21-11 12:40): redactie-loket "nieuws uit je Apps", fase 1 ──
+// Ontwerp mk-scripts/wv3689/ontwerp-redactie-loket.md (Codex GO-MET-WIJZIGINGEN, MOET 1+2 verwerkt); logica in app-nieuws.js (puur).
+// Een App meldt per onderwerp één regel (loketMeld); bijwerken i.p.v. herhalen, vanzelf weg; lanen editie/teller/kaart. Staat in
+// APP_DATA/app-nieuws.json (600), alle schrijvers in één keten. Fase 1 = schaduw: de zes oude schrijvers naar ochtend_buffer blijven
+// precies zoals ze waren en melden na hun geslaagde teruglezing dezelfde regel ook bij het loket (loketSchaduw; een fout daar raakt de
+// oude weg nooit). De tegeltellers Facturen en Pakjes rekent de pod zelf uit dezelfde bronnen als de app; de app toont nog het oude
+// getal en meldt elk paar (oud, nieuw) via POST /app/nieuws/schaduw. Het loket laat nooit zelf iets weg op inhoud (nooit filteren).
+// Routes: GET /app/nieuws[?alles=1], GET /app/nieuws/tellers, POST /app/nieuws/gezien, POST /app/nieuws/schaduw; POST /nieuws/meld (geheim).
+const AN = (function () { try { return require(path.join(__dirname, 'app-nieuws.js')); } catch (e) { console.error('app-nieuws.js:', e.message); return null; } })();
+const APP_NIEUWS = path.join(APP_DATA, 'app-nieuws.json');
+const APP_NIEUWS_TELLER_MS = 60 * 1000;
+let appNieuwsKeten = Promise.resolve();
+const appNieuwsStand = { tellersOp: 0, tellersFout: null, schaduwFout: 0 };
+function appNieuwsLees() { return AN.normaal(appLeesStreng(APP_NIEUWS, AN.leeg())); }
+// fn(staat, nu) → { staat, ... }; schrijft alleen als de staat veranderde; altijd binnen de keten (één schrijver)
+function appNieuwsWijzig(fn) {
+  const deze = appNieuwsKeten.then(function () {
+    if (!AN) throw new Error('app-nieuws.js ontbreekt');
+    const nu = Date.now();
+    const voor = appNieuwsLees(), voorTekst = JSON.stringify(voor);
+    const u = fn(voor, nu);
+    const s = AN.opruim(u.staat, nu).staat;
+    if (JSON.stringify(s) !== voorTekst) { appSchrijfJson(APP_NIEUWS, s); try { fs.chmodSync(APP_NIEUWS, 0o600); } catch (e) {} }
+    return u;
+  });
+  appNieuwsKeten = deze.catch(function () {});
+  return deze;
+}
+// De ene functie waarmee een App nieuws aanmeldt (ook vanuit n8n via POST /nieuws/meld). Gooit bij ongeldige invoer.
+function loketMeld(m) { return appNieuwsWijzig(function (s, nu) { return AN.meld(s, m, nu); }); }
+// Fase 1: dezelfde regel die een oude schrijver net in ochtend_buffer zette, ook in het loket. Nooit await-en in de oude weg; nooit gooien.
+function loketSchaduw(bron, datum, tekst) {
+  if (!AN) return;
+  let m;
+  try { m = AN.schaduwAanmelding(bron, datum, tekst); } catch (e) { appNieuwsStand.schaduwFout++; logError('app-nieuws-schaduw', e); return; }
+  loketMeld(m).catch(function (e) { appNieuwsStand.schaduwFout++; logError('app-nieuws-schaduw', e); });
+}
+// Tellers uit dezelfde bronnen als de app (Facturen: overzicht.tellers.beoordelen + signalen met de rol van de app; Pakjes: vandaagTeller).
+// Een bron die nu niet te lezen is laat zijn oude regel staan en staat in fout; nooit een verzonnen 0.
+async function loketTellersVerversen(a) {
+  if (!AN) return;
+  if (Date.now() - appNieuwsStand.tellersOp < APP_NIEUWS_TELLER_MS) return;
+  appNieuwsStand.tellersOp = Date.now();
+  const fouten = [], zet = [];
+  try {
+    if (!facturenRoutes) fouten.push('facturen');
+    else {
+      const fdb = facturenOpen();
+      const rol = facturenRoutes.rolVoor(fdb, { ingang: 'app', wie: 'david (' + String((a && (a.naam || a.id)) || 'loket').slice(0, 60) + ')' });
+      const x = facturenRoutes.app(fdb, { methode: 'GET', pad: '/app/facturen', d: {}, rol: rol, primair: rolPrimair() });
+      const t = x && x.status === 200 && x.j && x.j.tellers;
+      if (t && Number.isInteger(t.beoordelen) && Number.isInteger(t.signalen)) zet.push({ app: 'facturen', onderwerp: 'te-doen', laan: 'teller', aantal: t.beoordelen + t.signalen, doel: { scherm: 'facturen' } });
+      else fouten.push('facturen');
+    }
+  } catch (e) { fouten.push('facturen'); logError('app-nieuws-teller', e); }
+  try {
+    if (!pakjes) fouten.push('pakjes');
+    else {
+      const u = pakjes.lijst(pakjesGekocht(), pakjesOnderwerpen);
+      if (u && u.body && Array.isArray(u.body.lopend)) zet.push({ app: 'pakjes', onderwerp: 'vandaag', laan: 'teller', aantal: AN.pakjesVandaag(u.body), doel: { scherm: 'pakjes' } });
+      else fouten.push('pakjes');
+    }
+  } catch (e) { fouten.push('pakjes'); logError('app-nieuws-teller', e); }
+  appNieuwsStand.tellersFout = fouten.length ? fouten : null;
+  for (const m of zet) { try { await loketMeld(m); } catch (e) { logError('app-nieuws-teller', e); } }
+}
+function appNieuwsAan(res) { if (!AN) { appWeiger(res, 404, 'het loket zit niet in deze versie van de pod', 'app-nieuws ontbreekt'); return false; } return true; }
+appStaat.tellers.nieuws = [];
+appStaat.tellers.nieuws_gezien = [];
+appStaat.tellers.nieuws_schaduw = [];
+async function appNieuwsRoute(req, res, a) {
+  if (!appNieuwsAan(res)) return;
+  res._app.stil = true;
+  if (!appTeller('nieuws', 1200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens nieuws');
+  let q; try { q = new URL(req.url, 'http://x').searchParams; } catch (e) { q = new URLSearchParams(); }
+  let s;
+  try { await appNieuwsKeten; s = appNieuwsLees(); } catch (e) { logError('app-nieuws', e); return appWeiger(res, 503, 'het loket is nu niet te lezen', 'app-nieuws.json'); }
+  const nu = Date.now();
+  appStuur(res, 200, { ok: true, nu: new Date(nu).toISOString(), regels: AN.lijst(s, { ongezien: q.get('alles') !== '1' }, nu), tellers: AN.tellers(s, nu), instel: s.instel });
+}
+async function appNieuwsTellersRoute(req, res, a) {
+  if (!appNieuwsAan(res)) return;
+  res._app.stil = true;
+  if (!appTeller('nieuws', 1200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens nieuws');
+  try { await loketTellersVerversen(a); } catch (e) { logError('app-nieuws-teller', e); }
+  let s;
+  try { await appNieuwsKeten; s = appNieuwsLees(); } catch (e) { logError('app-nieuws', e); return appWeiger(res, 503, 'het loket is nu niet te lezen', 'app-nieuws.json'); }
+  appStuur(res, 200, { ok: true, tellers: AN.tellers(s, Date.now()), fout: appNieuwsStand.tellersFout });
+}
+async function appNieuwsGezienRoute(req, res, a, d) {
+  if (!appNieuwsAan(res)) return;
+  if (!appTeller('nieuws_gezien', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens nieuws gezien');
+  let u;
+  try { u = await appNieuwsWijzig(function (s, nu) { return AN.gezien(s, d && d.sleutels, nu); }); }
+  catch (e) { if (e && e.loket) return appWeiger(res, 400, 'ongeldig verzoek', 'nieuws gezien velden'); logError('app-nieuws', e); return appWeiger(res, 500, 'opslaan lukte niet', 'app-nieuws.json schrijven'); }
+  res._app.reden = 'nieuws gezien ' + u.gezet;
+  appStuur(res, 200, { ok: true, gezet: u.gezet });
+}
+async function appNieuwsSchaduwRoute(req, res, a, d) {
+  if (!appNieuwsAan(res)) return;
+  res._app.stil = true;
+  if (!appTeller('nieuws_schaduw', 300, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens nieuws schaduw');
+  const app = String((d && d.app) || '');
+  if (app !== 'facturen' && app !== 'pakjes') return appWeiger(res, 400, 'onbekende app', 'nieuws schaduw app');
+  const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  let u;
+  try { u = await appNieuwsWijzig(function (s, nu) { return AN.schaduwTel(s, dag, app, d.oud, d.nieuw, nu); }); }
+  catch (e) { if (e && e.loket) return appWeiger(res, 400, 'ongeldig verzoek', 'nieuws schaduw velden'); logError('app-nieuws', e); return appWeiger(res, 500, 'opslaan lukte niet', 'app-nieuws.json schrijven'); }
+  appStuur(res, 200, { ok: true, gelijk: u.gelijk });
+}
+function appNieuwsInfo() {
+  if (!AN) return { aan: false };
+  try {
+    const s = appNieuwsLees(), nu = Date.now(), l = AN.lijst(s, {}, nu);
+    const per = {}; l.forEach(function (r) { per[r.laan] = (per[r.laan] || 0) + 1; });
+    return { aan: true, regels: per, ongezien: l.filter(function (r) { return !r.gezien_op; }).length, schaduw_fout: appNieuwsStand.schaduwFout, teller_fout: appNieuwsStand.tellersFout };
+  } catch (e) { return { aan: true, fout: true }; }
 }
 
 // ── fase 5a: tabs Agents en Bestanden (wv98, 8-10-2026; bouwplan § 4.7 en § 4.9) ──
@@ -15982,6 +16124,10 @@ function handleApp(req, res) {
         if (route === 'GET /app/broedstoof') return appBroedstoof(req, res, a);   // wv891: apparaat (privé-kaart op een vaste plek)
         if (route === 'GET /app/briefing') return appBriefingRoute(req, res, a);   // wv891
         if (route === 'POST /app/briefing/punt') return appBriefingPuntRoute(req, res, a, d);   // wv3685
+        if (route === 'GET /app/nieuws') return appNieuwsRoute(req, res, a);   // wv3689: redactie-loket
+        if (route === 'GET /app/nieuws/tellers') return appNieuwsTellersRoute(req, res, a);   // wv3689
+        if (route === 'POST /app/nieuws/gezien') return appNieuwsGezienRoute(req, res, a, d);   // wv3689
+        if (route === 'POST /app/nieuws/schaduw') return appNieuwsSchaduwRoute(req, res, a, d);   // wv3689 fase 1
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
         if (route === 'POST /app/broedstoof/knop') return appBroedstoofKnop(req, res, reg, a, s, d);   // wv3731
         if (route === 'GET /app/agents') return appAgents(req, res, a);
@@ -21740,6 +21886,7 @@ async function mailSluitOchtend(datum, tekst) {
   const j = await appN8nZend('GET', '/data-tables/' + APP_MELD_TABEL + '/rows?limit=5&filter=' + encodeURIComponent(JSON.stringify(MAIL_SLUIT_FILTER)));
   const l = (Array.isArray(j && j.data) ? j.data : []).filter(function (r) { return r && r.bron === 'mail' && r.datum === datum && r.tekst === tekst; });
   if (!l.length) throw new Error('rij na het schrijven niet teruggelezen');
+  loketSchaduw('mail', datum, tekst);   // wv3689 fase 1
 }
 const mailSluitStand = { dag: '', pogingen: 0, ochtendPogingen: 0, bezig: false };
 async function mailSluitTik() {
@@ -22920,6 +23067,7 @@ async function weerRijZet(datum, tekst) {
   const j = await appN8nZend('GET', '/data-tables/' + APP_MELD_TABEL + '/rows?limit=5&filter=' + encodeURIComponent(JSON.stringify(WEER_FILTER)));
   const l = (Array.isArray(j && j.data) ? j.data : []).filter(function (r) { return r && r.bron === 'weer' && r.datum === datum && r.tekst === tekst; });
   if (!l.length) throw new Error('rij na het schrijven niet teruggelezen');
+  loketSchaduw('weer', datum, tekst);   // wv3689 fase 1
 }
 const weerOchtend = (function () {
   const p = path.join(__dirname, 'weer-ochtend.js');
@@ -22994,6 +23142,7 @@ async function crRijZet(datum, tekst) {
   const j = await appN8nZend('GET', '/data-tables/' + APP_MELD_TABEL + '/rows?limit=5&filter=' + encodeURIComponent(JSON.stringify(CR_FILTER)));
   const l = (Array.isArray(j && j.data) ? j.data : []).filter(function (r) { return r && r.bron === 'contactringen' && r.datum === datum && r.tekst === tekst; });
   if (!l.length) throw new Error('rij na het schrijven niet teruggelezen');
+  loketSchaduw('contactringen', datum, tekst);   // wv3689 fase 1
 }
 const contactringen = (function () {
   const p = path.join(__dirname, 'contactringen.js');
@@ -25305,6 +25454,7 @@ async function promedicoRijZet(datum, tekst) {
   const j = await appN8nZend('GET', '/data-tables/' + APP_MELD_TABEL + '/rows?limit=5&filter=' + encodeURIComponent(JSON.stringify(PB_FILTER)));
   const l = (Array.isArray(j && j.data) ? j.data : []).filter(function (r) { return r && r.bron === 'promedico' && r.datum === datum && r.tekst === tekst; });
   if (!l.length) throw new Error('rij na het schrijven niet teruggelezen');
+  loketSchaduw('promedico', datum, tekst);   // wv3689 fase 1
 }
 const promedicoBotsingen = (function () {
   const p = path.join(__dirname, 'promedico-botsingen.js');
@@ -30405,6 +30555,7 @@ async function geldRijZet(datum, tekst) {
   await poging().catch(function () { return new Promise(function (ok) { setTimeout(ok, 2000); }).then(poging); });
   const rij = await geldRijLees();   // teruglezen: staat hij er echt, met deze datum en tekst?
   if (!rij || rij.datum !== datum || rij.tekst !== tekst) throw new Error('rij na het schrijven niet teruggelezen');
+  loketSchaduw('geld', datum, tekst);   // wv3689 fase 1
 }
 // De kaart. Geen paden, wv-nummers of verwijzingen (mk_voor_jou_zet weigert die); de stappen staan in de kaart zelf.
 function geldKaart(s, peil) {
