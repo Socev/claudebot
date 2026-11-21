@@ -349,21 +349,17 @@ function zetSpreektekst(md, voorvoegsel, id, o, klok) {
 // naar de versiegeschiedenis.
 // De woorden die de stem zegt, zonder pauzes of tags (spreektekst met [pauze], of de modeltekst met [pause]/<break> uit de Studio-taak)
 function kaal(t) { return SPREEK.naarModel(String(t || '').replace(/\[\s*(?:long\s+)?pause\s*\]/gi, ' ').replace(/<break\b[^>]{0,80}>/gi, ' '), null).replace(/\s+/g, ' ').trim(); }
-// gezegd = de tekst die werkelijk naar de stem ging (velden.tekst van de Studio-taak van het laatste bestand; het sterkste bewijs). Zonder
-// taak: de spreektekst die Maak nu zou gebruiken, alleen als het journaal na het laatste maken geen spreektekstwijziging zag.
+// gezegd = de tekst die werkelijk naar de stem ging (velden.tekst van de Studio-taak van het laatste bestand). Zonder die taak: nee
+// (Codex MOET 1, wv3723: het journaal is geen bewijs; ook 'velden' zoals gehoord telt daar als schrijven).
 // u = een bandje zoals bandjeUit het geeft (ook zo in GET /app/bandjes)
 function gelijkFout(u, inst, spreekNaMaak, gezegd) {
   if (!u.voorstel) return 'er ligt geen voorstel';
   if (u.voorstel.tekst === u.tekst) return 'het voorstel is gelijk aan de tekst';
   if (!u.kan_centrale) return 'dit kan alleen bij een gemaakt bandje dat nog niet in de centrale staat';
   const nieuw = kaal(SPREEK.afleiden(u.voorstel.tekst, inst && inst.uitspraak));
-  if (typeof gezegd === 'string') {
-    if (!nieuw || kaal(gezegd) !== nieuw) return 'het voorstel klinkt anders dan het gemaakte bandje; neem het over en druk op Maak';
-    return null;
-  }
-  if (spreekNaMaak) return 'de spreektekst is na het maken nog gewijzigd; neem het voorstel over en druk op Maak';
-  const nu = kaal(spreekVan(u, inst).tekst);
-  if (!nu || nu !== nieuw) return 'het voorstel klinkt anders dan het gemaakte bandje; neem het over en druk op Maak';
+  // Codex MOET 1: alleen met de opname zelf als bewijs (de Studio-taak); zonder taak is niet na te gaan wat de stem zei
+  if (typeof gezegd !== 'string') return 'niet na te gaan wat de stem bij het maken zei; neem het voorstel over en druk op Maak';
+  if (!nieuw || kaal(gezegd) !== nieuw) return 'het voorstel klinkt anders dan het gemaakte bandje; neem het over en druk op Maak';
   return null;
 }
 function gelijkTrekken(md, voorvoegsel, id, o, klok) {
@@ -1076,7 +1072,7 @@ function routes(deps) {
     try {
       const lb = laatsteVan(b.laatste_bestand);
       const gezegd = lb ? gezegdVan(pr, b.id, lb.job) : undefined;
-      return !gelijkFout(b, inst, gezegd === undefined && S.spreekNaMaak ? S.spreekNaMaak(pr, b.id) : false, gezegd);
+      return !gelijkFout(b, inst, false, gezegd);
     } catch (e) { return false; }
   }
   function praktijkUit(l) {

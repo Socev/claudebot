@@ -40,7 +40,7 @@ const R = B.routes({ opslag: S, dir: DIR, primair: () => true, studio: studio })
   // ── 2C91a gelijktrekken ──
   let st = R.kaartStand();
   let kp = st[1].bandjes.find((x) => x.id === 'gh-koffiepauze');
-  toets('a: zonder taak en zonder journaal-spreekwijziging: gelijk_kan (spreektekst = voorstel)', kp.gelijk_kan === true, kp.gelijk_kan);
+  toets('a: zonder Studio-taak (geen bewijs van wat de stem zei): niet gelijk_kan', kp.gelijk_kan === false, kp.gelijk_kan);
   taak = { id: JOB, status: 'klaar', bron: { soort: 'bandje', praktijk: 'groenhouten', bandje: 'gh-koffiepauze', tekst_hash: h(OUDE) }, velden: { tekst: 'Welkom bij de Proefpraktijk. [pause] Voor spoed, kies één. [pause] Zie w w w punt proefpraktijk punt n l.' } };
   st = R.kaartStand(); kp = st[1].bandjes.find((x) => x.id === 'gh-koffiepauze');
   toets('a: met de Studio-taak (wat de stem zei) = voorstel: gelijk_kan', kp.gelijk_kan === true, kp.gelijk_kan);
@@ -71,7 +71,7 @@ const R = B.routes({ opslag: S, dir: DIR, primair: () => true, studio: studio })
   fs.writeFileSync(path.join(DIR, 'journaal.jsonl'), [{ tijd: '2026-10-22T20:27:55.000Z', praktijk: 'groenhouten', bandje: 'gh-koffiepauze', actie: 'gemaakt', versie: 2, tekst_hash: h(OUDE) },
     { tijd: '2026-10-22T21:00:00.000Z', praktijk: 'groenhouten', bandje: 'gh-koffiepauze', actie: 'spreektekst', versie: 2, tekst_hash: h(OUDE) }].map(JSON.stringify).join('\n') + '\n');
   r = await R.app('POST /app/bandjes/gelijk', { praktijk: 'groenhouten', bandje: 'gh-koffiepauze', versie: 2, tekst_hash: h(OUDE) }, {});
-  toets('a: spreektekst na het maken gewijzigd en geen taak: 409', r.status === 409 && /na het maken/.test(r.j.fout), r);
+  toets('a: geen taak: 409 niet na te gaan', r.status === 409 && /niet na te gaan/.test(r.j.fout), r);
   fs.writeFileSync(path.join(DIR, 'journaal.jsonl'), '');
   // niet gemaakt (status concept) = nee
   schrijfRegs({ status: 'concept (v2)' });
@@ -80,6 +80,7 @@ const R = B.routes({ opslag: S, dir: DIR, primair: () => true, studio: studio })
   schrijfRegs();
 
   // ── 2C22 afmaakkaart ──
+  taak = { id: JOB, status: 'klaar', bron: { soort: 'bandje', praktijk: 'groenhouten', bandje: 'gh-koffiepauze', tekst_hash: h(OUDE) }, velden: { tekst: 'Welkom bij de Proefpraktijk. [pause] Voor spoed, kies één. [pause] Zie w w w punt proefpraktijk punt n l.' } };
   const nu = Date.parse('2026-11-21T13:00:00Z');   // za 14:00 NL
   let pl = K.plan({ praktijken: R.kaartStand(), punten: [], nu: nu, nuKort: '21-11 14:00' });
   const sl = pl.zet.map((k) => k.sleutel).sort();
@@ -138,6 +139,11 @@ const R = B.routes({ opslag: S, dir: DIR, primair: () => true, studio: studio })
   toets('c: zetGehoord schrijft het veld gehoord', r.status === 200 && /^- gehoord: v2 op /m.test(fs.readFileSync(TG, 'utf8')), r);
   pl = K.plan({ praktijken: R2.kaartStand(), punten: [{ sleutel: 'bandjes-bel-tolgaarde-tg-buiten-v2', status: 'gedaan', gesloten_door: 'david' }], nu: Date.parse('2026-11-23T17:30:00Z') });
   toets('c: daarna niet nog eens', pl.gehoord.length === 0, pl.gehoord);
+  pl = K.plan({ praktijken: stand, punten: [{ sleutel: 'bandjes-bel-tolgaarde-tg-buiten-v2', status: 'gedaan', gesloten_door: 'david' }], nu: Date.parse('2026-12-20T12:00:00Z') });
+  toets('c (Codex ZOU 2): afgerond na de 7 dagen telt nog', pl.gehoord.length === 1, pl.gehoord);
+  const st3 = stand.map((x) => Object.assign({}, x, { bandjes: x.bandjes.map((b) => b.id === 'tg-buiten' ? Object.assign({}, b, { centrale_versie: 3, in_centrale: 'v3 sinds 22-11-2026, [[x]]', gehoord: 'v2 op 21-11-2026 (David belde na)' }) : b) }));
+  pl = K.plan({ praktijken: st3, punten: [{ sleutel: 'bandjes-bel-tolgaarde-tg-buiten-v3', status: 'gedaan', gesloten_door: 'david' }], nu: Date.parse('2026-11-23T12:00:00Z') });
+  toets('c (Codex ZOU 1): gehoord v2 telt niet voor v3', pl.gehoord.length === 1 && pl.gehoord[0].versie === 3, pl.gehoord);
   // vensters
   const v = K.vensters('ma-vr 00:00-08:00; za-zo 00:00-24:00; onzin');
   toets('vensters: twee gelezen, onzin genegeerd', v.length === 2 && v[1].dagen.has(6) && v[1].dagen.has(7) && !v[1].dagen.has(1));

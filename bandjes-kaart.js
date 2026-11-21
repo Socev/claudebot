@@ -129,8 +129,11 @@ function plan(x) {
         const p = punten.get(s);
         const heeftVensters = vensters(b.tijdvensters).length > 0;
         if (!p && overdag && (!heeftVensters || speeltNu(b.tijdvensters, t)) && uit.zet.length < MAX_NIEUW) uit.zet.push(belKaart(pr.id, pr.naam, b, nuKort));
-        if (p && p.status === 'gedaan' && p.gesloten_door === 'david' && !/^\s*v?\d/.test(String(b.gehoord || '')))
-          uit.gehoord.push({ praktijk: pr.id, bandje: b.id, versie: c });
+      }
+      // Codex ZOU 1+2: een door David afgeronde belkaart van de versie die nu in de centrale staat telt ook na de 7 dagen; gehoord per versie
+      if (c >= 1 && sinds && sinds.iso >= BEGIN && !new RegExp('^\\s*v' + c + '\\b').test(String(b.gehoord || ''))) {
+        const p = punten.get(sleutelBel(pr.id, b.id, c));
+        if (p && p.status === 'gedaan' && p.gesloten_door === 'david') uit.gehoord.push({ praktijk: pr.id, bandje: b.id, versie: c });
       }
     });
   });
