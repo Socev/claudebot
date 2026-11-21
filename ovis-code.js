@@ -368,16 +368,107 @@ function maak(o) {
   function waarVoorApp(t) {
     return String(t || '').replace(/\s*;?\s*(?:data |index )?pod\s*`\/opt\/[^`]*`/g, '').replace(/`?\/opt\/[^\s`;,)]*`?/g, '').replace(/`/g, '').replace(/\s*;\s*$/, '').trim();
   }
+
+  // ── wv3745 (besluitenpagina nr 438 = 3C138): Volgende stap en Besluiten uit STAND.md, bovenaan de app-pagina ──
+  // Alleen wat er staat (geen STAND of lege kopjes = null, niets verzinnen); datum = laatste wijziging van STAND.md (code-stand.py schrijft
+  // hem). Per kopje hooguit KERN_REGELS punten van hooguit KERN_TEKENS tekens; vervolgregels van een punt horen bij dat punt.
+  const KERN_REGELS = 5, KERN_TEKENS = 300;
+  function kernRegel(t) {
+    return schoon(waarVoorApp(String(t).replace(/\*\*/g, '')), KERN_TEKENS);
+  }
+  function standDeel(tekst, kop) {
+    const regels = String(tekst || '').split(/\r?\n/), uit = [];
+    let binnen = false, huidig = null;
+    const sluit = function () { if (huidig !== null) { const r = kernRegel(huidig); if (r && !/^[-–—.]*$/.test(r)) uit.push(r); } huidig = null; };
+    for (const r of regels) {
+      if (/^#{1,6}\s/.test(r)) { sluit(); if (binnen) break; binnen = new RegExp('^##\\s+' + kop + '[a-z]*\\s*:?$', 'i').test(r.trim()); continue; }
+      if (!binnen) continue;
+      const m = /^\s{0,1}[-*]\s+(.*)$/.exec(r) || (/^\s{0,1}[-*]\s*$/.test(r) ? ['', ''] : null);
+      if (m) { sluit(); huidig = m[1]; continue; }
+      if (huidig !== null && r.trim()) huidig += ' ' + r.trim();   // vervolgregel (ingesprongen of niet) van het punt
+      else if (huidig === null && r.trim()) { huidig = r.trim(); sluit(); }   // losse zin zonder streepje telt als punt
+    }
+    sluit();
+    return uit.slice(0, KERN_REGELS);
+  }
+  function standKern(id) {
+    const m = werkmap(id);
+    if (!m || !echteMap(m)) return null;
+    const p = path.join(m, STAND), st = echtBestand(p);
+    if (!st) return null;
+    const tekst = leesKlein(p, MAX_STAND * 4) || '';
+    const volgende = standDeel(tekst, 'Volgende stap'), besluiten = standDeel(tekst, 'Besluiten');
+    if (!volgende.length && !besluiten.length) return null;
+    return { op: new Date(st.mtimeMs).toISOString(), volgende: volgende, besluiten: besluiten };
+  }
+
+  // ── wv3745 (besluitenpagina nr 478 = 3C178): "Laatst gewijzigd" per app = de nieuwste afgeronde werkvoorraadklus van die app ──
+  // De pod ziet in mk_werkvoorraad_stand alleen klare rijen van de laatste 3 dagen; daarom onthouden we per app de nieuwste in
+  // gewijzigd.json (zelfde map, 0600). mk-scripts/wv3745/zaai.js vult het eenmalig uit de volledige historie. Uitkomstzin = een regel
+  // "Uitkomst: …" uit het bewaarde rapport (wv3732 zet die regel straks in elk rapport), anders de klustitel. Nacontroles tellen niet
+  // (die veranderen niets).
+  const GEWIJZIGD = 'gewijzigd.json';
+  function gewijzigdLees() {
+    try { const j = JSON.parse(fs.readFileSync(path.join(basis, GEWIJZIGD), 'utf8')); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; } catch (e) { return {}; }
+  }
+  function gewijzigdSchrijf(j) {
+    const p = path.join(basis, GEWIJZIGD), tmp = p + '.nieuw.' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(j), { mode: 0o600 });
+    fs.renameSync(tmp, p);
+  }
+  function uitkomstUit(tekst) {
+    const m = /^[ \t]*(?:[-*>#]+[ \t]*)?(?:\*\*|__)?Uitkomst(?:\*\*|__)?[ \t]*[:：][ \t]*(?:\*\*|__)?[ \t]*(\S.*)$/im.exec(String(tekst || ''));
+    if (!m) return null;
+    const z = schoon(waarVoorApp(m[1].replace(/\*\*|__/g, '')), 240);
+    return z.length >= 3 ? z : null;
+  }
+  function klusTitel(w) {
+    if (w.samenvatting) return schoon(w.samenvatting, 200);
+    return schoon(String(w.label || '').replace(/^\s*machinekamer\s*:\s*/i, '').replace(/[-_]+/g, ' '), 200);
+  }
+  const NIEUW_UITKOMST_MS = 2 * 24 * 3600 * 1000;   // zo lang na de klaar-tijd zoeken we nog naar de uitkomstregel (rapport kan later komen)
+  function gewijzigdBij(items, uitkomstVan) {
+    if (basisKlaar()) return null;
+    const oud = gewijzigdLees();
+    let anders = false;
+    (Array.isArray(items) ? items : []).forEach(function (w) {
+      if (!w || w.status !== 'klaar' || w.soort === 'nacontrole') return;
+      const id = C.appVanLabel(w.label);
+      const op = Date.parse(w.klaar_op || '');
+      if (!id || !isFinite(op) || !Number.isSafeInteger(Number(w.id))) return;
+      const x = oud[id], xop = x ? Date.parse(x.op) : NaN;
+      const zelfde = x && Number(x.wv) === Number(w.id);
+      if (x && !zelfde && isFinite(xop) && (xop > op || (xop === op && Number(x.wv) > Number(w.id)))) return;
+      if (zelfde && (x.uitkomst || nu() - op > NIEUW_UITKOMST_MS)) return;   // al bekend; alleen nog zoeken naar een late uitkomstregel
+      let uk = null;
+      try { uk = w.job_id && uitkomstVan ? uitkomstVan(String(w.job_id)) : null; } catch (e) { uk = null; }
+      if (zelfde && !uk) return;
+      oud[id] = { op: new Date(op).toISOString(), wv: Number(w.id), titel: klusTitel(w), uitkomst: uk ? schoon(uk, 240) : null };
+      anders = true;
+    });
+    if (anders) gewijzigdSchrijf(oud);
+    return oud;
+  }
   // Route-opbouw. inv: {stand, klussen: {id: [..]}, gesprek: {id: {loopt, in_rij, laatste}}, vraagOpen: {id: true}, lopend}
   function appsUit(inv) {
     const s = inv.stand || null, klussen = inv.klussen || {}, gesprek = inv.gesprek || {}, vraagOpen = inv.vraagOpen || {};
     const repoVan = function (r) { const x = s && s.repos ? s.repos[r] : null; return { naam: r, url: 'https://github.com/Socev/' + r, push: x ? x.push || null : null }; };
+    // wv3745: per app laatst gewijzigd (gewijzigd.json) en de STAND-regels; een scherm in de Socev-app zonder eigen uitrol krijgt de
+    // uitrol van de Socev-app (uitrol_schil), want daar zit het scherm in.
+    const gw = inv.gewijzigd || gewijzigdLees();
+    const schil = C.app('socev-app'), uitrolSchil = schil ? uitrolVan(schil, s) : null;
     const apps = C.APPS.map(function (a) {
       const kl = klussen[a.id] || [], g = gesprek[a.id] || { loopt: false, in_rij: 0, laatste: null };
       const chip = vraagOpen[a.id] || kl.some(function (k) { return k.stand === 'wacht_op_jou'; }) ? 'wacht_op_jou'
         : g.loopt || kl.some(function (k) { return k.stand === 'loopt'; }) ? 'loopt' : 'stil';
+      const ur = uitrolVan(a, s), x = gw[a.id];
+      let kern = null;
+      try { kern = standKern(a.id); } catch (e) { kern = null; }
       return { id: a.id, naam: a.naam, groep: C.weergaveGroep(a.groep), wat: a.wat, waar: waarVoorApp(a.waar), adressen: a.adressen || [], inlog: a.inlog === true,
-        repos: (a.repos || []).map(repoVan), scherm: a.scherm || null, uitrol: uitrolVan(a, s), klussen: kl, chip: chip, gesprek: g };
+        repos: (a.repos || []).map(repoVan), scherm: a.scherm || null, uitrol: ur, klussen: kl, chip: chip, gesprek: g,
+        uitrol_schil: !ur && a.scherm && a.id !== 'socev-app' ? uitrolSchil : null,
+        gewijzigd: x && x.op ? { op: x.op, wv: x.wv, zin: x.uitkomst || x.titel || null, uitkomst: !!x.uitkomst } : null,
+        stand_kern: kern };
     });
     return { ok: true, gemeten: s ? s.gemeten || null : null, stand_fout: s ? s.fout || null : 'nog niet gemeten',
       tegelijk: { max: inv.max || 2, lopend: inv.lopend || 0 }, groepen: C.GROEPEN, apps: apps,
@@ -385,7 +476,8 @@ function maak(o) {
   }
 
   return { werkmap, werkKlaar, standLees, standMeet, appsUit, uitrolVan, basis: basis, INSTRUCTIE, STAND, MAX_INSTRUCTIE, MAX_STAND,
-    draadMap, draadLees, draadBestaat, draden, alleDraden, draadMaak, draadSluit, draadHeropen, draadWeg, draadLaatst, draadStand, draadStandTekst, standTekst, overzicht };
+    draadMap, draadLees, draadBestaat, draden, alleDraden, draadMaak, draadSluit, draadHeropen, draadWeg, draadLaatst, draadStand, draadStandTekst, standTekst, overzicht,
+    standKern, gewijzigdLees, gewijzigdBij, uitkomstUit };
 }
 
 module.exports = { maak, INSTRUCTIE, STAND, MAX_INSTRUCTIE, MAX_STAND, MAX_DRADEN_OPEN, MAX_TITEL, MAX_DOEL, MAX_DRAAD_STAND, MAX_RAPPORT, STIL_DAGEN, WEG_DAGEN };

@@ -10234,7 +10234,17 @@ async function appCodeKlussen(a) {
     });
   });
   codeKlussenCache = { op: Date.now(), per: per };   // wv3243: voor de overkoepelende regel bij de start van een beurt (geen await daar)
+  try { CODE_WERK.gewijzigdBij(wv.items, codeUitkomstVan); } catch (e) { logError('app-code-gewijzigd', e); }   // wv3745 (nr 478 = 3C178)
   return per;
+}
+// wv3745: de regel "Uitkomst: …" uit het bewaarde rapport van een agentklus (≤ 64 kB, geen koppeling volgen), anders null
+function codeUitkomstVan(jobId) {
+  const m = appBewaardVan(jobId);
+  if (!m || !m.rapport) return null;
+  let fd;
+  try { fd = fs.openSync(path.join(APP_BESTANDEN_DIR, m.dag, jobId, 'rapport.md'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch (e) { return null; }
+  try { const b = Buffer.alloc(65536); const n = fs.readSync(fd, b, 0, b.length, 0); return CODE_WERK.uitkomstUit(b.slice(0, n).toString('utf8')); }
+  catch (e) { return null; } finally { fs.closeSync(fd); }
 }
 async function appCodeApps(req, res, a) {
   res._app.stil = true;   // ververst zolang de plek open is
