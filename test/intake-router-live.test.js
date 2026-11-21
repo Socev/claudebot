@@ -956,3 +956,95 @@ test('wv1276 review: kern — datumKop: JSON-strings, NEL weg', () => {
   assert.match(tekst, /\n  - \{tekst: "a b \\"c\\" \\\\ d: \{e\}", start: "2026-11-03", rol: "afspraak", zekerheid: "hoog"\}\n/);
   assert.ok(!/\u0085/.test(tekst));
 });
+
+// ── wv3683 (3C65): het sorteermodel leert van Davids keuzes (router.json indeling_leren) ──
+test('wv3683: oude vraag ongewijzigd zonder leren; nieuwe vraag met postvak, uitleg per plek, voorbeelden en Niet bewaren', () => {
+  const x = { onderwerp: 'Proef', van: 'a@voorbeeld.example', van_naam: 'Anne Proef', tekst: 'verzonnen tekst', categorieen: ['Privé', 'HAGRO'] };
+  const oud = R.indelingVraag(x);
+  assert.equal(oud.prompt, 'CATEGORIEËN:\n- Privé\n- HAGRO\n- Onbekend\n\n=== STUK ===\nONDERWERP: Proef\nAFZENDER: Anne Proef <a@voorbeeld.example>\n\nverzonnen tekst\n=== EINDE STUK ===');
+  assert.deepEqual(oud.schema.properties.categorie.enum, ['Privé', 'HAGRO', 'Onbekend']);
+  assert.match(oud.systeem, /^MACHINALE KLUS/); assert.match(oud.systeem, /Kies EXACT één categorie/); assert.match(oud.systeem, /GHAWA-ECG en niet Privé/);
+  const nw = R.indelingVraag(Object.assign({ leren: true, postvak: 'het testpostvak', voorbeelden: ['gmail:david | b@voorbeeld.example | "Factuur" → Privé'] }, x));
+  assert.match(nw.prompt, /POSTVAK van dit stuk: het testpostvak/);
+  assert.match(nw.prompt, /- gmail:david \| b@voorbeeld\.example \| "Factuur" → Privé/);
+  assert.match(nw.prompt, /- Privé: Davids privéleven/);
+  assert.deepEqual(nw.schema.properties.plek.enum, ['Privé', 'HAGRO', 'Niet bewaren', 'Onbekend']);
+  assert.deepEqual(nw.schema.required, ['plek', 'zekerheid', 'zin']);
+  assert.deepEqual(R.indelingAntwoord({ plek: 'HAGRO', zekerheid: 'hoog', zin: 'Een\nzin <b>' }), { categorie: 'HAGRO', zekerheid: 'hoog', zin: 'Een zin b' });
+  assert.deepEqual(R.indelingAntwoord({ categorie: 'HAGRO' }), { categorie: 'HAGRO', zekerheid: null, zin: null });
+  assert.equal(R.indelingAntwoord({}), null);
+});
+
+function lerenOmgeving(antw, auto) {
+  const vragen = [];
+  const E = omgeving({ lenzenLive: () => ['kennis', 'geen'], indelingLeren: () => ({ aan: true, auto: auto || null }),
+    indeling: async function (x) { vragen.push(x); return Object.assign({ ok: true }, antw.shift()); } });
+  E.vragen = vragen;
+  return E;
+}
+const mailVan = (E, van, ond) => E.zet({ meta: { van, van_naam: 'Proef', onderwerp: ond, aan: ['david@voorbeeld.example'] },
+  delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(van, ond, GEWOON) }] });
+
+test('wv3683: leren aan — postvak en Davids eerdere keuze (eerst zelfde afzender) gaan mee; redelijk = vermoeden als voorstel, niet vanzelf', async () => {
+  const E = lerenOmgeving([{ categorie: 'Onbekend', zekerheid: 'laag', zin: 'x' }, { plek: 'Huisartsenpraktijk Groenhouten (voorheen HAP Leusden)', zekerheid: 'redelijk', zin: 'Uitnodiging voor een overleg.' }]);
+  const a = mailVan(E, 'anne@ander.example', 'Overleg roosters');
+  await E.r.ronde();
+  assert.equal(E.vragen.length, 1); assert.equal(E.vragen[0].leren, true); assert.match(E.vragen[0].postvak, /Davids eigen Gmail/); assert.deepEqual(E.vragen[0].voorbeelden, []);
+  let k = await E.r.appKeuze({ stuk_id: a, keuze: 'bestemming', lens: 'kennis', entiteit: 'GH' }, 'app:proef');
+  assert.equal(k.status, 200);
+  E.klok.t += 60000;
+  const b = mailVan(E, 'anne@ander.example', 'Overleg roosters 2');
+  await E.r.ronde();
+  assert.equal(E.vragen.length, 2);
+  assert.deepEqual(E.vragen[1].voorbeelden, ['gmail:david | anne@ander.example | "Overleg roosters" → Huisartsenpraktijk Groenhouten (voorheen HAP Leusden)']);
+  const ls = E.db.prepare('SELECT staat FROM live_stuk WHERE stuk_id = ?').get(b);
+  assert.equal(ls.staat, 'twijfel');   // redelijk plaatst niet vanzelf (standaard alleen hoog)
+  const vn = JSON.parse(E.db.prepare("SELECT bewijs FROM besluit WHERE stuk_id = ? AND stap = 'vangnet'").get(b).bewijs);
+  assert.equal(vn.vermoeden, 'GH'); assert.equal(vn.zekerheid, 'redelijk'); assert.equal(vn.zin, 'Uitnodiging voor een overleg.'); assert.equal(vn.voorbeelden, 1);
+  const st = (await E.r.appWerkstroom('wacht', 50)).stukken.find((s) => s.stuk_id === b);
+  assert.deepEqual(st.voorstel, { lens: 'kennis', entiteit: 'GH' });
+  assert.match(st.reden, /^Intake denkt Praktijk Proefhout, maar weet het niet zeker$/);
+  E.r.sluit();
+});
+
+test('wv3683: leren aan — hoog plaatst vanzelf; Niet bewaren wordt alleen een voorstel (nooit vanzelf weg); auto-lijst uit router.json telt', async () => {
+  const E = lerenOmgeving([{ plek: 'Privé', zekerheid: 'hoog', zin: 'z' }, { plek: 'Niet bewaren', zekerheid: 'hoog', zin: 'Reclame.' }, { plek: 'Privé', zekerheid: 'redelijk', zin: 'z' }], ['hoog', 'redelijk']);
+  const a = mailVan(E, 'x@een.example', 'Een');
+  await E.r.ronde();
+  assert.equal(E.db.prepare('SELECT staat, bewijs FROM live_stuk WHERE stuk_id = ?').get(a).bewijs, 'model');
+  E.klok.t += 60000;
+  const b = mailVan(E, 'y@twee.example', 'Twee');
+  await E.r.ronde();
+  assert.equal(E.db.prepare('SELECT staat FROM live_stuk WHERE stuk_id = ?').get(b).staat, 'twijfel');
+  assert.equal(E.db.prepare("SELECT count(*) n FROM uitvoering WHERE stuk_id = ?").get(b).n, 0);
+  const st = (await E.r.appWerkstroom('wacht', 50)).stukken.find((s) => s.stuk_id === b);
+  assert.deepEqual(st.voorstel, { lens: 'geen', entiteit: null }); assert.equal(st.reden, 'Intake denkt: niet bewaren');
+  E.klok.t += 60000;
+  const c = mailVan(E, 'z@drie.example', 'Drie');
+  await E.r.ronde();   // redelijk staat in de auto-lijst → vanzelf
+  assert.equal(E.db.prepare('SELECT bewijs FROM live_stuk WHERE stuk_id = ?').get(c).bewijs, 'model');
+  E.r.sluit();
+});
+
+test('wv3683: leren uit — geen postvak of voorbeelden, elk modelantwoord met een plek plaatst zoals voorheen', async () => {
+  const vragen = [];
+  const E = omgeving({ indelingLeren: () => ({ aan: false, auto: null }), indeling: async function (x) { vragen.push(x); return { ok: true, categorie: 'Privé' }; } });
+  const a = mailVan(E, 'x@een.example', 'Een');
+  await E.r.ronde();
+  assert.equal(vragen[0].leren, undefined); assert.equal(vragen[0].voorbeelden, undefined); assert.equal(vragen[0].postvak, undefined);
+  assert.equal(E.db.prepare('SELECT bewijs FROM live_stuk WHERE stuk_id = ?').get(a).bewijs, 'model');
+  E.r.sluit();
+});
+
+test('wv3683 review MOET 2: een latere handeling van David zonder leren (verwijderen gevraagd) trekt het voorbeeld in', async () => {
+  const E = lerenOmgeving([{ categorie: 'Onbekend', zekerheid: 'laag', zin: 'x' }, { categorie: 'Onbekend', zekerheid: 'laag', zin: 'x' }]);
+  const a = mailVan(E, 'anne@ander.example', 'Overleg roosters');
+  await E.r.ronde();
+  assert.equal((await E.r.appKeuze({ stuk_id: a, keuze: 'bestemming', lens: 'kennis', entiteit: 'GH' }, 'app:proef')).status, 200);
+  E.r.verwijderGevraagd(a, 'david', 'wv1');
+  E.klok.t += 60000;
+  mailVan(E, 'anne@ander.example', 'Overleg roosters 2');
+  await E.r.ronde();
+  assert.deepEqual(E.vragen[1].voorbeelden, []);
+  E.r.sluit();
+});
