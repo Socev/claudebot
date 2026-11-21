@@ -103,6 +103,43 @@ function maak(o) {
     return { ok: true, status: p.status, nieuw: nieuw };
   }
 
+  // wv3821 (deel 2, "Zoek het uit"): David zei Ja op de kaart "Gevonden: … — onthouden?" → meteen een bevestigd paar (zijn Ja ís de
+  // bevestiging). x = { vraag, pad, waarden: [{ waarde, label, anker: { regel, kop } }] } — al nagekeken door de pod (bronAnker + grens).
+  // Een bevestigd paar met een andere pagina blijft staan. Geeft { ok, sleutel, vorige } terug: vorige = het oude paar (of null) voor terug().
+  function uitgezocht(x) {
+    const sl = vraagSleutel(x && x.vraag);
+    if (!sl) return { ok: false, reden: 'geen vraagsleutel' };
+    const pad = String(x.pad || '');
+    if (!/^(10_Zakelijk|20_Prive)\/[^\0]+\.md$/.test(pad) || pad.split('/').some(function (d) { return d === '..' || d === '.' || d === ''; })) return { ok: false, reden: 'geen vaultbron' };
+    const waarden = (Array.isArray(x.waarden) ? x.waarden : []).filter(function (w) { return w && typeof w.waarde === 'string' && w.waarde && w.waarde.length <= 120 && w.anker && typeof w.anker.regel === 'string' && w.anker.regel; })
+      .slice(0, MAX_WAARDEN).map(function (w) { return { waarde: w.waarde, label: kort(w.label || '', 40), anker: { regel: String(w.anker.regel).slice(0, 400), kop: String(w.anker.kop || '').slice(0, 600) } }; });
+    if (!waarden.length) return { ok: false, reden: 'geen bronanker' };
+    const j = lees(), t = nu();
+    const oud = j.paren.find(function (q) { return q.sleutel === sl; }) || null;
+    if (oud && oud.status === 'bevestigd' && oud.pad !== pad) return { ok: false, reden: 'al bevestigd met een andere bron' };
+    const vorige = oud ? JSON.parse(JSON.stringify(oud)) : null;
+    const p = { id: sha(sl).slice(0, 10), sleutel: sl, vraag: kort(x.vraag, 120), waarden: waarden, pad: pad, keer: oud ? (oud.keer || 0) + 1 : 1,
+      eerst: oud ? oud.eerst : t, laatst: t, status: 'bevestigd', bevestigd_op: t, herkomst: 'uitgezocht' };
+    j.paren = j.paren.filter(function (q) { return q !== oud; });
+    j.paren.push(p);
+    if (j.paren.length > MAX_PAREN) {
+      const weg = j.paren.filter(function (q) { return q.status !== 'bevestigd'; }).sort(function (a, b) { return a.laatst - b.laatst; })[0];
+      if (weg) j.paren = j.paren.filter(function (q) { return q !== weg; });
+    }
+    schrijf(j);
+    return { ok: true, sleutel: sl, vorige: vorige };
+  }
+  // Terug naar de stand van vóór uitgezocht() (de knopdruk verviel).
+  function terug(sleutel, vorige) {
+    try {
+      const j = lees();
+      j.paren = j.paren.filter(function (q) { return q.sleutel !== sleutel; });
+      if (vorige) j.paren.push(vorige);
+      schrijf(j);
+      return true;
+    } catch (e) { fout('zoek-snel-leer', e); return false; }
+  }
+
   function geleerd(vraag) {
     const sl = vraagSleutel(vraag);
     if (!sl) return null;
@@ -224,7 +261,7 @@ function maak(o) {
     } catch (e) { return { fout: true }; }
   }
 
-  return { vraagSleutel: vraagSleutel, gekozen: gekozen, geleerd: geleerd, weg: weg, kaart: kaart, kaartGezet: kaartGezet, knop: knop, info: info, datumKort: datumKort, _lees: lees };
+  return { vraagSleutel: vraagSleutel, gekozen: gekozen, uitgezocht: uitgezocht, terug: terug, geleerd: geleerd, weg: weg, kaart: kaart, kaartGezet: kaartGezet, knop: knop, info: info, datumKort: datumKort, _lees: lees };
 }
 
 module.exports = { maak: maak, SLEUTEL_RE: SLEUTEL_RE, LEER_LAGEN: LEER_LAGEN, isoWeekLokaal: isoWeekLokaal };

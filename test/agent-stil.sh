@@ -145,7 +145,7 @@ const stop = (srv) => { try { process.kill(-srv.p.pid, 'SIGKILL'); } catch (e) {
   const s = fs.readFileSync(BRON, 'utf8');
   const wb = s.indexOf('function weesAfleveren('), we = s.indexOf('\nfunction ', wb + 10);
   const wees = wb > 0 ? s.slice(wb, we) : '';
-  toets('W wees-aflevering: agentStil vóór sendReport', /const stil = agentStil\(a\.label, r, files\);\s*\n\s*if \(stil\) agentStilAf\(a, id\); else sendReport\(a, r\);/.test(wees));
+  toets('W wees-aflevering: agentStil vóór sendReport (wv3821: of een zoektocht van Zoek het uit)', /const stil = (?:zoekUit \|\| )?agentStil\(a\.label, r, files\);\s*\n\s*if \(stil\) agentStilAf\(a, id\); else sendReport\(a, r\);/.test(wees));
   toets('W wees-aflevering: geen rapport.md bij stil', /appBewaarAgent\(id, a, outdir, stil \? null : r\.output/.test(wees));
   if (srv) stop(srv);
   hook.close();

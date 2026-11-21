@@ -180,7 +180,7 @@ const maak = function (naam) { return L.maak({ bestand: path.join(W, naam), nu: 
   toets('server: weekkaart in de kaartenronde', /await zoekSnelLeerKaart\(\)/.test(S));
   toets('server: knop vóór de gewone knop, na de markerkaart', S.indexOf('zoekSnelLeer.knop(p.sleutel, keuze, d.toelichting)') > S.indexOf('herinneringen.knop(p.sleutel, keuze)'));
   toets('server: /health alleen aantallen', /leer: zoekSnelLeer \? zoekSnelLeer\.info\(\) : undefined/.test(S));
-  toets('uitrol: zoek-snel-leer.js in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]* zoek-snel-leer\.js"/.test(U));
+  toets('uitrol: zoek-snel-leer.js in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bzoek-snel-leer\.js\b/.test(U));
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
