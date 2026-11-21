@@ -1208,8 +1208,8 @@ function wijzig(fdb, r, d, nu) {
  * patiëntkenmerk en alleen-eigenaar gaan hooguit omhoog. De status blijft Beoordelen; zegt de kern nu "geen factuur" of "dubbel", dan staat
  * dat bovenaan bij Kijk na en beslist David zelf.
  * wv3738 (David 21-11-2026 13:44: scans mogen naar Anthropic als die beter extraheert): server.js vraagt eerst de PDF-lezer (Claude, zelfde
- * route en patiëntregel als bij binnenkomst: io.pdfLive / liveFacturen), alleen als de factuur geen patiëntkenmerk heeft en niet alleen voor
- * de eigenaar is (claude_mag). Geeft die een kandidaat, dan komt die als vo.modelKandidaat mee met de lokale tekst van de lezer als
+ * route als bij binnenkomst: io.pdfLive / liveFacturen). wv3762 (David 21-11-2026 14:00): ook bij een patiëntkenmerk of alleen-eigenaar
+ * (claude_mag is altijd true; geen patiëntrem vóór het model). Geeft die een kandidaat, dan komt die als vo.modelKandidaat mee met de lokale tekst van de lezer als
  * vo.ocrTekst (de controle): reden "Scan: velden gelezen door Claude, de lokale OCR is de controle". Anders de lokale OCR zoals hierboven.
  */
 function herleesBron(k, v, w) {
@@ -1237,24 +1237,17 @@ function herleesScan(fdb, r, d) {
 function herleesStuk(fdb, r, d) {
   const { f, doc } = herleesScan(fdb, r, d || {});
   const b = f.bericht ? fdb.db.prepare('SELECT afzender, onderwerp FROM bericht WHERE id = ?').get(f.bericht) : null;
-  const dk = fdb.db.prepare('SELECT patientkenmerk, bericht FROM document WHERE id = ?').get(doc.id);
-  // wv3738: Claude alleen zonder patiëntkenmerk (factuur én document) en niet bij alleen-eigenaar (grondwet 3; de lezer toetst daarna zelf nog).
-  // Review ZOU 2: zoals de koerier het hele bericht sluit, ook niet als een ander stuk of een andere factuur uit hetzelfde bericht een
-  // kenmerk heeft of alleen voor de eigenaar is.
-  const ber = f.bericht || (dk && dk.bericht) || null;
-  const buur = ber ? fdb.db.prepare('SELECT 1 FROM factuur WHERE bericht = ? AND id <> ? AND (patientkenmerk = 1 OR alleen_eigenaar = 1) UNION ALL ' +
-    'SELECT 1 FROM document WHERE bericht = ? AND id <> ? AND patientkenmerk = 1 LIMIT 1').get(ber, f.id, ber, doc.id) : null;
-  const claudeMag = !f.patientkenmerk && !f.alleen_eigenaar && !(dk && dk.patientkenmerk) && !buur;
-  return { ok: true, bytes: D.stukLees(fdb, doc.sha256), sha256: doc.sha256, naam: doc.naam, bericht: b ? { afzender: b.afzender, onderwerp: b.onderwerp } : null, claude_mag: claudeMag };
+  // wv3762 (David 21-11-2026 14:00): Claude mag altijd lezen, ook bij een patiëntkenmerk of alleen-eigenaar (dat blijft een vlag voor David).
+  return { ok: true, bytes: D.stukLees(fdb, doc.sha256), sha256: doc.sha256, naam: doc.naam, bericht: b ? { afzender: b.afzender, onderwerp: b.onderwerp } : null, claude_mag: true };
 }
 function herlees(fdb, r, d, nu, vo) {
   // wv3738: een kandidaat van de PDF-lezer telt alleen als hij live is (niet uit het verzoek: server.js zet hem, nooit de body)
   const mk = vo.modelKandidaat && typeof vo.modelKandidaat === 'object' && vo.modelKandidaat.live === true ? vo.modelKandidaat : null;
   if (typeof vo.ocrTekst !== 'string') weiger(503, 'de lokale tekstherkenning (OCR) is hier niet beschikbaar of liep niet; probeer het later opnieuw');
-  if (vo.ocrTekst.replace(/\s/g, '').length < 40) weiger(422, 'de tekstherkenning las te weinig tekst van dit stuk; vul de velden zelf in');
+  // wv3762: met een kandidaat van Claude mag de lokale OCR leeg zijn (Claude leest het beeld zelf; de OCR is alleen de controle)
+  if (!mk && vo.ocrTekst.replace(/\s/g, '').length < 40) weiger(422, 'de tekstherkenning las te weinig tekst van dit stuk; vul de velden zelf in');
   return D.transactie(fdb, function () {
     const { f, doc } = herleesScan(fdb, r, d);
-    if (mk && (f.patientkenmerk || f.alleen_eigenaar || (fdb.db.prepare('SELECT patientkenmerk FROM document WHERE id = ?').get(doc.id) || {}).patientkenmerk)) weiger(409, 'deze factuur is alleen voor de eigenaar of heeft een patiëntkenmerk: niet door Claude');   // wv3738: dubbel slot
     const wanneer = nuIso(nu);
     const ctx = Object.assign(kernCtx(fdb, nu), {
       leveranciers: leverancierLijst(fdb),
@@ -1308,7 +1301,7 @@ function herlees(fdb, r, d, nu, vo) {
     const redenen = (k.redenen || []).filter((x) => !(ander && OVER_LEV.test(String(x))));
     for (const x of (Array.isArray(f.redenen) ? f.redenen : [])) if (/Claude/.test(String(x)) && !redenen.includes(x)) redenen.push(x);
     // review wv3738 KAN 6: blijft een eerdere Claude-lezing staan, dan niet ook nog de scanreden van de lokale OCR ernaast
-    if (redenen.includes('Scan: velden gelezen door Claude, de lokale OCR is de controle')) for (let i = redenen.length - 1; i >= 0; i--) if (/^Scan zonder tekstlaag:/.test(String(redenen[i]))) redenen.splice(i, 1);
+    if (redenen.some((x) => /^Scan: velden gelezen door Claude/.test(String(x)))) for (let i = redenen.length - 1; i >= 0; i--) if (/^Scan zonder tekstlaag:/.test(String(redenen[i]))) redenen.splice(i, 1);
     if (ander) redenen.unshift('De tekstherkenning ziet een andere leverancier (' + kort(k.leverancier_naam || 'onbekend', 80) + ') dan hier gekozen: kijk na');
     if (k.status === 'dubbel') redenen.unshift('Na opnieuw lezen: lijkt dubbel met een bestaande factuur; kijk het na');
     if (k.status === 'geen_factuur') redenen.unshift('Na opnieuw lezen: lijkt geen inkoopfactuur; kies zelf Geen factuur als dat klopt');

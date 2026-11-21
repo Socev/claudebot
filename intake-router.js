@@ -26,8 +26,8 @@
  *   (pad + de lokale tekst als controle) naar o.pdfSchaduw (pdf-lezer.js via server.js), ná de transactie. De router blijft op zijn eigen
  *   lokale tekst beslissen (I3: de letterlijk-toets sluit modeluitvoer uit); een vastgehouden stuk gaat nooit mee.
  * LIVE PDF-lezer (wv1921): bij het schrijven van het kennisbestand vraagt de router per PDF-onderdeel o.pdfLees(pad) (pdf-lezer.js: eigen
- *   lezing per pagina + beide patiëntregels, dan Claude) en zet hij Claude's markdown in plaats van de pdftotext-tekst; lukt dat niet, dan
- *   blijft de lokale tekst. Alleen voor een stuk zonder marker, niet na Davids 'toch verwerken' en alleen met een Jev-uitslag onder de drempel.
+ *   lezing per pagina als controle, dan Claude) en zet hij Claude's markdown in plaats van de pdftotext-tekst; lukt dat niet, dan
+ *   blijft de lokale tekst. Sinds wv3762 voor elk stuk dat in het kennisbestand komt (ook met marker, na 'toch verwerken' of Jev boven).
  *   De beslissingen (soort, afzender, entiteit, regels) blijven op de lokale tekst.
  * STUK OPHALEN EN SYSTEEM (wv2004, bouwplan vault "01_Ontwikkeling/OVIS Intake - stuk ophalen en bestemming Systeem (bouwplan 29-10-2026).md").
  *   appStuk heeft een tijdsbudget (12 s): wat OCR nodig heeft leest de pod op de achtergrond (één tegelijk); de tekst blijft alleen in het
@@ -1752,7 +1752,9 @@ function maak(o) {
       uit.push(w); bijNamen.push({ naam: d.naam, bestand: path.basename(w.pad) });
     }
     const tekstDelen = lt.delen.filter(function (d) { return d.rol !== 'representatie' || lt.lijf; }).map(function (d) { return { deel: d.deel, rol: d.rol, naam: d.naam, tekst: d.tekst }; });
-    if (o.pdfLees && sam.marker === 'geen' && !sam.na_keuze && sam.jev === 'onder') {
+    // wv3762 (David 21-11-2026 14:00): Claude leest ook een stuk met een (vrijgegeven) marker, na "gewoon verwerken" of met Jev boven de drempel;
+    // dit stuk komt hoe dan ook in het kennisbestand, de lezer kiest alleen wie de tekst leest (geen patiëntrem vóór het model).
+    if (o.pdfLees) {
       for (const d of tekstDelen) {
         const od = delen.find(function (x) { return x.deel === d.deel; });
         if (!od || String(od.mime || '').toLowerCase() !== 'application/pdf') continue;
@@ -1776,7 +1778,7 @@ function maak(o) {
       const tekst = tekstDelen.map(function (x) { return x.tekst; }).join('\n');
       k.systeem = { onderwerp, van: (meta.van_naam ? meta.van_naam + ' ' : '') + '<' + adresVan(meta.van || '') + '>', van_adres: adresVan(meta.van || ''), dkim: sam.dkim || null,
         jev: sam.jev || null, na_keuze: !!sam.na_keuze, oordeel: systeemOordeelRegels({ onderwerp, tekst }),
-        model: !!o.systeemOordeel && sam.jev === 'onder' && !sam.na_keuze };   // review ZOU 3: niet voor een vrijgegeven markerstuk (zoals de PDF-lezer)
+        model: !!o.systeemOordeel && sam.jev === 'onder' && !sam.na_keuze };   // review ZOU 3: niet voor een vrijgegeven markerstuk
     }
     return [k].concat(uit);
   }

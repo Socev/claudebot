@@ -12,12 +12,14 @@
  * Management-API (zoals bankSleutels) en geeft hem hier via o.sleutel(). De SDK krijgt hem als expliciete apiKey, met authToken null en een
  * vaste baseURL, zodat geen ANTHROPIC_*-variabele uit de omgeving meetelt. Nooit in de procesomgeving, nooit in een log.
  *
- * PATIËNTREGEL (B2/B3, fail-closed). Een stuk uit Facturen gaat alleen naar Claude als het HELE bericht lokaal gelezen is (tekstlaag per
- * pagina, OCR voor beeldpagina's tot OCR_MAX pagina's, UBL-tekst en een in de UBL ingebedde PDF) en noch facturen-kern.stapPatientkenmerk
- * noch patientpoort-2.0 iets vindt. Iets niet te lezen, OCR mislukt of maar deels: dicht. Intake geeft alleen stukken door die de router
- * al als 'beoordeeld' (marker geen, niet deels gelezen) had, en ook dan leest de lezer elke PDF zelf nog eens per pagina (OCR op elke
- * beeldpagina en elke pagina met te weinig tekst; een lege OCR-pagina = dicht) en draait hij beide patiëntregels (review wv1431 MOET 1/2).
- * Een oordeel over patiëntgegevens komt nooit van Claude.
+ * GEEN PATIËNTREM VÓÓR CLAUDE (wv3762, David 21-11-2026 13:44: "het prima naar Anthropic of Gemini of OpenAI kan, als die beter kan
+ * extraheren"; 14:00: "Je hebt letterlijk vandaag je laatste checks verwijderd op patiëntgegevens, en bouw je er gewoon weer eentje in").
+ * Uitlezen door Claude is geen "naar derden". De oude patiëntregel (B2/B3, wv1431: alleen een heel lokaal gelezen bericht zonder kenmerk
+ * mocht naar Claude) is weg: elke PDF van Facturen en Intake gaat naar de lezer, ook met een patiëntkenmerk, een niet (volledig) lokaal
+ * gelezen pagina of een overgeslagen bijlage. De lezer leest elke PDF nog wel zelf per pagina (tekstlaag + OCR tot OCR_MAX pagina's): die
+ * lokale tekst (wat er gelezen is, desnoods leeg) is de controle op Claude's velden. Het patiëntkenmerk bepaalt de kern op de lokale tekst
+ * (facturen-kern.stapPatientkenmerk): een vlag voor David (alleen de eigenaar ziet de factuur), geen rem. Wat naar buiten gaat (mail,
+ * publieke pagina's, forum) of in de vault komt, regelt deze module niet.
  *
  * GRENS (I4). Reservering vóór de aanroep (pagina's × tokens_per_pagina), grens per maand, per dag en per stuk (pagina's), snelheidsgrens
  * per uur. Werkelijk verbruik met het model UIT HET ANTWOORD (een server-side fallback kan een ander model gebruiken) naar verbruik.jsonl,
@@ -25,10 +27,10 @@
  *
  * LIVE (wv1921, 28-10-2026; David: "We zouden Claude gebruiken - veel betrouwbaarder"). Per aanroeper aan in pdf-lezer.json
  * ({"live": {"facturen": true, "intake": true}}; ontbreekt of false: oude lezer). Facturen: liveFacturen(job) draait vóór de transactie van
- * de koerier dezelfde patiëntregel als de schaduw en geeft per PDF een modelkandidaat (velden, afzender, geadresseerde) plus de lokale tekst
+ * de koerier dezelfde lokale lezing als de schaduw en geeft per PDF een modelkandidaat (velden, afzender, geadresseerde) plus de lokale tekst
  * (ook OCR) als controle; de kern neemt Claude's velden voor de tekstregels, bedragen en IBAN alleen met lokale steun. Intake: leesIntake(bytes)
- * geeft de markdown voor het kennisbestand. Een live aanroeper krijgt geen schaduw meer. Terugval (uit, grens, fout, sleutel weg, patiëntregel
- * dicht): de oude lezer, zonder melding aan de aanroeper.
+ * geeft de markdown voor het kennisbestand. Een live aanroeper krijgt geen schaduw meer. Terugval (uit, grens, fout, sleutel weg):
+ * de oude lezer, zonder melding aan de aanroeper.
  *
  * VORM. Alleen crypto, fs en path; de SDK, de kluis, pdftotext/pdfinfo/OCR, de patiëntpoort en de kern komen via maak({...}) van server.js
  * (CI-poort: test/pdf-lezer.sh). Toetsen met een nep-API op 127.0.0.1 en verzonnen stukken (de repo is openbaar).
@@ -40,7 +42,7 @@ const path = require('path');
 const VERSIE = 'pdf-lezer-1.1';   // 1.1 (wv1921): live per aanroeper (Facturen: velden vóór de kern; Intake: markdown in raw_input)
 const API = 'https://api.anthropic.com';
 const BETA_FALLBACK = 'server-side-fallback-2026-07-01';
-const OCR_MAX = 10;           // pagina's die de lokale OCR leest (beeld of te weinig tekst); meer = deels gelezen = dicht
+const OCR_MAX = 10;           // pagina's die de lokale OCR leest (beeld of te weinig tekst); meer = deels gelezen (wv3762: alleen de tekstlaag als controle)
 const TEKST_MIN = 40;         // tekens zonder witruimte: daaronder telt een pagina als beeldpagina
 // Prijzen per miljoen tokens (prijspagina 27-10-2026; cache_schrijven = 1,25 × invoer, de standaardregel voor de 5-minutencache). Een model
 // dat hier niet staat, rekent met de duurste regel (DUURST) en krijgt de vlag prijs_onbekend.
@@ -436,8 +438,9 @@ function maak(o) {
   }
 
   // ── lokale lezing per pagina (review wv1431 MOET 1, ZOU 3) ──
-  // Eigen pdftotext (niet de tekst van de aanroeper: die kan afgekapt zijn). Fail-closed: aantal pagina-einden ≠ pdfinfo, afgekapte tekst,
-  // pdfimages faalt, meer dan OCR_MAX te OCR'en pagina's, of een OCR-pagina met minder dan TEKST_MIN tekens → niet gelezen. OCR gaat over
+  // Eigen pdftotext (niet de tekst van de aanroeper: die kan afgekapt zijn). Aantal pagina-einden ≠ pdfinfo, afgekapte tekst, pdfimages faalt,
+  // meer dan OCR_MAX te OCR'en pagina's, of een OCR-pagina met minder dan TEKST_MIN tekens → ok false (met wat wél gelezen is als `deel`;
+  // wv3762: dat remt Claude niet meer, het is alleen de controletekst). OCR gaat over
   // elke pagina met te weinig tekst ÉN elke pagina met een beeld (een stempel of faxkop is tekst genoeg, de scan eronder niet).
   async function lokaalLezen(bytes) {
     let r = null;
@@ -448,24 +451,23 @@ function maak(o) {
     let n = null;
     try { n = await o.paginas(bytes); } catch (e) { n = null; }
     if (!(n > 0)) return { ok: false, reden: 'paginas_onbekend' };
-    if ((t.match(/\f/g) || []).length !== n) return { ok: false, reden: 'paginatelling', paginas: n };
+    if ((t.match(/\f/g) || []).length !== n) return { ok: false, reden: 'paginatelling', paginas: n, deel: { tekst: t, paginas: n } };
     const pag = t.split('\f');
     let beelden = null;
     try { beelden = await o.beeldPaginas(bytes); } catch (e) { beelden = null; }
-    if (!Array.isArray(beelden)) return { ok: false, reden: 'pdfimages', paginas: n };
+    if (!Array.isArray(beelden)) return { ok: false, reden: 'pdfimages', paginas: n, deel: { tekst: t, paginas: n } };
     const ocrPag = [];
     for (let p = 1; p <= n; p++) if (zonderWit(pag[p - 1]) < TEKST_MIN || beelden.indexOf(p) >= 0) ocrPag.push(p);
-    if (ocrPag.length > OCR_MAX) return { ok: false, reden: 'ocr_deels', paginas: n };
+    if (ocrPag.length > OCR_MAX) return { ok: false, reden: 'ocr_deels', paginas: n, deel: { tekst: t, paginas: n } };   // wv3762: wat de tekstlaag gaf, als controle
     let ocr = '';
     if (ocrPag.length) {
       let x = null;
       try { x = await o.ocr(bytes, ocrPag); } catch (e) { x = null; }
-      if (!x || !Array.isArray(x.per) || x.per.length !== ocrPag.length) return { ok: false, reden: 'ocr_mislukt', paginas: n };
-      if (x.per.some(function (y) { return typeof y !== 'string'; })) return { ok: false, reden: 'ocr_mislukt', paginas: n };
+      if (!x || !Array.isArray(x.per) || x.per.length !== ocrPag.length) return { ok: false, reden: 'ocr_mislukt', paginas: n, deel: { tekst: t, paginas: n } };
+      if (x.per.some(function (y) { return typeof y !== 'string'; })) return { ok: false, reden: 'ocr_mislukt', paginas: n, deel: { tekst: t + '\n' + x.per.filter(function (y) { return typeof y === 'string'; }).join('\n'), paginas: n } };
       ocr = x.per.join('\n');
-      // wv3738: een OCR-pagina met te weinig tekst blijft 'ocr_leeg' (Intake en de Intake-schaduw sluiten dan), maar de aanroeper krijgt wat er
-      // wél gelezen is mee als `deel`, zodat poortFacturen de patiëntregels erop kan draaien (zie daar). `heel`: minstens één pagina is op
-      // zichzelf leesbaar (tekstlaag plus OCR van die pagina ≥ TEKST_MIN); ruis van losse pagina's telt niet op (review wv3738 MOET 1).
+      // wv3738/wv3762: een OCR-pagina met te weinig tekst blijft 'ocr_leeg', maar de aanroeper krijgt wat er wél gelezen is mee als `deel`
+      // (de controletekst voor Claude). `heel`: minstens één pagina is op zichzelf leesbaar (tekstlaag plus OCR van die pagina ≥ TEKST_MIN).
       if (x.per.some(function (y) { return zonderWit(y) < TEKST_MIN; })) {
         const deel = t + '\n' + ocr;
         let heel = false;
@@ -474,59 +476,31 @@ function maak(o) {
       }
     }
     const alles = t + (ocr ? '\n' + ocr : '');
-    if (zonderWit(alles) < TEKST_MIN) return { ok: false, reden: 'onleesbaar', paginas: n };
+    if (zonderWit(alles) < TEKST_MIN) return { ok: false, reden: 'onleesbaar', paginas: n, deel: { tekst: alles, paginas: n } };
     return { ok: true, tekst: alles, paginas: n, ocr_paginas: ocrPag.length };
   }
-  // Eén lokaal gelezen geheel door beide patiëntregels. → null (open) of { reden, soorten }.
-  function patientDicht(teksten, extra) {
-    const pk = K.stapPatientkenmerk(teksten);
-    if (pk.kenmerk) return { reden: 'kenmerk', soorten: pk.soorten };
-    const pp = o.patientpoort.beoordeel(Object.assign({ teksten }, extra || {}), {});
-    if (pp.tegenhouden) return { reden: 'patientpoort', soorten: pp.soorten };
-    return null;
+  // wv3762: de lokale lezing van één PDF als controletekst voor Claude. Lukt die niet (helemaal), dan gaat de PDF tóch naar Claude, met wat er
+  // wél gelezen is (desnoods leeg: controle() zet dan de vlag alleen_claude). → { tekst, paginas, ocr_paginas, zwak, reden? }
+  async function controleTekst(bytes) {
+    const l = await lokaalLezen(bytes);
+    if (l.ok) return { tekst: l.tekst, paginas: l.paginas, ocr_paginas: l.ocr_paginas, zwak: false };
+    const d = isObj(l.deel) ? l.deel : {};
+    return { tekst: typeof d.tekst === 'string' ? d.tekst : '', paginas: l.paginas || d.paginas || null, ocr_paginas: d.ocr_paginas || 0, zwak: true, reden: l.reden };
   }
 
   /*
-   * Patiëntregel voor een heel Facturen-bericht (B2/B3). → { open: true, perDoc: {sha256: {tekst, paginas}} } of { open: false, reden, soorten }.
-   * Eén kenmerk of één niet volledig gelezen onderdeel sluit het hele bericht.
+   * Lokale lezing van een heel Facturen-bericht. → { open: true, perDoc: { sha256: { tekst, paginas, ocr_zwak } } }.
+   * wv3762: geen patiëntregel meer (zie de kop): elke PDF van het bericht komt in perDoc, ook met een patiëntkenmerk, een overgeslagen bijlage
+   * of een pagina die de lokale OCR niet las (ocr_zwak). Een UBL is gestructureerd en gaat niet naar Claude (geen perDoc).
    */
   async function poortFacturen(job) {
-    const teksten = [], perDoc = {};
-    let scan = false;
-    const dicht = function (reden, soorten) { return { open: false, reden, soorten: soorten || [] }; };
-    // Een bijlage die de koerier niet doorgaf (te groot, na de 10e, beeld, docx, dubbele naam) is niet gelezen: dan het hele bericht dicht.
-    if (!(job.overgeslagen === 0)) return dicht('onderdeel_overgeslagen');
+    const perDoc = {};
     for (const d of job.documenten || []) {
-      if (d.patientkenmerk_koerier) return dicht('koerier_kenmerk');
       const isPdf = Buffer.isBuffer(d.bytes) && d.bytes.subarray(0, 5).toString('latin1') === '%PDF-';
-      if (isPdf) {
-        let l = await lokaalLezen(d.bytes);
-        // wv3738 (David 21-11-2026: "prima naar Anthropic … als die beter kan extraheren"): een scan waarvan de lokale OCR op een of meer
-        // pagina's te weinig tekst gaf, gaat toch naar Claude (die leest het beeld zelf beter dan tesseract), mits minstens één pagina op
-        // zichzelf leesbaar is (≥ TEKST_MIN tekens; ruis van losse pagina's telt niet op) en beide patiëntregels op de gelezen tekst niets
-        // vinden (hieronder, voor het hele bericht). Een stuk zonder leesbare pagina, mislukte OCR of meer dan OCR_MAX te OCR'en pagina's blijft
-        // dicht. Alleen Facturen (live en de Facturen-schaduw); Intake ongewijzigd. Een in een UBL ingebedde PDF blijft dicht bij ocr_leeg.
-        let zwak = false;
-        if (!l.ok && l.reden === 'ocr_leeg' && l.deel && l.deel.heel === true && zonderWit(l.deel.tekst) >= TEKST_MIN) { l = Object.assign({ ok: true }, l.deel); zwak = true; }
-        if (!l.ok) return dicht(l.reden);
-        teksten.push(l.tekst); perDoc[d.sha256] = zwak ? { tekst: l.tekst, paginas: l.paginas, ocr_zwak: true } : { tekst: l.tekst, paginas: l.paginas };
-        if (l.ocr_paginas) scan = true;
-      } else if (typeof d.ubl_xml === 'string') {
-        teksten.push(ublTekst(d.ubl_xml));
-        const ib = ingebedde(d.ubl_xml);
-        if (ib.anders) return dicht('ingebed_geen_pdf');
-        if (ib.pdfs.length > 10) return dicht('ingebed_te_veel');
-        for (const b of ib.pdfs) {
-          const l = await lokaalLezen(b);
-          if (!l.ok) return dicht('ingebed_' + l.reden);
-          teksten.push(l.tekst);
-          if (l.ocr_paginas) scan = true;
-        }
-      } else return dicht('onbekend_onderdeel');
+      if (!isPdf) continue;
+      const l = await controleTekst(d.bytes);
+      perDoc[d.sha256] = l.zwak ? { tekst: l.tekst, paginas: l.paginas, ocr_zwak: true } : { tekst: l.tekst, paginas: l.paginas };
     }
-    const pd = patientDicht(teksten, { onderwerp: job.bericht && job.bericht.onderwerp, afzender: job.bericht && job.bericht.afzender,
-      bijlagenamen: (job.documenten || []).map(function (d) { return d.naam; }), scan });
-    if (pd) return dicht(pd.reden, pd.soorten);
     return { open: true, perDoc };
   }
 
@@ -584,18 +558,15 @@ function maak(o) {
     }
     sch.laatste = basis.t;
   }
-  // Intake: de router gaf alleen een stuk dat hij beoordeelde (marker geen, volledig gelezen). Alleen soort, datum, entiteit en vlaggen.
+  // Intake: de router gaf een stuk door (alleen als Intake niet live is). Alleen soort, datum, entiteit en vlaggen.
   async function schaduwIntake(job) {
     const ents = job.entiteiten || [];
     for (const d of job.delen || []) {
       let bytes;
       try { bytes = fs.readFileSync(d.pad); } catch (e) { continue; }
       const regel = { t: new Date(nu()).toISOString(), soort: 'intake', versie: VERSIE, stuk: job.stuk_id, deel: d.deel, sha256: d.sha256 };
-      // De router OCR't een PDF alleen als de hele tekst te kort is; een getypte eerste pagina met gescande brieven erachter zag hij als
-      // gelezen (review wv1431 MOET 2). Daarom hier dezelfde lezing per pagina + beide patiëntregels als bij Facturen, vóór de aanroep.
-      const l = await lokaalLezen(bytes);
-      const pd = l.ok ? patientDicht([l.tekst], { scan: l.ocr_paginas > 0 }) : { reden: l.reden, soorten: [] };
-      if (pd) { bytes = null; sch.gesloten++; schrijfRegel(SCHADUW, Object.assign(regel, { gesloten: true, reden: pd.reden, soorten: pd.soorten })); continue; }
+      // Dezelfde lokale lezing per pagina als bij Facturen, als controletekst (wv3762: geen patiëntregel meer vóór Claude).
+      const l = await controleTekst(bytes);
       const r = await lees(bytes, { aanroeper: 'intake', entiteiten: ents, lokaleTekst: l.tekst, paginas: l.paginas });
       bytes = null;
       if (!r.ok) { sch.terugval++; regel.terugval = r.terugval; schrijfRegel(SCHADUW, regel); continue; }
@@ -624,7 +595,7 @@ function maak(o) {
     lv.facturen.berichten++;
     let poort;
     try { poort = await poortFacturen(job); } catch (e) { fout('pdf-lezer-live', e); poort = { open: false, reden: 'fout' }; }
-    if (!poort.open) { lv.facturen.gesloten++; verbruik({ aanroeper: 'facturen', terugval: 'patientregel_' + kort(poort.reden, 30), usd: 0 }); return { open: false, reden: poort.reden, perDoc: {} }; }
+    if (!poort.open) { lv.facturen.gesloten++; verbruik({ aanroeper: 'facturen', terugval: 'lokaal_' + kort(poort.reden, 30), usd: 0 }); return { open: false, reden: poort.reden, perDoc: {} }; }
     const perDoc = {};
     for (const d of job.documenten || []) {
       const ld = poort.perDoc[d.sha256];
@@ -632,18 +603,17 @@ function maak(o) {
       const r = await lees(d.bytes, { aanroeper: 'facturen', entiteiten: job.entiteiten || [], lokaleTekst: ld.tekst, paginas: ld.paginas });
       if (!r.ok) { lv.facturen.terugval++; continue; }
       lv.facturen.gelezen++;
-      if (ld.ocr_zwak) lv.facturen.ocr_zwak = (lv.facturen.ocr_zwak || 0) + 1;   // wv3738: gelezen terwijl de lokale OCR niet elke pagina las
+      if (ld.ocr_zwak) lv.facturen.ocr_zwak = (lv.facturen.ocr_zwak || 0) + 1;   // wv3738/wv3762: gelezen terwijl de lokale lezing niet (alles) las
       perDoc[d.sha256] = { kandidaat: kandidaat(r.r), ocr_tekst: ld.tekst, controle: r.controle.vlaggen, ocr_zwak: !!ld.ocr_zwak };
     }
     return { open: true, perDoc };
   }
-  // Intake live: één PDF. Zelfde lezing per pagina + beide patiëntregels als de schaduw. → { ok, markdown, entiteit, samenvatting } of { ok:false, terugval }.
+  // Intake live: één PDF. Zelfde lokale lezing per pagina als de schaduw, als controletekst (wv3762: geen patiëntregel meer vóór Claude).
+  // → { ok, markdown, entiteit, samenvatting } of { ok:false, terugval }.
   async function leesIntake(bytes, o2) {
     if (!isLive('intake')) return { ok: false, terugval: 'uit' };
     if (!Buffer.isBuffer(bytes) || bytes.subarray(0, 5).toString('latin1') !== '%PDF-') return terug('intake', 'geen_pdf');
-    const l = await lokaalLezen(bytes);
-    const pd = l.ok ? patientDicht([l.tekst], { scan: l.ocr_paginas > 0 }) : { reden: l.reden };
-    if (pd) { lv.intake.gesloten++; return terug('intake', 'patientregel_' + kort(pd.reden, 30)); }
+    const l = await controleTekst(bytes);
     const r = await lees(bytes, { aanroeper: 'intake', entiteiten: (o2 && o2.entiteiten) || [], lokaleTekst: l.tekst, paginas: l.paginas });
     if (!r.ok) { lv.intake.terugval++; return r; }
     lv.intake.gelezen++;
@@ -659,7 +629,8 @@ function maak(o) {
   for (const b of leesBatches()) for (const k of Object.keys(b.items || {})) tel.gereserveerd += Number(b.items[k].est) || 0;
   function bijBatch(aanroeper, fn) { ontvangers[aanroeper] = fn; }
   // job: { aanroeper, sha256, bytes, paginas?, entiteiten, patientregel: 'doorgelaten' }. Alleen stukken die de aanroeper al door de
-  // patiëntregel van deze module haalde (poortFacturen of de Intake-lezing); zonder dat expliciete veld weigert de wachtrij.
+  // lokale lezing van deze module haalde (poortFacturen of de Intake-lezing); zonder dat expliciete veld weigert de wachtrij (vormeis, wv3762:
+  // geen patiëntrem meer).
   function batchWachtrij(job) {
     const i = inst();
     if (!i.aan || !isObj(job) || job.patientregel !== 'doorgelaten' || !Buffer.isBuffer(job.bytes) || !/^[0-9a-f]{64}$/.test(String(job.sha256 || ''))) return false;

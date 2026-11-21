@@ -141,7 +141,8 @@ test('server.js: lokale OCR vóór de route, tekst alleen via ocrTekst van de se
   assert.match(blok, /return pdfLive\(\{ soort: 'facturen'/);
   assert.match(blok, /Promise\.race\(\[e\.p, /);
   assert.match(blok, /patientkenmerk_koerier: false/);
-  assert.match(blok, /if \(modelKandidaat === undefined\) \{/);
+  // wv3762 (review Fable ZOU 1): de lokale OCR ook als Claude las maar de controletekst van de lezer < 40 tekens was
+  assert.ok(blok.includes("if (modelKandidaat === undefined || String(ocrTekst || '').replace(/\\s/g, '').length < 40) {"));
   assert.ok(blok.indexOf('pdfLive(') < blok.indexOf('ocrLokaal('), 'Claude eerst, OCR als terugval');
   // review ZOU 3: één lezing per stuk; na 90 s een 503 "nog bezig" (geen OCR-terugval), daarna pakt de volgende klik de uitkomst op
   assert.match(blok, /let e = facturenHerleesClaude\.get\(st\.sha256\);/);
@@ -180,41 +181,44 @@ test('wv3738: kandidaat in de body telt niet; een niet-live kandidaat telt niet 
   const r2 = t.call('herlees', { id: s2.id }, { ocrTekst: INKOOP, modelKandidaat: Object.assign({}, MK, { live: false }) });
   assert.equal(r2.j.door, 'ocr');
 });
-test('wv3738: patiëntkenmerk of alleen-eigenaar → claude_mag false en een kandidaat wordt geweigerd; kenmerk in de lokale tekst → kandidaat niet gebruikt', () => {
+test('wv3762: patiëntkenmerk of alleen-eigenaar → claude_mag blijft true en de kandidaat telt; kenmerk in de lokale tekst = alleen een vlag; lege OCR met kandidaat mag', () => {
+  // David 21-11-2026 14:00: geen patiëntrem vóór Claude (wv3738 deed dat nog wel)
   const t = opzet(), s = t.scan();
   t.fdb.db.prepare('UPDATE factuur SET alleen_eigenaar = 1 WHERE id = ?').run(s.id);
-  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: s.id }).claude_mag, false);
-  assert.equal(t.call('herlees', { id: s.id }, { ocrTekst: INKOOP, modelKandidaat: MK }).status, 409);
-  assert.equal(t.call('herlees', { id: s.id }, { ocrTekst: INKOOP }).status, 200, 'lokale OCR mag wel');
+  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: s.id }).claude_mag, true);
+  const rs = t.call('herlees', { id: s.id }, { ocrTekst: INKOOP, modelKandidaat: MK });
+  assert.equal(rs.status, 200, JSON.stringify(rs.j)); assert.equal(rs.j.door, 'claude');
   const p = t.scan({ naam: 'p' });
   t.fdb.db.prepare('UPDATE document SET patientkenmerk = 1 WHERE id = ?').run(p.doc);
-  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: p.id }).claude_mag, false, 'kenmerk op het document');
-  assert.equal(t.call('herlees', { id: p.id }, { ocrTekst: INKOOP, modelKandidaat: MK }).status, 409, 'review KAN 5: documentkenmerk ook in het slot');
+  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: p.id }).claude_mag, true, 'kenmerk op het document');
+  assert.equal(t.call('herlees', { id: p.id }, { ocrTekst: INKOOP, modelKandidaat: MK }).status, 200);
   const q = t.scan({ naam: 'q' });
   t.fdb.db.prepare('UPDATE factuur SET patientkenmerk = 1 WHERE id = ?').run(q.id);
-  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: q.id }).claude_mag, false);
-  assert.equal(t.call('herlees', { id: q.id }, { ocrTekst: INKOOP, modelKandidaat: MK }).status, 409, 'factuurkenmerk');
-  // review ZOU 2: een ander stuk uit hetzelfde bericht met kenmerk → ook deze scan niet naar Claude
+  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: q.id }).claude_mag, true);
+  assert.equal(t.call('herlees', { id: q.id }, { ocrTekst: INKOOP, modelKandidaat: MK }).status, 200, 'factuurkenmerk');
+  // een ander stuk uit hetzelfde bericht met kenmerk remt ook niets
   const ber = D.nieuwId();
   const bron = t.fdb.db.prepare('SELECT id FROM bron LIMIT 1').get() || (D.voegToe(t.fdb, 'bron', { id: D.nieuwId(), soort: 'intake', naam: 'intake:proef', actief: 1 }), t.fdb.db.prepare('SELECT id FROM bron LIMIT 1').get());
   D.voegToe(t.fdb, 'bericht', { id: ber, bron: bron.id, message_id: 'proef-' + ber, afzender: 'a@voorbeeld.invalid', onderwerp: 'scans', ontvangen_op: new Date(NU).toISOString() });
   const m1 = t.scan({ naam: 'm1' }), m2 = t.scan({ naam: 'm2' });
   t.fdb.db.prepare('UPDATE factuur SET bericht = ? WHERE id IN (?, ?)').run(ber, m1.id, m2.id);
   t.fdb.db.prepare('UPDATE document SET bericht = ? WHERE id IN (?, ?)').run(ber, m1.doc, m2.doc);
-  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: m1.id }).claude_mag, true, 'schoon bericht');
   assert.deepEqual(t.routes.herleesBytes(t.fdb, t.eig, { id: m1.id }).bericht, { afzender: 'a@voorbeeld.invalid', onderwerp: 'scans' });
   t.fdb.db.prepare('UPDATE document SET patientkenmerk = 1 WHERE id = ?').run(m2.doc);
-  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: m1.id }).claude_mag, false, 'buurdocument met kenmerk');
-  t.fdb.db.prepare('UPDATE document SET patientkenmerk = 0 WHERE id = ?').run(m2.doc);
-  t.fdb.db.prepare("UPDATE factuur SET alleen_eigenaar = 1, status = 'geen_factuur' WHERE id = ?").run(m2.id);
-  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: m1.id }).claude_mag, false, 'buurfactuur alleen-eigenaar');
+  assert.equal(t.routes.herleesBytes(t.fdb, t.eig, { id: m1.id }).claude_mag, true, 'buurdocument met kenmerk');
+  // kenmerk in de lokale tekst: Claude telt, de factuur wordt alleen-eigenaar (vlag)
   const k = t.scan({ naam: 'k' });
   const r = t.call('herlees', { id: k.id }, { ocrTekst: INKOOP + '\nBetreft: BSN 111222333', modelKandidaat: MK });
   assert.equal(r.status, 200, JSON.stringify(r.j));
-  assert.equal(r.j.door, 'ocr', 'de kern zet de kandidaat uit bij een kenmerk');
+  assert.equal(r.j.door, 'claude', 'de kern gebruikt de kandidaat ook bij een kenmerk');
   const f = t.f(k.id);
   assert.equal(f.alleen_eigenaar, true);
-  assert.ok(!f.redenen.some((x) => /gelezen door Claude/.test(x)), JSON.stringify(f.redenen));
+  assert.ok(f.redenen.some((x) => /gelezen door Claude/.test(x)), JSON.stringify(f.redenen));
+  // lege lokale OCR: met een kandidaat van Claude geen 422 meer; zonder kandidaat wel
+  const e = t.scan({ naam: 'e' });
+  assert.equal(t.call('herlees', { id: e.id }, { ocrTekst: '' }).status, 422);
+  const re = t.call('herlees', { id: e.id }, { ocrTekst: '', modelKandidaat: MK });
+  assert.equal(re.status, 200, JSON.stringify(re.j)); assert.equal(re.j.door, 'claude');
 });
 test('wv3738 KAN 6: eerst Claude, dan een OCR-terugval die iets vult → geen tweede scanreden naast die van Claude', () => {
   const t = opzet(), s = t.scan();
@@ -302,5 +306,5 @@ test('KAN 7/8: creditnota krijgt soort creditnota; tweede druk zonder nieuws sch
 test('server.js: OCR zonder tekst → lege tekst (422), fout of > 80 s → geen tekst (503)', () => {
   const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
   assert.match(src, /setTimeout\(function \(\) \{ k\(null\); \}, 80000\)/);
-  assert.match(src, /if \(o && typeof o === 'object'\) ocrTekst = o\.ok && typeof o\.tekst === 'string' \? o\.tekst : '';/);
+  assert.ok(src.includes("if (o && typeof o === 'object' && (modelKandidaat === undefined || (o.ok && typeof o.tekst === 'string' && o.tekst.replace(/\\s/g, '').length > String(ocrTekst || '').replace(/\\s/g, '').length))) ocrTekst = o.ok && typeof o.tekst === 'string' ? o.tekst : '';"));
 });

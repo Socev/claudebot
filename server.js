@@ -19289,9 +19289,10 @@ async function appFacturen(req, res, a, s, d, route) {
   if (req.method === 'POST' && pad === '/app/facturen/herlees' && rolPrimair() === true && typeof facturenRoutes.herleesBytes === 'function') {
     const st = facturenRoutes.herleesBytes(fdb, rol, d || {});
     if (!st || st.status) { res._app.reden = 'facturen herlees ' + (st ? st.status : 500); return appStuur(res, st ? st.status : 500, st ? st.j : { ok: false, fout: 'onbekend' }); }
-    // wv3738 (David 21-11 13:44): eerst de PDF-lezer (Claude) via dezelfde live-route als de koerier (pdfLive: patiëntregel, dag- en maandgrens),
-    // alleen als de factuur geen patiëntkenmerk heeft en niet alleen voor de eigenaar is; de lokale tekst van de lezer is de controle.
-    // Dicht, uit, terugval of langer dan 90 s → de lokale OCR hieronder, zoals voorheen.
+    // wv3738 (David 21-11 13:44): eerst de PDF-lezer (Claude) via dezelfde live-route als de koerier (pdfLive: dag- en maandgrens); sinds
+    // wv3762 ook bij een patiëntkenmerk of alleen-eigenaar (claude_mag altijd true); de lokale tekst van de lezer is de controle.
+    // Uit, terugval of langer dan 90 s → de lokale OCR hieronder, zoals voorheen. wv3762 (review Fable ZOU 1): las Claude wel maar gaf de
+    // lokale lezing van de lezer < 40 tekens, dan draait de lokale OCR hieronder óók, als steuntekst voor Claude's bedragen en IBAN.
     // Review ZOU 3: één lezing per stuk tegelijk (facturenHerleesClaude); duurt hij langer dan 90 s, dan 503 "nog bezig" en pakt de volgende
     // klik de uitkomst op (geen tweede betaalde aanroep, en geen OCR-terugval terwijl het stuk al bij Claude ligt). Na 10 min vervalt hij.
     if (st.claude_mag === true && st.sha256) {
@@ -19312,13 +19313,13 @@ async function appFacturen(req, res, a, s, d, route) {
       const pd = x && x.open && x.perDoc ? x.perDoc[st.sha256] : null;
       if (pd && pd.kandidaat && typeof pd.ocr_tekst === 'string') { modelKandidaat = pd.kandidaat; ocrTekst = pd.ocr_tekst; }
     }
-    if (modelKandidaat === undefined) {
+    if (modelKandidaat === undefined || String(ocrTekst || '').replace(/\s/g, '').length < 40) {
       // review ZOU 5 / KAN 10: OCR liep maar las niets → '' (422: vul zelf in); fout of langer dan 80 s → geen tekst (503: later opnieuw)
       let o = null, tm = null;
       try { o = await Promise.race([facturenIo().ocrLokaal(st.bytes), new Promise(function (k) { tm = setTimeout(function () { k(null); }, 80000); })]); }
       catch (e) { logError('facturen-herlees-ocr', e); o = null; }
       finally { if (tm) clearTimeout(tm); }
-      if (o && typeof o === 'object') ocrTekst = o.ok && typeof o.tekst === 'string' ? o.tekst : '';
+      if (o && typeof o === 'object' && (modelKandidaat === undefined || (o.ok && typeof o.tekst === 'string' && o.tekst.replace(/\s/g, '').length > String(ocrTekst || '').replace(/\s/g, '').length))) ocrTekst = o.ok && typeof o.tekst === 'string' ? o.tekst : '';
     }
   }
   const r = facturenRoutes.app(fdb, { methode: req.method, pad: pad, d: d || {}, rol: rol, primair: rolPrimair(),
@@ -21164,7 +21165,7 @@ if (mailman && SERVER_ECHT) { setInterval(function () { mailmanTik(); }, 10 * 60
 // SLEUTEL (review B1): kluisnaam anthropic_api_key_pdf, NIET op de witte lijst (dus nooit in process.env of bij een kind). De pod leest hem op
 // het moment van gebruik via de Management-API (zelfde route als bankSleutels), 10 min in het geheugen (ontbreekt hij: 2 min), en geeft hem
 // alleen als expliciete apiKey aan de SDK. SDK: @anthropic-ai/sdk uit het image, anders uit de brug PDF_LEZER_DIR/vendor (tot het image
-// hem heeft; zelfde versie als package.json). Lokale lezing voor de patiëntregel en de controle: pdftotext/pdfinfo/pdftoppm/tesseract op een
+// hem heeft; zelfde versie als package.json). Lokale lezing als controle (wv3762: geen patiëntregel meer): pdftotext/pdfinfo/pdftoppm/tesseract op een
 // tijdelijk bestand in PDF_LEZER_DIR/tmp (0700), meteen weer weg.
 const PDF_LEZER_DIR = serverPad('pdf_lezer', process.env.PDF_LEZER_DIR, '/opt/data/pdf-lezer', serverProefDeel('pdf-lezer'));
 const PDF_SLEUTEL_NAAM = 'anthropic_api_key_pdf';
@@ -21201,10 +21202,10 @@ const pdfLezer = (function () {
       paginas: function (bytes) { return pdfTijdelijk(bytes, async function (f) { const t = await intakeProces('pdfinfo', [f], { ms: 15000 }); const m = t && /^Pages:\s+(\d+)/m.exec(t); return m ? Number(m[1]) : null; }); },
       // intakeProces kapt stil af op 4 MB: dan afgekapt (de lezer sluit dan, review wv1431 ZOU 3)
       pdftotext: function (bytes) { return pdfTijdelijk(bytes, async function (f) { const t = await intakeProces('pdftotext', ['-q', '-layout', '-enc', 'UTF-8', f, '-'], { ms: 60000 }); return t == null ? { ok: false } : { ok: true, tekst: t, afgekapt: t.length >= 4e6 }; }); },
-      // pagina's met een beeld (pdfimages -list, kolom page); null = mislukt (de lezer sluit dan)
+      // pagina's met een beeld (pdfimages -list, kolom page); null = mislukt (de lezer leest dan zonder controletekst)
       beeldPaginas: function (bytes) { return pdfTijdelijk(bytes, async function (f) { const t = await intakeProces('pdfimages', ['-list', f], { ms: 30000 }); if (t == null) return null;
         const p = new Set(); t.split('\n').slice(2).forEach(function (r) { const m = /^\s*(\d+)\s/.exec(r); if (m) p.add(Number(m[1])); }); return Array.from(p).sort(function (a, b) { return a - b; }); }); },
-      // OCR per gevraagde pagina, in dezelfde volgorde; een pagina die niet lukt geeft null (de lezer sluit dan)
+      // OCR per gevraagde pagina, in dezelfde volgorde; een pagina die niet lukt geeft null (de lezer leest dan met minder controletekst)
       ocr: function (bytes, paginas) {
         return pdfTijdelijk(bytes, async function (f, map) {
           const per = [];

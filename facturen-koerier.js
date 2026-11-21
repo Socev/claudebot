@@ -14,10 +14,10 @@
  * CI-poort (.github/workflows/build.yml): alleen crypto, child_process (execFile van /usr/bin/pdftotext) en de Facturen-buren.
  * SCHADUW PDF-lezer (wv1431): na de transactie van een bericht of upload geeft de koerier de stukken (bytes, vluchtige tekst) en de uitkomst
  * van de kern door aan io.pdfSchaduw (server.js → pdf-lezer.js, K1: via io, zoals pdftotext). Die bepaalt zelf of het bericht naar Claude
- * mag (patiëntregel fail-closed) en logt alleen velden en verschilvlaggen. Niets in de app verandert; een fout daar raakt de ronde niet.
- * LIVE PDF-lezer (wv1921): staat Facturen live in pdf-lezer.json, dan leest Claude elke PDF VÓÓR de transactie (io.pdfLive, zelfde
- * patiëntregel); per document gaan model_kandidaat en de lokale tekst (ook OCR) als controle mee de kern in, en vallen daarna weg. Geen
- * antwoord, dicht of het rondebudget op: de kern leest zoals voorheen alleen de tekstregels.
+ * mag (sinds wv3762 zonder patiëntregel) en logt alleen velden en verschilvlaggen. Niets in de app verandert; een fout daar raakt de ronde niet.
+ * LIVE PDF-lezer (wv1921): staat Facturen live in pdf-lezer.json, dan leest Claude elke PDF VÓÓR de transactie (io.pdfLive; sinds
+ * wv3762 zonder patiëntrem, ook bij een kenmerk of na "gewoon verwerken"); per document gaan model_kandidaat en de lokale tekst (ook OCR) als controle mee de kern in, en vallen daarna weg. Geen
+ * antwoord, uit of het rondebudget op: de kern leest zoals voorheen alleen de tekstregels.
  *
  * NIET ONDERHANDELBAAR. Niets gaat naar buiten zonder dat een mens Bevestigen klikte (alleen opdrachten uit de wachtrij, na verstuur_na).
  * Vóór elke verzending de consistentiecontrole (bytes opnieuw → sha256, bijlagen en vingerafdruk opnieuw uit de verse rijen, niet prive,
@@ -552,7 +552,7 @@ async function verstuurEen(fdb, io, op, o, uit) {
 // ───────────────────────────── schaduw PDF-lezer (wv1431) ─────────────────────────────
 
 // Na de transactie, nooit ervoor. De kern-uitkomst per factuur uit de database (alleen de velden die de schaduw vergelijkt).
-// overgeslagen: bijlagen van het bericht die niet als document meegingen (de PDF-lezer sluit dan het hele bericht, review wv1431 ZOU 4).
+// overgeslagen: bijlagen van het bericht die niet als document meegingen (alleen nog informatie; wv3762: de PDF-lezer sluit niets meer).
 function schaduwPdf(fdb, io, berichtId, bericht, documenten, ruw, facturen, overgeslagen) {
   if (typeof io.pdfSchaduw !== 'function' || !documenten.length) return;
   try {
@@ -567,22 +567,25 @@ function schaduwPdf(fdb, io, berichtId, bericht, documenten, ruw, facturen, over
 
 // Vóór de transactie (wv1921). docs: [{ sha256, naam, mime, tekst?, ubl_xml?, patientkenmerk_koerier }], ruw: Map sha256 → bytes. Zet per
 // document model_kandidaat en ocr_tekst (vluchtig; de koerier wist ze na de transactie). → aantal gelezen documenten.
-// wv3660 (David 21-11-2026): een scan (PDF zonder bruikbare tekstlaag) die Claude niet las (lezer niet live, Jev boven de drempel, of na
-// "gewoon verwerken" van een stuk met patiëntmarker) kreeg geen enkele lezing: Beoordelen zei "velden met de hand invullen". Nu lokale OCR
-// (io.ocrLokaal: pdftoppm + tesseract op de pod, niets gaat naar buiten); de kern haalt er de velden als voorstel uit, toetst het
-// patiëntkenmerk en herkent een uitgaande factuur. Nooit een taalmodel. Vluchtig zoals de rest (gewist na de transactie). → aantal gelezen.
+// wv3660 (David 21-11-2026): een scan (PDF zonder bruikbare tekstlaag) die Claude niet las (lezer niet live, grens, fout) kreeg geen enkele
+// lezing: Beoordelen zei "velden met de hand invullen". Nu lokale OCR (io.ocrLokaal: pdftoppm + tesseract op de pod); de kern haalt er de
+// velden als voorstel uit, toetst het patiëntkenmerk (vlag) en herkent een uitgaande factuur. wv3762 (review Fable ZOU 1): ook als Claude
+// las maar de lokale lezing van de PDF-lezer te weinig gaf (< 40 tekens): dan is deze OCR de steuntekst voor Claude's bedragen en IBAN.
+// Zelf geen taalmodel. Vluchtig zoals de rest (gewist na de transactie). → aantal gelezen.
+function zonderWitLen(x) { return String(x || '').replace(/\s/g, '').length; }
 async function ocrZonderModel(io, docs, ruw, o) {
   if (!io || typeof io.ocrLokaal !== 'function') return 0;
   let n = 0;
   for (const d of docs) {
     if (o && typeof o.klok === 'function' && o.klok() - o.start > GRENS.rondeMs) break;   // review ZOU 4: rondebudget op → volgende keer met de hand
-    if (d.mime !== 'application/pdf' || typeof d.ocr_tekst === 'string' || d.model_kandidaat) continue;
+    if (d.mime !== 'application/pdf' || (typeof d.ocr_tekst === 'string' && d.ocr_tekst.replace(/\s/g, '').length >= 40)) continue;
+    if (!d.model_kandidaat && typeof d.ocr_tekst === 'string') continue;   // zonder Claude: één lezing is genoeg (zoals voorheen)
     if (d.tekstlaag !== false && String(d.tekst || '').trim().length >= 20) continue;   // gelijk aan K.stapSoort: dit is geen scan
     const b = ruw.get(d.sha256);
     if (!b) continue;
     let r = null;
     try { r = await io.ocrLokaal(b); } catch (e) { r = null; }
-    if (r && r.ok && typeof r.tekst === 'string') { d.ocr_tekst = r.tekst; n++; }
+    if (r && r.ok && typeof r.tekst === 'string' && (typeof d.ocr_tekst !== 'string' || zonderWitLen(r.tekst) > zonderWitLen(d.ocr_tekst))) { d.ocr_tekst = r.tekst; n++; }
   }
   return n;
 }
@@ -847,12 +850,14 @@ async function leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel) {
   if (documenten.length && s.mailtekst && isDoorgestuurd({ van: s.van, onderwerp: s.onderwerp }, eigen)) { const a = oorspronkelijkeAfzender(s.mailtekst); if (a) afzender = a; }
   const ruw = new Map();
   for (const d of documenten) { const st = D.stukSchrijf(fdb, d._bytes); d.sha256 = st.sha256; ruw.set(d.sha256, d._bytes); delete d._bytes; }
-  const model = s.jev === 'onder' && !s.na_keuze;   // gelijk aan de kennislens: geen model zonder Jev onder de drempel of na "gewoon verwerken"
-  if (documenten.length && model) tel.claude += await pdfLive(io, { afzender, onderwerp: s.onderwerp }, documenten, ruw, 0, o);
-  if (documenten.length) await ocrZonderModel(io, documenten, ruw, o);   // wv3660: scan zonder Claude → lokale OCR
+  // wv3762 (David 21-11-2026 14:00): Claude leest ook een stuk met Jev boven de drempel of na "gewoon verwerken" (geen patiëntrem vóór het model)
+  if (documenten.length) tel.claude += await pdfLive(io, { afzender, onderwerp: s.onderwerp }, documenten, ruw, 0, o);
+  if (documenten.length) await ocrZonderModel(io, documenten, ruw, o);   // wv3660/wv3762: scan zonder (bruikbare) lokale tekst → lokale OCR
   // wv3660: een scan die David vrijgaf na de patiëntmarker van Intake ("gewoon verwerken") en die Facturen zelf niet kon lezen (geen OCR-tekst):
   // alleen de eigenaar. Een leesbaar stuk toetst de kern zelf (review ZOU 3: anders viel elke vrijgegeven inkoopfactuur uit de betaalstroom).
-  if (s.na_keuze === true) for (const d of documenten) if (d.mime === 'application/pdf' && !(d.tekstlaag !== false && String(d.tekst || '').trim().length >= 20) && typeof d.ocr_tekst !== 'string') d.patientkenmerk_koerier = true;
+  // wv3762: dit is een vlag (wie de factuur ziet), geen rem vóór Claude. "Zelf gelezen" = minstens 40 tekens lokale tekst (zelfde drempel als
+  // velden_ocr in de kern), met of zonder Claude; las alleen Claude het stuk, dan telt het als niet zelf gelezen.
+  if (s.na_keuze === true) for (const d of documenten) if (d.mime === 'application/pdf' && !(d.tekstlaag !== false && String(d.tekst || '').trim().length >= 20) && !(typeof d.ocr_tekst === 'string' && d.ocr_tekst.replace(/\s/g, '').length >= 40)) d.patientkenmerk_koerier = true;
   let vf = null, nieuwId = null, al = false;
   D.transactie(fdb, function () {
     if (fdb.db.prepare('SELECT 1 FROM bericht WHERE bron = ? AND message_id = ?').get(bron.id, mid)) { al = true; return; }
@@ -866,7 +871,7 @@ async function leesIntakeStuk(fdb, io, pdf, s, eigen, o, tel) {
     vf = v.facturen;
   });
   if (al) { tel.al_ingelezen++; return 'al_ingelezen'; }
-  if (vf && model) schaduwPdf(fdb, io, nieuwId, { afzender, onderwerp: s.onderwerp }, documenten, ruw, vf, 0);
+  if (vf) schaduwPdf(fdb, io, nieuwId, { afzender, onderwerp: s.onderwerp }, documenten, ruw, vf, 0);
   for (const d of documenten) { d.tekst = null; d.ubl_xml = null; d.ocr_tekst = null; d.model_kandidaat = null; }
   ruw.clear();
   tel.ingelezen++;

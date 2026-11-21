@@ -360,10 +360,16 @@ test('live PDF-lezer (wv1921): kennisbestand met Claude-markdown voor een PDF-bi
   // vastgehouden (marker) → geen aanroep
   const vast = [];
   const G = omgeving({ pdfLees: async function (p) { vast.push(p); return { ok: true, markdown: 'x'.repeat(100) }; } });
-  G.zet({ marker: 'gemarkeerd', soorten: ['bsn'], meta: { van: 'poli@voorbeeld.example', onderwerp: 'Brief' },
+  const gId = G.zet({ marker: 'gemarkeerd', soorten: ['bsn'], meta: { van: 'poli@voorbeeld.example', onderwerp: 'Brief' },
     delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('poli@voorbeeld.example', 'Brief', PATIENT_TEKST) }, { deel: 'b1', rol: 'bijlage', naam: 'brief.pdf', mime: 'application/pdf', bytes: '%PDF-1.4 rooster' }] });
   await G.r.ronde();
   assert.equal(vast.length, 0);
+  // wv3762 (David 21-11-2026 14:00): na 'gewoon verwerken' komt het stuk in het kennisbestand en leest Claude de PDF wél (geen patiëntrem vóór het model)
+  const vk = await G.r.appKeuze({ stuk_id: gId, keuze: 'verwerken' }, 'app:proef');
+  assert.equal(vk.status, 200, JSON.stringify(vk.j));
+  assert.equal(vast.length, 1, 'Claude las de vrijgegeven PDF');
+  const tg = fs.readFileSync(path.join(G.vault, G.bestanden().find((f) => /\.md$/.test(f))), 'utf8');
+  assert.match(tg, /gelezen door Claude/);
   G.r.sluit();
 });
 

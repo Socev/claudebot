@@ -374,7 +374,7 @@ test('fixture scan zonder tekstlaag → te_beoordelen, geen velden, wel leveranc
   assert.equal(foto.facturen[0].entiteit, null);
 });
 
-test('fixture patiëntkenmerk → alleen eigenaar, geen model, geen kenmerk in redenen', () => {
+test('fixture patiëntkenmerk → alleen eigenaar, model telt wél mee (wv3762), geen kenmerk in redenen', () => {
   const t = pdfA({ extra: 'Betreft patiënt: zie dossier\nBSN: 111222333\nGeboortedatum: 01-02-1950' });
   const mk = { factuurnummer: 'MODEL-1', entiteit_hint: 'groenhouten' };
   const r = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t, { model_kandidaat: mk })] }, ctxBasis());
@@ -385,7 +385,10 @@ test('fixture patiëntkenmerk → alleen eigenaar, geen model, geen kenmerk in r
   assert.equal(K.zichtbaarVoor('eigenaar', f), true);
   assert.equal(K.zichtbaarVoor('praktijkmanager', f), false);
   assert.equal(K.zichtbaarVoor('onbekend', f), false);
-  assert.ok(!f.besluiten.some((b) => b.bron === 'model'), 'modelkandidaat telt niet bij een patiëntkenmerk');
+  // wv3762 (David 21-11-2026): het kenmerk is een vlag voor David, geen rem vóór het model
+  assert.ok(f.besluiten.some((b) => b.bron === 'model' && b.veld === 'entiteit'), 'modelkandidaat telt ook bij een patiëntkenmerk');
+  assert.ok(f.redenen.includes('Kenmerk van patiëntgegevens: alleen de eigenaar ziet deze factuur'));
+  assert.ok(!f.redenen.some((x) => /taalmodel/.test(x)));
   const uit = JSON.stringify(r);
   assert.ok(!uit.includes('111222333') && !uit.includes('1950'), 'kenmerk zelf niet in de uitkomst');
   // los BSN-achtig getal zonder label ook; factuurnummer, IBAN en KvK niet
@@ -912,41 +915,48 @@ test('B4: twee facturen in één mail krijgen elk hun eigen modelkandidaat', () 
   assert.equal(oud.facturen[0].incl, null);
 });
 
-test('B2: scan zonder OCR-tekst → kandidaat genegeerd; met OCR-tekst zonder kenmerk → velden; OCR met kenmerk → genegeerd', () => {
+test('wv3762 (was B2): scan zonder OCR-tekst → kandidaat telt (bedrag zonder steun gemarkeerd); met OCR-tekst → velden; OCR met kenmerk → kandidaat telt, alleen eigenaar', () => {
   const scan = (o) => Object.assign({ sha256: sha('scan' + JSON.stringify(o)), naam: 'scan.pdf', mime: 'application/pdf', tekst: '', tekstlaag: false }, o);
   const mk = { factuurnummer: 'S-77', bedrag_incl: '1428.50', entiteit_hint: 'groenhouten' };
   const zonder = K.beslisBericht({ bericht: BERICHT_A, documenten: [scan({ model_kandidaat: mk })] }, ctxBasis()).facturen[0];
-  assert.equal(zonder.nummer, null);
-  assert.equal(zonder.incl, null);
-  assert.ok(zonder.besluiten.some((b) => b.veld === 'model_kandidaat' && /scan zonder lokale OCR-tekst/.test(b.toelichting)));
+  assert.equal(zonder.nummer, 'S-77');
+  assert.equal(zonder.incl, 142850);
+  assert.deepEqual(zonder.model_zonder_steun, ['incl'], 'bedrag zonder lokale steun blijft gemarkeerd (I1)');
+  assert.ok(!zonder.besluiten.some((b) => b.veld === 'model_kandidaat'), 'geen "modelkandidaat niet gebruikt" meer');
+  // live (Claude) zonder OCR-tekst: nummer van Claude, het bedrag zonder lokale steun niet in het voorstel (I1, geen patiëntregel)
+  const live = K.beslisBericht({ bericht: BERICHT_A, documenten: [scan({ model_kandidaat: Object.assign({ live: true, soort_stuk: 'factuur' }, mk) })] }, ctxBasis()).facturen[0];
+  assert.equal(live.nummer, 'S-77');
+  assert.equal(live.incl, null);
+  assert.ok(live.redenen.includes('Scan: velden gelezen door Claude, zonder lokale tekst als controle: bedragen en IBAN zelf invullen'), JSON.stringify(live.redenen));
   const ocr = pdfA({ nummer: 'S-77' });
   const met = K.beslisBericht({ bericht: BERICHT_A, documenten: [scan({ model_kandidaat: mk, ocr_tekst: ocr })] }, ctxBasis()).facturen[0];
   assert.equal(met.nummer, 'S-77');
   assert.equal(met.incl, 142850);
   assert.deepEqual(met.model_zonder_steun, [], 'bedrag staat in de OCR-tekst');
   const pat = K.beslisBericht({ bericht: BERICHT_A, documenten: [scan({ model_kandidaat: mk, ocr_tekst: ocr + '\nBSN: 111222333' })] }, ctxBasis()).facturen[0];
-  // wv3660: kenmerk → geen model, wel de velden uit de lokale OCR als voorstel, en alleen voor de eigenaar
+  // wv3660/wv3762: kenmerk → velden uit de lokale OCR als voorstel, de kandidaat telt mee, en alleen voor de eigenaar
   assert.equal(pat.nummer, 'S-77');
-  assert.ok(pat.besluiten.some((b) => b.veld === 'nummer' && b.toelichting === 'uit lokale OCR (voorstel)'));
   assert.equal(pat.alleen_eigenaar, true);
-  assert.ok(!pat.besluiten.some((b) => b.bron === 'model'));
+  assert.ok(pat.besluiten.some((b) => b.bron === 'model' && b.veld === 'entiteit'), 'wv3762: model telt ook bij een kenmerk');
+  const patLive = K.beslisBericht({ bericht: BERICHT_A, documenten: [scan({ model_kandidaat: Object.assign({ live: true, soort_stuk: 'factuur' }, mk), ocr_tekst: ocr + '\nBSN: 111222333' })] }, ctxBasis()).facturen[0];
+  assert.deepEqual([patLive.nummer, patLive.incl, patLive.alleen_eigenaar], ['S-77', 142850, true]);
+  assert.ok(patLive.besluiten.some((b) => b.bron === 'model' && b.veld === 'nummer'));
 });
 
-test('B3: kenmerk in een ánder onderdeel (UBL) of een ongelezen ingebedde PDF sluit de kandidaat van het hele bericht', () => {
+test('wv3762 (was B3): kenmerk in een ánder onderdeel (UBL) of een ongelezen ingebedde PDF sluit de kandidaat niet meer', () => {
   const mk = { bedrag_incl: '999.00' };
   const t = pdfA({ incl: 'zie bijlage', excl: '-', btw: '-' });
   const xmlKenmerk = ubl({ nummer: 'VB-9', notitie: 'Patiënt geboortedatum 01-02-1950 BSN 111222333' });
   const r = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t, { model_kandidaat: mk }), { sha256: sha('x1'), naam: 'f.xml', mime: 'application/xml', ubl_xml: xmlKenmerk }] }, ctxBasis());
   const f = r.facturen.find((x) => x.document === sha(t + JSON.stringify({ model_kandidaat: mk })));
-  assert.equal(f.incl, null, 'kenmerk in de UBL sluit ook de PDF');
-  assert.ok(!f.besluiten.some((b) => b.bron === 'model'));
+  assert.ok(r.facturen.some((x) => x.incl === 99900), 'kenmerk in de UBL sluit de PDF niet meer');
+  assert.ok(!f || f.alleen_eigenaar === true || r.facturen.some((x) => x.alleen_eigenaar), 'het kenmerk blijft een vlag');
   const xmlPdf = ubl({ nummer: 'VB-8', pdf: 'bijlage.pdf' });
   const r2 = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t, { model_kandidaat: mk }), { sha256: sha('x2'), naam: 'g.xml', mime: 'application/xml', ubl_xml: xmlPdf }] }, ctxBasis());
-  assert.ok(r2.facturen.every((x) => x.incl !== 99900), 'ingebedde PDF zonder lokale tekst: dicht');
+  assert.ok(r2.facturen.some((x) => x.incl === 99900), 'ingebedde PDF zonder lokale tekst: niet meer dicht');
   const r3 = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t, { model_kandidaat: mk }), { sha256: sha('x3'), naam: 'g.xml', mime: 'application/xml', ubl_xml: xmlPdf, ingebed_tekst: pdfA({ nummer: 'VB-8' }) }] }, ctxBasis());
   assert.ok(r3.facturen.some((x) => x.incl === 99900), 'ingebedde PDF lokaal gelezen, geen kenmerk: kandidaat telt');
-  assert.equal(K.modelPoort([doc(t, { model_kandidaat: mk, patientkenmerk_koerier: true })]), 'kenmerk van patiëntgegevens in het bericht');
-  assert.equal(K.modelPoort([doc(t)]), null, 'zonder kandidaat niets te sluiten');
+  assert.equal(K.modelPoort, undefined, 'de modelpoort is weg');
 });
 
 test('I1: regex-IBAN wint van het model-IBAN; model-IBAN alleen bij leeg, door de IBAN-poort, en zonder lokale steun geblokkeerd tot afvinken', () => {
@@ -979,7 +989,7 @@ test('I2: entiteitsstem van het model weegt 3 met naam of KvK op het stuk, ander
   assert.equal(tg.entiteit, 'tolgaarde');
 });
 
-test('wv1921 live: Claude is de bron (nummer, datum, naam van de afzender), een bedrag alleen met lokale steun, IBAN alleen met lokale steun; UBL wint; patiëntkenmerk = geen model', () => {
+test('wv1921 live: Claude is de bron (nummer, datum, naam van de afzender), een bedrag alleen met lokale steun, IBAN alleen met lokale steun; UBL wint; wv3762: patiëntkenmerk remt het model niet', () => {
   const BERICHT_KAAL = { message_id: 'm9', afzender: 'noreply@hosting.example', onderwerp: 'Fwd: Factuur 99' };
   const ctx = ctxBasis({ leveranciers: [] });
   // tekstregels lezen een ander nummer dan Claude; Claude wint, met de oude waarde in het besluit
@@ -1010,10 +1020,14 @@ test('wv1921 live: Claude is de bron (nummer, datum, naam van de afzender), een 
   const u = K.beslisBericht({ bericht: BERICHT_KAAL, documenten: [ublDoc(ubl({ nummer: 'UBL-77' })), doc(t, { model_kandidaat: mk })] }, ctx).facturen[0];
   assert.equal(u.nummer, 'UBL-77');
   assert.notEqual(u.leverancier_naam, 'Hosting Voorbeeld B.V.');
-  // patiëntkenmerk in het bericht: geen model
+  // wv3762: patiëntkenmerk in het bericht → Claude telt gewoon, alleen de eigenaar ziet de factuur
   const p = K.beslisBericht({ bericht: BERICHT_KAAL, documenten: [doc(t, { model_kandidaat: mk, patientkenmerk_koerier: true })] }, ctx).facturen[0];
-  assert.equal(p.nummer, 'VB-2026-0412');
-  assert.equal(p.leverancier_naam, null);
+  assert.equal(p.nummer, 'VB-2026-0413');
+  assert.equal(p.leverancier_naam, 'Hosting Voorbeeld B.V.');
+  assert.equal(p.alleen_eigenaar, true);
+  // en een model-IBAN (niet-live kandidaat, regex vond niets) telt ook bij een kenmerk; zonder lokale steun gemarkeerd (I1)
+  const pi = K.beslisBericht({ bericht: BERICHT_KAAL, documenten: [doc(zonderIban, { model_kandidaat: { iban: IBAN.B }, patientkenmerk_koerier: true })] }, ctx).facturen[0];
+  assert.deepEqual([pi.iban, pi.model_zonder_steun.includes('iban'), pi.alleen_eigenaar], [IBAN.B, true, true]);
 });
 
 // ───────────────────────────── wv1917: regel per afzender, "al betaald" alleen op bewijs ─────────────────────────────

@@ -13,7 +13,7 @@
  *
  * NIET ONDERHANDELBAAR (bouwplan § 1). Geen code die betaalt. Privé krijgt nooit een opdracht (maakOpdracht weigert; de database
  * dwingt het in F1c nog eens af). Nieuw IBAN blokkeert Bevestigen tot Nagebeld. Deterministisch eerst: een modelkandidaat is hooguit
- * één stem, vult alleen lege velden en telt niet bij een patiëntkenmerk. De factuurtekst is VLUCHTIG: geen functie geeft hem (of een
+ * één stem en vult alleen lege velden (wv3762: ook bij een patiëntkenmerk; dat is een vlag voor David, geen rem). De factuurtekst is VLUCHTIG: geen functie geeft hem (of een
  * stuk ervan) terug; redenen en besluiten noemen velden, nooit tekstfragmenten, en een patiëntkenmerk noemt alleen de soort.
  */
 const crypto = require('crypto');
@@ -739,7 +739,7 @@ function stapVelden(groep, ctx, opties) {
   // valuta, soort en de naam van de afzender neemt hij over; een bedrag alleen als het ook in de lokale tekst (pdftotext/OCR) staat, anders
   // blijft de regelwaarde (of leeg) met een opmerking. Zo komt een bedrag dat alleen Claude las nooit in een voorstel (I1, zonder dat het na
   // opslag een blokkade moet onthouden). Het IBAN loopt via beslisBericht (regex eerst, model alleen met lokale steun).
-  if (mk && mk.live && !(opties && opties.patientkenmerk)) {
+  if (mk && mk.live) {   // wv3762: ook bij een patiëntkenmerk (geen rem vóór het model)
     const st = opties.steun_tekst;
     const zet = (v, w) => { const oud = uit[v]; uit[v] = w; besluiten.push(besluit('velden', v, w, 'model', 'gelezen door Claude' + (oud != null && oud !== w ? ' (tekstregels lazen ' + oud + ')' : ''))); };
     const tekst = (x) => (x == null ? '' : String(x).replace(/\s+/g, ' ').trim());
@@ -769,7 +769,7 @@ function stapVelden(groep, ctx, opties) {
       const btw = String(mk.leverancier_btw || '').replace(/[\s.]/g, '').toUpperCase();
       if (!uit.leverancier_btw && /^[A-Z]{2}[0-9A-Z]{8,12}$/.test(btw) && lokaleSteun('nummer', btw, st)) uit.leverancier_btw = btw;
     }
-  } else if (mk && !(opties && opties.patientkenmerk)) {
+  } else if (mk) {
     const kaart = { nummer: 'factuurnummer', factuurdatum: 'factuurdatum', vervaldatum: 'vervaldatum', kenmerk: 'kenmerk', valuta: 'valuta' };
     for (const v of Object.keys(kaart)) if (uit[v] == null && mk[kaart[v]] != null) { uit[v] = String(mk[kaart[v]]); besluiten.push(besluit('velden', v, uit[v], 'model', 'modelkandidaat (deterministisch leeg)')); }
     for (const [v, k] of [['excl', 'bedrag_excl'], ['btw', 'btw'], ['incl', 'bedrag_incl']]) {
@@ -847,7 +847,7 @@ function stapEntiteit(velden, tekst, ctx, opties) {
   const mk = opties && opties.model_kandidaat;
   // I2: gewicht 3 alleen als naam of KvK van die entiteit lokaal op het stuk staat (ook OCR); anders 1. Zo stuurt een ingevoegde regel in
   // een PDF de entiteit niet.
-  if (mk && mk.entiteit_hint && !(opties && opties.patientkenmerk)) {
+  if (mk && mk.entiteit_hint) {   // wv3762: ook bij een patiëntkenmerk
     const e = ents.find((x) => x.sleutel === mk.entiteit_hint);
     const st = zonderAccenten(schoon((opties && opties.steun_tekst) || '')).toLowerCase().replace(/\s+/g, ' ');
     const steun = !!e && ((e.kvk && lokaleSteun('kvk', e.kvk, opties.steun_tekst)) ||
@@ -1221,34 +1221,11 @@ function nagebeld(f, wie, wanneer) {
 
 // invoer: { bericht: {message_id, afzender, onderwerp} | null, documenten: [{ sha256, naam, mime, tekst?, tekstlaag?, ubl_xml?,
 //           patientkenmerk_koerier?, model_kandidaat?, ocr_tekst?, ingebed_tekst? }] }
-// model_kandidaat staat per document (B4, PDF via Claude): een mail met twee facturen krijgt per factuur zijn eigen kandidaat. Eén kenmerk
-// van patiëntgegevens ergens in het bericht, of één onderdeel dat niet lokaal gelezen is (scan zonder OCR-tekst, UBL met een ingebedde PDF
-// zonder tekst), schakelt alle kandidaten van het bericht uit (B2/B3, fail-closed).
+// model_kandidaat staat per document (B4, PDF via Claude): een mail met twee facturen krijgt per factuur zijn eigen kandidaat.
+// wv3762 (David 21-11-2026 14:00): geen patiëntrem meer vóór het model. De oude modelPoort (B2/B3: één patiëntkenmerk of één niet lokaal
+// gelezen onderdeel in het bericht schakelde alle kandidaten uit) is weg; het patiëntkenmerk zet alleen nog alleen-eigenaar (vlag voor David).
 // ctx:    { vandaag, entiteiten, leveranciers, tekstankers, geenFactuur, bekendeSha256, bestaandeFacturen, ibanHistorie, afzenderRegels (wv1917) }
 // uit:    { documenten: [{ sha256, uitkomst, factuur }], facturen: [ … ], signalen: [ … ] } — zonder tekst.
-// B2/B3: mag een modelkandidaat in dit bericht meetellen? → null (ja) of de reden waarom niet. Kijkt naar ALLE onderdelen.
-function modelPoort(documenten) {
-  if (!documenten.some((d) => isObj(d.model_kandidaat))) return null;
-  const teksten = [];
-  for (const d of documenten) {
-    if (d.patientkenmerk_koerier) return 'kenmerk van patiëntgegevens in het bericht';
-    const s = stapSoort(d);
-    if (s.soort === 'pdf') teksten.push(d.tekst);
-    if (s.soort === 'scan') {
-      if (typeof d.ocr_tekst !== 'string' || d.ocr_tekst.replace(/\s/g, '').length < 40) return 'scan zonder lokale OCR-tekst';
-      teksten.push(d.ocr_tekst);
-    }
-    if (s.soort === 'ubl') {
-      teksten.push(s.ubl._tekst);
-      if (s.ubl.heeft_pdf) {
-        if (typeof d.ingebed_tekst !== 'string' || d.ingebed_tekst.replace(/\s/g, '').length < 40) return 'ingebedde PDF niet lokaal gelezen';
-        teksten.push(d.ingebed_tekst);
-      }
-    }
-    if (s.soort === 'overig') teksten.push(String(d.tekst || d.ubl_xml || '').replace(/<[^>]+>/g, ' '));
-  }
-  return stapPatientkenmerk(teksten).kenmerk ? 'kenmerk van patiëntgegevens in het bericht' : null;
-}
 function beslisBericht(invoer, ctx) {
   ctx = ctx || {};
   const bericht = invoer.bericht || null;
@@ -1266,7 +1243,6 @@ function beslisBericht(invoer, ctx) {
     if (s.soort === 'overig') { docUit.push({ sha256: d.sha256, uitkomst: 'geen_factuur', reden: s.reden, besluiten: doc.besluiten }); continue; }
     docs.push(doc);
   }
-  const mkDicht = modelPoort(invoer.documenten || []);
   for (const g of groepeerBericht(docs)) {
     const hoofd = g.pdf || g.ubl;
     const teksten = [g.pdf && g.pdf.tekst, g.ubl && g.ubl.ubl._tekst].filter(Boolean);
@@ -1276,15 +1252,16 @@ function beslisBericht(invoer, ctx) {
     // wv3660: de lokale OCR van een scan telt mee voor het patiëntkenmerk (een BSN op een gescande nota → alleen de eigenaar)
     const pk = stapPatientkenmerk(teksten.concat(g.pdf && g.pdf.soort === 'scan' && g.pdf.ocr_tekst ? [g.pdf.ocr_tekst] : []), (g.pdf && g.pdf.koerier) || (g.ubl && g.ubl.koerier));
     besluiten.push(...pk.besluiten);
-    let mk = g.pdf && g.pdf.model_kandidaat;
-    if (mk && mkDicht) { besluiten.push(besluit('velden', 'model_kandidaat', 0, 'regel', 'modelkandidaat niet gebruikt: ' + mkDicht)); mk = null; }
+    const mk = g.pdf && g.pdf.model_kandidaat;
     const steunTekst = [g.pdf && g.pdf.tekst, g.pdf && g.pdf.ocr_tekst, g.ubl && g.ubl.ubl._tekst].filter(Boolean).join('\n');
-    if (pk.kenmerk) redenen.push('Kenmerk van patiëntgegevens: alleen de eigenaar ziet deze factuur, geen taalmodel');
+    if (pk.kenmerk) redenen.push('Kenmerk van patiëntgegevens: alleen de eigenaar ziet deze factuur');
     const scan = !!(g.pdf && g.pdf.soort === 'scan' && !g.ubl);
-    // wv3660: zonder (live) model de velden uit de lokale OCR als voorstel; nooit een taalmodel
+    // wv3660: zonder (live) modelkandidaat de velden uit de lokale OCR als voorstel
     const ocrVoorstel = scan && !(mk && mk.live) && !!g.pdf.velden_ocr;
     if (ocrVoorstel) g.pdf.velden = Object.assign({}, g.pdf.velden_ocr, { _ocr: true });
-    if (scan) redenen.push(mk && mk.live ? 'Scan: velden gelezen door Claude, de lokale OCR is de controle' : ocrVoorstel ? 'Scan zonder tekstlaag: velden lokaal gelezen (OCR), alleen een voorstel: nakijken' : 'Scan zonder tekstlaag: velden met de hand invullen');
+    // wv3762 (review Fable KAN 3): las alleen Claude (geen lokale tekst als controle), dan zegt de reden dat; bedragen en IBAN blijven dan leeg (I1)
+    const zonderSteun = steunTekst.replace(/\s/g, '').length < 40;
+    if (scan) redenen.push(mk && mk.live ? (zonderSteun ? 'Scan: velden gelezen door Claude, zonder lokale tekst als controle: bedragen en IBAN zelf invullen' : 'Scan: velden gelezen door Claude, de lokale OCR is de controle') : ocrVoorstel ? 'Scan zonder tekstlaag: velden lokaal gelezen (OCR), alleen een voorstel: nakijken' : 'Scan zonder tekstlaag: velden met de hand invullen');
     const sv = stapVelden(g, ctx, { bericht, model_kandidaat: mk, patientkenmerk: pk.kenmerk, steun_tekst: steunTekst });
     const v = sv.velden; besluiten.push(...sv.besluiten);
     redenen.push(...(sv.opmerkingen || []));
@@ -1298,8 +1275,9 @@ function beslisBericht(invoer, ctx) {
     if (v.iban == null) { v.iban = kiesBetaalIban(v, lev, ctx); if (v.iban) besluiten.push(besluit('velden', 'iban', v.iban, 'regel', g.ubl ? 'uit PDF (ontbrak in UBL)' : 'uit PDF-tekst')); }
     // I1: het model-IBAN alleen als de regex niets vond; het gaat door de IBAN-poort zoals elk IBAN (nieuw = nabellen).
     // wv1921: live alleen met lokale steun (een IBAN dat alleen Claude las komt niet in het voorstel)
-    if (v.iban == null && v.model_iban && !pk.kenmerk && mk && mk.live && !lokaleSteun('iban', v.model_iban, steunTekst)) redenen.push('Claude las een IBAN dat niet in de lokale tekst staat: niet overgenomen, nakijken');
-    else if (v.iban == null && v.model_iban && !pk.kenmerk) {
+    // wv3762: ook bij een patiëntkenmerk (geen rem vóór het model; de lokale steun blijft de eis)
+    if (v.iban == null && v.model_iban && mk && mk.live && !lokaleSteun('iban', v.model_iban, steunTekst)) redenen.push('Claude las een IBAN dat niet in de lokale tekst staat: niet overgenomen, nakijken');
+    else if (v.iban == null && v.model_iban) {
       v.iban = v.model_iban;
       const steun = lokaleSteun('iban', v.iban, steunTekst);
       if (!steun) modelZonder.push('iban');
@@ -1720,7 +1698,7 @@ module.exports = {
   leesXml, leesUbl, leesPdfTekst,
   // besliskader per stap (§ 4.5)
   stapDubbelBestand, stapDubbelInhoud, factuurSleutel, stapSoort, groepeerBericht, stapPatientkenmerk, stapVelden, herkenLeverancier, compactNaam, naamVerwant, ibanNaamPast, VERZAMEL_RE,
-  stapEntiteit, stapGeenFactuur, stapUitgaand, EIGEN_DOMEINEN, stapSoortStuk, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, gebruikelijkBedrag, GEBRUIKELIJK_MIN_EERDER, ibanPoort, naamZelfde, ibanHistorieBekend, eerderBetaaldOnbekend, eerderTekst, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
+  stapEntiteit, stapGeenFactuur, stapUitgaand, EIGEN_DOMEINEN, stapSoortStuk, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, gebruikelijkBedrag, GEBRUIKELIJK_MIN_EERDER, ibanPoort, naamZelfde, ibanHistorieBekend, eerderBetaaldOnbekend, eerderTekst, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, bevestigBlokkades,
   // leren
   leerUitBevestiging,
   // overgangen (§ 4.4)
