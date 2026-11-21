@@ -9308,18 +9308,11 @@ async function appZoekLogLees(kanaal) {
     return { items: items, afgekapt: van > 0 };
   } finally { await fh.close().catch(function () {}); }
 }
-async function appZoek(req, res, a, d) {
-  const t0 = Date.now();
-  const kanaal = typeof d.kanaal === 'string' ? d.kanaal : '';
-  if (!Object.prototype.hasOwnProperty.call(APP_KANALEN, kanaal)) return appWeiger(res, 404, 'onbekend kanaal', 'zoek kanaal');
-  if (typeof d.term !== 'string') return appWeiger(res, 400, 'typ een zoekterm', 'zoek geen term');
-  const termV = appVouw(d.term.replace(/\s+/g, ' ').trim()).v;   // lengte op de gevouwen tekst (Fable #7c)
-  if (termV.length < APP_ZOEK_TERM_MIN) return appWeiger(res, 400, 'typ minstens 2 tekens', 'zoek term kort');
-  if (termV.length > APP_ZOEK_TERM_MAX) return appWeiger(res, 400, 'zoekterm te lang (hooguit 100 tekens)', 'zoek term lang');
-  if (!appTeller('zoek', APP_ZOEK_PER_UUR, 3600000)) return appWeiger(res, 429, 'even wachten: te veel zoekvragen dit uur', 'grens zoek');
+// Eén kanaal doorzoeken: {fout} of {treffers (nieuwste eerst, hooguit APP_ZOEK_MAX), totaal, sinds, afgekapt}.
+async function appZoekKanaal(kanaal, termV) {
   let staart = null;
   const ruw = await appGeschiedenisRuw(kanaal, async function (k) { staart = await appZoekLogLees(k); return staart.items; });
-  if (ruw.fout) { logError('app-zoek', ruw.fout); return appWeiger(res, 503, 'geschiedenis nu niet leesbaar', 'app-log'); }
+  if (ruw.fout) return { fout: ruw.fout };
   let items = ruw.items;
   const afgekapt = !!(staart && staart.afgekapt);
   const grens = Date.now() - APP_LOG_MS;
@@ -9339,9 +9332,46 @@ async function appZoek(req, res, a, d) {
       if (treffers.length < APP_ZOEK_MAX) treffers.push({ t: x.t, job_id: x.job_id, bel: bel, soort: x.soort, label: appZoekLabel(x, bel), fragment: z.fragment, aantal: z.aantal });
     }
   }
+  return { treffers: treffers, totaal: totaal, sinds: items.length ? items[0].t : null, afgekapt: afgekapt };
+}
+// wv3744 (besluitenpagina nr 467 = 3C167): {alle: true} = zoeken in alle gesprekken die als tab in Davids app staan (Socev,
+// Machinekamer, Cijfer-Meester, OVIS NZa); geen OVIS Code-, agent- of systeemkanalen. Elke treffer krijgt zijn kanaal; samen
+// nieuwste eerst, hooguit APP_ZOEK_MAX. Een kanaal dat niet te lezen is valt weg (onleesbaar), alleen allemaal stuk = 503.
+const APP_ZOEK_ALLE = ['hoofd', 'machinekamer', 'cijfer-meester', 'ovis-nza'];
+async function appZoek(req, res, a, d) {
+  const t0 = Date.now();
+  const kanaal = typeof d.kanaal === 'string' ? d.kanaal : '';
+  if (!Object.prototype.hasOwnProperty.call(APP_KANALEN, kanaal)) return appWeiger(res, 404, 'onbekend kanaal', 'zoek kanaal');
+  if (typeof d.term !== 'string') return appWeiger(res, 400, 'typ een zoekterm', 'zoek geen term');
+  const termV = appVouw(d.term.replace(/\s+/g, ' ').trim()).v;   // lengte op de gevouwen tekst (Fable #7c)
+  if (termV.length < APP_ZOEK_TERM_MIN) return appWeiger(res, 400, 'typ minstens 2 tekens', 'zoek term kort');
+  if (termV.length > APP_ZOEK_TERM_MAX) return appWeiger(res, 400, 'zoekterm te lang (hooguit 100 tekens)', 'zoek term lang');
+  if (!appTeller('zoek', APP_ZOEK_PER_UUR, 3600000)) return appWeiger(res, 429, 'even wachten: te veel zoekvragen dit uur', 'grens zoek');
+  if (d.alle !== true) {
+    const z = await appZoekKanaal(kanaal, termV);
+    if (z.fout) { logError('app-zoek', z.fout); return appWeiger(res, 503, 'geschiedenis nu niet leesbaar', 'app-log'); }
+    const ms = Date.now() - t0;
+    res._app.reden = 'zoek ' + kanaal + ' lengte ' + termV.length + ' treffers ' + z.totaal + ' ' + ms + ' ms' + (z.afgekapt ? ' afgekapt' : '');
+    return appStuur(res, 200, { ok: true, kanaal: kanaal, treffers: z.treffers, totaal: z.totaal, meer: z.totaal > z.treffers.length, sinds: z.sinds, afgekapt: z.afgekapt });
+  }
+  const ks = APP_ZOEK_ALLE.filter(function (k) { return Object.prototype.hasOwnProperty.call(APP_KANALEN, k); });
+  const uit = await Promise.all(ks.map(function (k) { return appZoekKanaal(k, termV).catch(function (e) { return { fout: e }; }); }));
+  const onleesbaar = [];
+  let samen = [], totaal = 0, sinds = null, afgekapt = false;
+  uit.forEach(function (z, i) {
+    if (z.fout) { onleesbaar.push(ks[i]); logError('app-zoek ' + ks[i], z.fout); return; }
+    totaal += z.totaal;
+    afgekapt = afgekapt || z.afgekapt;
+    if (z.sinds && (!sinds || Date.parse(z.sinds) < Date.parse(sinds))) sinds = z.sinds;
+    samen = samen.concat(z.treffers.map(function (t) { return Object.assign({ kanaal: ks[i] }, t); }));
+  });
+  if (onleesbaar.length === ks.length) return appWeiger(res, 503, 'geschiedenis nu niet leesbaar', 'app-log');
+  // stabiel: binnen één bericht blijft Socevs antwoord boven Davids vraag
+  samen.sort(function (x, y) { return (Date.parse(y.t) || 0) - (Date.parse(x.t) || 0); });
+  const treffers = samen.slice(0, APP_ZOEK_MAX);
   const ms = Date.now() - t0;
-  res._app.reden = 'zoek ' + kanaal + ' lengte ' + termV.length + ' treffers ' + totaal + ' ' + ms + ' ms' + (afgekapt ? ' afgekapt' : '');
-  appStuur(res, 200, { ok: true, kanaal: kanaal, treffers: treffers, totaal: totaal, meer: totaal > treffers.length, sinds: items.length ? items[0].t : null, afgekapt: afgekapt });
+  res._app.reden = 'zoek alle(' + ks.length + ') lengte ' + termV.length + ' treffers ' + totaal + ' ' + ms + ' ms' + (afgekapt ? ' afgekapt' : '') + (onleesbaar.length ? ' onleesbaar ' + onleesbaar.join(',') : '');
+  appStuur(res, 200, { ok: true, kanaal: kanaal, alle: true, kanalen: ks, treffers: treffers, totaal: totaal, meer: totaal > treffers.length, sinds: sinds, afgekapt: afgekapt, onleesbaar: onleesbaar });
 }
 
 // ── Broedstoof (wv92, bouwplan § 4.13): ideeënbus + werkvoorraad + agents; voorrang per idee ──
