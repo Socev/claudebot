@@ -704,7 +704,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   const SCH = path.join(W, 'zoek-snel.json');
   const log = [], chatlog = [];
   let modelVan = null, modelN = 0;
-  const appStaat = { tellers: { 'zoek-snel': [], 'zoek-snel-treffers': [] } };
+  const appStaat = { tellers: { 'zoek-snel': [], 'zoek-snel-treffers': [], 'zoek-snel-overal': [] } };
   const st = function () { return { _app: {}, status: null, j: null }; };
   const eenRegel = new Function('appOntmasker', 'return ' + /function appEenRegel\(t, max\) \{[\s\S]*?\n\}/.exec(src)[0])(
     new Function('return ' + /function appOntmasker\(t, merk\) \{[\s\S]*?\n\}/.exec(src)[0])());
@@ -722,7 +722,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     appSchrijfJson: (f, d) => fs.writeFileSync(f, JSON.stringify(d)),
     appEenRegel: eenRegel, appTijdKort: (ms) => new Date(ms).toISOString().slice(11, 16),
     harvesterClaude: async (sys, prompt, schema, o) => { modelN++; if (o.timeoutMs !== 20000) return { ok: false, fout: 'time-out niet 20 s' }; return modelVan ? modelVan(prompt, schema) : { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }; } });
-  vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, appZoekSnelTreffers, zoekSnelStaart, zoekSnelTot, zoekSnelInfo, zoekSnelAan, zoekSnel };', ctx, { filename: 'server.js#zoek-snel' });
+  vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, appZoekSnelTreffers, appZoekSnelOveral, zoekOveral, zoekSnelStaart, zoekSnelTot, zoekSnelInfo, zoekSnelAan, zoekSnel };', ctx, { filename: 'server.js#zoek-snel' });
   const S = ctx.__z;
   toets('6 module geladen', !!S.zoekSnel);
   const A = { id: 'pixel', soort: 'mee' }, A2 = { id: 'laptop', soort: 'mee' };
@@ -812,6 +812,32 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   res = await roepT(A, { tekst: 'btw Tolgaarde' });
   toets('11 grens 120 per uur: 429', res.status === 429);
   appStaat.tellers['zoek-snel-treffers'] = [];
+
+  // ── 14. wv3742 (nr 459 = 3C159): de voordeur naar al Davids bronnen, route POST /app/zoek-snel/overal ──
+  toets('14 dispatch, glijdroute en teller overal', /if \(route === 'POST \/app\/zoek-snel\/overal'\) return typeof appZoekSnelOveral === 'function' \? appZoekSnelOveral\(req, res, a, d\)/.test(src) &&
+    /APP_GLIJD_ROUTES\.add\('POST \/app\/zoek-snel\/overal'\)/.test(src) && /'zoek-snel-overal': \[\][,}]/.test(src));
+  toets('14 uitrol.sh en Dockerfile kennen zoek-overal.js', /RELEASE_OPTIONEEL="[^"]* zoek-overal\.js[ "]/.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY zoek-overal\.js \/app\/release-bootstrap\/zoek-overal\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
+  toets('14 Mail gaat niet vanzelf naar Gmail (geen luik in de route)', !/appAgendaApi|mail_lijst|mail_zoeken/.test(src.slice(src.indexOf('const zoekOveral = '), src.indexOf('// ── einde Zoek snel ──'))));
+  toets('14 module geladen', !!S.zoekOveral);
+  const roepO = async (a, d) => { const res = st(); await S.appZoekSnelOveral({}, res, a, d); return res; };
+  fs.writeFileSync(SCH, JSON.stringify({ aan: true, uit_bronnen: ['bank'] }));
+  res = await roepO(A, { tekst: 'Wat is het btw-nummer van Tolgaarde' });
+  const perO = {}; (res.j && res.j.bronnen || []).forEach((x) => { perO[x.bron] = x; });
+  toets('14 route: 200, alle zeven bronnen bij naam', res.status === 200 && res.j.ok && ['contacten', 'agenda', 'mail', 'gesprekken', 'facturen', 'bank', 'pakjes'].every((b) => perO[b] && perO[b].naam), res.j);
+  toets('14 uitgezette bron (schakelaar uit_bronnen) staat als uit', perO.bank && perO.bank.stand === 'uit', perO.bank);
+  toets('14 bron zonder ingang (proef: geen Supabase) staat als uit, niet stil weg', perO.contacten && perO.contacten.stand === 'uit' && perO.agenda.stand === 'uit', perO.contacten);
+  toets('14 Mail op tik met de kernwoorden', perO.mail && perO.mail.stand === 'op_tik' && perO.mail.kaart.doel.soort === 'mail' && perO.mail.kaart.doel.q === 'tolgaarde', perO.mail);
+  toets('14 bron die faalt = niet bereikt (gesprekken zonder app-log in de proef)', perO.gesprekken && ['niet_bereikt', 'niets'].indexOf(perO.gesprekken.stand) >= 0, perO.gesprekken);
+  res = await roepO(A, { tekst: '' });
+  toets('14 lege vraag: 400', res.status === 400);
+  appStaat.tellers['zoek-snel-overal'] = new Array(60).fill(Date.now());
+  res = await roepO(A, { tekst: 'Tolgaarde' });
+  toets('14 grens 60 per uur: 429', res.status === 429);
+  fs.writeFileSync(SCH, JSON.stringify({ aan: false }));
+  res = await roepO(A, { tekst: 'Tolgaarde' });
+  toets('14 schakelaar uit: 409', res.status === 409);
+  fs.writeFileSync(SCH, JSON.stringify({ aan: true }));
+  appStaat.tellers['zoek-snel-overal'] = [];
 
   // ── 10. server.js met de lagen (wv1788): RPC feitenlijst, tekstindex, query_run na het antwoord, zout, patiëntmarker, /health, nachtklokken ──
   const ZOUT = path.join(W, 'zoutmap', 'zout');
