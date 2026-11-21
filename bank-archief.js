@@ -148,11 +148,22 @@ function geldigLabel(v, n) { return typeof v === 'string' && /^[\p{L}\p{N}][\p{L
 // wv2392: bestand = 'zakelijk.sqlite' voor de zakelijke rekeningen (business-sessie bij Enable Banking): zelfde schema, aparte database,
 // zodat praktijk- en personeelsposten nooit in de privé-database, de Financiën-app of de verrijking (taalmodel) komen. Facturen leest hem.
 const BESTANDEN = ['transacties.sqlite', 'zakelijk.sqlite'];
+// wv3718 (21-11-2026, besluitenpagina nr 14 / A20): een ontbrekend archief werd hier stil een lege databank, en de volgende bank-ronde
+// vulde die met de laatste 90 dagen: Davids correcties, regels en de oudere posten waren dan zonder melding weg. Nu legt open() naast
+// het archief een merkbestand <bestand>.merk (0600, alleen een datum) zodra het archief bestaat; ontbreekt het archief terwijl het merk
+// er is, dan weigert open() met een fout (bank-lezer: _archief_fout -> logregel + één box-rij per dag) in plaats van leeg te beginnen.
+// Herstel: het archief terugzetten uit de nachtbundel (podstaat bank/transacties.sqlite.gz of bank/zakelijk.sqlite.gz). Bewust opnieuw
+// beginnen: het merkbestand weghalen (machinekamer). Eerste gebruik (geen archief, geen merk) blijft gewoon werken; het merk gaat via de
+// witte lijst van de nachtbundel mee, zodat een herstel van alleen stand.json + merk zonder archief ook weigert.
 function open(bankDir, bestand) {
   if (bestand !== undefined && BESTANDEN.indexOf(bestand) < 0) throw new Error('onbekend archiefbestand');
   fs.mkdirSync(bankDir, { recursive: true, mode: 0o700 });
   const pad = path.join(bankDir, bestand || 'transacties.sqlite');
+  const merk = pad + '.merk';
   const nieuw = !fs.existsSync(pad);
+  if (nieuw && fs.existsSync(merk)) {
+    throw new Error('archief ' + path.basename(pad) + ' ontbreekt terwijl het eerder bestond (' + path.basename(merk) + '): terugzetten uit de nachtbundel; niet leeg opnieuw begonnen');
+  }
   if (nieuw) fs.closeSync(fs.openSync(pad, 'a', 0o600));
   try { fs.chmodSync(pad, 0o600); } catch (e) {}
   const { DatabaseSync } = require('node:sqlite');
@@ -203,6 +214,12 @@ function open(bankDir, bestand) {
       rkOntbreekt().forEach(function (k) { try { db.exec('ALTER TABLE rekeningen ADD COLUMN ' + k[0] + ' ' + k[1]); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } });
       db.exec('COMMIT');
     } catch (e) { try { db.exec('ROLLBACK'); } catch (e2) {} db.close(); throw e; }
+  }
+  // wv3718: merk zodra het archief bestaat (ook voor bestaande archieven bij de eerste open() na de uitrol); 'wx' = nooit overschrijven
+  // Codex wv3718 MOET 1: alleen EEXIST (twee processen tegelijk) negeren; elke andere schrijffout = geen bescherming, dus doorgeven.
+  if (!fs.existsSync(merk)) {
+    try { fs.writeFileSync(merk, new Date().toISOString() + '\n', { flag: 'wx', mode: 0o600 }); }
+    catch (e) { if (!e || e.code !== 'EEXIST') { try { db.close(); } catch (e2) {} throw new Error('merkbestand ' + path.basename(merk) + ' niet te schrijven: ' + String(e && e.code || e)); } }
   }
   return { db: db, pad: pad, dir: bankDir };
 }

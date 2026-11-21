@@ -345,6 +345,7 @@ jobs:
             for f in test/bunq-poort.sh test/bankluis-poort.sh test/bank-ronde.sh; do TOETS_NU=$nu t $f; done
           done
           t test/bank-archief.sh
+          t test/bank-archief-merk.sh
           t test/vaste-lasten-ronde.sh   # wv776: maandronde vaste lasten (binnenblok vault, poort nieuwste post, box 1× per maand per reden)
           t test/paypal-laag.sh
           t test/ecobank-laag.sh
