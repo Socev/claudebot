@@ -2324,6 +2324,17 @@ async function bewijs(o) {
       toets('9d wv926 Fable #6: een doe-kaart met hetzelfde wv-nummer verbergt de vraag niet (alleen een besluitkaart)', mDoe.some((x) => x.punt.includes(J(2))), JSON.stringify(mDoe.map((x) => x.punt)));
       const leeg = H.appMoetIetsUit({}, {}, {}, [], nu);
       toets('9d wv594: zonder gegevens een lege lijst', Array.isArray(leeg) && leeg.length === 0);
+      // wv3828 (David 21-11 20:12 "Wat moet ik met deze enorme lijst??"): een proefvoorstel van een machinekamer-klus komt niet in Moet iets; een echt voorstel wel
+      {
+        const mkA = [
+          it(30, { bron: 'agenda', antwoord: 'Bevestig in je agenda:\nNieuwe afspraak in Davids proefagenda op dinsdag 1 december 2026, 10:00-10:30: "SOCEV PROEF kaart wv3687".' }),
+          it(31, { bron: 'agenda', antwoord: 'Bevestig in je agenda:\nVerwijder afspraak van zondag 6 december 2026, 19:30-21:00: "SOCEV PROEF momenten wv3822" uit Davids proefagenda.' }),
+          it(32, { bron: 'agenda', antwoord: 'Bevestig in je agenda:\nNieuwe afspraak in Davids agenda op dinsdag 1 december 2026, 10:00-10:30: "Tandarts".' }),
+        ];
+        const agM = Object.fromEntries([30, 31, 32].map((n) => [J(n), { kanaal: 'machinekamer', t: iso(uur), knoppen: { uitvoeren: { verloopt: nu + uur, stand: 'open' } } }]));
+        const pp = H.appMoetIetsUit({ machinekamer: mkA }, {}, agM, [], nu).map((x) => x.punt);
+        toets('9d wv3828: proefvoorstel (proefagenda / SOCEV PROEF) niet in Moet iets, een echt voorstel in het machinekamer-kanaal wel', pp.length === 1 && pp[0] === 'a:' + J(32), JSON.stringify(pp));
+      }
       // wv2317 (David 3-11): een stiltewachter-dagbericht vervalt uit Moet iets zodra elke genoemde stroom weer gezond is na het bericht
       {
         const S = (n) => 'd2d2d2d2d2d2d2' + String(n).padStart(2, '0'), tb = nu - 20 * 60000, isoT = new Date(tb).toISOString(), na = new Date(tb + 5 * 60000).toISOString(), voor = new Date(tb - 5 * 60000).toISOString();

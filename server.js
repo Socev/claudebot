@@ -12748,6 +12748,7 @@ function appStilWeerTerug(tekst, stilte, t) {
     return !!(st && st.status === 'gezond' && st.laatste_executie && Date.parse(st.laatste_executie) > t);
   });
 }
+const APP_AGENDA_PROEF_RE = /SOCEV PROEF|\bDavids proefagenda\b/;   // wv3828
 function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs, afgeleid, stilte, opties) {
   const weg = (opties && opties.weg) || {}, factuurKlaar = (opties && opties.factuurKlaar) || {};   // wv2560
   const vandaag = appYmd(nu), gekoppeld = {}, kaartWv = {}, kaartJob = {};
@@ -12773,6 +12774,9 @@ function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs
       const basis = { kanaal: kanaal, job_id: x.job_id, t: new Date(t).toISOString(), bron: x.soort === 'socev' ? x.bron || null : null, socev: x.soort === 'socev' };
       const e = agendaKnoppen && agendaKnoppen[x.job_id];
       if (e && e.kanaal === kanaal) {
+        // wv3828 (David 21-11 20:12, "Wat moet ik met deze enorme lijst??"): een proefvoorstel van een machinekamer-klus (proefagenda,
+        // titel SOCEV PROEF) hoort nooit in Davids lijst; het blijft gewoon in het machinekamer-gesprek staan, alleen niet als Moet iets.
+        if (APP_AGENDA_PROEF_RE.test(String(x.antwoord || ''))) return;
         const vorm = appAgendaVorm(e, nu);
         if (vorm.knoppen.some(function (k) { return k.knop === 'uitvoeren' && k.open && Date.parse(k.verloopt) > nu; })) {
           uit.push(Object.assign({ punt: 'a:' + x.job_id, soort: 'agenda', bericht: appMoetBericht(x.antwoord), afgekapt: appMoetAf(x.antwoord), agenda: vorm }, basis));
