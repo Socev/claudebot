@@ -8,7 +8,11 @@
 // toetst die pas terug via POST /bericht/sms-pas met het pod-geheim (credential "Claudebot pod API (body-secret)"); het leesgeheim
 // opent de verzendtak niet meer. Puur (geen netwerk, geen schijf): getoetst in test/sms-tik.sh.
 
-const TEKST_MAX = 918;            // 6 sms-delen van 153 tekens; daarboven is het geen sms meer
+const TEKST_MAX = 918;            // ruwe bovengrens in tekens; de echte grens is DELEN_MAX sms-delen (review wv3664 MOET 1)
+const DELEN_MAX = 6;
+// GSM 03.38: basisset (1 septet) en uitbreiding (2 septets). Eén teken daarbuiten = hele bericht in UCS-2 (70/67 per deel).
+const GSM_BASIS = '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà';
+const GSM_UIT = '^{}\\[~]|€\f';
 const NAAM_MAX = 60;
 const PAS_MS = 60000;
 const PAS_MAX = 50;
@@ -21,6 +25,18 @@ function nummer(x) {
   if (/^00[1-9]/.test(s)) s = '+' + s.slice(2);
   else if (/^0[1-9]\d{8}$/.test(s)) s = '+31' + s.slice(1);
   return NUMMER_RE.test(s) ? s : null;
+}
+
+// Aantal sms-delen zoals de telefoon het verstuurt (GSM-7 160/153, anders UCS-2 70/67 in UTF-16-eenheden).
+function delen(t) {
+  let septets = 0, gsm = true;
+  for (const c of t) {
+    if (GSM_BASIS.indexOf(c) >= 0) septets += 1;
+    else if (GSM_UIT.indexOf(c) >= 0) septets += 2;
+    else { gsm = false; break; }
+  }
+  if (gsm) return septets <= 160 ? 1 : Math.ceil(septets / 153);
+  return t.length <= 70 ? 1 : Math.ceil(t.length / 67);
 }
 
 // Leesbare weergave voor David (+31 6 12345678); andere landen ongewijzigd.
@@ -38,6 +54,7 @@ function valideer(d) {
   const tekst = d.tekst.replace(/\r\n?/g, '\n').replace(/\s+$/, '');
   if (!tekst.trim()) return 'tekst is leeg';
   if (tekst.length > TEKST_MAX) return 'tekst langer dan ' + TEKST_MAX + ' tekens';
+  if (delen(tekst) > DELEN_MAX) return 'tekst wordt ' + delen(tekst) + ' sms-delen (max ' + DELEN_MAX + '); korter maken (emoji en tekens buiten het sms-alfabet tellen zwaar)';
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u0008\u000b-\u001f\u007f\u2028\u2029\u202a-\u202e\u2066-\u2069]/.test(tekst)) return 'tekst bevat stuurtekens';
   if (tekst.indexOf('```') >= 0) return 'tekst bevat ``` (dat kan de app niet eerlijk tonen)';
@@ -91,8 +108,9 @@ function uitkomst(fout, status, j, naar) {
   j = j && typeof j === 'object' ? j : {};
   if (status === 200 && j.status === 'ok') return { pagina: 'uitgevoerd', tekst: '✅ Sms aangeboden aan je telefoon, naar ' + nummerLeesbaar(naar) + '.' };
   if (status === 403) return { pagina: 'mislukt', tekst: '⚠️ Niet verstuurd: de sms-dienst nam de pas niet aan.' };
-  if (status === 502 || j.status === 'fout') return { pagina: 'mislukt', tekst: '⚠️ Niet verstuurd: de sms-dienst gaf een fout' + (j.fout ? ' (' + kort(j.fout, 120) + ')' : '') + '.' };
+  // review wv3664 MOET 2: een fout ná de toets van de pas bewijst niet dat er niets weg is; alleen 403 (pas geweigerd) is vóór het versturen
+  if (status === 502 || j.status === 'fout') return { pagina: 'mislukt', tekst: '⚠️ De sms-dienst gaf een fout' + (j.fout ? ' (' + kort(j.fout, 120) + ')' : '') + '; onbekend of de sms weg is. Kijk in je berichten-app. Ik verstuur hem niet opnieuw.' };
   return { pagina: 'mislukt', tekst: '⚠️ Onbekende uitkomst (HTTP ' + Number(status) + '); kijk in je berichten-app. Ik verstuur hem niet opnieuw.' };
 }
 
-module.exports = { nummer, nummerLeesbaar, valideer, berichtTekst, passen, uitkomst, TEKST_MAX, PAS_MS };
+module.exports = { nummer, nummerLeesbaar, delen, valideer, berichtTekst, passen, uitkomst, TEKST_MAX, PAS_MS };

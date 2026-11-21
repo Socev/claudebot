@@ -36,6 +36,9 @@ toets('1 pas zonder/onzin = nee', P.toets({}).j.ok === false && P.toets({ pas: '
 toets('1 uitkomst ok', S.uitkomst(null, 200, { status: 'ok', id: 'a' }, '+31612345678').pagina === 'uitgevoerd');
 toets('1 uitkomst 403/502/time-out/vreemd = mislukt', ['mislukt', 'mislukt', 'mislukt', 'mislukt'].join() === [S.uitkomst(null, 403, { error: 'x' }), S.uitkomst(null, 502, { status: 'fout', fout: 'y' }),
   S.uitkomst(new Error('timeout'), undefined, null), S.uitkomst(null, 200, { status: 'iets' })].map((u) => u.pagina).join());
+toets('1 sms-delen GSM-7/UCS-2', [S.delen('a'.repeat(160)), S.delen('a'.repeat(161)), S.delen('€'.repeat(80)), S.delen('中'.repeat(70)), S.delen('中'.repeat(71)), S.delen('Café')].join() === '1,2,1,1,2,1');
+toets('1 valideer: 402 Chinese tekens mag (6 delen), 403 niet', typeof S.valideer({ naar: '0612345678', tekst: '中'.repeat(402) }) === 'object' && typeof S.valideer({ naar: '0612345678', tekst: '中'.repeat(403) }) === 'string');
+toets('1 502 = onbekend, niet "niet verstuurd"', /onbekend/i.test(S.uitkomst(null, 502, { status: 'fout', fout: 'x' }).tekst) && !/Niet verstuurd/.test(S.uitkomst(null, 502, {}).tekst));
 toets('1 time-out zegt onbekend, niet "niet verstuurd"', /onbekend/i.test(S.uitkomst(new Error('t')).tekst) && !/Niet verstuurd/.test(S.uitkomst(new Error('t')).tekst));
 
 // ── 2. server-blok ──
