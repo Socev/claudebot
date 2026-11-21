@@ -1058,6 +1058,69 @@ function maak(opt) {
     return { status: 200, j: j };
   }
 
+  // ── wv3753 (besluitenpagina nr 508 = 3C208, David Ja 21-11-2026 13:21; Fable-review brein-graaf idee 12): de stamboom als waaier ──
+  // De personen uit 20_Prive/Familie/Stamboom (één map, geen deelmappen) met wat de waaier nodig heeft uit hun frontmatter: naam, kwartierstaat-
+  // nummer, geboren/overleden (jaar-maand-dag zoals het er staat), geslacht, relatie tot David, en ouders/partners/kinderen als wikilinks,
+  // opgelost zoals overal op de kaart (los) en teruggebracht tot een plek in de lijst (links buiten de stamboommap tellen alleen mee in los_n).
+  // Alleen lezen; geen keuzes: dubbele nummers, tegenstrijdige ouders en gaten bepaalt de app en zet ze als waarschuwing in beeld.
+  // Een onleesbaar nummer (geen geheel getal 1..2^20) gaat niet mee als nummer maar als waarschuwing. Uitkomst per kaartbouw in het geheugen.
+  const STAMBOOM_MAP = '20_Prive/Familie/Stamboom/', STAMBOOM_MAX = 6000, STAMBOOM_KOP = 16384;
+  let stamboomCache = null;   // { sig, j }
+  function fmVelden(t) {
+    const m = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/.exec(t);
+    if (!m) return null;
+    const v = {};
+    let huidig = null;
+    for (const r of m[1].split(/\r?\n/)) {
+      const x = /^([A-Za-z_][A-Za-z0-9_]{0,40}):\s*(.*)$/.exec(r);
+      if (x) { huidig = x[1]; v[huidig] = x[2].trim(); continue; }
+      const l = /^\s+-\s+(.*)$/.exec(r);
+      if (l && huidig) v[huidig] = (v[huidig] ? v[huidig] + ', ' : '') + l[1].trim();
+    }
+    return v;
+  }
+  const fmTekst = function (s, n) { return kortTekst(String(s || '').replace(/^["']|["']$/g, ''), n); };
+  function stamboom(ctx) {
+    const k = vers(false);
+    if (!k) return { status: 503, j: { ok: false, fout: 'de kaart is nu niet te bouwen' } };
+    if (stamboomCache && k.sig && stamboomCache.sig === k.sig) return { status: 200, j: stamboomCache.j };
+    const rijen = [], naar = new Map(), waarschuwingen = [];
+    k.bestanden.forEach(function (b, i) {
+      if (rijen.length >= STAMBOOM_MAX || b.s !== 'md' || b.p.indexOf(STAMBOOM_MAP) !== 0 || b.p.indexOf('/', STAMBOOM_MAP.length) >= 0) return;
+      let t;
+      try {
+        const fd = fs.openSync(path.join(VAULT, b.p), 'r');
+        try { const buf = Buffer.alloc(Math.min(STAMBOOM_KOP, b.g || STAMBOOM_KOP)); const n = fs.readSync(fd, buf, 0, buf.length, 0); t = buf.slice(0, n).toString('utf8'); }
+        finally { fs.closeSync(fd); }
+      } catch (e) { return; }
+      const v = fmVelden(t);
+      if (!v) return;
+      let kw = null;
+      const kr = String(v.kwartierstaat || '').replace(/^["']|["']$/g, '').trim();
+      if (kr) {
+        if (/^\d{1,7}$/.test(kr) && +kr >= 1 && +kr <= 1048576) kw = +kr;
+        else waarschuwingen.push({ p: b.p, tekst: 'kwartierstaatnummer onleesbaar: ' + kortTekst(kr, 30) });
+      }
+      const ln = function (veld) {
+        const uit = [];
+        (v[veld] ? linksIn(v[veld]) : []).forEach(function (l) { const r = los(l.doel, b.p, false, k); uit.push(r && r.i !== undefined ? r.i : -1); });
+        return uit;
+      };
+      const g = /^["']?(man|m)["']?$/i.test(v.geslacht || '') ? 'm' : /^["']?(vrouw|v)["']?$/i.test(v.geslacht || '') ? 'v' : '';
+      naar.set(i, rijen.length);
+      rijen.push({ p: b.p, naam: fmTekst(v.naam, 120) || b.p.slice(STAMBOOM_MAP.length).replace(/\.md$/i, ''), kw: kw,
+        geb: fmTekst(v.geboren, 10), ovl: fmTekst(v.overleden, 10), g: g, rel: fmTekst(v.relatie_tot_david, 80),
+        ouders: ln('ouders'), partners: ln('partners'), kinderen: ln('kinderen') });
+    });
+    let losN = 0;
+    const plek = function (lijst) { const uit = []; lijst.forEach(function (i) { const j = naar.get(i); if (j === undefined) losN++; else if (uit.indexOf(j) < 0) uit.push(j); }); return uit; };
+    const personen = rijen.map(function (r) { return [r.p, r.naam, r.kw, r.geb, r.ovl, r.g, r.rel, plek(r.ouders), plek(r.partners), plek(r.kinderen)]; });
+    const j = { ok: true, bijgewerkt: new Date(k.op).toISOString(), map: STAMBOOM_MAP.replace(/\/$/, ''), personen: personen, los_n: losN,
+      waarschuwingen: waarschuwingen.slice(0, 50) };
+    if (k.sig) stamboomCache = { sig: k.sig, j: j };
+    return { status: 200, j: j };
+  }
+
   function nacht(datum) {
     if (laatsteNacht === datum) return false;
     laatsteNacht = datum;
@@ -1083,6 +1146,7 @@ function maak(opt) {
     if (route === 'GET /app/secondbrain') return kaartVoor(ctx, false);
     if (route === 'POST /app/secondbrain/kaart') return kaartVoor(ctx, !!(d && d.alles));
     if (route === 'POST /app/secondbrain/vandaag') return vandaag(ctx);   // wv3717: "Wat speelt"
+    if (route === 'POST /app/secondbrain/stamboom') return stamboom(ctx);   // wv3753: de stamboom als waaier
     if (route === 'POST /app/secondbrain/open') return open(d, ctx);
     if (route === 'POST /app/secondbrain/bestand') return bestand(d, ctx);
     if (route === 'POST /app/secondbrain/zoek') return zoek(d, ctx);

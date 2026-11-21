@@ -645,6 +645,42 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       w4.j.bronnen.deadlines === 'niet beschikbaar', w4.j); }
   toets('15 server.js geeft de deadlines van Projecten mee', /deadlines: function \(\) \{ const p = appProjecten\(\); return p && Array\.isArray\(p\.deadlines\) \? p\.deadlines : null; \}/.test(fs.readFileSync('server.js', 'utf8')));
 
+  // ── 16. wv3753 (3C208): de stamboom als waaier — POST /app/secondbrain/stamboom (verzonnen namen) ──
+  { const VS = path.join(W, 'vault-stam');
+    const zs = (p, t) => { fs.mkdirSync(path.dirname(path.join(VS, p)), { recursive: true }); fs.writeFileSync(path.join(VS, p), t); };
+    const M = '20_Prive/Familie/Stamboom/';
+    const fm = (o) => '---\n' + Object.keys(o).map((k) => k + ': ' + o[k]).join('\n') + '\n---\n# x\n';
+    zs(M + 'Proef Midden (1980).md', fm({ type: 'persoon', naam: '"Proef Midden"', geslacht: '"man"', geboren: '"1980-02-03"', relatie_tot_david: '"zelf"', kwartierstaat: 1,
+      ouders: '["[[20_Prive/Familie/Stamboom/Proef Vader (1950)|Proef Vader]]", "[[Proef Moeder (1952)]]"]', partners: '["[[20_Prive/Familie/Partner Elders]]"]', kinderen: '' }));
+    zs(M + 'Proef Vader (1950).md', fm({ naam: '"Proef Vader"', geslacht: '"man"', geboren: '"1950"', overleden: '"2020-01-01"', kwartierstaat: 2, ouders: '', kinderen: '["[[Proef Midden (1980)]]", "[[Proef Broer (1982)]]"]' }));
+    zs(M + 'Proef Moeder (1952).md', '---\nnaam: "Proef Moeder"\ngeslacht: "vrouw"\nkwartierstaat: "3"\nouders:\n  - "[[Proef Opa Zondernummer]]"\n---\n');
+    zs(M + 'Proef Opa Zondernummer.md', fm({ naam: '"Proef Opa Zondernummer"', geslacht: '"man"', kwartierstaat: '' }));
+    zs(M + 'Proef Broer (1982).md', fm({ naam: '"Proef Broer"', geslacht: '"man"', ouders: '["[[Proef Vader (1950)]]"]' }));
+    zs(M + 'Proef Raar nummer.md', fm({ naam: '"Proef Raar"', kwartierstaat: '"12a"' }));
+    zs(M + 'Zonder frontmatter.md', '# geen kop\n');
+    zs(M + 'Deelmap/Proef Diep.md', fm({ naam: '"Diep"', kwartierstaat: 9 }));
+    zs('20_Prive/Familie/Partner Elders.md', fm({ naam: '"Elders"', kwartierstaat: 7 }));
+    zs('10_Zakelijk/Ander/Proef Nummer.md', fm({ naam: '"Ander"', kwartierstaat: 4 }));
+    const ss = S.maak({ vault: VS, dir: path.join(W, 'staat-stam') });
+    const st = await ss.app('POST /app/secondbrain/stamboom', {}, {});
+    const pers = st.j.personen || [];
+    const op = (naam) => pers.findIndex((x) => x[1] === naam);
+    const mid = pers[op('Proef Midden')] || [];
+    toets('16 stamboom: alleen de stamboommap zelf (geen deelmap, geen pagina elders), zonder frontmatter niet mee', st.status === 200 && pers.length === 6 &&
+      !pers.some((x) => /Deelmap|Elders|Ander/.test(x[0])) && op('Zonder frontmatter') < 0, pers.map((x) => x[0]));
+    toets('16 velden: pad, naam, nummer, geboren, overleden, geslacht, relatie', mid[0] === M + 'Proef Midden (1980).md' && mid[2] === 1 && mid[3] === '1980-02-03' && mid[5] === 'm' && mid[6] === 'zelf' &&
+      pers[op('Proef Vader')][4] === '2020-01-01' && pers[op('Proef Moeder')][2] === 3 && pers[op('Proef Moeder')][5] === 'v', mid);
+    toets('16 ouders als plek in de lijst (wikilink met pad|tekst en kale naam, ook als YAML-lijst)', JSON.stringify(mid[7]) === JSON.stringify([op('Proef Vader'), op('Proef Moeder')]) &&
+      JSON.stringify(pers[op('Proef Moeder')][7]) === JSON.stringify([op('Proef Opa Zondernummer')]), [mid[7], pers[op('Proef Moeder')][7]]);
+    toets('16 kinderen terug, link buiten de stamboommap telt alleen in los_n', JSON.stringify(pers[op('Proef Vader')][9]) === JSON.stringify([op('Proef Midden'), op('Proef Broer')]) &&
+      mid[8].length === 0 && st.j.los_n === 1, [pers[op('Proef Vader')][9], st.j.los_n]);
+    toets('16 leeg nummer = null, onleesbaar nummer = waarschuwing, niet als nummer', pers[op('Proef Opa Zondernummer')][2] === null && pers[op('Proef Raar')][2] === null &&
+      st.j.waarschuwingen.length === 1 && /onleesbaar: 12a/.test(st.j.waarschuwingen[0].tekst), st.j.waarschuwingen);
+    const st2 = await ss.app('POST /app/secondbrain/stamboom', {}, {});
+    toets('16 zelfde kaart = zelfde uitkomst uit het geheugen', st2.j === st.j);
+  }
+  toets('16 server.js: de route valt onder appSecondBrain (POST /app/secondbrain/…)', /route\.indexOf\('POST \/app\/secondbrain\/'\) === 0\) return typeof appSecondBrain/.test(fs.readFileSync('server.js', 'utf8')));
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
