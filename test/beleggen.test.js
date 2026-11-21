@@ -491,3 +491,82 @@ test('wv3031 exports: per DEGIRO-export het laatst ingelezen bestand (ook na mee
   assert.strictEqual(get().body.exports.rekening.aantal, 1);
   assert.deepStrictEqual(Object.keys(get().body.exports.rekening).sort(), ['aantal', 'datum_bestand', 'op']);
 });
+// wv3727 (David Ja 21-11, nr 160): één dagboekvraag per aandeel per dag; teller voor de tegel; afgeronde beursgang
+test('wv3727 dagboek: twee orders van hetzelfde aandeel op één dag = één vraag; andere dag, ander aandeel of verkoop = eigen vraag', () => {
+  const tx = [
+    { sleutel: 'a2', datum: '2026-11-13', tijd: '15:45', naam: 'VOORBEELD ROBOT CORP', isin: 'XX0000000044', aantal: '2' },
+    { sleutel: 'a1', datum: '2026-11-13', tijd: '15:30', naam: 'VOORBEELD ROBOT CORP', isin: 'XX0000000044', aantal: '1.5' },
+    { sleutel: 'b1', datum: '2026-11-13', tijd: '10:00', naam: 'VOORBEELD ZORGFONDS', isin: 'XX0000000055', aantal: '6' },
+    { sleutel: 'a3', datum: '2026-11-14', tijd: '09:00', naam: 'VOORBEELD ROBOT CORP', isin: 'XX0000000044', aantal: '1' },
+    { sleutel: 'a4', datum: '2026-11-14', tijd: '16:00', naam: 'VOORBEELD ROBOT CORP', isin: 'XX0000000044', aantal: '-1' }];
+  // vóór wv3727 gaf dit 5 vragen (één per order); nu 4
+  let k = B.bereken(data(REGELS, SOORT, { transacties: tx }), '2026-11-14');
+  const dg = k.signalen.filter((x) => x.soort === 'dagboek');
+  assert.strictEqual(dg.length, 4);
+  const robot = dg.find((x) => x.transactie === 'a1');
+  assert.ok(robot, 'groep hangt aan de vroegste order');
+  assert.deepStrictEqual(robot.transacties, ['a1', 'a2']);
+  assert.strictEqual(robot.sleutel, 'dagboek:a1');
+  assert.match(robot.wat, /^Op 2026-11-13 kwam er 3,5 VOORBEELD ROBOT CORP bij \(2 orders\)\.$/);
+  assert.strictEqual(k.open_punten.filter((p) => p.soort === 'dagboek').length, 4);
+  // een regel bij de tweede order (van vóór wv3727) dekt de hele groep
+  k = B.bereken(data(REGELS, SOORT, { transacties: tx, dagboek: [{ id: 1, transactie_sleutel: 'a2', datum: '2026-11-13', naam: 'VOORBEELD ROBOT CORP', waarom: 'x' }] }), '2026-11-14');
+  assert.ok(!k.signalen.some((x) => x.sleutel === 'dagboek:a1'));
+  assert.ok(!k.open_punten.some((p) => p.transactie === 'a1'));
+  // "Niets doen" op één order van vóór wv3727 (oude sleutel per order) geldt voor de groep: geen signaal, geen open punt
+  k = B.bereken(data(REGELS, SOORT, { transacties: tx, keuzes: { 'dagboek:a2': { keuze: 'niets' } } }), '2026-11-14');
+  assert.ok(!k.signalen.some((x) => x.sleutel === 'dagboek:a1'));
+  assert.ok(!k.open_punten.some((p) => p.transactie === 'a1'));
+  // herinner op de groep verbergt tot de datum
+  k = B.bereken(data(REGELS, SOORT, { transacties: tx, keuzes: { 'dagboek:a1': { keuze: 'herinner', tot: '2026-11-20' } } }), '2026-11-14');
+  assert.ok(!k.signalen.some((x) => x.sleutel === 'dagboek:a1'));
+});
+test('wv3727 routes: Davids vorm (twee orders zelfde aandeel, zelfde dag) → één vraag; regel via de eerste order; teller', () => {
+  const { m, post, get } = nieuw();
+  const T = (s) => m.app({ methode: 'GET', pad: '/app/beleggen/teller' });
+  assert.deepStrictEqual(T().body, { ok: true, signalen: 0, week: 0, totaal: 0 }, 'lege databank = 0');
+  post('transactie', { actie: 'zet', richting: 'erbij', datum: '2026-11-10', naam: 'VOORBEELD CHIPS INC', isin: 'XX0000000011', aantal: '2', koers: '100', valuta: 'EUR', kosten_eur: '1' });
+  post('transactie', { actie: 'zet', richting: 'erbij', datum: '2026-11-10', naam: 'VOORBEELD CHIPS INC', isin: 'XX0000000011', aantal: '1', koers: '101', valuta: 'EUR', kosten_eur: '1' });
+  let o = get().body;
+  assert.strictEqual(o.transacties.length, 2);
+  const open = o.open_punten.filter((p) => p.soort === 'dagboek');
+  assert.strictEqual(open.length, 1);
+  assert.strictEqual(open[0].transacties.length, 2);
+  assert.strictEqual(o.signalen.filter((s) => s.soort === 'dagboek').length, 1);
+  const t = T().body;
+  assert.strictEqual(t.signalen, o.signalen.length);
+  assert.strictEqual(t.totaal, t.signalen + t.week);
+  assert.ok(t.signalen >= 1);
+  assert.strictEqual(post('dagboek', { transactie: open[0].transactie, waarom: 'één zin' }).status, 200);
+  o = get().body;
+  assert.strictEqual(o.signalen.filter((s) => s.soort === 'dagboek').length, 0);
+  assert.strictEqual(o.open_punten.filter((p) => p.soort === 'dagboek').length, 0);
+  assert.strictEqual(T().body.signalen, o.signalen.length);
+  assert.ok(!/\d+,\d\d|€/.test(JSON.stringify(T().body)), 'teller: alleen aantallen');
+});
+test('wv3727 beursgang afronden: keuze bewaard als beursgang:<code>, terug in GET; raakt geen signaal', () => {
+  const { post, get } = nieuw();
+  assert.deepStrictEqual(get().body.beursgang_klaar, []);
+  const voor = get().body.signalen.length;
+  assert.strictEqual(post('signaal', { sleutel: 'beursgang:ANT', keuze: 'niets' }).status, 200);
+  const o = get().body;
+  assert.deepStrictEqual(o.beursgang_klaar, ['ANT']);
+  assert.strictEqual(o.signalen.length, voor);
+});
+test('wv3727 teller: weekkaarten zonder keuze uit het weekbericht van de laatste 8 dagen tellen mee; ouder niet', () => {
+  const { m, map, post } = nieuw();
+  post('volglijst', { actie: 'zet', naam: 'Voorbeeld' });   // databank aanmaken
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(path.join(map, 'b', 'beleggen.sqlite'));
+  const zet = (w, op, kaarten) => db.prepare('INSERT INTO week (iso_week, van, tot, gemaakt_op, kaarten, verder, belang, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(w, '2026-11-02', '2026-11-08', op, JSON.stringify(kaarten.map((b) => ({ bedrijf: b }))), '[]', '[]', '{}');
+  zet('2026-W45', '2026-11-01T08:00:00Z', ['p', 'q', 'r']);
+  zet('2026-W46', '2026-11-08T08:00:00Z', ['a', 'b']);
+  db.prepare("INSERT INTO week_keuze (iso_week, bedrijf, keuze, op) VALUES ('2026-W46', 'a', 'niets', '2026-11-09T08:00:00Z')").run();
+  db.close();
+  let t = m.app({ methode: 'GET', pad: '/app/beleggen/teller' }).body;
+  assert.deepStrictEqual([t.week, t.totaal], [1, t.signalen + 1]);
+  const m2 = B.maak({ dbPad: path.join(map, 'b', 'beleggen.sqlite'), vaultSchrijf: () => {}, vandaag: () => '2026-11-20' });
+  t = m2.app({ methode: 'GET', pad: '/app/beleggen/teller' }).body;
+  assert.strictEqual(t.week, 0, 'weekbericht ouder dan 8 dagen telt niet meer');
+});

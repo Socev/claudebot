@@ -508,11 +508,16 @@ function bereken(data, vandaag) {
     treffers.length ? 'Iets in je stand of volglijst staat op je lijst.' : 'Niets in je stand of volglijst staat op je lijst.');
   for (const t of treffers) sig({ sleutel: 'koop-niet:' + t.s, soort: 'koop_niet', titel: t.wat + ' staat op je lijst "koop ik niet"', wat: t.wat + ' lijkt op "' + t.k + '" uit je lijst.',
     raakt: t.s.startsWith('volg:') ? 'je volglijst' : 'je stand', plan: 'Vraag 10: bedrijven waar je zakelijk mee te maken hebt.' });
-  // dagboek: transactie zonder regel, terugblik
+  // dagboek: transactie zonder regel, terugblik. wv3727 (David Ja 21-11, nr 160): één vraag per aandeel per dag en richting; twee orders van
+  // hetzelfde aandeel op één dag zijn één aankoop. De groep hangt aan zijn eerste transactie (sleutel 'dagboek:<eerste>'): een regel of "Niets doen"
+  // bij één van de orders geldt voor de hele groep (ook de keuzes van vóór wv3727, die per order werden gezet).
   const metRegel = new Set(data.dagboek.filter((d) => d.transactie_sleutel && (d.waarom || d.blijven || d.verkoop_wanneer)).map((d) => d.transactie_sleutel));
-  for (const t of data.transacties) if (!metRegel.has(t.sleutel)) sig({ sleutel: 'dagboek:' + t.sleutel, soort: 'dagboek', titel: 'Transactie zonder dagboekregel: ' + t.naam,
-    wat: 'Op ' + t.datum + ' ' + (Number(t.aantal) > 0 ? 'kwam er ' : 'ging er ') + String(Math.abs(Number(t.aantal))).replace('.', ',') + ' ' + t.naam + (Number(t.aantal) > 0 ? ' bij.' : ' af.'),
-    raakt: t.naam, transactie: t.sleutel, plan: 'Na een transactie schrijf je één keer waarom, wat waar moet blijven en wanneer je zou verkopen.', keuzes: ['dagboek', 'niets'] });
+  const groepen = dagboekGroepen(data.transacties);
+  const groepMetRegel = (g) => g.leden.some((x) => metRegel.has(x));
+  const groepNiets = (g) => g.leden.some((x) => { const k = data.keuzes['dagboek:' + x]; return !!(k && k.keuze === 'niets'); });
+  for (const g of groepen) if (!groepMetRegel(g)) sig({ sleutel: 'dagboek:' + g.eerste, soort: 'dagboek', titel: 'Transactie zonder dagboekregel: ' + g.naam,
+    wat: 'Op ' + g.datum + ' ' + (g.erbij ? 'kwam er ' : 'ging er ') + g.aantal.replace('.', ',') + ' ' + g.naam + (g.erbij ? ' bij' : ' af') + (g.leden.length > 1 ? ' (' + g.leden.length + ' orders).' : '.'),
+    raakt: g.naam, transactie: g.eerste, transacties: g.leden, plan: 'Na een transactie schrijf je één keer waarom.', keuzes: ['dagboek', 'niets'] });
   for (const d of data.dagboek) {
     for (const [m, veldNaam] of [[6, 'terugblik6'], [12, 'terugblik12']]) {
       const op = plusMaanden(d.datum, m);
@@ -530,16 +535,36 @@ function bereken(data, vandaag) {
   }
   for (const s of signalen) if (!s.schreef && s.positie && woorden[s.positie]) s.schreef = woorden[s.positie];
   // Davids keuze bij een signaal
-  const zichtbaar = signalen.filter((s) => { const k = data.keuzes[s.sleutel]; if (!k) return true; if (k.keuze === 'niets') return false; return !(k.tot && k.tot > vandaag); });
+  const keuzeVan = (s) => data.keuzes[s.sleutel] || (s.transacties || []).map((x) => data.keuzes['dagboek:' + x]).find((k) => k && k.keuze === 'niets');   // wv3727: groep
+  const zichtbaar = signalen.filter((s) => { const k = keuzeVan(s); if (!k) return true; if (k.keuze === 'niets') return false; return !(k.tot && k.tot > vandaag); });
   // open punten
   const open = [];
   for (const v of VRAGEN) { const a = data.antwoorden[v.nr]; if (!a || a.status === 'overgeslagen') open.push({ soort: 'vraag', vraag: v.nr, tekst: 'Vraag ' + v.nr + (a ? ' overgeslagen' : ' nog niet beantwoord') }); }
   for (const p of posities) if (!p.soort) open.push({ soort: 'positie', sleutel: p.sleutel, tekst: p.naam + ': kies kern, tech, health of voor de leuk' });
-  const bewustZonder = (t) => { const k = data.keuzes['dagboek:' + t.sleutel]; return !!(k && k.keuze === 'niets'); };   // wv3030: Niets doen = geen open punt meer
-  for (const t of data.transacties) if (!metRegel.has(t.sleutel) && !bewustZonder(t)) open.push({ soort: 'dagboek', transactie: t.sleutel, tekst: t.naam + ' (' + t.datum + '): nog geen dagboekregel' });
+  // wv3030: Niets doen = geen open punt meer; wv3727: één open punt per groep (transacties = alle orders van die dag)
+  for (const g of groepen) if (!groepMetRegel(g) && !groepNiets(g)) open.push({ soort: 'dagboek', transactie: g.eerste, transacties: g.leden, tekst: g.naam + ' (' + g.datum + '): nog geen dagboekregel' });
   const anthropic = posities.some((p) => ANTHROPIC_RE.test(p.naam)) || data.volglijst.some((v) => ANTHROPIC_RE.test(v.naam + ' ' + (v.code || '')));
   return { verdeling, posities, cash, lampjes, signalen: zichtbaar, signalen_verborgen: signalen.length - zichtbaar.length, open_punten: open,
     belang: anthropic ? ANTHROPIC_ZIN : null, volledig, woorden };
+}
+
+// wv3727: transacties gegroepeerd per dag, aandeel (ISIN, anders naam) en richting; eerste = vroegste order (tijd, dan sleutel). aantal = som als tekst.
+function dagboekGroepen(transacties) {
+  const per = new Map();
+  for (const t of transacties) {
+    const erbij = Number(t.aantal) > 0;
+    const k = t.datum + '|' + (t.isin ? 'isin:' + t.isin : 'naam:' + String(t.naam).toLowerCase()) + '|' + (erbij ? '+' : '-');
+    if (!per.has(k)) per.set(k, { datum: t.datum, naam: t.naam, erbij, tx: [] });
+    per.get(k).tx.push(t);
+  }
+  const uit = [];
+  for (const g of per.values()) {
+    g.tx.sort((a, b) => ((a.tijd || '') + a.sleutel < (b.tijd || '') + b.sleutel ? -1 : 1));
+    const dec = Math.max(0, ...g.tx.map((t) => (String(t.aantal).split('.')[1] || '').length));
+    const som = g.tx.reduce((n, t) => n + Math.abs(Number(t.aantal)), 0);
+    uit.push({ datum: g.datum, naam: g.naam, erbij: g.erbij, eerste: g.tx[0].sleutel, leden: g.tx.map((t) => t.sleutel), aantal: String(Number(som.toFixed(dec))) });
+  }
+  return uit.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));
 }
 
 // wv3030: stand uit transacties zolang er geen portefeuille en geen handpositie is (een ingelezen portefeuille of handpositie gaat altijd voor).
@@ -711,7 +736,8 @@ function maak(o) {
       return { ok: true, vandaag, vragen: VRAGEN, antwoorden: d.antwoorden, regels: d.regels, versies: d.versies, stand: { datum: d.stand_datum, bron: d.stand_bron,
         verdeling: k.verdeling, posities: k.posities, cash: k.cash, lampjes: k.lampjes, volledig: k.volledig, historie: historieUit(db), onvolledig: !!d.aankoop_onvolledig }, transacties: d.transacties, dagboek, volglijst: volg,
         signalen: k.signalen, signalen_verborgen: k.signalen_verborgen, open_punten: k.open_punten, belang: k.belang, bestanden: d.bestanden, exports: d.exports, rekening_rijen: d.rekening_rijen, stortingen: d.stortingen,
-        soort_namen: SOORT_NAAM, vault: { ok: vaultOk, op: laatsteVault }, bedrijven };
+        soort_namen: SOORT_NAAM, vault: { ok: vaultOk, op: laatsteVault }, bedrijven,
+        beursgang_klaar: Object.keys(d.keuzes).filter((x) => x.startsWith('beursgang:')).map((x) => x.slice(10)) };   // wv3727: afgeronde beursgangen (code)
     }, false);
   }
   function snapshot(db) {
@@ -1109,6 +1135,7 @@ function maak(o) {
     try {
       if (v.methode === 'GET' && v.pad === '/app/beleggen') return { status: 200, body: overzicht(), reden: 'beleggen' };
       if (v.methode === 'GET' && v.pad === '/app/beleggen/week') return { status: 200, body: leesWeek(), reden: 'beleggen week' };
+      if (v.methode === 'GET' && v.pad === '/app/beleggen/teller') return { status: 200, body: teller(), reden: 'beleggen teller' };   // wv3727
       const f = v.methode === 'POST' ? SCHRIJF[v.pad] : null;
       if (!f) return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'beleggen onbekend' };
       const u = f(v.body && typeof v.body === 'object' ? v.body : {});
@@ -1118,6 +1145,18 @@ function maak(o) {
       if (e instanceof Fout) return { status: e.status, body: { ok: false, fout: e.message }, reden: 'beleggen ' + e.status };
       throw e;
     }
+  }
+  // wv3727 (David Ja 21-11, nr 160): het getal op de tegel Beleggen = open signalen + weekkaarten zonder keuze uit het weekbericht van de laatste
+  // 8 dagen + herinneringen die vandaag terug zijn. Alleen aantallen; geen databank = 0.
+  function teller() {
+    const o = overzicht();
+    const w = leesWeek();
+    const vandaag = vandaagF();
+    let week = 0;
+    const nieuwste = w.weken[0];
+    if (nieuwste && plusDagen(String(nieuwste.gemaakt_op).slice(0, 10), 8) >= vandaag) week = nieuwste.kaarten.filter((k) => !(w.keuzes[nieuwste.iso_week] || {})[k.bedrijf]).length;
+    week += w.herinneringen.length;
+    return { ok: true, signalen: o.signalen.length, week, totaal: o.signalen.length + week };
   }
   function info() {
     return metDb((db) => {
