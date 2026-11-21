@@ -570,3 +570,113 @@ test('wv3727 teller: weekkaarten zonder keuze uit het weekbericht van de laatste
   t = m2.app({ methode: 'GET', pad: '/app/beleggen/teller' }).body;
   assert.strictEqual(t.week, 0, 'weekbericht ouder dan 8 dagen telt niet meer');
 });
+
+// ── wv3756 (nr 908 / L08): Socev in het gewone gesprek — stand, dagboekzin koppelen, niet dubbel, later koppelen bij inlezen ──
+test('wv3756 naam zoals David hem zegt: Nvidia ↔ NVIDIA CORP, geen deelwoord', () => {
+  assert.ok(B.pastNaam('Voorbeeld Chips', 'VOORBEELD CHIPS INC'));
+  assert.ok(B.pastNaam('voorbeeld chips inc.', 'VOORBEELD CHIPS INC'));
+  assert.ok(!B.pastNaam('arm', 'VOORBEELD PHARMA'), 'deelwoord past niet');
+  assert.ok(!B.pastNaam('x', 'X CORP'), 'één letter is te kort');
+});
+test('wv3756 gesprek: stand zoals het scherm, aandacht en open punten; onbekende opdracht = 400', () => {
+  const { m, post } = nieuw();
+  let u = m.gesprek({ opdracht: 'stand' });
+  assert.strictEqual(u.status, 200); assert.strictEqual(u.body.stand.posities.length, 0); assert.strictEqual(u.body.open_punten.aantal, 14);
+  post('bestand', { naam: 'Portfolio.csv', tekst: PORT, datum: '2026-11-11', bewaar: true });
+  u = m.gesprek({ opdracht: 'stand' });
+  const s = u.body.stand;
+  assert.deepStrictEqual([s.datum, s.bron, s.belegd_eur, s.contant_eur, s.posities.length], ['2026-11-11', 'bestand', 1215.53, 150, 3]);
+  assert.match(s.bron_uitleg, /portefeuille/);
+  assert.strictEqual(s.posities[0].naam, 'VOORBEELD WERELD ETF');
+  assert.ok(Array.isArray(u.body.lampjes) && u.body.lampjes.length > 0);
+  assert.ok(!('secret' in u.body));
+  assert.strictEqual(m.gesprek({ opdracht: 'koop' }).status, 400, 'alleen stand, dagboek-open, dagboek');
+  assert.strictEqual(m.gesprek({}).status, 400);
+});
+test('wv3756 gesprek: "X gekocht omdat …" hangt aan de open aankoop; de dagboekvraag is weg; tweede keer = dubbel, geen tweede regel', () => {
+  const { m, post, get, vault } = nieuw();
+  post('bestand', { naam: 'Transactions.csv', tekst: TX_NL, bewaar: true });
+  assert.strictEqual(m.gesprek({ opdracht: 'dagboek-open' }).body.open.length, 2);
+  let u = m.gesprek({ opdracht: 'dagboek', naam: 'voorbeeld chips', waarom: 'AI-chips blijven nodig', richting: 'koop' });
+  assert.strictEqual(u.status, 200, JSON.stringify(u.body));
+  assert.strictEqual(u.body.gekoppeld.naam, 'VOORBEELD CHIPS INC'); assert.strictEqual(u.body.gekoppeld.datum, '2026-11-05');
+  const o = get().body;
+  assert.strictEqual(o.dagboek.length, 1); assert.strictEqual(o.dagboek[0].transactie_sleutel, u.body.gekoppeld.transactie);
+  assert.strictEqual(o.signalen.filter((x) => x.soort === 'dagboek').length, 1, 'alleen de ETF vraagt nog');
+  assert.match(vault['20_Prive/Financien/Beleggen/Dagboek.md'], /AI-chips blijven nodig/);
+  u = m.gesprek({ opdracht: 'dagboek', naam: 'voorbeeld chips', waarom: 'AI-chips blijven nodig' });
+  assert.strictEqual(u.status, 409); assert.strictEqual(u.body.dubbel, true);
+  assert.strictEqual(get().body.dagboek.length, 1, 'niet dubbel');
+  assert.strictEqual(m.gesprek({ opdracht: 'dagboek', naam: 'voorbeeld chips' }).status, 400, 'zonder waarom');
+  assert.strictEqual(m.gesprek({ opdracht: 'dagboek', naam: 'voorbeeld wereld', waarom: 'x', richting: 'kopen' }).status, 400, 'richting alleen koop of verkoop');
+  // met een transactiesleutel; een sleutel die al een regel heeft = 409
+  const etf = m.gesprek({ opdracht: 'dagboek-open' }).body.open[0];
+  assert.strictEqual(m.gesprek({ opdracht: 'dagboek', transactie: etf.transactie, waarom: 'spreiding' }).status, 200);
+  assert.strictEqual(m.gesprek({ opdracht: 'dagboek', transactie: etf.transactie, waarom: 'spreiding' }).status, 409);
+  assert.strictEqual(m.gesprek({ opdracht: 'dagboek', transactie: 'bestaat-niet', waarom: 'x' }).status, 404);
+});
+test('wv3756 gesprek: twee passende aankopen = keuze terug, niets geschreven', () => {
+  const { m, post, get } = nieuw();
+  const TX2 = [TX_NL.split('\r\n')[0],
+    '05-11-2026,15:31,VOORBEELD CHIPS INC,XX0000000011,NDQ,XNAS,3,"100,00",USD,"-300,00",USD,"-276,50",EUR,"1,0850","-2,00",EUR,"-278,50",EUR,aaaa0000-0000-0000-0000-000000000001',
+    '03-11-2026,15:31,VOORBEELD CHIPS INC,XX0000000011,NDQ,XNAS,1,"100,00",USD,"-100,00",USD,"-92,17",EUR,"1,0850","-2,00",EUR,"-94,17",EUR,aaaa0000-0000-0000-0000-000000000009'].join('\r\n') + '\r\n';
+  assert.strictEqual(post('bestand', { naam: 'Transactions.csv', tekst: TX2, bewaar: true }).status, 200);
+  const u = m.gesprek({ opdracht: 'dagboek', naam: 'Voorbeeld Chips', waarom: 'x' });
+  assert.strictEqual(u.status, 409); assert.strictEqual(u.body.keuzes.length, 2);
+  assert.strictEqual(get().body.dagboek.length, 0);
+  assert.strictEqual(m.gesprek({ opdracht: 'dagboek', naam: 'Voorbeeld Chips', datum: '2026-11-04', waarom: 'eerste stap' }).status, 200, 'met een datum past er één');
+});
+test('wv3756 gesprek: zin vóór het inlezen = regel zonder transactie; zelfde zin opnieuw = dubbel; na het inlezen hangt hij aan de aankoop (geen tweede vraag)', () => {
+  const { m, post, get, vault } = nieuw();
+  let u = m.gesprek({ opdracht: 'dagboek', naam: 'Voorbeeld Chips', waarom: 'AI-chips blijven nodig', datum: '2026-11-05' });
+  assert.strictEqual(u.status, 200); assert.strictEqual(u.body.zonder_transactie, true);
+  const id = u.body.id;
+  u = m.gesprek({ opdracht: 'dagboek', naam: 'voorbeeld chips', waarom: 'AI-chips blijven nodig', datum: '2026-11-05' });
+  assert.deepStrictEqual([u.status, u.body.dubbel, u.body.id], [200, true, id]);
+  assert.strictEqual(get().body.dagboek.length, 1);
+  u = post('bestand', { naam: 'Transactions.csv', tekst: TX_NL, bewaar: true });
+  assert.strictEqual(u.body.dagboek_gekoppeld, 1);
+  const o = get().body;
+  assert.strictEqual(o.dagboek.length, 1); assert.ok(o.dagboek[0].transactie_sleutel);
+  assert.strictEqual(o.signalen.filter((x) => x.soort === 'dagboek').length, 1, 'alleen de ETF vraagt nog; Chips niet opnieuw');
+  assert.match(vault['20_Prive/Financien/Beleggen/Dagboek.md'], /transactie: `/);
+});
+test('wv3756 koppelen bij inlezen: twee losse regels voor één aankoop of een aankoop buiten het venster = niets koppelen', () => {
+  const { m, post, get } = nieuw();
+  m.gesprek({ opdracht: 'dagboek', naam: 'Voorbeeld Chips', waarom: 'een', datum: '2026-11-05' });
+  m.gesprek({ opdracht: 'dagboek', naam: 'Voorbeeld Chips', waarom: 'twee', datum: '2026-11-06' });
+  m.gesprek({ opdracht: 'dagboek', naam: 'Voorbeeld Wereld ETF', waarom: 'te laat', datum: '2026-12-30' });
+  const u = post('bestand', { naam: 'Transactions.csv', tekst: TX_NL, bewaar: true });
+  assert.strictEqual(u.body.dagboek_gekoppeld, undefined);
+  assert.ok(get().body.dagboek.every((d) => !d.transactie_sleutel));
+});
+test('wv3756 review MOET 1: een losse verkoopregel hangt bij het inlezen niet aan een aankoop', () => {
+  const { m, post, get } = nieuw();
+  assert.strictEqual(m.gesprek({ opdracht: 'dagboek', naam: 'Voorbeeld Chips', waarom: 'winst nemen', richting: 'verkoop', datum: '2026-11-05' }).status, 200);
+  const u = post('bestand', { naam: 'Transactions.csv', tekst: TX_NL, bewaar: true });
+  assert.strictEqual(u.body.dagboek_gekoppeld, undefined);
+  const o = get().body;
+  assert.strictEqual(o.dagboek[0].transactie_sleutel, null); assert.strictEqual(o.dagboek[0].richting, 'verkoop');
+  assert.strictEqual(o.signalen.filter((x) => x.soort === 'dagboek').length, 2, 'de aankoopvraag blijft');
+});
+test('wv3756 review MOET 2: zin herhaald nadat hij aan een aankoop van later (tot +5 dagen) hing = dubbel, geen losse regel erbij', () => {
+  const { m, post, get } = nieuw();
+  m.gesprek({ opdracht: 'dagboek', naam: 'Voorbeeld Zorg', waarom: 'diagnostiek groeit', richting: 'koop', datum: '2026-11-04' });
+  const TX = TX_EN;   // VOORBEELD ZORG op 06-11-2026
+  assert.strictEqual(post('bestand', { naam: 'Transactions.csv', tekst: TX, bewaar: true }).body.dagboek_gekoppeld, 1);
+  const u = m.gesprek({ opdracht: 'dagboek', naam: 'Voorbeeld Zorg', waarom: 'diagnostiek groeit', richting: 'koop', datum: '2026-11-04' });
+  assert.strictEqual(u.status, 409); assert.strictEqual(u.body.dubbel, true);
+  assert.strictEqual(get().body.dagboek.length, 1);
+});
+test('wv3756 migratie: bestaande databank zonder kolom richting krijgt hem bij openen', () => {
+  const map = fs.mkdtempSync(path.join(os.tmpdir(), 'beleggen-'));
+  const pad = path.join(map, 'b', 'beleggen.sqlite');
+  fs.mkdirSync(path.dirname(pad), { recursive: true });
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(pad);
+  db.exec("CREATE TABLE dagboek (id INTEGER PRIMARY KEY AUTOINCREMENT, transactie_sleutel TEXT UNIQUE, datum TEXT NOT NULL, naam TEXT NOT NULL, waarom TEXT, blijven TEXT, verkoop_wanneer TEXT, terugblik6 TEXT, terugblik12 TEXT, op TEXT NOT NULL, bijgewerkt TEXT NOT NULL); INSERT INTO dagboek (datum, naam, waarom, op, bijgewerkt) VALUES ('2026-11-01', 'Oud', 'x', 'o', 'o');");
+  db.close();
+  const m = B.maak({ dbPad: pad, vaultSchrijf: () => {}, vandaag: () => '2026-11-12' });
+  const u = m.app({ methode: 'GET', pad: '/app/beleggen' });
+  assert.strictEqual(u.status, 200); assert.strictEqual(u.body.dagboek.length, 1); assert.strictEqual(u.body.dagboek[0].richting, null);
+});

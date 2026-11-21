@@ -578,6 +578,14 @@ function dagboekGroepen(transacties) {
   return uit.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));
 }
 
+// wv3756 (nr 908 / L08, David Ja 21-11): naam zoals David hem zegt ("Nvidia", "NVDA") tegen de naam in de export ("NVIDIA CORP"). Kleine letters,
+// zonder rechtsvorm/aandelenklasse en leestekens; past als de ene vorm als heel woord(groep) in de andere staat ("arm" past niet in "pharma").
+function zoekVorm(n) {
+  return ' ' + String(n || '').toLowerCase().replace(/[,.]/g, ' ').replace(/\b(inc|incorporated|corp|corporation|co|company|nv|n v|sa|se|ag|plc|ltd|limited|holdings?|group|a\/s|as|asa|ab|spa|bv|class [a-c]|cl [a-c]|adr|ord|reg|shs)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim() + ' ';
+}
+function pastNaam(gezegd, naam) { const a = zoekVorm(gezegd), b = zoekVorm(naam); return a.trim().length >= 2 && b.trim().length >= 2 && (b.includes(a) || a.includes(b)); }
+
 // wv3728 (nr 138 / 2C38): waarde van vandaag uit de dagkoersen die de ochtendronde ophaalt. Per positie: aantal × laatste slotkoers, omgerekend met
 // de ECB-koers van die dag (of de laatste ervóór); de vorige beursdag op dezelfde manier ("sinds gisteren"); aankoopwaarde uit de transacties.
 // Geen koers, een koers in een andere valuta dan de positie, of geen wisselkoers = die positie "zonder koers" (niet raden); het totaal staat er
@@ -870,6 +878,8 @@ function maak(o) {
       db.exec(SCHEMA);
       db.exec(SCHEMA_2);
       db.exec(SCHEMA_3);
+      // wv3756 (review MOET 1): richting (koop/verkoop) bij een dagboekregel zonder transactie, zodat hij later alleen aan die richting hangt
+      if (!db.prepare("SELECT 1 FROM pragma_table_info('dagboek') WHERE name = 'richting'").get()) db.exec('ALTER TABLE dagboek ADD COLUMN richting TEXT');
       db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde WHERE CAST(meta.waarde AS INTEGER) < CAST(excluded.waarde AS INTEGER)").run(String(SCHEMA_VERSIE));
       gemigreerd = true;
     }
@@ -1257,7 +1267,7 @@ function maak(o) {
       throw e;
     }
     const h = sha(b.tekst);
-    return metDb((db) => {
+    const uit = metDb((db) => {
       let nieuw = 0, bekend = 0;
       if (l.soort === 'transacties' || l.soort === 'rekening') {
         const tab = l.soort === 'transacties' ? 'transactie' : 'rekening';
@@ -1273,12 +1283,14 @@ function maak(o) {
       if (!nieuw && l.soort !== 'portefeuille') return { status: 200, body: Object.assign(samen, { bewaard: true, melding: 'niets nieuws: alles stond er al in' }), reden: 'beleggen bestand dubbel ' + l.soort };
       if (!nieuw) return { status: 200, body: Object.assign(samen, { bewaard: true, melding: 'dit bestand was al ingelezen' }), reden: 'beleggen bestand dubbel portefeuille' };
       const op = nuIso();
+      let koppeld = 0;
       const id = Number(db.prepare('INSERT INTO bestand (soort, naam, sha256, datum_bestand, op, rijen, nieuw, inhoud) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(l.soort, naam, h, l.soort === 'portefeuille' ? datum : null, op, l.rijen.length, nieuw, b.tekst).lastInsertRowid);
       if (l.soort === 'transacties') {
         const st = db.prepare('INSERT OR IGNORE INTO transactie (sleutel, datum, tijd, naam, isin, beurs, aantal, koers, valuta, lokaal_cent, waarde_eur_cent, wisselkoers, kosten_eur_cent, totaal_eur_cent, order_id, bron, bestand_id, op) ' +
           'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         for (const r of l.rijen) st.run(r.sleutel, r.datum, r.tijd, r.naam, r.isin, r.beurs, r.aantal, r.koers, r.valuta, r.lokaal_cent, r.waarde_eur_cent, r.wisselkoers, r.kosten_eur_cent, r.totaal_eur_cent, r.order_id, 'bestand', id, op);
+        koppeld = koppelHandregels(db);   // wv3756: een dagboekzin uit het gesprek hangt nu aan zijn aankoop
       } else if (l.soort === 'rekening') {
         const st = db.prepare('INSERT OR IGNORE INTO rekening (sleutel, datum, tijd, valutadatum, naam, isin, omschrijving, mutatie_cent, mutatie_valuta, saldo_cent, saldo_valuta, order_id, bestand_id, op) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         for (const r of l.rijen) st.run(r.sleutel, r.datum, r.tijd, r.valutadatum, r.naam, r.isin, r.omschrijving, r.mutatie_cent, r.mutatie_valuta, r.saldo_cent, r.saldo_valuta, r.order_id, id, op);
@@ -1289,8 +1301,10 @@ function maak(o) {
         for (const r of l.rijen) st.run(r.sleutel, r.regelsoort, r.naam, r.isin, r.aantal, r.koers, r.valuta, r.lokaal_cent, r.waarde_eur_cent, 'bestand', id, op);
         zetStand(db, datum, 'bestand');
       }
-      return { status: 200, body: Object.assign(samen, { bewaard: true }), reden: 'beleggen bestand ' + l.soort + ' ' + nieuw + ' nieuw' };
+      return { status: 200, body: Object.assign(samen, { bewaard: true }, koppeld ? { dagboek_gekoppeld: koppeld } : {}), reden: 'beleggen bestand ' + l.soort + ' ' + nieuw + ' nieuw' };
     }, true);
+    if (uit && uit.body && uit.body.dagboek_gekoppeld) schrijfVault({ dagboek: true });   // wv3756: de vaultpagina toont nu de transactie
+    return uit;
   }
   function zetDagboek(b) {
     const velden = { waarom: T(b.waarom), blijven: T(b.blijven), verkoop_wanneer: T(b.verkoop_wanneer), terugblik6: T(b.terugblik6), terugblik12: T(b.terugblik12) };
@@ -1313,8 +1327,9 @@ function maak(o) {
         datum = tx.datum; naam = tx.naam;
       } else { datum = handDatum(b.datum || vandaagF()); naam = T(b.naam, 120); if (!naam) throw new Fout(400, 'naam ontbreekt'); }
       if (!velden.waarom && !velden.blijven && !velden.verkoop_wanneer) throw new Fout(400, 'schrijf minstens één van: waarom, wat moet waar blijven, wanneer verkoop ik');
-      id = Number(db.prepare('INSERT INTO dagboek (transactie_sleutel, datum, naam, waarom, blijven, verkoop_wanneer, terugblik6, terugblik12, op, bijgewerkt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(tx ? tx.sleutel : null, datum, naam, velden.waarom, velden.blijven, velden.verkoop_wanneer, velden.terugblik6, velden.terugblik12, op, op).lastInsertRowid);
+      const richting = !tx && (b.richting === 'koop' || b.richting === 'verkoop') ? b.richting : null;   // wv3756: alleen bij een regel zonder transactie
+      id = Number(db.prepare('INSERT INTO dagboek (transactie_sleutel, datum, naam, waarom, blijven, verkoop_wanneer, terugblik6, terugblik12, op, bijgewerkt, richting) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(tx ? tx.sleutel : null, datum, naam, velden.waarom, velden.blijven, velden.verkoop_wanneer, velden.terugblik6, velden.terugblik12, op, op, richting).lastInsertRowid);
     }, true);
     schrijfVault({ dagboek: true });
     return { reden: 'beleggen dagboek', id };
@@ -1484,6 +1499,129 @@ function maak(o) {
     return { reden: 'beleggen week ' + b.keuze };
   }
 
+  // ── wv3756 (nr 908 / L08, David Ja 21-11): Socev in het gewone gesprek (skill beleggen, pod-route POST /smal/beleggen) ──
+  // "Hoe sta ik ervoor?" → gesprekStand (stand, vandaag, wat aandacht vraagt; dezelfde berekening als het scherm). "X gekocht omdat …" →
+  // gesprekDagboek: koppelt de zin aan de ene open aankoop van dat aandeel (dagboekvraag van de app is dan weg), anders een regel zonder transactie
+  // die bij het inlezen van de transacties vanzelf aan die aankoop hangt (koppelHandregels). Alleen lezen en een dagboekregel; nooit handelen.
+  const euro = (c) => (c == null ? null : Math.round(c) / 100);
+  function gesprekStand() {
+    const o = overzicht();
+    const s = o.stand, v = s.vandaag || null;
+    const bronUitleg = { bestand: 'uit je ingelezen portefeuille van DEGIRO', hand: 'met de hand ingevuld', aankoop: 'op aankoopwaarde uit je transacties (geen portefeuille ingelezen)' };
+    const laatste = o.dagboek.slice(0, 3).map((d) => ({ datum: d.datum, naam: d.naam, waarom: d.waarom }));
+    return { status: 200, body: { ok: true, vandaag: o.vandaag,
+      stand: { datum: s.datum, bron: s.bron, bron_uitleg: bronUitleg[s.bron] || null, belegd_eur: euro(s.verdeling.belegd_cent), contant_eur: euro(s.verdeling.cash_cent),
+        verdeling_pct: { kern: s.verdeling.kern, tech: s.verdeling.tech, health: s.verdeling.health, leuk: s.verdeling.leuk, zonder_soort: s.verdeling.zonder },
+        onvolledig: s.onvolledig, volledig: s.volledig,
+        posities: s.posities.map((p) => { const w = v && v.posities ? v.posities[p.sleutel] : null;
+          return { naam: p.naam, soort: o.soort_namen[p.soort] || null, aandeel_pct: p.aandeel, aantal: p.aantal, waarde_eur: euro(p.waarde_eur_cent),
+            koers: w && w.koers ? { slot: w.koers, valuta: w.valuta, datum: w.datum, waarde_eur: euro(w.waarde_cent), vorige_datum: w.vorige_datum, vorige_waarde_eur: euro(w.vorige_cent), aankoop_eur: euro(w.aankoop_cent) }
+              : w && w.reden ? { zonder: w.reden } : null }; }) },
+      waarde_vandaag: v ? { volledig: v.volledig, waarde_eur: euro(v.waarde_cent), sinds_vorige_beursdag_eur: euro(v.verschil_dag_cent), sinds_aankoop_eur: euro(v.verschil_aankoop_cent),
+        koers_datum: v.koers_datum, oud: v.oud, zonder_koers: v.zonder_koers } : null,
+      lampjes: s.lampjes.map((l) => ({ naam: l.naam, grens: l.grens, stand: l.stand, lamp: l.lamp, uitleg: l.uitleg })),
+      aandacht: o.signalen.slice(0, 5).map((x) => ({ soort: x.soort, titel: x.titel, wat: x.wat || null, plan: x.plan || null })),
+      aandacht_meer: Math.max(0, o.signalen.length - 5),
+      open_punten: { aantal: o.open_punten.length, eerste: o.open_punten.slice(0, 5).map((x) => x.tekst) },
+      dagboek: { regels: o.dagboek.length, laatste }, volglijst: o.volglijst.map((x) => x.naam), belang: o.belang } };
+  }
+  // open aankopen/verkopen zonder dagboekregel en zonder "Niets doen" (zelfde groepen als het scherm)
+  function openDagboek(o) {
+    o = o || overzicht();
+    const open = new Set(o.open_punten.filter((x) => x.soort === 'dagboek').map((x) => x.transactie));
+    return dagboekGroepen(o.transacties).filter((g) => open.has(g.eerste))
+      .map((g) => { const t = o.transacties.find((x) => x.sleutel === g.eerste) || {}; return { transactie: g.eerste, datum: g.datum, naam: g.naam, isin: t.isin || null, richting: g.erbij ? 'koop' : 'verkoop', aantal: g.aantal, orders: g.leden.length }; });
+  }
+  // wat David zegt ("NVDA", "Nvidia") → past bij een groep op naam, ISIN of de beurscode uit het nieuwskaartje of de koersronde
+  function codesNaarIsin() {
+    return metDb((db) => {
+      const m = {};
+      if (!db) return m;
+      for (const r of db.prepare("SELECT sleutel, code FROM bedrijf WHERE code IS NOT NULL AND sleutel LIKE 'isin:%'").all()) m[String(r.code).toUpperCase()] = r.sleutel.slice(5);
+      for (const r of db.prepare("SELECT sleutel, code FROM koerscode WHERE code IS NOT NULL AND sleutel LIKE 'isin:%'").all()) if (!m[String(r.code).toUpperCase()]) m[String(r.code).toUpperCase()] = r.sleutel.slice(5);
+      return m;
+    }, false);
+  }
+  function pastBij(gezegd, g, codes) {
+    const t = String(gezegd || '').trim(), T2 = t.toUpperCase();
+    if (g.isin && (T2 === g.isin || codes[T2] === g.isin)) return true;
+    return pastNaam(t, g.naam);
+  }
+  function gesprekDagboek(b) {
+    const waarom = T(b.waarom);
+    if (!waarom) throw new Fout(400, 'waarom ontbreekt: de reden in Davids eigen woorden');
+    const extra = { blijven: T(b.blijven), verkoop_wanneer: T(b.verkoop_wanneer) };
+    const richting = b.richting == null || b.richting === '' ? null : String(b.richting);
+    if (richting && richting !== 'koop' && richting !== 'verkoop') throw new Fout(400, 'richting: koop of verkoop');
+    const o = overzicht();
+    const zet = (tx) => {
+      const u = zetDagboek(Object.assign({ transactie: tx.transactie, waarom }, extra));
+      return { status: 200, body: { ok: true, id: u.id, gekoppeld: tx } };
+    };
+    if (b.transactie) {
+      const tx = openDagboek(o).find((g) => g.transactie === String(b.transactie));
+      if (!tx) {
+        const bestaat = o.dagboek.find((d) => d.transactie_sleutel === String(b.transactie));
+        if (bestaat) return { status: 409, body: { ok: false, fout: 'bij deze transactie staat al een dagboekregel', dubbel: true, regel: { id: bestaat.id, datum: bestaat.datum, naam: bestaat.naam, waarom: bestaat.waarom } } };
+        throw new Fout(404, 'geen open transactie met deze sleutel (zie dagboek-open)');
+      }
+      return zet(tx);
+    }
+    const naam = T(b.naam, 120);
+    if (!naam) throw new Fout(400, 'naam ontbreekt: welk aandeel of fonds');
+    const datum = b.datum ? handDatum(b.datum) : vandaagF();
+    const codes = codesNaarIsin();
+    const venster = (g) => g.datum <= datum && g.datum >= plusDagen(datum, -14);
+    const kand = openDagboek(o).filter((g) => venster(g) && (!richting || g.richting === richting) && pastBij(naam, g, codes));
+    if (kand.length === 1) return zet(kand[0]);
+    if (kand.length > 1) return { status: 409, body: { ok: false, fout: 'meer dan één transactie past; kies er één en stuur transactie mee', keuzes: kand } };
+    // geen open aankoop: staat er al een regel bij een aankoop van dit aandeel in dit venster, of dezelfde zin al zonder transactie?
+    const ruim = (g) => g.datum <= plusDagen(datum, 5) && g.datum >= plusDagen(datum, -14);   // review MOET 2: zelfde venster als koppelHandregels
+    const metRegel = dagboekGroepen(o.transacties).filter((g) => ruim(g) && (!richting || (g.erbij ? 'koop' : 'verkoop') === richting) && pastBij(naam, Object.assign({ isin: (o.transacties.find((x) => x.sleutel === g.eerste) || {}).isin }, g), codes))
+      .map((g) => o.dagboek.find((d) => g.leden.includes(d.transactie_sleutel))).filter(Boolean);
+    if (metRegel.length) { const d = metRegel[0]; return { status: 409, body: { ok: false, fout: 'bij die transactie staat al een dagboekregel', dubbel: true, regel: { id: d.id, datum: d.datum, naam: d.naam, waarom: d.waarom } } }; }
+    const zelfde = o.dagboek.find((d) => !d.transactie_sleutel && d.datum === datum && zoekVorm(d.naam) === zoekVorm(naam) && String(d.waarom || '').trim() === waarom && (d.richting || null) === richting);
+    if (zelfde) return { status: 200, body: { ok: true, id: zelfde.id, dubbel: true, zonder_transactie: true } };
+    const u = zetDagboek(Object.assign({ naam, datum, waarom, richting }, extra));
+    return { status: 200, body: { ok: true, id: u.id, zonder_transactie: true } };
+  }
+  // Een dagboekregel zonder transactie (uit het gesprek of de app) hangt na het inlezen van de transacties aan de ene aankoop/verkoop van dat
+  // aandeel van hooguit 14 dagen ervóór tot 5 dagen erna (order die pas later uitgevoerd werd). Alleen als precies één groep zonder regel past én
+  // die groep maar bij één losse regel past: anders blijft alles zoals het was (niet raden).
+  function koppelHandregels(db) {
+    const los = db.prepare('SELECT id, datum, naam, richting FROM dagboek WHERE transactie_sleutel IS NULL').all();
+    if (!los.length) return 0;
+    const tx = db.prepare('SELECT sleutel, datum, tijd, naam, isin, aantal FROM transactie').all();
+    const metRegel = new Set(db.prepare('SELECT transactie_sleutel AS s FROM dagboek WHERE transactie_sleutel IS NOT NULL').all().map((r) => r.s));
+    const groepen = dagboekGroepen(tx).filter((g) => !g.leden.some((x) => metRegel.has(x)))
+      .map((g) => Object.assign({ isin: (tx.find((x) => x.sleutel === g.eerste) || {}).isin || null }, g));
+    const codes = {};
+    for (const r of db.prepare("SELECT sleutel, code FROM bedrijf WHERE code IS NOT NULL AND sleutel LIKE 'isin:%'").all()) codes[String(r.code).toUpperCase()] = r.sleutel.slice(5);
+    const paren = los.map((d) => ({ d, gs: groepen.filter((g) => g.datum >= plusDagen(d.datum, -14) && g.datum <= plusDagen(d.datum, 5) && pastBij(d.naam, g, codes)
+      && (!d.richting || (g.erbij ? 'koop' : 'verkoop') === d.richting)) }));   // review MOET 1: een verkoopreden hangt nooit aan een aankoop
+    let n = 0;
+    const st = db.prepare('UPDATE dagboek SET transactie_sleutel = ?, bijgewerkt = ? WHERE id = ? AND transactie_sleutel IS NULL');
+    for (const p of paren) {
+      if (p.gs.length !== 1) continue;
+      const g = p.gs[0];
+      if (paren.filter((q) => q.gs.some((x) => x.eerste === g.eerste)).length !== 1) continue;
+      st.run(g.eerste, nuIso(), p.d.id); n++;
+    }
+    return n;
+  }
+  function gesprek(b) {
+    b = b && typeof b === 'object' ? b : {};
+    try {
+      if (b.opdracht === 'stand') return gesprekStand();
+      if (b.opdracht === 'dagboek-open') return { status: 200, body: { ok: true, open: openDagboek() } };
+      if (b.opdracht === 'dagboek') return gesprekDagboek(b);
+      return { status: 400, body: { ok: false, fout: 'opdracht: stand, dagboek-open of dagboek' } };
+    } catch (e) {
+      if (e instanceof Fout) return { status: e.status, body: { ok: false, fout: e.message } };
+      throw e;
+    }
+  }
+
   const SCHRIJF = { '/app/beleggen/plan': zetPlan, '/app/beleggen/soort': zetSoort, '/app/beleggen/positie': zetPositie, '/app/beleggen/transactie': zetTransactie,
     '/app/beleggen/bestand': zetBestand, '/app/beleggen/dagboek': zetDagboek, '/app/beleggen/volglijst': zetVolglijst, '/app/beleggen/signaal': zetSignaal,
     '/app/beleggen/bedrijf': zetBedrijf, '/app/beleggen/week/keuze': zetWeekKeuze };
@@ -1525,7 +1663,7 @@ function maak(o) {
           laatste: (db.prepare('SELECT MAX(datum) AS d FROM koers').get() || {}).d || null } };   // wv3728: alleen aantallen en een datum
     }, false);
   }
-  return { app, info, _overzicht: overzicht, nieuwsData, koersData, zetKoersen, zetAutoBedrijven, vulBedrijfAan, metDb, vandaag: vandaagF };
+  return { app, gesprek, info, _overzicht: overzicht, nieuwsData, koersData, zetKoersen, zetAutoBedrijven, vulBedrijfAan, metDb, vandaag: vandaagF };
 }
 
-module.exports = { maak, leesBestand, bereken, aankoopStand, waardeVandaag, aankoopPer, daglijn, geldOverzicht, WERELD, regelsUit, VRAGEN, LeesFout, ANTHROPIC_ZIN, plusMaanden };
+module.exports = { maak, leesBestand, bereken, zoekVorm, pastNaam, aankoopStand, waardeVandaag, aankoopPer, daglijn, geldOverzicht, WERELD, regelsUit, VRAGEN, LeesFout, ANTHROPIC_ZIN, plusMaanden };

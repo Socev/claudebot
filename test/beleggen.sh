@@ -22,6 +22,22 @@ grep -qE "'ghawa', 'beleggen'(, '[a-z-]+')*\]" app-vast.js || { echo "ROOD  app-
 B=$(awk '/── OVIS Beleggen \(wv2982/,/── einde OVIS Beleggen ──/' server.js)
 if echo "$B" | grep -nE "logError\([^)]*(e\.message|String\(e|d\.|u\.body)"; then echo "ROOD  server.js: Beleggen logt inhoud"; f=1; fi
 [ $f = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS"
+# wv3756: /smal/beleggen — grens in SMAL_GRENS, route in smalActie, alleen de bekende velden door (de secret niet), fout zonder inhoud
+grep -qE "^const SMAL_GRENS = \{.*\bbeleggen: [0-9]+ \}" server.js || { echo "ROOD  server.js: beleggen niet in SMAL_GRENS"; f=1; }
+grep -qF "if (actie === 'beleggen') return beleggenSmal(d);" server.js || { echo "ROOD  server.js: /smal/beleggen niet in smalActie"; f=1; }
+node -e '
+const fs = require("fs"); const s = fs.readFileSync("server.js", "utf8");
+const a = s.indexOf("function beleggenSmal(d) {"), b = s.indexOf("// ── einde OVIS Beleggen ──");
+let gezien = null, logs = [];
+const f = new Function("beleggenApp", "logError", s.slice(a, b) + "; return beleggenSmal;")({ gesprek: (x) => { gezien = x; if (x.opdracht === "boem") throw new Error("geheim-inhoud"); return { status: 200, body: { ok: true } }; } }, (k, e) => logs.push(k + " " + e.message));
+let u = f({ secret: "S", beurt: "B", opdracht: "dagboek", naam: "Voorbeeld", waarom: "w", richting: "koop", extra: 1 });
+if (u.status !== 200 || "secret" in gezien || "beurt" in gezien || "extra" in gezien || gezien.naam !== "Voorbeeld") { console.log("ROOD  beleggenSmal geeft meer of minder door: " + JSON.stringify(gezien)); process.exit(1); }
+u = f({ secret: "S", opdracht: "boem" });
+if (u.status !== 503 || logs.join(" ").includes("geheim")) { console.log("ROOD  beleggenSmal: fout lekt inhoud of geen 503"); process.exit(1); }
+const g = new Function("beleggenApp", "logError", s.slice(a, b) + "; return beleggenSmal;")(null, () => {});
+if (g({ opdracht: "stand" }).status !== 404) { console.log("ROOD  beleggenSmal zonder module geen 404"); process.exit(1); }
+console.log("GROEN /smal/beleggen: alleen bekende velden door, fout zonder inhoud, 404 zonder module");
+' || f=1
 node --test test/beleggen.test.js 2>&1 | tail -n 12 | grep -E "^# (pass|fail)" ; node --test test/beleggen.test.js >/dev/null 2>&1 || { echo "ROOD  test/beleggen.test.js"; f=1; }
 node --test test/beleggen-dash.test.js >/dev/null 2>&1 && echo "GROEN test/beleggen-dash.test.js (daglijn, wereldindex, geld-tegels; wv3754)" || { echo "ROOD  test/beleggen-dash.test.js"; f=1; }
 exit $f

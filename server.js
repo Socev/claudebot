@@ -25006,6 +25006,19 @@ async function beleggenNieuwsTik() {
   finally { beleggenNieuwsBezig = false; }
 }
 if (beleggenNieuws && SERVER_ECHT) { setInterval(function () { beleggenNieuwsTik(); }, 5 * 60000).unref(); }
+// wv3756 (besluitenpagina nr 908 = L08, David Ja 21-11 13:18): Socev kan erbij in het gewone gesprek (skill beleggen). Zelfde databank en
+// berekening als het scherm; alleen lezen en een dagboekregel (vaultpagina Dagboek via vault-veilig, zoals de app). Socev draait als gebruiker
+// socev zonder kluis: deze route vraagt alleen de agent-sleutel, geen nieuwe sleutel. Alleen de bekende velden gaan door (de secret niet).
+//   POST /smal/beleggen {secret, opdracht: stand | dagboek-open | dagboek, naam?, datum?, richting?, transactie?, waarom?, blijven?, verkoop_wanneer?}
+function beleggenSmal(d) {
+  if (!beleggenApp) return { status: 404, j: { ok: false, fout: 'Beleggen zit niet in deze versie van de pod' } };
+  const b = {};
+  ['opdracht', 'naam', 'datum', 'richting', 'transactie', 'waarom', 'blijven', 'verkoop_wanneer'].forEach(function (k) { if (d[k] != null) b[k] = d[k]; });
+  let u;
+  try { u = beleggenApp.gesprek(b); }
+  catch (e) { logError('beleggen', new Error('gesprek faalde')); return { status: 503, j: { ok: false, fout: 'Beleggen is nu niet te lezen; probeer het zo opnieuw' } }; }   // geen inhoud in de log
+  return { status: u.status, j: u.body };
+}
 // ── einde OVIS Beleggen ──
 // ── OVIS PMA (wv3037, 14-11-2026; plan vault "01_Ontwikkeling/OVIS PMA - plan (Fable 5.2, 14-11-2026)" fase 1) ──
 // Declaratie-inzicht uit Davids eigen Promedico-exports (ZIP, gegevensset PMA). Logica in pma.js (alleen fs, path, crypto, zlib, node:sqlite;
@@ -27767,7 +27780,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata']);   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -27983,6 +27996,7 @@ async function smalActie(actie, d, wie) {
     return { status: 200, j: { ok: r.code === 0, code: r.code, stdout: r.stdout, stderr: r.stderr } };
   }
   if (actie === 'bank') return bankSmal(d);   // wv680: alleen-lezen bankluis (zie bankSmal)
+  if (actie === 'beleggen') return beleggenSmal(d);   // wv3756: Socev in het gewone gesprek (stand, dagboekregel); nooit handelen
   if (actie === 'homey') return homeySmal(d, wie);   // wv3460: Homey (Athom MCP), alleen API_SECRET (zie homeySmal)
   if (actie === 'tibber') return tibberSmal(d, wie);   // wv2625: Tibber Data API, alleen API_SECRET (zie tibberSmal)
   if (actie === 'nmbrs') return nmbrsSmal(d, wie);   // wv2797: Nmbrs (salarisadministratie), alleen API_SECRET (zie nmbrsSmal)
