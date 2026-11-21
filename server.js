@@ -3067,6 +3067,8 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
       const poort = await managersPoortToets(chatId);
       if (!poort.ok) {
         managersPoortBox(String(chatId), poort);
+        // wv3659: weekinhaal telt deze n8n-run dan niet als gelopen en haalt de weekronde in zodra het zegel weer klopt (binnen 36 u)
+        try { if (weekinhaal) weekinhaal.poortWeigering(String(chatId)); } catch (e) {}
         j.status = 'done'; j.done_at = Date.now();
         j.result = { ok: false, error: 'manager-poort', output: 'Managerronde ' + chatId + ' niet gestart: de voorpoort (wv904) zag ' + (poort.fouten || []).length +
           ' afwijking(en), eerste: ' + String((poort.fouten || [])[0] || '?').slice(0, 200) + '. Zie de box-rij in de machinekamer.', files: [] };
@@ -22351,6 +22353,7 @@ const weekinhaal = (function () {
         return Object.keys(jobs).some(function (k) { const j = jobs[k]; return j && String(j.chat_id || '') === item.sessie && (j.status === 'pending' || j.status === 'running'); });
       },
       magStarten: function () { return !uitrolWacht().wacht && !onderhoud.houdtTegen({ bron: '', gereedschap: null }); },
+      poortGroen: async function (item) { const p = await managersPoortToets(item.sessie); return !!(p && p.ok); },   // wv3659
       uit: function () { return process.env.WEEKINHAAL === '0'; },
       box: function (t) { return ovisBoxRij(t); },
       log: function (r) { schrijfLog(nu() + ' ' + r); },

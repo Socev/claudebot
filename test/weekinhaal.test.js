@@ -294,3 +294,98 @@ test('MOET 1: markeer weigert zolang een inhaal van die stroom loopt; daarna wel
   const r2 = await m.markeer('comp_a');
   assert.equal(r2.ok, true); assert.equal(r2.al, true); assert.equal(r2.status, 'ingehaald');
 });
+
+// ── wv3659: een run die de voorpoort (zegel) weigerde telt niet als gelopen; inhalen zodra de poort weer groen is ──
+// 18-11-2026: MrLean-run om 10:00 geweigerd (wachter-state.py gewijzigd, niet herzegeld), hartslag niet gestempeld, weekinhaal zag "gelopen".
+const T_RUN = '2026-11-15T08:30:09Z', T_WEIGER = Date.parse('2026-11-15T08:30:10Z');
+function geweigerdeOpstelling(groen) {
+  const o = opstelling();
+  o.st.exec.wfA.push({ id: '157270', mode: 'trigger', status: 'success', startedAt: T_RUN });
+  o.st.poortVragen = 0; o.st.groen = groen === undefined ? true : groen;
+  o.dep.poortGroen = async () => { o.st.poortVragen++; return o.st.groen; };
+  assert.equal(o.m.poortWeigering('sessie-a', T_WEIGER), true);
+  return o;
+}
+test('wv3659: geweigerde run + poort weer groen -> precies één inhaal, reden voorpoort in staat en box', async () => {
+  const { st, m } = geweigerdeOpstelling(true);
+  const r = await m.tik();
+  assert.match(r.uitkomst, /gestart \(MCP ok\)/);
+  assert.equal(st.mcp.length, 1); assert.equal(st.poortVragen, 1);
+  const s = m.staat().rondes['wfA|' + new Date(T_ZO).toISOString()];
+  assert.equal(s.status, 'ingehaald'); assert.equal(s.reden, 'voorpoort'); assert.equal(s.execution_id, '900000');
+  assert.deepEqual(s.voor_ids, ['157270']);
+  assert.match(st.box[0], /door de voorpoort \(zegel\) geweigerd/);
+  st.exec.wfA[1].status = 'success'; st.nu += 30 * MIN;
+  assert.equal((await m.tik()).per[0].besluit, 'staat: ingehaald');
+  assert.equal(st.mcp.length, 1);
+});
+test('wv3659: poort nog niet groen -> wachten zonder staat; later groen -> inhaal', async () => {
+  const { st, m } = geweigerdeOpstelling(false);
+  const r = await m.tik();
+  assert.equal(st.mcp.length, 0); assert.match(r.per[0].besluit, /^wacht: voorpoort weigerde run 157270/);
+  assert.equal(m.staat().rondes['wfA|' + new Date(T_ZO).toISOString()], undefined);
+  st.nu += 15 * MIN; st.groen = true;   // Codex ZOU 1: zelfde opstelling hervat na herzegelen
+  const r2 = await m.tik();
+  assert.equal(st.mcp.length, 1); assert.match(r2.per[0].besluit, /gestart/);
+  assert.equal(m.staat().rondes['wfA|' + new Date(T_ZO).toISOString()].reden, 'voorpoort');
+});
+test('wv3659 (Codex MOET 1): een run die wél door de poort kwam blijft gelopen, ook na een latere geweigerde poging', async () => {
+  const { st, m } = opstelling();
+  st.exec.wfA.push({ id: '157270', mode: 'trigger', status: 'success', startedAt: T_RUN });             // door de poort, faalde vóór de stempel
+  st.exec.wfA.push({ id: '157400', mode: 'manual', status: 'success', startedAt: '2026-11-15T13:00:00Z' });
+  m.poortWeigering('sessie-a', Date.parse('2026-11-15T13:00:02Z'));                                    // alleen de tweede geweigerd
+  st.nu = Date.parse('2026-11-15T14:00:00Z');
+  const r = await m.tik();
+  assert.equal(st.mcp.length, 0); assert.match(r.per[0].besluit, /^gelopen/);
+  m.poortWeigering('sessie-a', T_WEIGER);                                                              // beide geweigerd -> wel inhalen
+  const o = opstelling(); o.st.exec.wfA = st.exec.wfA; o.st.nu = st.nu; o.dep.poortGroen = async () => true;
+  o.m.poortWeigering('sessie-a', T_WEIGER); o.m.poortWeigering('sessie-a', Date.parse('2026-11-15T13:00:02Z'));
+  await o.m.tik(); assert.equal(o.st.mcp.length, 1);
+});
+test('wv3659 (Codex ronde 2): twee starts binnen 2 min, één weigering -> gelopen; twee weigeringen -> inhalen', async () => {
+  const a = geweigerdeOpstelling(true);
+  a.st.exec.wfA.push({ id: '157271', mode: 'manual', status: 'success', startedAt: '2026-11-15T08:31:00Z' });
+  const r = await a.m.tik();
+  assert.equal(a.st.mcp.length, 0); assert.match(r.per[0].besluit, /^gelopen/);
+  const b = geweigerdeOpstelling(true);
+  b.st.exec.wfA.push({ id: '157271', mode: 'manual', status: 'success', startedAt: '2026-11-15T08:31:00Z' });
+  b.m.poortWeigering('sessie-a', Date.parse('2026-11-15T08:31:01Z'));
+  await b.m.tik(); assert.equal(b.st.mcp.length, 1);
+});
+test('wv3659: hooguit 20 weigeringen per sessie bewaard', async () => {
+  const { m } = opstelling();
+  for (let i = 0; i < 25; i++) m.poortWeigering('sessie-a', T_WEIGER + i * MIN);
+  assert.equal(m.staat().poort['sessie-a'].length, 20);
+});
+const KRUIS_POORT = [
+  ['geen weigering vastgelegd', (o) => { o.m.poortWeigering('sessie-a', 0); fs.writeFileSync(o.dep.staatPad, JSON.stringify({ versie: 1, rondes: {}, regelfout: {} })); }, /^gelopen/],
+  ['weigering vóór de tick', (o) => { fs.writeFileSync(o.dep.staatPad, JSON.stringify({ versie: 1, rondes: {}, regelfout: {}, poort: { 'sessie-a': [new Date(T_ZO - 3 * MIN).toISOString()] } })); }, /^gelopen/],
+  ['een run startte ná de weigering', (o) => { o.st.exec.wfA.push({ id: '157300', mode: 'manual', status: 'success', startedAt: '2026-11-15T09:00:00Z' }); }, /^gelopen/],
+  ['run zonder startedAt', (o) => { o.st.exec.wfA.push({ id: '157301', mode: 'trigger', status: 'new', startedAt: null }); }, /^gelopen/],
+  ['weigering van een andere sessie', (o) => { fs.writeFileSync(o.dep.staatPad, JSON.stringify({ versie: 1, rondes: {}, regelfout: {}, poort: { 'sessie-b': [new Date(T_WEIGER).toISOString()] } })); }, /^gelopen/],
+  ['weigering > 2 min na de runstart', (o) => { fs.writeFileSync(o.dep.staatPad, JSON.stringify({ versie: 1, rondes: {}, regelfout: {}, poort: { 'sessie-a': [new Date(T_WEIGER + 3 * MIN).toISOString()] } })); }, /^gelopen/],
+  ['hartslag toch na de tick', (o) => { o.st.hs.comp_a = '2026-11-15T09:00:00Z'; }, /^overbodig/],
+  ['poortGroen ontbreekt', (o) => { delete o.dep.poortGroen; }, /^wacht: voorpoort/],
+  ['poortGroen gooit', (o) => { o.dep.poortGroen = async () => { throw new Error('x'); }; }, /^wacht: voorpoort/],
+  ['poortGroen geeft geen echte true', (o) => { o.dep.poortGroen = async () => 'ja'; }, /^wacht: voorpoort/],
+  ['> 36 u na de tick', (o) => { o.st.nu = T_ZO + 36 * UUR + MIN; }, /^vervallen/],
+  ['sessie bezig', (o) => { o.st.sessieBezig = true; }, /sessie\/ronde bezig/],
+];
+for (const [naam, breek, verwacht] of KRUIS_POORT) {
+  test('wv3659 kruisproef: ' + naam + ' -> niets', async () => {
+    const o = geweigerdeOpstelling(true);
+    breek(o);
+    const r = await o.m.tik();
+    assert.equal(o.st.mcp.length, 0, naam);
+    assert.match(r.per[0].besluit, verwacht);
+  });
+}
+test('wv3659: poortWeigering alleen voor sessies uit de lijst; opruimen wist oude weigeringen', async () => {
+  const { st, m } = opstelling();
+  assert.equal(m.poortWeigering('onbekend', st.nu), false);
+  assert.equal(m.poortWeigering('', st.nu), false);
+  assert.equal(m.staat().poort, undefined);
+  m.poortWeigering('sessie-a', st.nu - 61 * 24 * UUR);
+  m.opruimen();
+  assert.deepEqual(m.staat().poort, {});
+});
