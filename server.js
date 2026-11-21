@@ -4701,6 +4701,7 @@ function handleRequest(req, res) {
       mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },
       pot_app: typeof potAppInfo === 'function' ? potAppInfo() : { aan: false },   // wv1894: OVIS POT (lezen)   // wv1269: App Mediatheek (aantallen, geen inhoud)
       weekinhaal: typeof weekinhaalInfo === 'function' ? weekinhaalInfo() : { aan: false },
+      heartbeat_moment: hbMomentLaatst,   // wv3686: laatste momentbesluit (meta)
       storingsdienst: typeof storingsdienstInfo === 'function' ? storingsdienstInfo() : null,   // wv3712: onderzoek per alarm (laatste ronde, wacht, vandaag, verbruik)
       hartslag_alarm: typeof hartslagAlarmInfo === 'object' ? hartslagAlarmInfo : null,   // wv3484: verlopen hartslag → box (laatste ronde, gemeld, overgeslagen)   // wv3194: inhaal gemiste weekrondes (laatste tik, aantallen deze week, bezig)
       nieuwsbrief: nieuwsbriefInfo(),   // wv2190: nieuwsbrief-bloemlezing (laatste ronde, bezig; geen inhoud)
@@ -5238,6 +5239,21 @@ function handleRequest(req, res) {
     }).sort(function (a, b) { return (b.gestart || '').localeCompare(a.gestart || ''); });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, max_agents: maxAgents(), agents: lijst }));
+  }
+
+  // wv3686 (besluit nr 355 = 3C55 stap 1): heartbeat-bericht met "MOMENT: thuis|werk" — is Davids moment er? Puur besluit in
+  // heartbeat-moment.js op zijn locatiemeldingen; alleen lezen. Geen antwoord of een fout = n8n stuurt meteen (er valt nooit iets weg).
+  if (req.method === 'POST' && req.url === '/heartbeat/moment') {
+    return readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      { const gst = podGeheimStatus(d.secret); if (gst) return weigerGeheim(res, gst); }
+      heartbeatMoment(d).then(function (u) {
+        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(u));
+      }, function (e) {
+        logError('heartbeat-moment', e);
+        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, nu: true, reden: 'pod kon het niet bepalen' }));
+      });
+    });
   }
 
   if (req.method === 'POST' && req.url === '/result') {
@@ -23112,6 +23128,30 @@ if (SERVER_ECHT === true) { setTimeout(function () { hartslagAlarmTik(); }, 3000
 // nieuwe alarmen van de Foutmelder/Stiltewachter uit ochtend_buffer → na 15 min een klein onderzoek (Sonnet zonder gereedschap, feiten
 // door de pod verzameld, geen vrije fouttekst) → drie regels op de kaart in Meldingen en als bericht (bericht.py), opgelost alleen met
 // bewijs, Voor jou alleen als David iets mist of moet doen. Logica in storingsdienst.js; staat in klokken/storingsdienst.json.
+/* heartbeat-moment:begin */
+// wv3686 (21-11-2026, besluit nr 355 = 3C55 stap 1): herinneringen op Davids moment. Logica in heartbeat-moment.js (puur, met toets
+// test/heartbeat-moment.sh). Elk besluit 'sturen' komt als één metaregel (geen tekst) in klokken/heartbeat-moment.jsonl: daaruit
+// komt het meetpunt "tijd tussen thuiskomst en bericht" (twee weken, box). /health.heartbeat_moment: laatste besluit.
+const HB_MOMENT_LOG = path.join(KLOKKEN_DIR, 'heartbeat-moment.jsonl');
+let hbMomentLaatst = null;
+async function heartbeatMoment(d) {
+  const M = require('./heartbeat-moment.js');
+  const doel = d && (d.doel === 'thuis' || d.doel === 'werk') ? d.doel : null;
+  let data = null;
+  try {
+    const r = await sbBeheerQuery(M.SQL, { ua: 'socev-hb-moment/1', ms: 15000 });
+    if (r && r.ok) { const j = await r.json(); data = Array.isArray(j) && j[0] ? j[0].m : null; }
+    else if (r) await r.text().catch(function () {});
+  } catch (e) { logError('heartbeat-moment', e); }
+  const u = M.beslis({ doel: doel, sinds: d && d.sinds, nu: data && data.nu ? data.nu : Date.now(), huidig: data && data.huidig, reeks: data && data.reeks });
+  if (!data) { u.nu = true; u.reden = 'locatie niet te lezen'; }
+  const regel = { t: new Date().toISOString(), doel: doel, sinds: d && typeof d.sinds === 'string' ? d.sinds.slice(0, 40) : null,
+    ronde: Number(d && d.ronde) || 0, nu: u.nu, reden: u.reden, plek: u.plek || null, leeftijd_min: u.leeftijd_min === undefined ? null : u.leeftijd_min };
+  hbMomentLaatst = regel;
+  if (u.nu || !regel.ronde) { try { fs.appendFileSync(HB_MOMENT_LOG, JSON.stringify(regel) + '\n', { mode: 0o600 }); } catch (e) { logError('heartbeat-moment', e); } }
+  return Object.assign({ ok: true }, u);
+}
+/* heartbeat-moment:end */
 /* storingsdienst:begin */
 const STORINGSDIENST_PAD = path.join(KLOKKEN_DIR, 'storingsdienst.json');
 const STORINGSDIENST_INHAAL_TABEL = process.env.STORINGSDIENST_INHAAL_TABEL || 'vak9gyhFHvKwXxFr';   // n8n Data Table inhaal_wachtrij (wv3169)
