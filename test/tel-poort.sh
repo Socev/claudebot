@@ -21,7 +21,9 @@ for (const [x, y] of [['const TEL_LEASE_MS = 3 * 60 * 1000;', 'const TEL_LEASE_M
                       ['const TEL_KOPPEL_PER_UUR = 10;', 'const TEL_KOPPEL_PER_UUR = 20;'],
                       ['const TEL_CODES_PER_DAG = 10;', 'const TEL_CODES_PER_DAG = 12;'],
                       ['const TEL_ZELF_HERHAAL_MS = 4 * 60 * 1000;', 'const TEL_ZELF_HERHAAL_MS = 1200;'],
-                      ['const TEL_ZELF_AANKONDIG_MS = 20 * 1000;', 'const TEL_ZELF_AANKONDIG_MS = 400;']]) {
+                      ['const TEL_ZELF_AANKONDIG_MS = 20 * 1000;', 'const TEL_ZELF_AANKONDIG_MS = 400;'],
+                      // wv3826: te-lezen.js laden in de vm (geen __dirname daar); de toets draait in de repo-wortel
+                      ["if (typeof __dirname !== 'string') return null; return require(path.join(__dirname, 'te-lezen.js'));", "return require(path.resolve('te-lezen.js'));"]]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'teltoets-'));
@@ -930,6 +932,158 @@ srv.listen(0, '127.0.0.1', async () => {
     const iB = H.telRij().findIndex((x) => x.id === idBezig); if (iB >= 0) H.telRij().splice(iB, 1); delete jobs[idBezig];
     fs.writeFileSync(HOOFDr, hoofdVoorR);
     toets('8r geen fouten in logError (rit)', !logs.some((l) => /tel-rit|app-ritten/.test(l)), logs.filter((l) => /rit/.test(l)));
+    // ── 8s. wv3826: snelle vraag uit de auto (434, Zoek snel; geen Socev-beurt) en Te lezen voorlezen (484) ──
+    H.appStaat.tellers['tel-alles'] = [];
+    sessie(PIXEL, 'credP', false);
+    const telS = (o) => { const k = { 'cf-access-jwt-assertion': jwt(), authorization: 'Bearer ' + (o.sleutel || OW2), 'content-type': o.ct || 'audio/mp4', 'x-tel-snel': o.kop === undefined ? '1' : o.kop };
+      const b = o.body || mp4Maak(2); k['content-length'] = String(Buffer.byteLength(b)); return verzoek('POST', '/tel/beurt', k, b); };
+    const gestartS = gestart.length, chatS = st.chatlog.length, sttS = st.stt.length;
+    r = await telS({ sleutel: TK3 });
+    toets('8s snel met een Tasker-sleutel: 404 (Tasker krijgt nooit Zoek snel)', r.status === 404, r.j);
+    r = await telS({ kop: 'ja' });
+    toets('8s snel met een rare kopwaarde: 404', r.status === 404, r.j);
+    r = await telS({});
+    toets('8s snel op een pod zonder Zoek snel: 404 met zin', r.status === 404 && /snelle vraag/.test(r.j.fout), r.j);
+    const zsAanroep = [];
+    let zsAan = false, zsUit = null, zsWacht = null;
+    H.__zet('zoekSnel', {});
+    H.__zet('zoekSnelAan', () => zsAan);
+    H.__zet('zoekSnelVoer', async (a, id, vraag, toon) => { zsAanroep.push({ a: a.id, id, vraag, toon }); if (zsWacht) await zsWacht; if (zsUit instanceof Error) throw zsUit; return zsUit; });
+    r = await telS({});
+    toets('8s Zoek snel uit: 409 met zin, Whisper niet aangeroepen', r.status === 409 && /Zoek snel staat uit/.test(r.j.fout) && st.stt.length === sttS, { r: r.j, stt: st.stt.length - sttS });
+    zsAan = true;
+    Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
+    r = await telS({});
+    toets('8s snel zonder app-sessie: 423', r.status === 423, r.j);
+    sessie(PIXEL, 'credP', false);
+    st.sttTekst = 'Wat is mijn kenteken';
+    let vrij; zsWacht = new Promise((ok) => { vrij = ok; });
+    zsUit = { status: 200, j: { ok: true, soort: 'antwoord', tekst: 'Je kenteken is AB-12-CD.', waarden: [{ label: 'kenteken', waarde: 'AB-12-CD' }, { label: 'garage', waarde: '0612345678' }] } };
+    r = await telS({});
+    const idS = r.j.id;
+    toets('8s snel: 202 met id, verstaan en snel ja', r.status === 202 && /^[0-9a-f]{16}$/.test(String(idS)) && r.j.verstaan === 'Wat is mijn kenteken' && r.j.snel === 'ja', r.j);
+    await tik();
+    toets('8s zoekSnelVoer met de app-Pixel, de vraag en toon_dekking', zsAanroep.length === 1 && zsAanroep[0].a === PIXEL && zsAanroep[0].id === idS && zsAanroep[0].vraag === 'Wat is mijn kenteken' && zsAanroep[0].toon === true, zsAanroep);
+    toets('8s GEEN Socev-beurt en GEEN chat_log-rij', gestart.length === gestartS && st.chatlog.length === chatS, { beurten: gestart.length - gestartS, chat: st.chatlog.length - chatS });
+    r = await telS({});
+    toets('8s tweede snelle vraag terwijl de eerste loopt: 429', r.status === 429 && /snelle vraag/.test(r.j.fout), r.j);
+    H.telOpruim();
+    toets('8s opruimen laat een lopende snelle vraag staan (geen job)', H.telRij().find((x) => x.id === idS).soort === 'bezig');
+    r = await tel('GET', '/tel/uit', { sleutel: OW2 });
+    toets('8s nog niets uitgegeven, bezig ja', !r.j.id && r.j.bezig === 'ja', r.j);
+    vrij(); await tik(); await tik();
+    r = await tel('GET', '/tel/uit', { sleutel: OW2 });
+    toets('8s antwoord als gewoon item: soort antwoord, snel ja, nooit een wedervraag', r.j.id === idS && r.j.soort === 'antwoord' && r.j.snel === 'ja' && r.j.wedervraag === 'nee' && r.j.knopvraag === 'nee', r.j);
+    toets('8s spreektekst: zin + alleen de waarde die er nog niet in stond', (r.j.tekst.match(/AB-12-CD/g) || []).length === 1 && /garage: 0612345678/.test(r.j.tekst), r.j.tekst);
+    const delS = await tel('GET', '/tel/deel/' + idS + '/1', { sleutel: OW2 });
+    toets('8s deel 1 met de pod-stem', delS.status === 200 && /audio\/wav/.test(delS.ct) && /kenteken/.test(st.tts[st.tts.length - 1]), { status: delS.status });
+    await tel('POST', '/tel/gespeeld/' + idS, { sleutel: OW2 });
+    toets('8s tel-audit zonder inhoud', !/kenteken|AB-12-CD|0612345678/.test(audit()) && /snel /.test(audit()));
+    // niets gevonden, fout, te lang, vastgelopen
+    zsWacht = null; zsUit = { status: 200, j: { ok: true, soort: 'geen', melding: 'Niet gevonden in je Brain.', tekst: '' } };
+    r = await telS({}); const idG = r.j.id; await tik(); await tik();
+    r = await tel('GET', '/tel/uit', { sleutel: OW2 });
+    toets('8s niets gevonden: de melding hardop', r.j.id === idG && r.j.soort === 'antwoord' && /Niet gevonden in je Brain/.test(r.j.tekst), r.j);
+    await tel('POST', '/tel/gespeeld/' + idG, { sleutel: OW2 });
+    zsUit = new Error('stuk');
+    r = await telS({}); const idF = r.j.id; await tik(); await tik();
+    r = await tel('GET', '/tel/uit', { sleutel: OW2 });
+    toets('8s Zoek snel faalt: fout-item met de vaste zin', r.j.id === idF && r.j.soort === 'fout' && /niet gelukt/.test(r.j.tekst), r.j);
+    await tel('POST', '/tel/gespeeld/' + idF, { sleutel: OW2 });
+    st.sttTekst = 'x'.repeat(230);
+    r = await telS({});
+    toets('8s vraag langer dan 200 tekens: 413', r.status === 413 && /snelle vraag/.test(r.j.fout), r.j);
+    st.sttTekst = 'Wat is mijn kenteken';
+    zsWacht = new Promise(() => {});
+    r = await telS({}); const idV = r.j.id; await tik();
+    H.telRij().find((x) => x.id === idV).t_start -= 100000;
+    H.telOpruim();
+    toets('8s snelle vraag zonder uitkomst na 90 s: fout-item', H.telRij().find((x) => x.id === idV).soort === 'fout');
+    delete H.appStaat.zoekSnel.bezig[PIXEL];
+    r = await tel('GET', '/tel/uit', { sleutel: OW2 }); await tel('POST', '/tel/gespeeld/' + idV, { sleutel: OW2 });
+    toets('8s nog steeds geen Socev-beurt of chat_log', gestart.length === gestartS && st.chatlog.length === chatS);
+    r = await tel('POST', '/tel/beurt', { sleutel: OW2, ct: 'text/plain', body: 'Gewone vraag zonder kop' });
+    toets('8s zonder kop: gewone Socev-beurt (geen snel)', r.status === 202 && r.j.snel === undefined && gestart.length === gestartS + 1, r.j);
+    { const idN = r.j.id; await tik(); afmaken[idN]('Gewoon antwoord.'); await tik(); r = await tel('GET', '/tel/uit', { sleutel: OW2 }); await tel('POST', '/tel/gespeeld/' + idN, { sleutel: OW2 });
+      toets('8s gewoon antwoord: snel nee', r.j.id === idN && r.j.snel === 'nee', r.j); }
+
+    // 484 — Te lezen
+    const JK = 'a1a1a1a1a1a1a1a1', JA = 'b2b2b2b2b2b2b2b2', JL = 'c3c3c3c3c3c3c3c3';
+    const lang = Array.from({ length: 60 }, (_, i) => 'Zin nummer ' + (i + 1) + ' van het lange rapport over de planning.').join(' ');
+    const tlPunten = [
+      { sleutel: 't:' + JK, soort: 'klus', kanaal: 'machinekamer', job_id: JK, t: new Date().toISOString(), titel: 'Rapport **bandjes**', van: null, bericht: 'Uitkomst: het bandje staat klaar.\n\nVerder in de app:\n- geheim detail', afgekapt: false },
+      { sleutel: 't:' + JA, soort: 'antwoord', kanaal: 'hoofd', job_id: JA, t: new Date().toISOString(), titel: null, van: 'Hoe laat is de tandarts', bericht: 'Om **15:30** bij de tandarts.', afgekapt: false },
+      { sleutel: 't:' + JL, soort: 'bewaard', kanaal: 'hoofd', job_id: JL, t: new Date().toISOString(), titel: null, van: null, bericht: '# Planning\n' + lang, afgekapt: false }];
+    let tlFout = null;
+    H.__zet('appVjPunten', async () => []);   // Moet iets leeg (de echte lijst zit in de databank)
+    H.__zet('appTeLezen', async () => { if (tlFout) throw tlFout; return { punten: tlPunten.slice(), meer: 0 }; });
+    r = await tel('GET', '/tel/uit?lijst=telezen', { sleutel: TK3 });
+    toets('8s telezen met een Tasker-sleutel: 404', r.status === 404, r.j);
+    Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
+    r = await tel('GET', '/tel/uit?lijst=telezen', { sleutel: OW2 });
+    toets('8s telezen zonder app-sessie: 423', r.status === 423, r.j);
+    sessie(PIXEL, 'credP', false);
+    r = await tel('GET', '/tel/uit?lijst=telezen', { sleutel: OW2 });
+    const tl = r.j.telezen || [];
+    toets('8s telezen: drie titels met soort, sleutel en aantal delen', r.status === 200 && tl.length === 3 && tl[0].sleutel === 't:' + JK && tl[0].soort === 'klus' && tl[0].titel === 'Rapport bandjes' && tl[1].titel === 'Antwoord op: Hoe laat is de tandarts' && tl[2].titel === 'Planning' && tl.every((x) => x.delen >= 1), tl);
+    toets('8s telezen geeft geen berichttekst', !/Uitkomst|geheim|15:30|Zin nummer/.test(JSON.stringify(r.j)), r.j);
+    toets('8s lang stuk heeft meer delen', tl[2].delen >= 2, tl[2]);
+    const stem = (sl, n, o) => tel('GET', '/tel/uit?lijst=telezenstem&sleutel=' + encodeURIComponent(sl) + '&deel=' + n, Object.assign({ sleutel: OW2 }, o || {}));
+    r = await stem('t:' + JK, 1, { sleutel: TK3 });
+    toets('8s telezenstem met een Tasker-sleutel: 404', r.status === 404, r.j);
+    r = await stem('t:zz', 1);
+    toets('8s telezenstem met een ongeldige sleutel: 400', r.status === 400, r.j);
+    r = await stem('t:' + 'd4'.repeat(8), 1);
+    toets('8s telezenstem van een stuk dat er niet (meer) staat: 404', r.status === 404 && /Te lezen/.test(r.j.fout), r.j);
+    r = await tel('GET', '/tel/uit?lijst=telezengezien&sleutel=' + encodeURIComponent('t:' + JK), { sleutel: OW2 });
+    toets('8s gezien zonder voorlezen: 409', r.status === 409 && /voorlezen/.test(r.j.fout), r.j);
+    const ttsV8s = st.tts.length;
+    r = await stem('t:' + JK, 1);
+    toets('8s telezenstem deel 1: wav', r.status === 200 && /audio\/wav/.test(r.ct), { status: r.status, ct: r.ct });
+    const gesproken = st.tts.slice(ttsV8s).join(' ');
+    toets('8s voorgelezen: titel + bericht tot "Verder in de app", zonder opmaak', /Rapport bandjes/.test(gesproken) && /bandje staat klaar/.test(gesproken) && !/geheim detail|\*\*/.test(gesproken) && /De rest staat in de app/.test(gesproken), gesproken);
+    r = await stem('t:' + JK, tl[0].delen + 1);
+    toets('8s deel voorbij het einde: 404', r.status === 404, r.j);
+    const TLF = path.join(DATA, 'te-lezen.json');
+    const tlVoor = fs.existsSync(TLF) ? fs.readFileSync(TLF, 'utf8') : null;
+    const gestartT = gestart.length, chatT = st.chatlog.length, vrVoor = fs.existsSync(path.join(DATA, 'vragen.json')) ? fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8') : null;
+    for (let n = 2; n <= tl[0].delen; n++) await stem('t:' + JK, n);
+    r = await tel('GET', '/tel/uit?lijst=telezengezien&sleutel=' + encodeURIComponent('t:' + JK), { sleutel: TK3 });
+    toets('8s gezien met een Tasker-sleutel: 404', r.status === 404, r.j);
+    r = await tel('GET', '/tel/uit?lijst=telezengezien&sleutel=' + encodeURIComponent('t:' + JK), { sleutel: OW2 });
+    const tlNa = fs.existsSync(TLF) ? JSON.parse(fs.readFileSync(TLF, 'utf8')) : {};
+    toets('8s na helemaal voorlezen: gezien 200, te-lezen.json gezien voor die klus', r.status === 200 && r.j.gezien === true && tlNa.gezien && tlNa.gezien[JK] && tlVoor !== JSON.stringify(tlNa), { r: r.j, tlNa });
+    toets('8s te-lezen.json alleen ids en tijden (geen inhoud)', !/bandje|Uitkomst|Rapport/.test(JSON.stringify(tlNa)));
+    toets('8s GEZIEN IS GEEN KNOPDRUK: geen beurt, geen chat_log, vragen.json gelijk', gestart.length === gestartT && st.chatlog.length === chatT &&
+      (fs.existsSync(path.join(DATA, 'vragen.json')) ? fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8') : null) === vrVoor);
+    r = await tel('GET', '/tel/uit?lijst=telezengezien&sleutel=' + encodeURIComponent('t:' + JK), { sleutel: OW2 });
+    toets('8s tweede keer gezien zonder opnieuw voorlezen: 409', r.status === 409, r.j);
+    // lang stuk: geknipt op ± 1.500 tekens
+    const ttsL = st.tts.length;
+    for (let n = 1; n <= tl[2].delen; n++) { r = await stem('t:' + JL, n); if (r.status !== 200) break; }
+    const langGesproken = st.tts.slice(ttsL).join(' ');
+    toets('8s lang stuk: ± 1.500 tekens en "De rest staat in de app"', r.status === 200 && langGesproken.length <= 1650 && /De rest staat in de app/.test(langGesproken) && !/Zin nummer 60/.test(langGesproken), { n: langGesproken.length });
+    // cache: hetzelfde deel opnieuw maakt geen tweede stem
+    const ttsC = st.tts.length;
+    await stem('t:' + JL, 1);
+    toets('8s hetzelfde deel opnieuw: uit het geheugen (geen nieuwe stem)', st.tts.length === ttsC, st.tts.length - ttsC);
+    // dagplafond: 80 echte stemaanroepen (ook vooruitladen telt; Codex MOET 1)
+    const tz = H.telStaat.telezen;
+    toets('8s elke stemaanroep telt (ook vooruitladen)', H.appStaat.tellers['tel-telezenstem'].length === st.tts.length - ttsV8s, { teller: H.appStaat.tellers['tel-telezenstem'].length, tts: st.tts.length - ttsV8s });
+    tz.audio = {};
+    H.appStaat.tellers['tel-telezenstem'] = Array.from({ length: 80 }, () => Date.now());
+    const ttsP = st.tts.length;
+    r = await stem('t:' + JA, 1);
+    toets('8s dagplafond (80 aanroepen): 429 met zin, geen stem gemaakt', r.status === 429 && /genoeg voorgelezen/.test(r.j.fout) && st.tts.length === ttsP, r.j);
+    H.appStaat.tellers['tel-telezenstem'] = [];
+    r = await stem('t:' + JA, 1);
+    toets('8s onder het plafond weer 200', r.status === 200);
+    tlFout = new Error('log weg');
+    r = await tel('GET', '/tel/uit?lijst=telezen', { sleutel: OW2 });
+    toets('8s Te lezen onleesbaar: 503', r.status === 503, r.j);
+    tlFout = null;
+    toets('8s tel-audit zonder inhoud (Te lezen)', !/bandje|Uitkomst|tandarts|Planning|Zin nummer/.test(audit()) && /telezen /.test(audit()));
+    toets('8s geen onverwachte fouten (snel/telezen)', !logs.some((l) => /tel-snel|tel-telezen/.test(l) && !/stuk|log weg/.test(l)), logs.filter((l) => /tel-snel|tel-telezen/.test(l)));
     toets('8 geen onverwachte fouten (wv3700)', !logs.some((l) => /tel-voorjou/.test(l) && !/databank weg/.test(l)), logs.filter((l) => /tel-voorjou/.test(l)));
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }
   srv.close();

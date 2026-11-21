@@ -18539,7 +18539,7 @@ function telOnderwegVelden(x) {
   const s = String(x.spreek || '');
   const knop = /(^|\n)Ik heb een vraag voor je in [^\n]*\.$/.test(s);
   const kern = s.replace(/(^|\n)Ik heb een vraag voor je in [^\n]*\.$/, '').trim();
-  return { tekst: s.slice(0, 2000), wedervraag: (x.soort === 'antwoord' || x.soort === 'zelf') && /\?["'”’)]*$/.test(kern) ? 'ja' : 'nee',
+  return { tekst: s.slice(0, 2000), wedervraag: !x.snel && (x.soort === 'antwoord' || x.soort === 'zelf') && /\?["'”’)]*$/.test(kern) ? 'ja' : 'nee', snel: x.snel ? 'ja' : 'nee',
     knopvraag: knop ? 'ja' : 'nee', rest: x.rest ? 'ja' : 'nee', vraagzin: knop && x.vraag ? String(x.vraag).slice(0, TEL_VRAAGZIN_MAX) : '' };
 }
 // wv3770: de zin van de VRAAG AAN DAVID-regel (zelfde knip als telSpreektekst: alleen vóór "Verder in de app:"), zonder opmaak.
@@ -18579,7 +18579,7 @@ function telOpruim() {
   let om = false;
   rij.forEach(function (x) {
     const j = typeof jobs !== 'undefined' ? jobs[x.id] : null;
-    if (x.soort === 'bezig' && (!j || (j.status !== 'pending' && j.status !== 'running' && nu - (j.done_at || 0) > 60000))) {
+    if (x.soort === 'bezig' && (x.snel ? nu - (x.t_start || 0) > TEL_SNEL_MS : (!j || (j.status !== 'pending' && j.status !== 'running' && nu - (j.done_at || 0) > 60000)))) {   // wv3826: snel heeft geen job
       x.soort = 'fout'; x.spreek = TEL_AFZEGGEN; x.t_klaar = nu; x.tot = nu + TEL_TTL_MS; om = true; telWek(x.apparaat);
     }
   });
@@ -18816,6 +18816,9 @@ function telKoppel(req, res) {
 
 function telBeurt(req, res, t) {
   const weg = function (st, f, r) { req.resume(); return telWeiger(res, st, f, r); };
+  // wv3826 (434): kop X-Tel-Snel: 1 = snelle vraag via Zoek snel (geen Socev-beurt); alleen Onderweg
+  const snel = req.headers['x-tel-snel'] !== undefined;
+  if (snel && (String(req.headers['x-tel-snel']).trim() !== '1' || telSoort(t) !== 'onderweg')) return weg(404, 'onbekend', 'snel: ' + (telSoort(t) !== 'onderweg' ? 'geen onderweg-sleutel' : 'kop'));
   if (!telSessieOk(t)) return weg(423, 'open eerst even de Socev-app', 'geen app-sessie');
   const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   const tekstSoort = ct === 'text/plain';
@@ -18826,8 +18829,15 @@ function telBeurt(req, res, t) {
   if (lengte !== null && lengte > max) return weg(413, tekstSoort ? 'te lang (hooguit ' + TEL_TEKST_MAX + ' tekens)' : 'opname te groot (hooguit 5 MB)', 'te groot ' + lengte);
   const lopend = telRij().filter(function (x) { return x.soort === 'bezig'; }).length + telStaat.inBehandeling;
   if (lopend >= TEL_LOPEND_MAX) return weg(429, 'Socev is nog bezig met je vorige vragen', 'grens lopend');
-  if (!appTeller('tel-beurt', TEL_BEURTEN_PER_UUR, 3600000)) return weg(429, 'te veel vragen dit uur', 'grens uur');
-  if (!appTeller('tel-beurtdag', TEL_BEURTEN_PER_DAG, 86400000)) return weg(429, 'genoeg vragen voor vandaag', 'grens dag');
+  if (snel) {
+    const zs = telSnelKan(t);
+    if (zs) return weg(zs[0], zs[1], zs[2]);
+    if (!appTeller('tel-snel', TEL_SNEL_PER_UUR, 3600000)) return weg(429, 'te veel snelle vragen dit uur', 'grens snel uur');
+    if (!appTeller('tel-sneldag', TEL_SNEL_PER_DAG, 86400000)) return weg(429, 'genoeg snelle vragen voor vandaag', 'grens snel dag');
+  } else {
+    if (!appTeller('tel-beurt', TEL_BEURTEN_PER_UUR, 3600000)) return weg(429, 'te veel vragen dit uur', 'grens uur');
+    if (!appTeller('tel-beurtdag', TEL_BEURTEN_PER_DAG, 86400000)) return weg(429, 'genoeg vragen voor vandaag', 'grens dag');
+  }
   telStaat.inBehandeling++;
   let vrij = false;
   const klaar = function () { if (!vrij) { vrij = true; telStaat.inBehandeling--; } };
@@ -18872,6 +18882,7 @@ function telBeurt(req, res, t) {
       if (!tekst || !/[\p{L}\p{N}]/u.test(tekst)) return telWeiger(res, 422, 'ik heb je niet verstaan', 'niets verstaan');
       if (telUit()) return telWeiger(res, 503, 'de telefoonkoppeling staat uit (noodstop)', 'uit (tijdens het verzoek)');
       if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve, gebruik Telegram', 'rol passief (tijdens)');
+      if (snel) return telSnelStart(res, t, tekst, k);   // wv3826
       const veilig = appOntmasker(tekst, 'gesproken');
       const gelogd = await appChatLogStart('hoofd', [{ rol: 'david', ts: Date.now(), bevestiging: 'gesproken', tekst: '[AUTO] ' + veilig }]);
       const st = appStartBeurt({ id: t.app_apparaat || t.id }, 'hoofd', '[AUTO] ' + veilig + (gelogd ? '' : APP_CHATLOG_NIET),
@@ -18895,6 +18906,9 @@ function telUitRoute(req, res, t) {
     if (q.get('lijst') === 'dagbericht') return telDagbericht(req, res, t, q.get('audio') === '1');
     if (q.get('lijst') === 'kaartstem') return telKaartStem(req, res, t, String(q.get('id') || ''));   // wv3771
     if (q.get('lijst') === 'voorstel') return telVoorstelRoute(req, res, t, String(q.get('id') || ''), String(q.get('keuze') || ''), String(q.get('tekst_id') || ''));   // wv3771
+    if (q.get('lijst') === 'telezen') return telTeLezenLijst(req, res, t);   // wv3826 (484)
+    if (q.get('lijst') === 'telezenstem') return telTeLezenStem(req, res, t, String(q.get('sleutel') || ''), String(q.get('deel') || ''));
+    if (q.get('lijst') === 'telezengezien') return telTeLezenGezien(req, res, t, String(q.get('sleutel') || ''));
     return telWeiger(res, 400, 'onbekende lijst', 'lijst');
   }
   res._tel.stil = true;   // de hartslag (± 1 per minuut) niet in het auditlog; alleen weigeringen
@@ -19053,7 +19067,7 @@ async function appRittenRoute(req, res, a) {
   });
   try {
     telRij().forEach(function (x) {
-      if (x.soort !== 'bezig' || gezien[x.id]) return;
+      if (x.soort !== 'bezig' || x.snel || gezien[x.id]) return;   // wv3826: een snelle vraag is geen Socev-beurt
       const v = bij(Number(x.t_start) || 0);
       if (!v) return;
       const j = typeof jobs !== 'undefined' ? jobs[x.id] : null;
@@ -19238,6 +19252,203 @@ async function telKaartStem(req, res, t, idTekst) {
   if (res.headersSent) return;
   res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, 'Cache-Control': 'no-store' });
   res.end(wav);
+}
+
+// ── wv3826 (Onderweg fase 2b-b/c; besluitenpagina 434 + 484, David 21-11: "daar brengen we alles in onder", toestanden van het
+// autodashboard). Ontwerp + Codex-review: mk-scripts/wv3826/ontwerp.md. Toets: test/tel-poort.sh § 8s. Geen nieuw /tel-pad (tunnel en
+// Access laten er maar vijf door): de snelle vraag is een kop op POST /tel/beurt, Te lezen zijn lijsten op GET /tel/uit.
+//
+// 434 — snelle vraag: POST /tel/beurt met X-Tel-Snel: 1 (alleen Onderweg). Na Whisper GEEN Socev-beurt maar de kern van Zoek snel
+// (zoekSnelVoer: lagen, natoets, geschiedenisregel soort zoek in hoofd.jsonl; geen chat_log, geen Opus). Het antwoord komt als gewoon item
+// in de tel-rij (uitgifte, /tel/deel, /tel/gespeeld), zodat Onderweg het afspeelt zoals elk antwoord.
+const TEL_SNEL_PER_UUR = 60;            // zelfde grens als Zoek snel in de app, eigen teller
+const TEL_SNEL_PER_DAG = 300;
+const TEL_SNEL_MS = 90 * 1000;          // zonder uitkomst na 90 s: fout-item (Zoek snel geeft het model 20 s)
+const TEL_SNEL_VRAAG_MAX = 200;         // = ZOEK_SNEL_MAX
+const TEL_SNEL_SPREEK_MAX = 600;
+appStaat.tellers['tel-snel'] = []; appStaat.tellers['tel-sneldag'] = [];
+function telSnelMod() { return typeof zoekSnel !== 'undefined' && zoekSnel && typeof zoekSnelVoer === 'function' && typeof zoekSnelAan === 'function'; }
+function telSnelApparaat(t) { return { id: t.app_apparaat || t.id }; }
+// null = mag; anders [status, zin, reden]
+function telSnelKan(t) {
+  if (!telSnelMod()) return [404, 'een snelle vraag kan nog niet op deze pod', 'snel: zoek-snel ontbreekt'];
+  if (!zoekSnelAan()) return [409, 'Zoek snel staat uit', 'snel: zoek-snel uit'];
+  const zs = appStaat.zoekSnel;
+  if (zs && zs.bezig && zs.bezig[telSnelApparaat(t).id]) return [429, 'er loopt al een snelle vraag; even geduld', 'snel: bezig'];
+  return null;
+}
+function telSnelStart(res, t, tekst, k) {
+  const vraag = String(tekst).replace(/\s+/g, ' ').trim();
+  if (vraag.length > TEL_SNEL_VRAAG_MAX) return telWeiger(res, 413, 'te lang voor een snelle vraag; stel hem gewoon aan Socev', 'snel te lang');
+  const zf = telSnelKan(t);
+  if (zf) return telWeiger(res, zf[0], zf[1], zf[2] + ' (tijdens)');
+  const a = telSnelApparaat(t), zs = appStaat.zoekSnel = appStaat.zoekSnel || { ids: {}, bezig: {} };
+  let id;
+  do { id = crypto.randomBytes(8).toString('hex'); } while ((typeof jobs !== 'undefined' && jobs[id]) || telRij().some(function (y) { return y.id === id; }));
+  zs.bezig[a.id] = true;
+  k.snel = 1; k.tekens_in = vraag.length;
+  telRij().push({ id: id, apparaat: t.id, soort: 'bezig', snel: true, t_start: Date.now(), tot: Date.now() + TEL_TTL_MS, k: k });
+  telRijBewaar();
+  res._tel.reden = 'snel ' + id;
+  telStuur(res, 202, { ok: true, id: id, verstaan: vraag.slice(0, 600), snel: 'ja' });
+  Promise.resolve().then(function () { return zoekSnelVoer(a, id, vraag, true); })
+    .then(function (r) { telNaSnel(id, r && r.status === 200 ? r.j : null); }, function (e) { logError('tel-snel', e); telNaSnel(id, null); })
+    .finally(function () { delete zs.bezig[a.id]; });
+}
+// Wat hardop gaat: de zin van Zoek snel, plus de waarden die er niet al in staan; niets gevonden = de melding. Geen bronnen (die staan in de app).
+function telSnelSpreek(j) {
+  let s;
+  if (j.soort === 'antwoord') {
+    const tekst = String(j.tekst || '').trim();
+    const w = (Array.isArray(j.waarden) ? j.waarden : []).filter(function (v) { return v && typeof v.waarde === 'string' && v.waarde && tekst.indexOf(v.waarde) < 0; })
+      .slice(0, 5).map(function (v) { return (v.label ? String(v.label) + ': ' : '') + v.waarde; });
+    s = [tekst].concat(w).filter(Boolean).join('\n');
+  } else s = [String(j.melding || 'Niet gevonden.'), String(j.tekst || '')].filter(function (x) { return x.trim(); }).join(' ');
+  s = appSpreektekst(s);
+  if (s.length > TEL_SNEL_SPREEK_MAX) s = telKnipZin(s, TEL_SNEL_SPREEK_MAX) + ' De rest staat in de app.';
+  return s || 'Niets gevonden.';
+}
+function telKnipZin(s, max) {
+  const d = s.slice(0, max), i = Math.max(d.lastIndexOf('. '), d.lastIndexOf('.\n'), d.lastIndexOf('? '), d.lastIndexOf('! '));
+  return (i > max / 2 ? d.slice(0, i + 1) : d.replace(/\s+\S*$/, '') + '…').trim();
+}
+function telNaSnel(id, j) {
+  const x = telRij().find(function (y) { return y.id === id; });
+  if (!x || x.soort !== 'bezig') return;
+  const nu = Date.now();
+  x.soort = j && j.ok ? 'antwoord' : 'fout';
+  x.spreek = x.soort === 'fout' ? TEL_AFZEGGEN : telSnelSpreek(j);
+  x.rest = false; x.vraag = null;
+  x.t_klaar = nu; x.tot = nu + TEL_TTL_MS; delete telStaat.delen[x.id]; delete telStaat.audio[x.id];
+  x.k = x.k || {};
+  x.k.beurt_s = x.t_start ? Math.round((nu - x.t_start) / 100) / 10 : null; x.k.spreek_tekens = x.spreek.length; x.k.zoek = j ? String(j.soort || '').slice(0, 12) : 'fout';
+  telRijBewaar();
+  telWek(x.apparaat);
+  if (telLuistert(x.apparaat) && !telStaat.gestopt) { const p = telAudio(x, 1); if (p) p.catch(function () {}); }
+}
+
+// 484 — "lees voor wat er ligt": Te lezen (zelfde lijst als de app: appTeLezen, met Moet iets eruit) in de auto. Alleen Onderweg, zelfde
+// sloten als Voor jou. lijst=telezen: titels zonder tekst. lijst=telezenstem&sleutel&deel: het stuk (alleen vóór "Verder in de app:",
+// ± 1.500 tekens) in delen met de pod-stem; 80 stemaanroepen per dag (± 30 stukken). lijst=telezengezien&sleutel: het punt op gezien via te-lezen.js zet()
+// (zoals het vinkje in de app: alleen id + tijd, terug te zetten), alleen als deze sleutel alle delen van dit stuk het afgelopen uur
+// kreeg (= helemaal voorgelezen). Nooit een knopdruk: geen vragen.json, kaart, chat_log of beurt.
+const TEL_TELEZEN_MAX = 15;
+const TEL_TELEZEN_TEKENS = 1500;
+const TEL_TELEZEN_PER_UUR = 60;
+const TEL_TELEZEN_GEZIEN_PER_UUR = 120;
+const TEL_TELEZEN_STEM_PER_DAG = 80;   // elke echte stemaanroep telt (ook vooruitladen en opnieuw na een fout; Codex MOET 1). Een deel ± 900 tekens
+                                         // ± 45 s ± $0,01; een stuk van 1.500 tekens = 2–3 delen ± $0,02: hooguit ± $0,80 per dag (± 30 stukken)
+const TEL_TELEZEN_GEHAALD_MS = 60 * 60 * 1000;
+const TEL_TELEZEN_AUDIO_MAX = 12;
+const TEL_SLEUTEL_TL_RE = /^t:[a-f0-9]{16}$/;
+appStaat.tellers['tel-telezen'] = []; appStaat.tellers['tel-telezen-gezien'] = []; appStaat.tellers['tel-telezenstem'] = [];
+telStaat.telezen = { audio: {}, gehaald: {} };
+async function telOwSloten(res, t, naam, teller, max) {
+  if (telSoort(t) !== 'onderweg') { telWeiger(res, 404, 'onbekend', naam + ': geen onderweg-sleutel'); return false; }
+  if (!telSessieOk(t)) { telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (' + naam + ')'); return false; }
+  if (typeof teLezenMod === 'undefined' || !teLezenMod) { telWeiger(res, 404, 'Te lezen zit niet in deze versie van de pod', naam + ': module'); return false; }
+  if (teller && !appTeller(teller, max, 3600000)) { telWeiger(res, 429, 'te vaak dit uur', 'grens ' + naam); return false; }
+  if (!(await appRolOk())) { telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (' + naam + ')'); return false; }
+  return true;
+}
+async function telTeLezenPunten() {
+  const nu = Date.now();
+  let moet = [];
+  try { const punten = await appVjPunten(); moet = (await appMoetIets(punten, nu, await appVjAfgeleid(punten, nu))) || []; } catch (e) { logError('tel-telezen', e); moet = []; }
+  const tl = await appTeLezen(null, moet, nu);
+  return (tl && Array.isArray(tl.punten) ? tl.punten : []).filter(function (p) { return p && TEL_SLEUTEL_TL_RE.test(String(p.sleutel)); });
+}
+function telTeLezenTitel(p) {
+  const kaal = function (x) { return String(x).replace(/\*\*|__|`/g, ''); };
+  if (p.titel) return appKort(kaal(p.titel), 120);
+  if (p.van) return 'Antwoord op: ' + appKort(kaal(p.van), 80);
+  const r = String(p.bericht || '').split('\n').map(function (z) { return z.replace(/[#*_`>|]/g, '').trim(); }).find(function (z) { return /[\p{L}\p{N}]/u.test(z); });
+  return appKort(r || 'Bericht', 80);
+}
+// De tekst die hardop gaat: titel, dan het bericht tot "Verder in de app:", zonder opmaak, geknipt op ± 1.500 tekens (zinsgrens).
+function telTeLezenTekst(p) {
+  let t = String(p.bericht || '').replace(/\r\n?/g, '\n');
+  const m = /^[^\S\n]*[*_]*Verder in (de app|Telegram)\s*:/im.exec(t);
+  if (m) t = t.slice(0, m.index);
+  let s = appSpreektekst(t);
+  if (s.length > TEL_TELEZEN_TEKENS) s = telKnipZin(s, TEL_TELEZEN_TEKENS) + '\nDe rest staat in de app.';
+  else if (p.afgekapt || m) s += '\nDe rest staat in de app.';
+  const kop = appSpreektekst(telTeLezenTitel(p));
+  return (kop ? kop + '\n' : '') + (s || 'Dit bericht heeft geen tekst om voor te lezen.');
+}
+function telTeLezenDelen(p) { return appVoorleesDelen(telTeLezenTekst(p)); }
+async function telTeLezenLijst(req, res, t) {
+  if (!(await telOwSloten(res, t, 'telezen', 'tel-telezen', TEL_TELEZEN_PER_UUR))) return;
+  let punten;
+  try { punten = await telTeLezenPunten(); } catch (e) { logError('tel-telezen', e); return telWeiger(res, 503, 'Te lezen is nu niet te lezen', 'telezen lezen'); }
+  const lijst = punten.slice(0, TEL_TELEZEN_MAX).map(function (p) {
+    return { sleutel: p.sleutel, soort: p.soort, titel: telTeLezenTitel(p), delen: telTeLezenDelen(p).length, t: p.t };
+  });
+  res._tel.reden = 'telezen ' + lijst.length;
+  telStuur(res, 200, { ok: true, telezen: lijst, meer: Math.max(0, punten.length - lijst.length) });
+}
+async function telTeLezenPunt(res, sl) {
+  if (!TEL_SLEUTEL_TL_RE.test(sl)) { telWeiger(res, 400, 'ongeldig stuk', 'telezen sleutel'); return null; }
+  let punten;
+  try { punten = await telTeLezenPunten(); } catch (e) { logError('tel-telezen', e); telWeiger(res, 503, 'Te lezen is nu niet te lezen', 'telezen lezen'); return null; }
+  const p = punten.find(function (x) { return x.sleutel === sl; });
+  if (!p) { telWeiger(res, 404, 'dit stuk staat niet meer bij Te lezen', 'telezen weg'); return null; }
+  return p;
+}
+async function telTeLezenStem(req, res, t, sl, deelT) {
+  if (!(await telOwSloten(res, t, 'telezenstem', null, 0))) return;
+  if (!/^[1-9]\d?$/.test(deelT)) return telWeiger(res, 400, 'ongeldig deel', 'telezenstem deel');
+  const p = await telTeLezenPunt(res, sl);
+  if (!p) return;
+  const d = telTeLezenDelen(p), n = Number(deelT);
+  if (n > d.length) return telWeiger(res, 404, 'geen deel', 'telezenstem deel ' + n);
+  if (!process.env.GEMINI_API_KEY_AUTO) return telWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'geen gemini-sleutel');
+  const tz = telStaat.telezen, vers = appSha(d.join('\n')).slice(0, 12);
+  const maak = function (m) {   // audio van deel m (Promise), of null als het dagplafond op is
+    const key = sl + ':' + vers + ':' + m;
+    if (tz.audio[key]) return tz.audio[key];
+    if (!appTeller('tel-telezenstem', TEL_TELEZEN_STEM_PER_DAG, 86400000)) return null;   // vóór elke echte aanroep
+    const ks = Object.keys(tz.audio);
+    if (ks.length >= TEL_TELEZEN_AUDIO_MAX) delete tz.audio[ks[0]];
+    const pr = tz.audio[key] = appGeminiStem(d[m - 1], {});
+    pr.catch(function () { if (tz.audio[key] === pr) delete tz.audio[key]; });
+    return pr;
+  };
+  const pr = maak(n);
+  if (!pr) return telWeiger(res, 429, 'genoeg voorgelezen voor vandaag', 'grens telezen dag');
+  let wav;
+  try {
+    let tm = null;
+    wav = await Promise.race([pr, new Promise(function (_, nee) { tm = setTimeout(function () { nee(Object.assign(new Error('duurde te lang'), { traag: true })); }, TEL_WACHT_MAX_S * 1000); })]);
+    clearTimeout(tm);
+  } catch (e) {
+    if (!(e && e.traag)) logError('tel-telezenstem', e);
+    return telWeiger(res, 503, 'inspreken lukte niet', 'telezenstem gemini');
+  }
+  if (n < d.length) { const v = maak(n + 1); if (v) v.catch(function () {}); }   // het volgende deel alvast
+  // bijhouden welke delen dit apparaat kreeg: gezien mag pas als het hele stuk (deze versie) is opgehaald
+  const gk = t.id + '|' + sl, g = tz.gehaald[gk] && tz.gehaald[gk].vers === vers ? tz.gehaald[gk] : (tz.gehaald[gk] = { vers: vers, delen: {}, t: 0 });
+  g.delen[n] = 1; g.t = Date.now(); g.n = d.length;
+  Object.keys(tz.gehaald).forEach(function (x) { if (Date.now() - tz.gehaald[x].t > TEL_TELEZEN_GEHAALD_MS) delete tz.gehaald[x]; });
+  res._tel.reden = 'telezenstem ' + n + '/' + d.length;
+  if (res.headersSent) return;
+  res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, 'Cache-Control': 'no-store' });
+  res.end(wav);
+}
+async function telTeLezenGezien(req, res, t, sl) {
+  if (!(await telOwSloten(res, t, 'telezengezien', 'tel-telezen-gezien', TEL_TELEZEN_GEZIEN_PER_UUR))) return;
+  const p = await telTeLezenPunt(res, sl);
+  if (!p) return;
+  const vers = appSha(telTeLezenDelen(p).join('\n')).slice(0, 12), g = telStaat.telezen.gehaald[t.id + '|' + sl];
+  if (!g || g.vers !== vers || Date.now() - g.t > TEL_TELEZEN_GEHAALD_MS || Object.keys(g.delen).length < g.n) return telWeiger(res, 409, 'eerst helemaal voorlezen', 'telezen gezien zonder voorlezen');
+  let staat;
+  try { staat = appLeesStreng(APP_TE_LEZEN, {}); } catch (e) { logError('tel-telezen', e); return telWeiger(res, 503, 'Te lezen is nu niet te lezen', 'telezen staat'); }
+  const z = teLezenMod.zet(staat, { job_id: p.job_id, kanaal: p.kanaal, actie: 'gezien' }, Date.now(), null);
+  if (z.fout) return telWeiger(res, 409, z.fout, 'telezen gezien ' + z.fout);
+  try { appSchrijfJson(APP_TE_LEZEN, z.staat); } catch (e) { logError('tel-telezen', e); return telWeiger(res, 503, 'opslaan lukte niet', 'telezen schrijven'); }
+  delete telStaat.telezen.gehaald[t.id + '|' + sl];
+  res._tel.reden = 'telezen gezien';
+  telStuur(res, 200, { ok: true, gezien: true });
 }
 
 async function telDeel(req, res, t, id, n) {
