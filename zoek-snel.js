@@ -433,6 +433,9 @@ function maak(opt) {
   const index = opt.index && opt.index.cmd && opt.index.db ? opt.index : null;
   const l1Ms = opt.l1Ms || L1_MS, l2Ms = opt.l2Ms || L2_MS;
   const stempel = opt.feitenStempel || null;   // bestand dat feitenlijst.py --stempel na een geslaagde vulling vervangt (mtime = vuldatum)
+  // wv3734 (David Ja 21-11, nr 383 = 3C83): stuit een vraag op een pagina die ná de bouw gewijzigd is, dan meldt zoek() dat hier, zodat
+  // de pod feitenlijst en tekstindex meteen opnieuw bouwt (begrensd in server.js); de volgende vraag krijgt dan weer de snelle laag.
+  const verouderdSein = typeof opt.verouderd === 'function' ? function (laag) { try { opt.verouderd(laag); } catch (e) { fout('zoek-snel-verouderd', e); } } : function () {};
   let wl = null;   // { m, groepen }
 
   function woordenlijst() {
@@ -1027,6 +1030,7 @@ function maak(opt) {
     // ── laag 1 ──
     const l1 = await laag1(vraag);
     if (l1) { ms.feiten = l1.ms; const u1 = l1.uit; delete l1.uit; delete l1.ms; lagen.feitenlijst = l1;
+      if (l1.reden === 'pagina nieuwer') verouderdSein('feitenlijst');
       if (u1) return uit('antwoord', { laag: 'identifier', tekst: u1.tekst, tekst_kaal: u1.tekst, waarden: u1.waarden, bronnen: u1.bronnen, melding: null, gelezen_als: gelezenUit }); }
     if (!gr.length) return uit('geen', { reden: 'geen zoektermen', melding: MELDING.leeg });
 
@@ -1042,7 +1046,7 @@ function maak(opt) {
         Object.assign(info, { paginas: Number(dk.paginas) || 0, paginas_mee: c2.bronnen.length, blokken: Number(dk.blokken) || 0, blokken_mee: Number(dk.blokken_mee) || 0,
           afgekapt: !!dk.afgekapt, weg: c2.weg || undefined, dicht: c2.dicht || undefined });
         info.volledig = !info.afgekapt && !c2.vol && !c2.weg && !c2.dicht && info.paginas_mee >= info.paginas && info.blokken_mee >= info.blokken;
-        if (c2.verouderd) { info.stand = 'verouderd'; info.verouderd = c2.verouderd; info.volledig = false; }
+        if (c2.verouderd) { info.stand = 'verouderd'; info.verouderd = c2.verouderd; info.volledig = false; verouderdSein('tekstindex'); }
         else if (c2.bronnen.length) {
           const m = await modelAntwoord(vraag, gelezenUit, c2.tekst, c2.bronnen);
           ms.model = m.model_ms; verbruik = telOp(verbruik, m.verbruik);

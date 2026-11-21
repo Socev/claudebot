@@ -728,7 +728,8 @@ function maak(opt) {
   // wv1940 (David 29-10: "vinkjes boven … 'PDF', 'Media' — dat maakt zoeken makkelijker"): soorten = vaste codes in twee groepen. Binnen een
   // groep of, tussen de groepen en: soort van het bestand én waar het staat; een lege groep = alles in die groep, geen enkele code = alles.
   // Zonder het veld soorten het oude gedrag (alles = ook Bronnen en gesprekken), voor een app van vóór wv1940. Filteren gebeurt hier vóór
-  // de limiet, zodat de 40 treffers (afgekapt) per gekozen soort gelden. PDF, Word & Excel en media zoekt de pod alleen op de naam.
+  // de limiet, zodat de 40 treffers (afgekapt) per gekozen soort gelden. Media, Excel, PowerPoint en oude .doc zoekt de pod alleen op de naam;
+  // pdf en docx sinds wv3734 ook op inhoud (opt.inhoud).
   const ZOEK_SOORT = ['paginas', 'pdf', 'office', 'media'], ZOEK_PLEK = ['vault', 'bronnen', 'gesprekken'];
   const soortCode = function (b) {
     if (b.s === 'md') return 'paginas';
@@ -837,33 +838,49 @@ function maak(opt) {
       // 3. in de tekst (en de frontmatter-alias, die promoveert naar paginas). Eerst wat in een map met die naam staat, dan de vault zelf
       // op datum; lezen stopt bij MAX_LEZEN treffers of ZOEK_MS. Daarna gerangschikt op hoe vaak de woorden erin staan.
       const opTekst = [];
-      const tekstLijst = lijst.filter(function (b) { return (b.s === 'md' || b.s === 'tekst') && b.g <= MAX_MD && !gehad.has(b.p); })
+      // wv3734 (David Ja 21-11, nr 404 = 3C104): pdf en docx ook op inhoud, uit de tekstcache van brain-tekst.js (opt.inhoud; alleen als
+      // het stuk sinds de laatste uitleesronde niet gewijzigd is)
+      const inhoud = opt.inhoud && typeof opt.inhoud.tekst === 'function' ? opt.inhoud : null;
+      const metInhoud = function (b) { return !!inhoud && (b.s === 'pdf' || b.s === 'office') && inhoud.heeft(b); };
+      const tekstLijst = lijst.filter(function (b) { return ((b.s === 'md' || b.s === 'tekst') && b.g <= MAX_MD || metInhoud(b)) && !gehad.has(b.p); })
         .map(function (b) { return { b: b, map: padPast(b) ? 0 : 1 }; })
         .sort(function (a, z) { return a.map - z.map || rang(a.b) - rang(z.b) || z.b.m - a.b.m; });
       const telIn = function (t, w) { let n = 0, i = t.indexOf(w); while (i >= 0 && n < 20) { n++; i = t.indexOf(w, i + w.length); } return n; };
+      // wv3734: een vraag van meer woorden die letterlijk als zin in een stuk staat ("zin die alleen in een pdf staat") komt bovenaan de
+      // tekstgroep, en na de grens van MAX_LEZEN gewone vondsten wordt (binnen ZOEK_MS) nog doorgelezen op zo'n hele zin (hooguit
+      // MAX_TREFFERS extra), zodat een stuk in Bronnen niet wegvalt achter honderd pagina's die dezelfde losse woorden hebben.
+      const frase = woorden.length > 1 ? qPlat : null;
+      let gewoon = 0, fraseNa = 0;
       for (const x of tekstLijst) {
         const b = x.b;
-        if (opTekst.length >= MAX_LEZEN || Date.now() - t0 > ZOEK_MS) {
+        const tijdOp = Date.now() - t0 > ZOEK_MS, vol = (frase ? gewoon : opTekst.length) >= MAX_LEZEN;
+        if ((tijdOp || vol) && (tijdOp || !frase || fraseNa >= MAX_TREFFERS)) {
           afgekapt = true;
           if (x.map === 0) opTekst.push({ b: b, pad: b.p, waar: 'map', groep: 'tekst', fragment: '', n: 0 });   // niet meer gelezen: alleen de map
           if (opTekst.length >= MAX_LEZEN + MAX_TREFFERS) break;
           continue;
         }
         let t;
-        try { t = fs.readFileSync(path.join(VAULT, b.p), 'utf8'); } catch (e) { continue; }
+        const stuk = b.s === 'pdf' || b.s === 'office';
+        if (stuk) { t = inhoud.tekst(b); if (t === null) continue; }
+        else try { t = fs.readFileSync(path.join(VAULT, b.p), 'utf8'); } catch (e) { continue; }
         let bron = t.toLowerCase();
         if (!woorden.every(function (w) { return bron.indexOf(w) >= 0; })) {
           if (!/[À-ɏ]/.test(t)) { if (x.map === 0) opTekst.push({ b: b, pad: b.p, waar: 'map', groep: 'tekst', fragment: '', n: 0 }); continue; }
           bron = plat(t);
           if (!woorden.every(function (w) { return bron.indexOf(w) >= 0; })) { if (x.map === 0) opTekst.push({ b: b, pad: b.p, waar: 'map', groep: 'tekst', fragment: '', n: 0 }); continue; }
         }
-        const al = aliasPast(t, qPlat, woorden);
+        const fr = !!frase && bron.replace(/\s+/g, ' ').indexOf(frase) >= 0;
+        if (vol) { afgekapt = true; if (!fr) continue; fraseNa++; }   // na de grens alleen nog de hele zin
+        const al = stuk ? 0 : aliasPast(t, qPlat, woorden);
         if (al) { opNaam.push({ b: b, pad: b.p, waar: 'alias', groep: 'paginas', fragment: '', s: al === 1 ? 1.5 : 2.5 }); continue; }
         const n = woorden.reduce(function (s, w) { return s + telIn(bron, w); }, 0);
-        opTekst.push({ b: b, pad: b.p, waar: 'tekst', groep: 'tekst', fragment: fragment(t, Math.min(bron.indexOf(woorden[0]), t.length), ctx), n: n + (x.map === 0 ? 3 : 0) });
+        const vanaf = fr ? Math.max(0, bron.indexOf(woorden[0])) : bron.indexOf(woorden[0]);
+        opTekst.push({ b: b, pad: b.p, waar: stuk ? 'inhoud' : 'tekst', groep: 'tekst', fragment: fragment(t, Math.min(vanaf, t.length), ctx), n: n + (x.map === 0 ? 3 : 0), fr: fr ? 1 : 0 });
+        if (!fr) gewoon++;
       }
       opNaam.sort(function (a, z) { return rang(a.b) - rang(z.b) || a.s - z.s || z.b.m - a.b.m; });
-      opTekst.sort(function (a, z) { return rang(a.b) - rang(z.b) || z.n - a.n || z.b.m - a.b.m; });
+      opTekst.sort(function (a, z) { return (z.fr || 0) - (a.fr || 0) || rang(a.b) - rang(z.b) || z.n - a.n || z.b.m - a.b.m; });
       const naamDeel = opNaam.slice(0, MAX_TREFFERS - ent.length - Math.min(opTekst.length, MIN_TEKST));   // de tekstgroep houdt minstens MIN_TEKST plekken
       const alle = ent.concat(naamDeel).concat(opTekst);
       const treffers = alle.slice(0, MAX_TREFFERS).map(function (x) {

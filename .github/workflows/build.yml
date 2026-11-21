@@ -855,6 +855,9 @@ jobs:
       - name: "zoek-snel (wv1252, Zoek snel achter het OVIS-logo)"
         if: ${{ !cancelled() }}
         run: bash test/zoek-snel.sh
+      - name: "brain-tekst (wv3734, pdf en docx op inhoud in Brain › Zoeken; Zoek snel overdag vers)"
+        if: ${{ !cancelled() }}
+        run: bash test/brain-tekst.sh
       # Health-rapporten (wv811): start zonder taalmodel — alleen de startregel terug, omgeving-allowlist, tijdgrens, één tegelijk.
       - name: "health-rapporten (wv811, start zonder taalmodel)"
         if: ${{ !cancelled() }}

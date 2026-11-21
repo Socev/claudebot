@@ -785,9 +785,12 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   modelVan = null; rpcVan = null;
   // nachtklokken (bron): venster, socev-run met hartslag, onderhoudsstand en OVIS-nachtronde, /health
   toets('10 nachtklokken: sb2-feitenlijst 05:00–05:30 (--laad --gelijktrekken) en sb2-zoekindex 05:05–06:00 (bouw onder de grendel), hartslag = naam',
-    /sb2ZoekKlok\('sb2-feitenlijst', \{ van: \[5, 0\], tot: \[5, 30\] \}, 5,\n\s+\['python3', '-I', SB2_SRC \+ '\/feitenlijst\.py', '--vault', VAULT, '--laad', '--gelijktrekken', '--stempel', '\/opt\/data\/scripts-staat\/sb2-zoek\/feitenlijst\.gevuld'\]\)/.test(src) &&
+    // wv3734: argv als constante (ook de overdagronde gebruikt hem)
+    /const SB2_FEITEN_ARGV = \['python3', '-I', SB2_SRC \+ '\/feitenlijst\.py', '--vault', VAULT, '--laad', '--gelijktrekken', '--stempel', '\/opt\/data\/scripts-staat\/sb2-zoek\/feitenlijst\.gevuld'\];/.test(src) &&
+    /sb2ZoekKlok\('sb2-feitenlijst', \{ van: \[5, 0\], tot: \[5, 30\] \}, 5, SB2_FEITEN_ARGV\)/.test(src) &&
     /argv: argv, pogingen: 2 \}\)/.test(src) &&
-    /sb2ZoekKlok\('sb2-zoekindex', \{ van: \[5, 5\], tot: \[6, 0\] \}, 10,\n\s+\['python3', '-I', SB2_SRC \+ '\/zoekindex\.py', 'bouw', '--vault', VAULT, '--db', '\/opt\/data\/scripts-staat\/sb2-zoekindex\/index\.sqlite', '--grendel', OVIS_LOCK\]\)/.test(src) &&
+    /const SB2_INDEX_ARGV = \['python3', '-I', SB2_SRC \+ '\/zoekindex\.py', 'bouw', '--vault', VAULT, '--db', '\/opt\/data\/scripts-staat\/sb2-zoekindex\/index\.sqlite', '--grendel', OVIS_LOCK\];/.test(src) &&
+    /sb2ZoekKlok\('sb2-zoekindex', \{ van: \[5, 5\], tot: \[6, 0\] \}, 10, SB2_INDEX_ARGV\)/.test(src) &&
     /naam: naam, hartslag: naam/.test(src) && /mag: function \(\) \{ return !onderhoud\.stand\(\)\.aan && ovisLoopt\.nu !== 'nacht'; \}/.test(src) &&
     /if \(!SERVER_ECHT \|\| !rolPrimair\(\)\) return;\n(  if \(nachtketenActief\(\)\) return;[^\n]*\n)?  const ctx = \{ ams: ovisAms\(\), mag:/.test(src) && /sb2_zoek: typeof sb2ZoekKlokInfo === 'function'/.test(src));
 

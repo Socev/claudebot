@@ -22468,10 +22468,59 @@ function sb2ZoekKlok(naam, venster, maxMin, argv) {
   } catch (e) { logError(naam, e); return null; }
 }
 const SB2_SRC = '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2';
-const sb2Feitenlijst = sb2ZoekKlok('sb2-feitenlijst', { van: [5, 0], tot: [5, 30] }, 5,
-  ['python3', '-I', SB2_SRC + '/feitenlijst.py', '--vault', VAULT, '--laad', '--gelijktrekken', '--stempel', '/opt/data/scripts-staat/sb2-zoek/feitenlijst.gevuld']);
-const sb2Zoekindex = sb2ZoekKlok('sb2-zoekindex', { van: [5, 5], tot: [6, 0] }, 10,
-  ['python3', '-I', SB2_SRC + '/zoekindex.py', 'bouw', '--vault', VAULT, '--db', '/opt/data/scripts-staat/sb2-zoekindex/index.sqlite', '--grendel', OVIS_LOCK]);
+const SB2_FEITEN_ARGV = ['python3', '-I', SB2_SRC + '/feitenlijst.py', '--vault', VAULT, '--laad', '--gelijktrekken', '--stempel', '/opt/data/scripts-staat/sb2-zoek/feitenlijst.gevuld'];
+const SB2_INDEX_ARGV = ['python3', '-I', SB2_SRC + '/zoekindex.py', 'bouw', '--vault', VAULT, '--db', '/opt/data/scripts-staat/sb2-zoekindex/index.sqlite', '--grendel', OVIS_LOCK];
+const sb2Feitenlijst = sb2ZoekKlok('sb2-feitenlijst', { van: [5, 0], tot: [5, 30] }, 5, SB2_FEITEN_ARGV);
+const sb2Zoekindex = sb2ZoekKlok('sb2-zoekindex', { van: [5, 5], tot: [6, 0] }, 10, SB2_INDEX_ARGV);
+// ── wv3734 (David Ja 21-11 13:19, besluitenpagina nr 383 = 3C83): Zoek snel ook overdag vers ──
+// WAAROM: in 8 van de 17 gemeten vragen (Fable-review "Een 9 - brain-zoeken", idee 6) sloeg Zoek snel de snelle laag over omdat een
+// trefferpagina sinds de nachtbouw gewijzigd was: ± 8 s wachten i.p.v. 0,2 s. NU: 07:00–22:59 elk uur feitenlijst + tekstindex opnieuw
+// (zelfde commando's als de nachtklokken; gemeten 21-11: index 3,4 s, feitenlijst < 1 s) en meteen als een vraag op een gewijzigde pagina
+// stuit (zoek-snel.js opt.verouderd), hooguit eens per 5 min. Zonder socev-run: een mislukte overdagronde geeft geen box-rij of bericht
+// (de nachtklok blijft het alarm, en Zoek snel zoekt dan live zoals vóór wv3734); alleen het podlog en /health zoek_snel.overdag. Niet tijdens
+// de onderhoudsstand, de OVIS-nachtronde of de nachtketen. Schakelaar ZOEK_OVERDAG=uit.
+const ZOEK_OVERDAG_VAN = 7, ZOEK_OVERDAG_TOT = 23, ZOEK_OVERDAG_UUR_MS = 55 * 60000, ZOEK_OVERDAG_VRAAG_MS = 5 * 60000;
+const ZOEK_OVERDAG_STAAT = path.join(KLOKKEN_DIR, 'sb2-zoek-overdag.json');
+const zoekOverdag = { loopt: false, laatste: null, aan: process.env.ZOEK_OVERDAG !== 'uit' };
+try { zoekOverdag.laatste = JSON.parse(fs.readFileSync(ZOEK_OVERDAG_STAAT, 'utf8')).laatste || null; } catch (e) { /* nog geen ronde */ }
+function zoekOverdagStap(argv, maxMs) {
+  return new Promise(function (klaar) {
+    const t0 = Date.now();
+    try {
+      require('child_process').execFile(argv[0], argv.slice(1), { timeout: maxMs, maxBuffer: 4 * 1024 * 1024, env: Object.assign({}, process.env, { VAULT_DIR: VAULT }) },
+        function (e) { klaar({ exit: e ? (typeof e.code === 'number' ? e.code : 1) : 0, ms: Date.now() - t0 }); });
+    } catch (e) { klaar({ exit: 127, ms: Date.now() - t0 }); }
+  });
+}
+function zoekOverdagMag() {
+  if (!zoekOverdag.aan || !SERVER_ECHT || !rolPrimair() || zoekOverdag.loopt || nachtketenActief()) return false;
+  try { if (onderhoud.stand().aan) return false; } catch (e) { return false; }
+  if (ovisLoopt.nu === 'nacht') return false;
+  const a = ovisAms();
+  return a.uur >= ZOEK_OVERDAG_VAN && a.uur < ZOEK_OVERDAG_TOT;
+}
+async function zoekOverdagRonde(reden) {
+  if (!zoekOverdagMag()) return null;
+  zoekOverdag.loopt = true;
+  const t = new Date().toISOString();
+  try {
+    const f = await zoekOverdagStap(SB2_FEITEN_ARGV, 5 * 60000);
+    const i = await zoekOverdagStap(SB2_INDEX_ARGV, 10 * 60000);
+    zoekOverdag.laatste = { t: t, reden: reden, feitenlijst: f, tekstindex: i };
+    try { const tmp = ZOEK_OVERDAG_STAAT + '.tmp'; fs.writeFileSync(tmp, JSON.stringify({ laatste: zoekOverdag.laatste }), { mode: 0o600 }); fs.renameSync(tmp, ZOEK_OVERDAG_STAAT); }
+    catch (e) { logError('zoek-overdag-staat', e); }
+    schrijfLog(nu() + ' zoek-overdag ' + velden({ reden: reden, feiten_exit: f.exit, feiten_ms: f.ms, index_exit: i.exit, index_ms: i.ms }));
+    return zoekOverdag.laatste;
+  } catch (e) { logError('zoek-overdag', e); return null; }
+  finally { zoekOverdag.loopt = false; }
+}
+function zoekOverdagSinds() { const l = zoekOverdag.laatste; const t = l ? Date.parse(l.t) : NaN; return isFinite(t) ? Date.now() - t : Infinity; }
+// zoek-snel.js: een vraag stuitte op een pagina die nieuwer is dan feitenlijst of index (laag = 'feitenlijst' | 'tekstindex')
+function zoekOverdagVraag(laag) {
+  if (zoekOverdagSinds() < ZOEK_OVERDAG_VRAAG_MS) return;
+  setImmediate(function () { zoekOverdagRonde('vraag-' + (laag === 'tekstindex' ? 'index' : 'feiten')).catch(function () {}); });
+}
+if (SERVER_ECHT) setInterval(function () { if (zoekOverdagSinds() >= ZOEK_OVERDAG_UUR_MS) zoekOverdagRonde('uur').catch(function () {}); }, 5 * 60000).unref();
 // wv1789: zelflerende nachtronde v1 (zoekleer.py): deelt de gemiste Zoek snel-vragen in en schrijft één keer per ISO-week één box-rij (alleen als er
 // vragen zijn), daarna query_run.geleerd. 06:00–06:59, ná feitenlijst en tekstindex (de woordkandidaten lezen de index van vannacht). Schrijft in de
 // vault (box): zelf onder de vault-grendel (gedeeld) en niet in de onderhoudsstand (exit 3 = onvolledig, nog één poging). Schakelaar SB2_ZOEKLEER=uit.
@@ -24443,6 +24492,13 @@ function vaultzoekInfo() {
 // AI Search-index met een eigen teller (Fable K11), de nachtbouw en de verrijking van Financiën (koppeltabel in de vault).
 // Op een vaste plek vallen de POST-routes onder het invoerslot (niet in APP_SLOT_VRIJ): openen alleen als David daar is, zoals /app/bestand.
 const SB_DIR = process.env.SECONDBRAIN_DIR || '/opt/data/secondbrain';
+// wv3734 (David Ja 21-11 13:19, besluitenpagina nr 404 = 3C104): de tekst van pdf's en docx-bestanden, zodat Brain › Zoeken ze ook op inhoud
+// vindt (waarom en hoe in brain-tekst.js). Elk uur een ronde over de kaart (alleen nieuwe of gewijzigde stukken; de eerste ± 1–2 min).
+const brainTekst = (function () {
+  const p = path.join(__dirname, 'brain-tekst.js');
+  if (!fs.existsSync(p) || process.env.BRAIN_TEKST === 'uit') return null;
+  try { return require(p).maak({ vault: VAULT, dir: path.join(SB_DIR, 'inhoud'), fout: logError }); } catch (e) { logError('brain-tekst', e); return null; }
+})();
 const secondbrain = (function () {
   const p = path.join(__dirname, 'secondbrain.js');
   if (!fs.existsSync(p)) return null;
@@ -24461,6 +24517,7 @@ const secondbrain = (function () {
         catch (e) { return false; }
       },
       hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
+      inhoud: brainTekst,   // wv3734: pdf en docx op inhoud
       // wv3295: eigen databank (vaultzoek.js) in plaats van Cloudflare AI Search; zelfde vorm [{key: 'vault/<pad>', text, score}]
       betekenis: async function (q) {
         if (!vaultzoek) return null;
@@ -24473,8 +24530,20 @@ const secondbrain = (function () {
 })();
 function secondbrainInfo() {
   if (!secondbrain) return { aan: false };
-  try { return secondbrain.health(); } catch (e) { return { aan: true, fout: true }; }
+  try { const h = secondbrain.health(); if (brainTekst) h.inhoud = brainTekst.info(); return h; } catch (e) { return { aan: true, fout: true }; }
 }
+// wv3734: de tekstronde van brain-tekst.js, elk uur (eerste na 4 min), niet tijdens onderhoud of de OVIS-nachtronde
+async function brainTekstTik() {
+  if (!brainTekst || !secondbrain || !SERVER_ECHT || !rolPrimair()) return;
+  try { if (onderhoud.stand().aan) return; } catch (e) { return; }
+  if (ovisLoopt.nu === 'nacht') return;
+  let k = null;
+  try { k = secondbrain.vers(false); } catch (e) { k = null; }
+  if (!k || !Array.isArray(k.bestanden)) return;
+  const t = await brainTekst.ronde(k.bestanden);
+  if (t && !t.bezig && (t.nieuw || t.weg || t.mislukt)) schrijfLog(nu() + ' brain-tekst ' + velden({ stukken: t.stukken, nieuw: t.nieuw, met_tekst: t.met_tekst, zonder_tekst: t.zonder_tekst, fout: t.fout, weg: t.weg, ms: t.ms, afgekapt: t.afgekapt }));
+}
+if (brainTekst && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setTimeout(function () { brainTekstTik().catch(function () {}); }, 4 * 60000).unref(); setInterval(function () { brainTekstTik().catch(function () {}); }, 60 * 60000).unref(); }
 // Nachtbouw rond 03:50 (Amsterdamse tijd): de kaart vers en kaart.json bijgewerkt, ook als niemand de App opent.
 if (secondbrain) setInterval(function () {
   try {
@@ -27123,7 +27192,8 @@ const zoekSnel = (function () {
         ? function (vraag) { return zoekSnelRpc('sb_zoek_identifier', { p_vraag: vraag, p_max: 20, p_vast: false }, ZOEK_SNEL_RPC_MS); } : null,
       index: ZOEK_SNEL_INDEX_DB ? { cmd: process.env.ZOEK_SNEL_INDEX_CMD || 'python3', args: process.env.ZOEK_SNEL_INDEX_CMD ? [ZOEK_SNEL_INDEX_SCRIPT] : ['-I', ZOEK_SNEL_INDEX_SCRIPT],
         db: ZOEK_SNEL_INDEX_DB } : null,
-      feitenStempel: ZOEK_SNEL_STEMPEL });
+      feitenStempel: ZOEK_SNEL_STEMPEL,
+      verouderd: function (laag) { if (typeof zoekOverdagVraag === 'function') zoekOverdagVraag(laag); } });   // wv3734: index en feitenlijst meteen opnieuw (begrensd)
     z.queryRunVan = m.queryRunVan;
     return z;
   } catch (e) { logError('zoek-snel', e); return null; }
@@ -27134,7 +27204,8 @@ function zoekSnelAan() {
 function zoekSnelInfo() {
   const l = appStaat.zoekSnelLaatst || null;
   return { aan: !!zoekSnel && zoekSnelAan(), module: !!zoekSnel, schakelaar: zoekSnelAan(), laatste: l ? { t: l.t, uitkomst: l.uitkomst, ms: l.ms, laag: l.laag || null } : null,
-    index_leeftijd_u: zoekSnelIndexLeeftijdU() };   // wv1788: laag van de laatste vraag en leeftijd van de tekstindex (geen inhoud)
+    index_leeftijd_u: zoekSnelIndexLeeftijdU(),   // wv1788: laag van de laatste vraag en leeftijd van de tekstindex (geen inhoud)
+    overdag: typeof zoekOverdag !== 'undefined' ? { aan: zoekOverdag.aan, loopt: zoekOverdag.loopt, laatste: zoekOverdag.laatste } : undefined };   // wv3734
 }
 // wv1788: per laag alleen getallen, booleans en korte standen (geen soorten-, reden- of inhoudstekst) voor het app-log.
 function zoekSnelLagenTelling(l) {
