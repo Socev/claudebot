@@ -13047,17 +13047,22 @@ async function appAnders(req, res, reg, a, s, d) {
     if (!e || e.kanaal !== kanaal || !K) return appWeiger(res, 404, 'deze knop ken ik niet (meer)', 'anders agenda onbekend');
     // Opus-review wv1821 MOET 1: de echte stand van de ✅ (al uitgevoerd, bezig, verlopen of open), niet altijd "blijft staan"
     const kNu = Date.now();
-    const stand = appAgendaBezig(K, kNu) ? 'De ✅ onder dat voorstel wordt op dit moment uitgevoerd; wacht de uitkomst af voor je iets aanpast.'
+    const sms = !!e.sms;   // wv3664: Anders bij een sms-voorstel
+    const stand = sms ? (appAgendaBezig(K, kNu) ? 'De ✅ onder dat sms-voorstel wordt op dit moment uitgevoerd; wacht de uitkomst af.'
+        : K.stand === 'klaar' ? 'Dat sms-voorstel is al afgehandeld' + (K.uitkomst ? ' ("' + appEenRegel(K.uitkomst, 200) + '")' : '') + '.'
+        : !(kNu <= Number(K.verloopt) + APP_AGENDA_MARGE_MS) ? 'Dat sms-voorstel is verlopen; er is niets verstuurd.'
+        : 'Er is niets verstuurd; de ✅ blijft staan. Pas het voorstel aan naar wat David zegt en zet een nieuw sms-voorstel klaar (skill sms-berichten), of laat het vallen als hij dat zegt.')
+      : appAgendaBezig(K, kNu) ? 'De ✅ onder dat voorstel wordt op dit moment uitgevoerd; wacht de uitkomst af voor je iets aanpast.'
       : K.stand === 'klaar' ? 'De ✅ onder dat voorstel is al afgehandeld' + (K.uitkomst ? ' ("' + appEenRegel(K.uitkomst, 200) + '")' : '') + '; staat de afspraak er al, dan is een wijziging verplaatsen: leg dat voor met een nieuwe agendaknop.'
       : !(kNu <= Number(K.verloopt) + APP_AGENDA_MARGE_MS) ? 'De ✅ onder dat voorstel is verlopen; er is niets in de agenda gezet. Leg zo nodig een nieuw voorstel met agendaknop voor.'
       : 'De ✅ onder dat voorstel blijft staan en er verandert niets in de agenda. Pas het voorstel aan naar wat David zegt en leg het opnieuw voor met een agendaknop, of laat het vallen als hij dat zegt.';
     const bericht = await appAndersBericht(kanaal, id);
-    kop = '[KNOP] David koos ANDERS bij het agendavoorstel in jouw bericht van ' + appTijdKort(Date.parse(e.t) || Date.now()) + ' — toelichting: ' + t;
-    ctx = '(Knopdruk bij het agendavoorstel in de app om ' + tijd + (bericht ? '. Het voorstel begon met: "' + appEenRegel(bericht, 300) + '"' : '. Het bericht met het voorstel is niet meer leesbaar') + '. ' +
+    kop = '[KNOP] David koos ANDERS bij het ' + (sms ? 'sms-voorstel' : 'agendavoorstel') + ' in jouw bericht van ' + appTijdKort(Date.parse(e.t) || Date.now()) + ' — toelichting: ' + t;
+    ctx = '(Knopdruk bij het ' + (sms ? 'sms-voorstel' : 'agendavoorstel') + ' in de app om ' + tijd + (bericht ? '. Het voorstel begon met: "' + appEenRegel(bericht, 300) + '"' : '. Het bericht met het voorstel is niet meer leesbaar') + '. ' +
       'Dit is GEEN bevestiging. ' + stand + ')';
     socevRij = bericht || '(agendavoorstel)';
-    davidRij = 'Anders (knop bij een agendavoorstel in de app) — toelichting: ' + t;
-    reden = 'anders agenda ' + id + ' -> ' + kanaal;
+    davidRij = 'Anders (knop bij een ' + (sms ? 'sms-voorstel' : 'agendavoorstel') + ' in de app) — toelichting: ' + t;
+    reden = 'anders ' + (sms ? 'sms ' : 'agenda ') + id + ' -> ' + kanaal;
   }
   if (!(await appMagBeurt(res, kanaal, true))) return;
   // wv405-volgorde (Opus-review wv1821 ZOU 2): een getypt bericht dat nog zijn chat_log-rij schrijft, gaat eerst de rij in
@@ -16387,7 +16392,7 @@ const BERICHT_KLASSEN = { stil: true, normaal: true, dringend: true };
 // Vaste lijst (bouwplan § 3, fasen 1–5); een nieuwe bron vraagt een regel hier, net als een rij in bericht_route.
 const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef', 'droomronde', 'ideeenmotor', 'ciso', 'research-scout', 'quotumalarm', 'voorwerk',
   'stiltewachter', 'meelezer', 'nachtwerk', 'werkkamer-toegang', 'foutmelder', 'script', 'socev-spreekt', 'heartbeat', 'vergaderbriefing',
-  'parro', 'signal', 'teams', 'gambia', 'raw-input', 'files-portaal', 'voorlezen', 'briefing', 'actielijst', 'agenda', 'actie-bewaker',
+  'parro', 'signal', 'teams', 'gambia', 'raw-input', 'files-portaal', 'voorlezen', 'briefing', 'actielijst', 'agenda', 'sms', 'actie-bewaker',
   'agenda-wachter', 'correspondentie-wachter', 'dienstwaarschuwer', 'waarnemingzoeker',
   'agentrapport-david', 'stiltewachter-david',   // wv300: eigen bron per kanaal (agentrapport en stiltewachter dienen ook de machinekamer)
   'droomronde-wachter',   // wv390: Wachter melden van de droomronde (wv299). Bewust NIET 'echt-alarm' (Werkvoorraad-tikker, wv358): dat alarm
@@ -16446,7 +16451,7 @@ const BERICHT_INVOER_MS = 2 * 60 * 1000;     // wv804 (ontwerp § 2): echte invo
 const BERICHT_BEZIG_MAX = 3;                 // wv804 Fable M1: bezig aan het eind van een bundel = hooguit 3× opnieuw plannen
 const BERICHT_CONTROLE_MARGE_MS = 90 * 1000; // wv292 (Fable wv263 #7): n8n kijkt na een uitgesteld seintje opnieuw (controle_na)
 const BERICHT_VOORLOPIG_MS = 5 * 60 * 1000;  // wv292 (Fable wv263 #6): voorlopig naar Telegram, zonder bevestiging weer knoppen in de app
-const BERICHT_RE = /^\/bericht(\/(bestand|stand|naar-telegram))?$/;
+const BERICHT_RE = /^\/bericht(\/(bestand|stand|naar-telegram|sms-pas))?$/;   // wv3664: sms-pas = n8n toetst de pas van Davids sms-tik terug
 
 function berichtIsPad(req) { return BERICHT_RE.test(reqPath(req)); }
 function berichtStuur(res, status, obj) {
@@ -16728,9 +16733,15 @@ async function berichtNieuw(res, d) {
   // wv315 (§ 4.13): een agendaknop (✅ uitvoeren of ↩️ ongedaan) van AI - Agenda-knoppen; alleen bij bron agenda. De nonce blijft hier.
   let ag = null;
   if (d.agenda !== undefined) {
-    if (bron !== 'agenda') return berichtStuur(res, 400, { ok: false, fout: 'agenda alleen bij bron agenda' });
+    if (bron !== 'agenda' && bron !== 'sms') return berichtStuur(res, 400, { ok: false, fout: 'agenda alleen bij bron agenda of sms' });
     ag = appAgendaUitBericht(d.agenda, Date.now());
     if (typeof ag === 'string') return berichtStuur(res, 400, { ok: false, fout: ag });
+  }
+  // wv3664: bron sms = een sms-voorstel van de pod zelf (smsVoorstel); het nummer en de tekst staan bij de nonce in smsWacht, nooit in de body
+  let smsV = null;
+  if (bron === 'sms') {
+    smsV = ag && typeof smsWachtNeem === 'function' ? smsWachtNeem(ag.nonce) : null;
+    if (!smsV || ag.soort !== 'uitvoeren') return berichtStuur(res, 400, { ok: false, fout: 'bron sms alleen voor een sms-voorstel van de pod' });
   }
   let tekst = typeof appOpenKnip === 'function' ? appOpenKnip(d.tekst.replace(/\r\n?/g, '\n')) : d.tekst.replace(/\r\n?/g, '\n');   // wv1712: een bericht stuurt nooit de weergave
   if (!tekst.trim()) return berichtStuur(res, 400, { ok: false, fout: 'geen tekst' });
@@ -16786,6 +16797,7 @@ async function berichtNieuw(res, d) {
   if (ag) {
     agk[id] = { kanaal: kanaal, t: t, knoppen: {} };
     agk[id].knoppen[ag.soort] = { nonce: ag.nonce, verloopt: ag.verloopt, stand: 'open', sinds: null, pagina: null, uitkomst: null };
+    if (smsV) agk[id].sms = smsV;   // wv3664: de ✅ verstuurt dan deze sms (appSmsKnop) in plaats van Agenda-knoppen aan te roepen
     if (!appAgendaKnoppenBewaar()) { delete agk[id]; return berichtStuur(res, 500, { ok: false, fout: 'agendaknop niet op te slaan', terugval: true }); }
   }
   const regel = { t: t, job_id: id, soort: 'socev', bron: bron, klasse: klasse, tekst: '', antwoord: tekst, ok: true,
@@ -17057,6 +17069,7 @@ function berichtRoute(req, res) {
       if (!primair) return berichtStuur(res, 409, { ok: false, error: 'passief', terugval: true });
       if (!naUit && fs.existsSync(APP_UIT)) return berichtStuur(res, 503, { ok: false, fout: 'app staat uit (noodstop)', terugval: true });
       if (p === '/bericht') return berichtNieuw(res, d);
+      if (p === '/bericht/sms-pas') return smsPasRoute(res, d);   // wv3664
       if (p === '/bericht/bestand') return berichtBestand(res, d);
       if (p === '/bericht/stand') return berichtStand(res, d);
       return berichtNaarTelegram(res, d);
@@ -17247,6 +17260,81 @@ async function appAgendaKnopN8n(body) {
   }
   throw new Error('agendaknop niet gevonden');
 }
+// ── wv3664 (besluitenpagina nr 3, C06): een sms gaat pas weg na Davids tik (zie sms-tik.js voor het waarom) ─────────────────────────
+// Socev: POST /smal/sms/voorstel {secret, naar, tekst, naam?} → de pod zet via zijn eigen /bericht (bron sms) een bericht met ✅/❌ in het
+// hoofdgesprek; nummer en tekst staan bij die knop in agenda-knoppen.json (0600, 50 u), nooit in een log. ✅ (verse vingerafdruk) →
+// appSmsKnop: eenmalige pas (60 s, geheugen) → POST verzendtak van AI - SMS Gateway {pas, naar, tekst} → n8n toetst de pas via
+// POST /bericht/sms-pas (pod-geheim) → sms-gate. Eén ✅ = hooguit één verzending: de claim (sms.geclaimd) staat op schijf vóór de aanroep,
+// ook een herstart of time-out geeft geen tweede. Het leesgeheim van Socev opent de verzendtak niet meer.
+const SMS_WF = process.env.SMS_WF || '9aiWD9tXz448nS7E';   // AI - SMS Gateway, webhookknoop "SMS Verzenden"
+const SMS_KNOP_MS = 12 * 3600 * 1000;
+const SMS_N8N_MS = 45 * 1000;
+const smsTik = (function () { try { return require(path.join(__dirname, 'sms-tik.js')); } catch (e) { logError('sms-tik', e); return null; } })();
+const smsPassen = smsTik ? smsTik.passen({ nu: Date.now, toeval: function () { return crypto.randomBytes(16).toString('hex'); } }) : null;
+const smsWacht = new Map();   // nonce -> voorstel, alleen tijdens de eigen /bericht-aanroep van smsVoorstel
+function smsWachtNeem(nonce) { const v = smsWacht.get(nonce); smsWacht.delete(nonce); return v || null; }
+async function smsVoorstel(d) {
+  if (!smsTik) return { status: 404, j: { ok: false, fout: 'sms zit niet in deze versie van de pod' } };
+  const v = smsTik.valideer(d);
+  if (typeof v === 'string') return { status: 400, j: { ok: false, fout: v } };
+  const nonce = crypto.randomBytes(16).toString('hex'), verloopt = Date.now() + SMS_KNOP_MS;
+  smsWacht.set(nonce, v);
+  try {
+    const r = await fetch('http://127.0.0.1:' + PORT + '/bericht', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ secret: SECRET, kanaal: 'hoofd', bron: 'sms', klasse: 'normaal', tekst: smsTik.berichtTekst(v), agenda: { nonce: nonce, soort: 'uitvoeren', verloopt: verloopt } }),
+      signal: AbortSignal.timeout(20000) });
+    let j = null;
+    try { j = await r.json(); } catch (e) { j = null; }
+    if (!r.ok || !j || j.ok !== true || typeof j.id !== 'string') return { status: 503, j: { ok: false, fout: 'voorstel niet in de app gezet (' + String((j && (j.fout || j.error)) || 'HTTP ' + r.status).slice(0, 80) + ')' } };
+    schrijfLog(nu() + ' sms voorstel ' + velden({ bericht: j.id }));   // nooit nummer of tekst in het log
+    return { status: 200, j: { ok: true, bericht: j.id, verloopt: new Date(verloopt).toISOString(), uitleg: 'Het voorstel staat in de app met ✅/❌. Er is niets verstuurd; dat gebeurt pas na Davids ✅.' } };
+  } finally { smsWacht.delete(nonce); }
+}
+function smsPasRoute(res, d) {
+  const pr = smsPassen ? smsPassen.toets(d) : { status: 200, j: { ok: false } };
+  res._log = Object.assign(res._log || {}, { sms_pas: pr.j.ok ? 'ja' : 'nee' });
+  return berichtStuur(res, pr.status, pr.j);
+}
+async function smsVerzendN8n(body) {
+  for (let poging = 0; poging < 2; poging++) {
+    const url = await appWebhookUrl(SMS_WF, 'SMS Verzenden', 'smsVerzendUrl', poging > 0);
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(SMS_N8N_MS) });
+    if (r.status === 404 && poging === 0) { await r.text().catch(function () {}); continue; }   // webhookpad gewijzigd: één keer opnieuw opzoeken
+    let j = null;
+    try { j = await r.json(); } catch (e) { j = null; }
+    return { status: r.status, j: j };
+  }
+  throw new Error('sms-verzenden niet gevonden');
+}
+// Na alle controles van appAgendaRoute (knop open, niet verlopen, verse vingerafdruk bij ✅, bezig gezet en bewaard, uurgrens, rol).
+async function appSmsKnop(res, id, knop, keuze, terug) {
+  const e = appAgendaKnoppen()[id], K = appAgendaKnop(id, knop);
+  if (!e || !e.sms || !K || knop !== 'uitvoeren' || !smsTik) { terug(); return appWeiger(res, 404, 'deze knop ken ik niet (meer)', 'sms onbekend'); }
+  const klaar = function (pagina, uitkomst) {
+    K.stand = 'klaar'; K.sinds = null; K.pagina = pagina; K.uitkomst = uitkomst;
+    appAgendaKnoppenBewaar();   // mislukt: gelogd; de claim (sms.geclaimd) stond al op schijf
+    res._app.reden = 'sms ' + keuze + ' -> ' + pagina;
+    return appStuur(res, 200, { ok: pagina === 'uitgevoerd' || pagina === 'afgewezen', pagina: pagina, melding: uitkomst, agenda: appAgendaVorm(e) });
+  };
+  if (keuze === 'nee') return klaar('afgewezen', '❌ Niet verstuurd.');
+  if (e.sms.geclaimd) {   // een eerdere ✅ is al naar de sms-dienst gegaan (pod herstartte midden in die aanroep): nooit een tweede
+    const t = 'Al afgehandeld: deze ✅ is al eerder gedrukt; kijk in je berichten-app of de sms weg is.';
+    K.stand = 'klaar'; K.sinds = null; K.pagina = 'gebruikt'; K.uitkomst = K.uitkomst || t; appAgendaKnoppenBewaar();
+    res._app.reden = 'sms al geclaimd';
+    return appStuur(res, 409, { ok: false, al_afgehandeld: true, fout: t, melding: t, agenda: appAgendaVorm(e) });
+  }
+  e.sms.geclaimd = new Date().toISOString();
+  if (!appAgendaKnoppenBewaar()) { delete e.sms.geclaimd; terug(); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo opnieuw', 'sms claim'); }
+  let pas;
+  try { pas = smsPassen.maak(e.sms); } catch (x) { logError('sms-pas', x); return klaar('mislukt', '⚠️ Niet verstuurd: de pod kon geen pas maken.'); }
+  let r = null, fout = null;
+  try { r = await smsVerzendN8n({ pas: pas, naar: e.sms.naar, tekst: e.sms.tekst }); } catch (x) { fout = x; }
+  if (fout) logError('sms-verzenden', new Error('verzendtak gaf geen antwoord (' + (/timeout|abort/i.test(String(fout.name) + ' ' + String(fout.message)) ? 'time-out' : String(fout.message).slice(0, 60)) + ')'));
+  else if (r.status !== 200) logError('sms-verzenden', new Error('verzendtak HTTP ' + r.status));
+  const u = smsTik.uitkomst(fout, r && r.status, r && r.j, e.sms.naar);
+  return klaar(u.pagina, u.tekst);
+}
+// ── einde wv3664 ──
 // Volgorde (contract wv315; synchroon tot en met bezig, Fable #11): velden, entry, kanaal, knop, bezig, klaar, verlopen,
 // vingerafdruk (verbruikt), bezig + bewaren, grens, rol, sleutel; dan n8n.
 async function appAgendaRoute(req, res, a, s, d) {
@@ -17283,6 +17371,10 @@ async function appAgendaRoute(req, res, a, s, d) {
   if (!appAgendaKnoppenBewaar()) { terug(); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo opnieuw', 'agenda-knoppen.json'); }
   if (!appTeller('agenda', APP_AGENDA_PER_UUR, 3600000)) { terug(); return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_AGENDA_PER_UUR + '); probeer het straks opnieuw', 'grens agenda'); }
   if (!(await appRolOk())) { terug(); return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later opnieuw', 'rol passief'); }
+  if (e.sms) {   // wv3664: sms-voorstel; zonder de sms-code in deze versie (vm-knipsel, terugrol) nooit naar Agenda-knoppen
+    if (typeof appSmsKnop === 'function') return appSmsKnop(res, id, knop, keuze, terug);
+    terug(); return appWeiger(res, 503, 'versturen van sms zit niet in deze versie van de pod', 'sms ontbreekt');
+  }
   if (!appKnopSleutel()) { terug(); return appWeiger(res, 503, 'de agendaknoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'agenda geen sleutel'); }
   let j = null, fout = null;
   try { j = await appAgendaKnopN8n({ n: K.nonce, a: keuze }); } catch (x) { fout = x; }
@@ -26998,7 +27090,7 @@ const MK_ENV_WEG = {
   'n8n-git-backup': ['SUPABASE_MCP_TOKEN']
 };
 const SOCEV_ENV_MAG = AUTO_AGENT_ENV_MAG.concat([
-  'N8N_WEBHOOK_SMS',                                  // sms-berichten (versturen gaat langs David)
+  'N8N_WEBHOOK_SMS',                                  // sms lezen en markeren; versturen opent dit geheim sinds wv3664 niet meer (pas na Davids tik)
   'N8N_WEBHOOK_SOCEV_AGENDA',                         // agenda-schrijven: voorstel naar de Poortwachter (Knop (app) heeft sinds wv424 een eigen sleutel)
   'N8N_WEBHOOK_MAILCONCEPT',                          // mailconcept-aanmaken, voorlezen
   'N8N_WEBHOOK_VERBETERLOG',
@@ -27132,7 +27224,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata']);   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -27360,6 +27452,7 @@ async function smalActie(actie, d, wie) {
     if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
     return harvester.smal('kaart', d);
   }
+  if (actie === 'sms/voorstel') return typeof smsVoorstel === 'function' ? smsVoorstel(d) : { status: 404, j: { ok: false, fout: 'sms zit niet in deze versie van de pod' } };   // wv3664
   if (actie === 'bandjes/voorstel') {
     if (!bandjes) return { status: 404, j: { ok: false, fout: 'Bandjes zit niet in deze versie van de pod' } };
     const r = bandjes.smal('voorstel', d);
