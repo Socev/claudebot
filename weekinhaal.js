@@ -150,6 +150,24 @@ function maak(dep) {
   const log = dep.log || function () {};
   let bezigTik = false, laatsteTik = null;
 
+  // wv3659: de pod legt een weigering van de voorpoort vast (laatste per sessie); beoordeel() telt die run dan niet als gelopen
+  // staat.poort[sessie] = de laatste 20 weigeringen (ISO), elk aan de run gekoppeld die toen startte
+  function weigeringen(sessie) {
+    const p = (opslag.lees().poort || {})[sessie];
+    return (Array.isArray(p) ? p : []).map(function (x) { return Date.parse(x); }).filter(function (t) { return isFinite(t); });
+  }
+  function poortWeigering(sessie, op) {
+    sessie = String(sessie || '');
+    if (!lijst.some(function (x) { return x.sessie && x.sessie === sessie; })) return false;
+    const iso = new Date(op || klok()).toISOString();
+    return opslag.onder(function (s) {
+      s.poort = s.poort || {};
+      const oud = Array.isArray(s.poort[sessie]) ? s.poort[sessie] : [];
+      s.poort[sessie] = oud.concat([iso]).slice(-20);
+      return true;
+    });
+  }
+
   async function executies(wid) {
     const r = await dep.n8n('GET', '/executions?workflowId=' + encodeURIComponent(wid) + '&limit=25');
     if (!r || r.status !== 200 || !r.json || !Array.isArray(r.json.data)) throw new Error('executies ' + wid + ' http ' + (r && r.status));
@@ -193,7 +211,8 @@ function maak(dep) {
     try {
       return dep.box('\n## [weekinhaal] ' + isoNl(klok()) + ' — ' + r.naam + ': ' + kop + ' (automatisch, wv3194)\n' +
         '- status: ' + (r.status === 'ingehaald' ? 'gesloten (ter info; mislukt de run, dan meldt de Foutmelder hem)' : 'open') + '\n- van: pod (weekinhaal)\n' +
-        '- gemeten: geen n8n-run na de geplande tick en hartslag ' + r.comp + ' ouder dan de tick; MCP execute_workflow production ' +
+        '- gemeten: ' + (r.reden === 'voorpoort' ? 'de n8n-run na de geplande tick werd door de voorpoort (zegel) geweigerd, de poort is nu weer groen (wv3659),'
+          : 'geen n8n-run na de geplande tick') + ' en hartslag ' + r.comp + ' ouder dan de tick; MCP execute_workflow production ' +
         (r.aanroep ? (r.aanroep.ok ? 'aanvaard' : 'zonder antwoord (' + String(r.aanroep.fout || '?').slice(0, 40) + ')') : '?') + ' op ' + isoNl(Date.parse(r.aanroep_op || r.op)) + '.\n' +
         (r.status === 'ingehaald' ? '' : '- gevolg als er niets gebeurt: deze weekronde blijft overgeslagen tot de volgende tick; de hartslag meldt hem na zijn drempel.\n' +
           '- voorstel: n8n-runs van die workflow rond dit tijdstip nalopen; de pod start hem niet nog eens (hooguit één keer per tick).\n'));
@@ -265,7 +284,22 @@ function maak(dep) {
     let ex;
     try { ex = await executies(item.id); } catch (e) { return { besluit: 'executies niet te lezen', T: Tiso }; }
     const na = ex.filter(function (e) { const t = startMs(e); return t === null || t >= T - MARGE_MS; });
-    if (na.length) return { besluit: 'gelopen: run ' + na[0].id + ' (' + na[0].mode + ', ' + na[0].status + ')', T: Tiso };
+    // wv3659: een run die de voorpoort (zegel, wv904) weigerde is geen gelopen ronde (18-11: MrLean gemist, hartslag niet gestempeld).
+    // Alleen als ELKE run na de tick een eigen weigering heeft binnen 2 min van zijn start (marge klokverschil n8n/pod; Codex MOET 1:
+    // een run die wél door de poort kwam blijft "gelopen", ook als een latere poging geweigerd werd).
+    // Eén-op-één (Codex ronde 2): elke weigering hoort bij hooguit één run.
+    const pw = item.sessie ? weigeringen(item.sessie).sort(function (a, b) { return a - b; }) : [];
+    const geweigerd = na.length > 0 && pw.length >= na.length && (function () {
+      const starts = na.map(startMs);
+      if (starts.some(function (t) { return t === null; })) return false;
+      const vrij = pw.slice();
+      return starts.sort(function (a, b) { return a - b; }).every(function (t) {
+        const i = vrij.findIndex(function (w) { return w >= t - MARGE_MS && w <= t + MARGE_MS; });
+        if (i < 0) return false;
+        vrij.splice(i, 1); return true;
+      });
+    })();
+    if (na.length && !geweigerd) return { besluit: 'gelopen: run ' + na[0].id + ' (' + na[0].mode + ', ' + na[0].status + ')', T: Tiso };
     const hs = await c.hartslag();
     if (!hs) return { besluit: 'hartslag niet te lezen', T: Tiso };
     if (!Object.prototype.hasOwnProperty.call(hs, item.comp)) return { besluit: 'hartslagcomponent ' + item.comp + ' onbekend', T: Tiso };
@@ -283,7 +317,13 @@ function maak(dep) {
     try { if (typeof dep.sessieBezig === 'function' && dep.sessieBezig(item)) return { besluit: 'sessie/ronde bezig', T: Tiso }; }
     catch (e) { return { besluit: 'sessie niet te toetsen', T: Tiso }; }
     if (typeof dep.magStarten === 'function' && !dep.magStarten()) return { besluit: 'pod laat niets starten (uitrol of onderhoud)', T: Tiso };
-    return { start: true, besluit: 'inhalen', T: Tiso, sleutel: sleutel, trigger: sp.trigger, meerTriggers: sp.meerTriggers, voor_ids: ex.map(function (e) { return String(e.id); }) };
+    if (geweigerd) {
+      let groen = false;
+      try { groen = typeof dep.poortGroen === 'function' && (await dep.poortGroen(item)) === true; } catch (e) {}
+      if (!groen) return { besluit: 'wacht: voorpoort weigerde run ' + na[0].id + ' en is nog niet groen (herzegelen)', T: Tiso };
+    }
+    return { start: true, besluit: 'inhalen', T: Tiso, sleutel: sleutel, trigger: sp.trigger, meerTriggers: sp.meerTriggers, voor_ids: ex.map(function (e) { return String(e.id); }),
+      reden: geweigerd ? 'voorpoort' : null };
   }
 
   async function start(item, b, nu) {
@@ -296,6 +336,7 @@ function maak(dep) {
     const vast = opslag.onder(function (s) {
       if (s.rondes[b.sleutel]) return false;
       s.rondes[b.sleutel] = { workflow: item.id, naam: item.naam, comp: item.comp, T: b.T, status: 'gestart', op: new Date(nu).toISOString(), voor_ids: b.voor_ids.slice(0, 25) };
+      if (b.reden) s.rondes[b.sleutel].reden = b.reden;
       return true;
     });
     if (!vast) return 'niet gestart: sleutel bestond al';
@@ -344,6 +385,10 @@ function maak(dep) {
         let n = 0;
         for (const k of Object.keys(s.rondes)) { const x = s.rondes[k]; if (nu - Date.parse(x.T) > BEWAAR_MS) { delete s.rondes[k]; n++; } }
         for (const k of Object.keys(s.regelfout || {})) { if (nu - Date.parse(s.regelfout[k]) > BEWAAR_MS) { delete s.regelfout[k]; n++; } }
+        for (const k of Object.keys(s.poort || {})) {
+          const oud = Array.isArray(s.poort[k]) ? s.poort[k] : [], blijft = oud.filter(function (x) { return nu - Date.parse(x) <= BEWAAR_MS; });
+          if (!blijft.length) { delete s.poort[k]; n++; } else if (blijft.length !== oud.length) { s.poort[k] = blijft; n++; }
+        }
         return n > 0;
       });
     } catch (e) {}
@@ -363,7 +408,7 @@ function maak(dep) {
     return { aan: !(dep.uit && dep.uit()), stromen: lijst.length, laatste_tik: laatsteTik, deze_week: tel, bezig: bezig };
   }
 
-  return { tik: tik, markeer: markeer, health: health, opruimen: opruimen, staat: function () { return opslag.lees(); } };
+  return { tik: tik, markeer: markeer, health: health, opruimen: opruimen, poortWeigering: poortWeigering, staat: function () { return opslag.lees(); } };
 }
 
 // ── MCP execute_workflow via de streambare HTTP-ingang van n8n (initialize -> initialized -> tools/call), alles binnen ms ──
