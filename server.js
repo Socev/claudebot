@@ -15416,7 +15416,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag|medisch)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
         if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
         if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking
-        if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen)
+        if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk' || route === 'GET /app/nza/punten') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen); wv3676: tab Punten
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0) return typeof appKalender === 'function' ? appKalender(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv2333: OVIS Calendar (alleen lezen)
@@ -24737,6 +24737,7 @@ function vastgoedInfo() {
 // en dezelfde regels als de agent van fase 1a; index /opt/data/ovis-nza/nza.db read-only). Alleen lezen, geen netwerk. Routes achter de
 // app-sessie (alleen David):
 //   GET  /app/nza                             overzicht: telling, stukken met stand, tijdlijn, nieuw, dekking per soort, zaken, uitspraken
+//   GET  /app/nza/punten                      wv3676: tab Punten — verweerpunten (register) met de jongste naloop per punt
 //   POST /app/nza/stuk {id, plek?, citaat?, van?}   één stuk: gegevens, versies, relaties, plekken en 8 passages rond de plek;
 //                                             met citaat de citaatcontrole van 1a (vinkje alleen bij woordelijk op die plek)
 // Audit/log: alleen route + reden; nooit tekst uit een stuk of een citaat.
@@ -24749,6 +24750,7 @@ const NZA_SCHERM = (function () {
       db: serverPad('nza-db', process.env.NZA_DB, '/opt/data/ovis-nza/nza.db', serverProefDeel('nza/nza.db')),
       wacht: serverPad('nza-wacht', process.env.NZA_WACHT, '/opt/data/ovis-nza/wacht', serverProefDeel('nza/wacht')),   // wv3113: scherm.json van de wachter
       log: serverPad('nza-log', process.env.NZA_LOG, '/opt/data/ovis-nza/log', serverProefDeel('nza/log')),   // wv3158: ontbreekt.jsonl (lijst Ontbreekt)
+      register: serverPad('nza-register', process.env.NZA_REGISTER, path.join(VAULT, '10_Zakelijk/DBH/Verweerpunten'), serverProefDeel('nza/register')),   // wv3676: tab Punten
       vandaag: (!SERVER_ECHT && process.env.NZA_VANDAAG) || '',
       toegang: SERVER_ECHT ? '/opt/data/mk-scripts/ovis-nza/toegang.py' : (process.env.NZA_TOEGANG || '') });   // wv3153: /health.nza.index_leesbaar_agent
   } catch (e) { logError('nza', new Error('laden faalde')); return null; }

@@ -7,6 +7,9 @@
 // Fase 2 (wv3113): de wachter (mk-scripts/ovis-nza/wachter.py) schrijft <wacht>/scherm.json (titel + link-stukken, laatst gekeken per bron);
 // nza.py zet die in het overzicht (nieuw_links, bronnen). De cache kijkt daarom ook naar dat bestand.
 // wv3158: lijst Ontbreekt (overzicht.ontbreekt) = stand van de wachter + zoekrijen uit <log>/ontbreekt.jsonl; de cache kijkt ook daarnaar.
+// wv3676 (21-11-2026, besluitenpagina nr 128): GET /app/nza/punten = tab Punten (nza.py scherm punten): de verweerpunten uit het register
+// (vault 10_Zakelijk/DBH/Verweerpunten, of opts.register in een toets) met de jongste naloop per punt. Geen cache: ± 0,2 s, en een naloop
+// die de agent net bewaarde moet meteen zichtbaar zijn.
 // Alleen child_process (execFile zonder shell, python3 -I) en fs.
 const { execFile } = require('child_process');
 const fs = require('fs');
@@ -20,6 +23,7 @@ function maak(opts) {
   const db = opts.db;
   const wacht = opts.wacht || '';   // map met scherm.json van de wachter (wv3113)
   const logmap = opts.log || '';   // wv3158: map met ontbreekt.jsonl (zoekrijen van de agent; lijst Ontbreekt)
+  const register = opts.register || '';   // wv3676: registermap (NZA_REGISTER); leeg = de vault (nza.py)
   const vandaag = opts.vandaag || '';   // alleen voor de toets met het proefdossier (NZA_VANDAAG)
   const timeoutMs = opts.timeoutMs || 20000;
   let cache = null;   // overzicht per stand van de index (mtime + grootte)
@@ -55,6 +59,7 @@ function maak(opts) {
       const env = { PATH: process.env.PATH || '/usr/bin:/bin', NZA_DB: db, LANG: 'C.UTF-8' };
       if (wacht) env.NZA_WACHT = wacht;
       if (logmap) env.NZA_LOG = logmap;
+      if (register) env.NZA_REGISTER = register;
       if (vandaag) env.NZA_VANDAAG = vandaag;
       execFile('python3', ['-I', script, 'scherm'].concat(argv), { env: env, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024 },
         function (e, out) {
@@ -109,6 +114,7 @@ function maak(opts) {
     if (!aan()) return { status: 503, body: { ok: false, fout: 'het NZa-dossier staat niet op deze pod' }, reden: 'nza uit' };
     if (v.methode === 'GET' && v.pad === '/app/nza') return overzicht();
     if (v.methode === 'POST' && v.pad === '/app/nza/stuk') return stuk(v.body);
+    if (v.methode === 'GET' && v.pad === '/app/nza/punten') return draai(['punten']);   // wv3676
     return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'nza onbekend' };
   }
 

@@ -14,7 +14,8 @@ echo "$C" | grep -qF "execFile('python3', ['-I', script, 'scherm']" || { echo "R
 g=0
 grep -q "const NZA_SCHERM = (function () {" server.js || { echo "ROOD  server.js: NZA_SCHERM ontbreekt"; g=1; }
 R=$(grep -oE "'(GET|POST) /app/nza[a-z/]*'" server.js | sort -u | tr '\n' ' ')
-[ "$R" = "'GET /app/nza' 'GET /app/nza/vragen' 'POST /app/nza/draad' 'POST /app/nza/dubbelcheck' 'POST /app/nza/stuk' " ] || { echo "ROOD  server.js: NZa-routes zijn niet precies GET /app/nza(/vragen) en POST /app/nza/stuk|draad|dubbelcheck ($R)"; g=1; }
+[ "$R" = "'GET /app/nza' 'GET /app/nza/punten' 'GET /app/nza/vragen' 'POST /app/nza/draad' 'POST /app/nza/dubbelcheck' 'POST /app/nza/stuk' " ] || { echo "ROOD  server.js: NZa-routes zijn niet precies GET /app/nza(/punten|/vragen) en POST /app/nza/stuk|draad|dubbelcheck ($R)"; g=1; }
+grep -qF "register: serverPad('nza-register', process.env.NZA_REGISTER" server.js || { echo "ROOD  server.js: registermap (wv3676) niet via serverPad"; g=1; }
 grep -qF "APP_GLIJD_ROUTES.add('POST /app/nza/stuk');" server.js || { echo "ROOD  server.js: NZa-stuk verlengt de sessie niet"; g=1; }
 grep -qE "^\s+nza: typeof nzaInfo === 'function'" server.js || { echo "ROOD  server.js: /health.nza ontbreekt"; g=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* nza-scherm\.js" uitrol.sh || { echo "ROOD  uitrol.sh: nza-scherm.js niet in RELEASE_OPTIONEEL"; g=1; }

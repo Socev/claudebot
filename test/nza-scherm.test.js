@@ -137,6 +137,51 @@ test('proefdossier door het echte nza.py', { skip: echtAan ? false : 'nza.py met
   assert.strictEqual(ov.stukken.find((x) => x.id === 'bob-proef-2025').stand, '');
 });
 
+// wv3676: tab Punten — het echte nza.py op het verzonnen register (test/nza-proef-register.py) naast het proefdossier
+test('wv3676: punten uit het register met de jongste naloop; vijf zwakste; bronlink met citaat; geen link gevolgd', { skip: echtAan ? false : 'nza.py niet aanwezig (CI)' }, async () => {
+  const db = path.join(T, 'proef-p.db');
+  execFileSync('python3', ['-I', path.join(__dirname, 'nza-proef.py'), db]);
+  const reg = path.join(T, 'reg', 'Verweerpunten');
+  execFileSync('python3', ['-I', path.join(__dirname, 'nza-proef-register.py'), reg]);
+  const m = maak({ script: ECHT, db, register: reg, vandaag: '2026-11-21' });
+  const u = await m.app({ pad: '/app/nza/punten', methode: 'GET' });
+  assert.strictEqual(u.status, 200);
+  const o = u.body;
+  assert.strictEqual(o.punten.length, 6);
+  assert.deepStrictEqual(o.themas.map((x) => [x.thema, x.naam, x.punten]), [['huisvesting', 'Huisvesting', 2], ['procedure', 'Procedure en transparantie', 4]]);
+  const p = Object.fromEntries(o.punten.map((x) => [x.id, x]));
+  assert.strictEqual(p['VP-01'].naloop.oordeel, 'zwak', 'de nieuwste naloop telt');
+  assert.ok(p['VP-01'].naloop.waarom.includes('nieuw'));
+  assert.strictEqual(p['VP-03'].naloop.oordeel, 'zwak', '**Zwak** wordt zwak');
+  assert.strictEqual(p['VP-05'].naloop, null, 'een link in Naloop wordt niet gevolgd');
+  assert.ok(!JSON.stringify(o).includes('GEHEIM-BUITEN-REGISTER'));
+  assert.strictEqual(p['VP-04'].naloop.oordeel, 'sterk', 'een nieuwere link verbergt de geldige naloop niet (Codex MOET 2)');
+  assert.strictEqual(p['VP-06'].naloop.oordeel, '', 'vrije vorm: geen oordeel');
+  assert.ok(p['VP-06'].naloop.md.includes('vrije vorm'));
+  assert.deepStrictEqual(o.zwakste, ['VP-01', 'VP-03', 'VP-02', 'VP-04'], 'zwak (hoog eerst), dan redelijk, dan sterk; zonder oordeel niet');
+  assert.strictEqual(o.nagelopen, 5);
+  assert.deepStrictEqual(o.per_oordeel, { zwak: 2, redelijk: 1, sterk: 1 });
+  assert.strictEqual(p['VP-01'].citaten_ok, 2);
+  assert.strictEqual(p['VP-01'].bronnen, 2);
+  assert.deepStrictEqual(p['VP-01'].ontbreekt, ['het proefverslag van het overleg staat niet in het dossier.']);
+  assert.deepStrictEqual(p['VP-02'].ontbreekt, []);
+  assert.strictEqual(p['VP-01'].stand, 'het proefpunt ligt voor bij de proefrechter.');
+  assert.strictEqual(p['VP-01'].wij.length, 2);
+  assert.ok(p['VP-01'].wij[0].includes('[B1](/nza#stuk=cbb-2099-901&plek=1.2&c=de+NZa+de+proeftarieven'), p['VP-01'].wij[0]);
+  assert.strictEqual(p['VP-01'].wij[1], 'Een tweede proefargument zonder bron.');
+  // Codex MOET 1: is de map Naloop zelf een link (socev kan in de vault links zetten), dan wordt hij niet gevolgd
+  const reg2 = path.join(T, 'reg2', 'Verweerpunten');
+  execFileSync('python3', ['-I', path.join(__dirname, 'nza-proef-register.py'), reg2]);
+  fs.renameSync(path.join(reg2, 'Naloop'), path.join(T, 'reg2', 'elders'));
+  fs.symlinkSync(path.join(T, 'reg2', 'elders'), path.join(reg2, 'Naloop'));
+  const o2 = (await maak({ script: ECHT, db, register: reg2, vandaag: '2026-11-21' }).app({ pad: '/app/nza/punten', methode: 'GET' })).body;
+  assert.strictEqual(o2.punten.length, 6);
+  assert.strictEqual(o2.nagelopen, 0, 'map Naloop als link: geen naloop gelezen');
+  const leeg = maak({ script: ECHT, db, register: path.join(T, 'bestaat-niet'), vandaag: '2026-11-21' });
+  const l = (await leeg.app({ pad: '/app/nza/punten', methode: 'GET' })).body;
+  assert.deepStrictEqual([l.punten.length, l.zwakste.length], [0, 0]);
+});
+
 test('wv3153: index_leesbaar_agent in info() uit toegang.py (achtergrond, nooit wachten; fout = null)', async () => {
   const nepT = (naam, inhoud) => { const p = path.join(T, naam); fs.writeFileSync(p, inhoud); return p; };
   const goed = nepT('toegang-goed.py', 'import json; print(json.dumps({"index_leesbaar_agent": True, "log_schrijfbaar_agent": False, "fouten": ["x"]}))');
