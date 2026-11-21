@@ -101,12 +101,26 @@ const nep = O.maak({ basis: basis, geheugenToets: MK.geheugenToets, ghToken: () 
     if (/pages\/projects/.test(url)) return { success: true, result: [{ name: 'respi', canonical_deployment: { created_on: '2026-11-12T11:00:00Z', deployment_trigger: { metadata: { commit_hash: 'aaaaaaa111', branch: 'main' } } } }], result_info: { total_pages: 1 } };
     if (/workers\/scripts/.test(url)) return { success: true, result: [{ id: 'ovis-texere', modified_on: '2026-11-04T10:00:00Z' }] };
     if (/branches/.test(url)) return { commit: { sha: 'bbbbbbb222' } };
+    if (/repos\/Socev\/ovis-texere\/commits\?sha=main&since=2026-11-04T10%3A00%3A00\.000Z&per_page=100$/.test(url)) return [{ commit: { committer: { date: '2026-11-16T10:00:00Z' } } }, { commit: { committer: { date: '2026-11-05T09:00:00Z' } } }];
     throw new Error('onbekend ' + url);
   } });
 let s1 = await nep.standMeet();
 const uit = nep.appsUit({ stand: s1 });
 const tx = uit.apps.find((a) => a.id === 'texere'), sp = uit.apps.find((a) => a.id === 'spoed');
-toets('B stand: Worker-uitrol + push ná uitrol = main verder (benadering)', tx.uitrol && tx.uitrol.soort === 'worker' && tx.uitrol.main_verder === true && tx.repos[0].push === '2026-11-16T10:00:00Z', tx.uitrol);
+toets('B stand: Worker-uitrol + push ná uitrol = NIET "main verder" (niet gemeten), wel 2 commits op main sinds 5-11 (3B21)', tx.uitrol && tx.uitrol.soort === 'worker' && tx.uitrol.main_verder === null &&
+  tx.uitrol.niet_gemeten && tx.uitrol.niet_gemeten.aantal === 2 && tx.uitrol.niet_gemeten.meer === false && tx.uitrol.niet_gemeten.sinds === '2026-11-05T09:00:00Z' &&
+  tx.uitrol.niet_gemeten.push === '2026-11-16T10:00:00Z' && tx.repos[0].push === '2026-11-16T10:00:00Z', tx.uitrol);
+{
+  const zonder = Object.assign({}, s1); delete zonder.wacht;
+  const tOud = nep.appsUit({ stand: zonder }).apps.find((a) => a.id === 'texere').uitrol;
+  toets('B stand zonder telling (oude stand.json): Worker niet gemeten, aantal onbekend, geen "main verder"', tOud.main_verder === null && tOud.niet_gemeten && tOud.niet_gemeten.aantal === null, tOud);
+  const nul = Object.assign({}, s1, { wacht: { 'ovis-texere': { aantal: 0, meer: false, sinds: null } } });
+  const tNul = nep.appsUit({ stand: nul }).apps.find((a) => a.id === 'texere').uitrol;
+  toets('B stand: push alleen buiten main (0 commits op main sinds uitrol) = niets te melden', tNul.main_verder === null && tNul.niet_gemeten === null, tNul);
+  const voor = Object.assign({}, s1, { repos: Object.assign({}, s1.repos, { 'ovis-texere': Object.assign({}, s1.repos['ovis-texere'], { push: '2026-11-04T10:05:00Z' }) }) });
+  const tVoor = nep.appsUit({ stand: voor }).apps.find((a) => a.id === 'texere').uitrol;
+  toets('B stand: push binnen 10 min na de Worker-uitrol = niets te melden', tVoor.main_verder === null && tVoor.niet_gemeten === null, tVoor);
+}
 toets('B stand: Pages-commit ≠ main = main verder, korte commit', sp.uitrol && sp.uitrol.soort === 'pages' && sp.uitrol.commit === 'aaaaaaa' && sp.uitrol.main_verder === true, sp.uitrol);
 toets('B route zonder interne werkplek (geen "code"-veld, geen /opt/data)', !JSON.stringify(uit.apps).includes('/opt/data') && uit.apps.every((a) => !('code' in a) && !('voorvoegsels' in a) && !('register' in a)));
 const kapot = O.maak({ basis: basis, geheugenToets: MK.geheugenToets, ghToken: () => 'x', cfToken: () => 'y', cfAccount: 'acc', haal: async function () { throw new Error('api.github.com 503'); } });
