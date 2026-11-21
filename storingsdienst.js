@@ -23,6 +23,7 @@
 
 const WACHT_MS = 15 * 60000, UITERLIJK_MS = 45 * 60000, RUIS_MS = 24 * 3600000, BEWAAR_MS = 14 * 86400000;
 const BUNDEL_MAX = 8, PER_DAG = 12, POGINGEN = 2, BEZIG_MAX_MS = 10 * 60000;
+const OPNIEUW_PER_DAG = 4;
 
 // Workflows die bij elke run het achtergebleven werk zelf meenemen (poller op een wachtrij of label): een geslaagde latere run bewijst
 // dat het werk van de mislukte run alsnog gedaan is. Vaste lijst; uitbreiden = stap 2 (vervolgrij).
@@ -32,11 +33,24 @@ const ZELFHERSTEL = {
   '8swfS8Km2fhuJSdT': 'AI - Signal meelezen',                // leest elk kwartier alles sinds de laatste geslaagde lezing
 };
 
+// wv3760 (stap 2): zelf opnieuw proberen via de n8n-retry (hervat bij de mislukte knoop; eerdere knopen draaien niet opnieuw). Alleen
+// als de run faalde op een knoop die ALLEEN LEEST: dan deed de mislukte run niets wat de retry kan herhalen. Vaste lijst per
+// (workflow, knoop), met het aantal uren waarbinnen opnieuw proberen nog zin heeft. Nooit iets dat verstuurt, betaalt of wist.
+// Ontwerp + Codex-review: mk-scripts/wv3760/ontwerp-stap2.md.
+const OPNIEUW = {
+  DVUqVkEIt8rKPR7L: { naam: 'AI - WhatsApp Nachtextractie', uur: 6,
+    knopen: ['Zoek whitelist-bestand', 'Download whitelist', 'Lees waterlijn', 'Haal berichten op (WAHA)', 'Volglijst lezen (Intake)'] },
+  '8o2bg3RXj6EJ02yF': { naam: 'AI - Contacten Sync (Google → Supabase)', uur: 12, knopen: ['Groepen ophalen', 'Contacten ophalen (volledig)'] },
+};
+// Alleen tijdelijke dienst-/netwerkfouten (n8n-standaardzinnen); 400/401/403/404 en vrije fouten nooit.
+const TIJDELIJK = [/^Service unavailable - try again later/i, /^Bad gateway - the service failed/i, /^Gateway timed out/i, /^The DNS server returned an error/i,
+  /^The connection was aborted/i, /^The connection to the server was closed unexpectedly/i, /^The service is receiving too many requests/i, /^Timeout/i];
+
 // n8n-standaardmeldingen die het model wél mag zien (MOET 1): technische zinnen zonder gegevens. Al het andere: weggelaten.
 const STANDAARD = [
   /^Service unavailable - try again later/i, /^Bad gateway - the service failed/i, /^The DNS server returned an error/i,
   /^The connection was aborted/i, /^The connection to the server was closed unexpectedly/i, /^Method not allowed/i,
-  /^Forbidden - perhaps check your credentials/i, /^Authorization failed/i, /^Your request is invalid or could not be processed/i,
+  /^Gateway timed out - perhaps try again later/i, /^Forbidden - perhaps check your credentials/i, /^Authorization failed/i, /^Your request is invalid or could not be processed/i,
   /^The resource you are requesting could not be found/i, /^The service is receiving too many requests/i, /^Timeout/i,
   /^Error executing workflow with item at index \d+$/i, /^The service was not able to process your request/i,
   /^Cannot read properties of undefined \(reading '[A-Za-z_$][\w$]{0,30}'\)( \[line \d+\])?$/i,
@@ -90,6 +104,9 @@ function maak(io) {
     staat.wacht = Array.isArray(staat.wacht) ? staat.wacht : [];
     staat.uitkomsten = staat.uitkomsten && typeof staat.uitkomsten === 'object' ? staat.uitkomsten : {};
     staat.per_sleutel = staat.per_sleutel && typeof staat.per_sleutel === 'object' ? staat.per_sleutel : {};
+    staat.opnieuw = staat.opnieuw && typeof staat.opnieuw === 'object' ? staat.opnieuw : {};
+    if (!info.laatst && staat.laatst) info.laatst = staat.laatst;   // wv3760: /health vergeet het laatste onderzoek niet bij een herstart
+    if (staat.dag && staat.dag.datum === dag(io.nu ? io.nu() : Date.now())) info.onderzoeken_vandaag = staat.dag.n || 0;
     return staat;
   }
   function bewaar() { io.schrijfStaat(staat); }
@@ -118,6 +135,45 @@ function maak(io) {
   function opruimen(nu) {
     Object.keys(staat.uitkomsten).forEach(function (r) { if (!(nu - (staat.uitkomsten[r].t || 0) < BEWAAR_MS)) delete staat.uitkomsten[r]; });
     Object.keys(staat.per_sleutel).forEach(function (s) { if (!(nu - (staat.per_sleutel[s].op || 0) < RUIS_MS)) delete staat.per_sleutel[s]; });
+    Object.keys(staat.opnieuw).forEach(function (x) { if (!(nu - (staat.opnieuw[x].op || 0) < BEWAAR_MS)) delete staat.opnieuw[x]; });
+  }
+
+  // wv3760: mag deze mislukte run opnieuw (zie OPNIEUW)? Eerst de goedkope toets zonder n8n (vooraf), dan met de run zelf (run).
+  function opnieuwVooraf(a, h, nu) {
+    if (io.opnieuwUit && io.opnieuwUit()) return false;
+    if (!io.opnieuw || !io.run || a.soort !== 'storing' || !a.workflow_id || !a.executie) return false;
+    const lijst = Object.prototype.hasOwnProperty.call(OPNIEUW, a.workflow_id) ? OPNIEUW[a.workflow_id] : null;
+    if (!lijst || lijst.knopen.indexOf(a.knoop) < 0) return false;
+    if (!a.standaard || !TIJDELIJK.some(function (re) { return re.test(a.standaard); })) return false;
+    if (!(nu - a.t < lijst.uur * 3600000)) return false;
+    if (Object.prototype.hasOwnProperty.call(staat.opnieuw, String(a.executie))) return false;   // per executie hooguit één poging, ook na herstart
+    if (((staat.dag && staat.dag.opnieuw) || 0) >= OPNIEUW_PER_DAG) return false;
+    if (h && h.inhaal) return false;   // de inhaalslag heeft hem al
+    return true;
+  }
+  function opnieuwMetRun(a, h, run) {
+    if (!run || String(run.id) !== String(a.executie) || run.mode !== 'trigger' || run.retryOf || run.retrySuccessId || run.status !== 'error') return false;
+    const t0 = Date.parse(run.startedAt);
+    if (!isFinite(t0)) return false;
+    // geen andere run van die workflow gestart na de foute (ook geen lopende): dan nam die het al mee of loopt hij ermee in de weg
+    return !(Array.isArray(h.runs) ? h.runs : []).some(function (r) { return r && String(r.id) !== String(a.executie) && (Date.parse(r.startedAt) > t0 || !isFinite(Date.parse(r.startedAt))); });
+  }
+  async function probeerOpnieuw(a, h, nu, ctx) {
+    if (ctx.opnieuw_gedaan || !opnieuwVooraf(a, h, nu)) return;   // hooguit één retry per onderzoek (Codex MOET 1: begrensde duur)
+    let run = null;
+    try { run = await io.run(a.executie); } catch (e) { return; }
+    if (!opnieuwMetRun(a, h, run)) return;
+    const ex = String(a.executie);
+    ctx.opnieuw_gedaan = true;
+    staat.opnieuw[ex] = { op: nu, workflow_id: a.workflow_id, knoop: a.knoop };
+    staat.dag.opnieuw = ((staat.dag && staat.dag.opnieuw) || 0) + 1;
+    bewaar();   // vóór de aanroep vastgelegd: een herstart halverwege geeft nooit een tweede poging
+    let r;
+    try { r = await io.opnieuw(ex); } catch (e) { r = { fout: kort(e && e.message || e, 100) }; }
+    h.opnieuw = { id: r && r.id != null ? String(r.id) : null, status: r && r.status ? String(r.status) : null, fout: r && r.fout || null, op: io.nu() };
+    Object.assign(staat.opnieuw[ex], h.opnieuw);
+    bewaar();
+    io.log('storingsdienst opnieuw ' + ex + ' -> ' + (h.opnieuw.id || '?') + ' ' + (h.opnieuw.status || h.opnieuw.fout || '?'));
   }
 
   // Afloop, deterministisch (MOET 2/3). h = io.afloop(alarm) → { runs: [{id,status,startedAt}], inhaal: {status, op}|null,
@@ -130,6 +186,16 @@ function maak(io) {
       if (s && s.status === 'stil') return { stand: 'kapot', tekst: 'Nog steeds stil' + (s.laatste_executie ? ' (laatste aanvoer ' + klokBij(Date.parse(s.laatste_executie), a.t) + ').' : '.') };
       return { stand: 'afwachten', tekst: 'Of de aanvoer weer loopt, is nu niet vast te stellen.' };
     }
+    const op = h.opnieuw;
+    if (op) {   // wv3760: de storingsdienst probeerde de run zelf opnieuw
+      const k = klokBij(op.op, a.t);
+      if (op.status === 'success') return { stand: 'bewezen', tekst: 'Om ' + k + ' zelf opnieuw geprobeerd vanaf de mislukte stap; dat lukte.' };
+      if (op.status === 'error' || op.status === 'crashed') return { stand: 'kapot', tekst: 'Om ' + k + ' zelf opnieuw geprobeerd vanaf de mislukte stap; ook dat mislukte.' };
+      return { stand: 'afwachten', tekst: 'Om ' + k + ' geprobeerd hem zelf opnieuw te starten; of dat liep, is nog niet bekend.' };   // Codex ZOU 1: acceptatie onbekend
+    }
+    const ex0 = String(a.executie || '');
+    const herh = ex0 && (Array.isArray(h.runs) ? h.runs : []).find(function (r) { return r && r.retryOf != null && String(r.retryOf) === ex0 && r.status === 'success'; });
+    if (herh) return { stand: 'bewezen', tekst: 'Om ' + klokBij(Date.parse(herh.startedAt), a.t) + ' opnieuw gedraaid vanaf de mislukte stap; dat lukte.' };
     const inh = h.inhaal;
     if (inh && inh.status === 'ingehaald') return { stand: 'bewezen', tekst: 'Ingehaald' + (inh.op ? ' om ' + klokBij(Date.parse(inh.op), a.t) : '') + ': de inhaalslag draaide de mislukte run opnieuw en dat lukte.' };
     if (inh && inh.status === 'overbodig') return { stand: 'bewezen', tekst: 'Hoefde niet ingehaald te worden: het werk was al gedaan.' };
@@ -216,6 +282,7 @@ function maak(io) {
     for (const a of lijst) {
       let h = {};
       try { h = (await io.afloop(a)) || {}; } catch (e) { h = {}; }
+      try { await probeerOpnieuw(a, h, nu, ctx); } catch (e) {}
       ctx.afloop[a.ref] = h; ctx.af[a.ref] = afloop(a, h);
     }
     try { ctx.rond = (await io.rondom(lijst)) || []; } catch (e) { ctx.rond = []; }
@@ -256,7 +323,15 @@ function maak(io) {
     catch (e) { rijen.forEach(function (u) { u.bericht_fout = true; }); }
   }
 
+  // Codex MOET 1 (wv3760): zolang een tik in dit proces loopt, start er geen tweede; een verlopen 'bezig' in de staat wordt dus alleen
+  // na een herstart (oorspronkelijke uitvoering gestopt) teruggezet.
+  let loopt = false;
   async function tik() {
+    if (loopt) return { stil: 'loopt' };
+    loopt = true;
+    try { return await tikBinnen(); } finally { loopt = false; }
+  }
+  async function tikBinnen() {
     if (io.uit && io.uit()) return { stil: 'uit' };
     laad();
     const nu = io.nu();
@@ -317,9 +392,13 @@ function maak(io) {
     staat.dag.n++;   // alleen een gelukt onderzoek telt voor het plafond (een mislukte poging is begrensd door POGINGEN)
     await handel(r.rijen);
     r.rijen.forEach(function (u) { staat.uitkomsten[u.ref] = u; });
-    if (r.verbruik) { staat.dag.verbruik = (staat.dag.verbruik || []).concat([{ op: nu, n: lijst.length, in: r.verbruik.in, uit: r.verbruik.uit, ms: r.verbruik.ms, kosten: r.verbruik.kosten }]).slice(-PER_DAG); }
-    info.laatst = { op: new Date(nu).toISOString(), alarmen: lijst.length, uitkomsten: r.rijen.map(function (u) { return u.uitkomst; }), verbruik: r.verbruik || null };
-    io.log('storingsdienst onderzoek ' + r.rijen.map(function (u) { return u.ref + ':' + u.uitkomst; }).join(',') + (r.verbruik ? ' in=' + r.verbruik.in + ' uit=' + r.verbruik.uit : ''));
+    // wv3760: invoer = nieuwe + uit de cache gelezen + in de cache geschreven tokens (de prompt staat meestal in de cache: "in=2" zei niets)
+    const v = r.verbruik ? { in: (r.verbruik.in || 0) + (r.verbruik.cache_lees || 0) + (r.verbruik.cache_schrijf || 0), cache: (r.verbruik.cache_lees || 0) + (r.verbruik.cache_schrijf || 0),
+      uit: r.verbruik.uit || 0, ms: r.verbruik.ms || null, kosten: r.verbruik.kosten == null ? null : r.verbruik.kosten } : null;
+    if (v) { staat.dag.verbruik = (staat.dag.verbruik || []).concat([Object.assign({ op: nu, n: lijst.length }, v)]).slice(-PER_DAG); }
+    info.laatst = { op: new Date(nu).toISOString(), alarmen: lijst.length, uitkomsten: r.rijen.map(function (u) { return u.uitkomst; }), verbruik: v };
+    staat.laatst = info.laatst;
+    io.log('storingsdienst onderzoek ' + r.rijen.map(function (u) { return u.ref + ':' + u.uitkomst; }).join(',') + (v ? ' in=' + v.in + ' uit=' + v.uit : ''));
     opruimen(nu); bewaar();
     return { onderzocht: r.rijen.length };
   }
@@ -342,8 +421,12 @@ function maak(io) {
       van: klok(o.t), zelfde_als: zelfde ? klok(o.t) : null };
   }
 
-  function health() { return Object.assign({ aan: !(io.uit && io.uit()), per_dag: PER_DAG }, info); }
+  function health() {
+    try { laad(); } catch (e) {}
+    return Object.assign({ aan: !(io.uit && io.uit()), per_dag: PER_DAG, opnieuw_aan: !!(io.opnieuw && !(io.opnieuwUit && io.opnieuwUit())),
+      opnieuw_vandaag: (staat && staat.dag && staat.dag.datum === dag(io.nu()) && staat.dag.opnieuw) || 0 }, info);
+  }
   return { tik: tik, voorKaart: voorKaart, health: health };
 }
 
-module.exports = { maak, standaardMelding, ZELFHERSTEL, WACHT_MS, UITERLIJK_MS, RUIS_MS, PER_DAG, BUNDEL_MAX };
+module.exports = { maak, standaardMelding, ZELFHERSTEL, OPNIEUW, OPNIEUW_PER_DAG, WACHT_MS, UITERLIJK_MS, RUIS_MS, PER_DAG, BUNDEL_MAX };

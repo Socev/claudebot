@@ -5,6 +5,7 @@
 #   niet door het model (MOET 3); ruisregel 24 u: geen tweede onderzoek of bericht, kaart verwijst; bundel = één modelbeurt; nog kapot
 #   met handeling → Voor jou, zonder → box; model faalt → opnieuw, na 2× box; plafond 12/dag; stiltemelding weer gezond → opgelost.
 # Kruisproef: STORINGSDIENST_MOD=<kopie zonder ruisregel> bash test/storingsdienst.sh moet rood zijn.
+# wv3760 (stap 2, § 11–14): retry alleen bij een mislukte leesknoop van de vaste lijst; kruisproef = kopie zonder knoopcontrole → 11e rood.
 set -u
 HIER="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
@@ -121,6 +122,68 @@ function rij(id, t, tekst, bron) { return { id: id, createdAt: new Date(t).toISO
   w.staat = { watermerk: 0 }; w.rijen = [rij(1, w.t, 'Aanvoer stil\n\nAI - Outlook is stil sinds 2026-11-21 08:00 - 3 effectieve uren, drempel 2', 'stiltewachter')];
   d = w.dienst(); await d.tik(); w.t += 16 * MIN; await d.tik();
   toets('10 stil en weer gezond → opgelost', w.af.length === 1 && w.af[0] === 's-AI - Outlook-1' && /Levert weer aan/.test(w.bericht[0].t));
+
+  // 11 wv3760 stap 2: zelf opnieuw proberen, alleen bij een mislukte LEESknoop op de vaste lijst
+  function opWereld(o) {
+    o = o || {};
+    const wid = o.wid || 'DVUqVkEIt8rKPR7L', ex = o.ex || 800;
+    const w = wereld({ runs: { [wid]: o.runs || [{ id: ex, status: 'error', startedAt: '2026-11-21T08:58:00Z' }] } });
+    w.opnieuw = []; w.staatBijRetry = null;
+    w.io.run = async function (x) { return Object.assign({ id: String(x), mode: 'trigger', status: 'error', startedAt: '2026-11-21T08:58:00Z', retryOf: null, retrySuccessId: null }, o.run || {}); };
+    w.io.opnieuw = async function (x) { w.opnieuw.push(String(x)); w.staatBijRetry = JSON.parse(JSON.stringify(w.staat)); if (o.retryFout) throw new Error(o.retryFout); return { id: 900, status: o.retryStatus || 'success' }; };
+    if (o.uit) w.io.opnieuwUit = function () { return true; };
+    w.staat = Object.assign({ watermerk: 0 }, o.staat || {});
+    w.rijen = [rij(1, w.t, fmTekst(o.naam || 'AI - WhatsApp Nachtextractie', wid, o.knoop || 'Volglijst lezen (Intake)', o.fout || 'Service unavailable - try again later or consider setting this node to retry automatically', ex))];
+    return w;
+  }
+  async function draai(w) { const d = w.dienst(); await d.tik(); w.t += 16 * MIN; await d.tik(); return d; }
+  w = opWereld(); d = await draai(w);
+  toets('11a leesknoop + 503 → precies één retry', w.opnieuw.length === 1 && w.opnieuw[0] === '800');
+  toets('11b poging vóór de aanroep in de staat vastgelegd', w.staatBijRetry && w.staatBijRetry.opnieuw && w.staatBijRetry.opnieuw['800']);
+  toets('11c retry gelukt → bewezen, kaart dicht, afloop zegt het', w.af.length === 1 && /zelf opnieuw geprobeerd vanaf de mislukte stap; dat lukte/.test(w.bericht[0].t));
+  w.staat.wacht = [Object.assign({}, w.staat.uitkomsten['1'], { niet_voor: 0, pogingen: 0, workflow_id: 'DVUqVkEIt8rKPR7L', knoop: 'Volglijst lezen (Intake)', standaard: 'Service unavailable - try again later', executie: '800', soort: 'storing' })];
+  d = w.dienst(); w.t += 5 * MIN; await d.tik();
+  toets('11d herstart/nieuw onderzoek van dezelfde executie: geen tweede retry', w.opnieuw.length === 1);
+  w = opWereld({ knoop: 'Schrijf naar raw_input' }); await draai(w);
+  toets('11e schrijfknoop → geen retry', w.opnieuw.length === 0 && w.claude.length === 1);
+  w = opWereld({ wid: 'WFBUITEN01', naam: 'AI - Buiten de lijst' }); await draai(w);
+  toets('11f workflow buiten de lijst → geen retry', w.opnieuw.length === 0);
+  w = opWereld({ fout: 'Your request is invalid or could not be processed by the service' }); await draai(w);
+  toets('11g 400 op een leesknoop → geen retry', w.opnieuw.length === 0);
+  w = opWereld({ runs: [{ id: 805, status: 'running', startedAt: '2026-11-21T09:05:00Z' }, { id: 800, status: 'error', startedAt: '2026-11-21T08:58:00Z' }] }); await draai(w);
+  toets('11h latere (lopende) run → geen retry', w.opnieuw.length === 0);
+  w = opWereld({ run: { mode: 'retry', retryOf: '700' } }); await draai(w);
+  toets('11i run is zelf een retry → geen retry', w.opnieuw.length === 0);
+  w = opWereld({ run: { retrySuccessId: '801' } }); await draai(w);
+  toets('11j al eerder met succes herhaald → geen retry', w.opnieuw.length === 0);
+  w = opWereld({ retryStatus: 'error' }); await draai(w);
+  toets('11k retry faalt → nog kapot → box, geen kaart dicht', w.opnieuw.length === 1 && w.af.length === 0 && w.box.length === 1 && /ook dat mislukte/.test(w.bericht[0].t));
+  w = opWereld({ retryFout: 'n8n retry http 500' }); await draai(w);
+  toets('11l retry-aanroep faalt → afloop onbekend, niet opgelost', w.opnieuw.length === 1 && w.af.length === 0 && /of dat liep, is nog niet bekend/.test(w.bericht[0].t));
+  w = opWereld({ staat: { dag: { datum: '2026-11-21', n: 0, opnieuw: S.OPNIEUW_PER_DAG } } }); await draai(w);
+  toets('11m plafond per dag → geen retry', w.opnieuw.length === 0 && w.claude.length === 1);
+  w = opWereld({ uit: true }); await draai(w);
+  toets('11n noodrem → geen retry', w.opnieuw.length === 0);
+  // (max. uren per workflow is een extra rem: een onderzoek start toch al uiterlijk 60 min na het alarm)
+  // 12 latere retry (bv. van de inhaalslag) met retryOf = de foute run → bewezen
+  w = wereld({ runs: { R1: [{ id: 51, status: 'success', startedAt: '2026-11-21T09:10:00Z', retryOf: '50' }, { id: 50, status: 'error', startedAt: '2026-11-21T08:59:00Z' }] } });
+  w.staat = { watermerk: 0 }; w.rijen = [rij(1, w.t, fmTekst('AI - R', 'R1', 'k', 'Timeout', 50))];
+  await draai(w);
+  toets('12 latere retry van precies die run gelukt → opgelost', w.af.length === 1 && /opnieuw gedraaid vanaf de mislukte stap; dat lukte/.test(w.bericht[0].t));
+  // 13 verbruik telt de cache mee; /health onthoudt het laatste onderzoek na een herstart
+  w = wereld({ antwoord: function () { return { ok: true, data: { alarmen: [{ nr: 1, oorzaak: 'x', gevolg: 'y', mist_david: false, handeling_david: '' }] }, verbruik: { in: 2, cache_lees: 3000, cache_schrijf: 1000, uit: 200, ms: 2000, kosten: 0.01 } }; } });
+  w.staat = { watermerk: 0 }; w.rijen = [rij(1, w.t, fmTekst('AI - V', 'V1', 'k', 'Timeout', 60))];
+  await draai(w);
+  toets('13a verbruik: invoer = nieuw + cache', w.staat.dag.verbruik.slice(-1)[0].in === 4002 && w.staat.dag.verbruik.slice(-1)[0].cache === 4000);
+  d = w.dienst(); const hh = d.health();
+  toets('13b health na herstart: laatst en vandaag uit de staat', hh.laatst && hh.laatst.verbruik && hh.laatst.verbruik.in === 4002 && hh.onderzoeken_vandaag === 1 && hh.opnieuw_vandaag === 0);
+  // 14 Codex MOET 1: een tweede tik terwijl de eerste nog loopt doet niets
+  w = wereld(); let los; w.io.claude = function () { w.claude.push('x'); return new Promise(function (r) { los = r; }); };
+  w.staat = { watermerk: 0 }; w.rijen = [rij(1, w.t, fmTekst('AI - L', 'L1', 'k', 'Timeout', 70))];
+  d = w.dienst(); await d.tik(); w.t += 16 * MIN; const p1 = d.tik(); await new Promise(function (r) { setTimeout(r, 10); });
+  w.t += 11 * MIN; const r2 = await d.tik();
+  toets('14 tik terwijl een onderzoek loopt: geen tweede', r2 && r2.stil === 'loopt' && w.claude.length === 1);
+  los({ ok: true, data: { alarmen: [{ nr: 1, oorzaak: 'x', gevolg: 'y', mist_david: false, handeling_david: '' }] } }); await p1;
   console.log(ok + ' goed, ' + fout + ' fout');
   process.exit(fout ? 1 : 0);
 })();

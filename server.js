@@ -22361,6 +22361,7 @@ async function harvesterClaude(systeem, prompt, schema, o) {
       if (!s && typeof j.result === 'string') { const m = /\{[\s\S]*\}/.exec(j.result); if (m) { try { s = JSON.parse(m[0]); } catch (e) {} } }
       if (!s || typeof s !== 'object') return klaar({ ok: false, fout: 'antwoord zonder kaarten' });
       klaar({ ok: true, data: s, verbruik: { account: account, in: (j.usage || {}).input_tokens || 0, uit: (j.usage || {}).output_tokens || 0, ms: j.duration_ms || null,
+        cache_lees: (j.usage || {}).cache_read_input_tokens || 0, cache_schrijf: (j.usage || {}).cache_creation_input_tokens || 0,   // wv3760
         kosten: typeof j.total_cost_usd === 'number' ? j.total_cost_usd : null } });
     });
   });
@@ -23720,7 +23721,7 @@ const storingsdienst = (function () {
           const [runs, wf] = await Promise.all([
             appN8n('/executions?workflowId=' + encodeURIComponent(a.workflow_id) + '&limit=10').catch(function () { return null; }),
             appN8n('/workflows/' + encodeURIComponent(a.workflow_id)).catch(function () { return null; })]);
-          h.runs = (Array.isArray(runs && runs.data) ? runs.data : []).map(function (x) { return { id: x.id, status: x.status, startedAt: x.startedAt, mode: x.mode }; });
+          h.runs = (Array.isArray(runs && runs.data) ? runs.data : []).map(function (x) { return { id: x.id, status: x.status, startedAt: x.startedAt, mode: x.mode, retryOf: x.retryOf || null }; });
           if (wf) {
             h.beschrijving = wf.description || null;
             h.alleen_fouten = !!(wf.settings && wf.settings.saveDataSuccessExecution === 'none');
@@ -23752,6 +23753,22 @@ const storingsdienst = (function () {
           ' sinds ' + new Date(rol.sinds_rol).toISOString().slice(0, 16) + 'Z.';
       },
       claude: function (systeem, prompt, schema) { return harvesterClaude(systeem, prompt, schema, { timeoutMs: 240000 }); },
+      // wv3760 (stap 2): de mislukte run zelf (mode, retryOf) en de n8n-retry (hervat bij de mislukte knoop; antwoord na afloop, max 8 min).
+      // Welke runs mogen, beslist storingsdienst.js (vaste lijst leesknopen). Noodrem: STORINGSDIENST_OPNIEUW=0.
+      opnieuwUit: function () { return process.env.STORINGSDIENST_OPNIEUW === '0'; },
+      run: async function (ex) {
+        const x = await appN8n('/executions/' + encodeURIComponent(ex));
+        return x ? { id: x.id, mode: x.mode, status: x.status, startedAt: x.startedAt, retryOf: x.retryOf || null, retrySuccessId: x.retrySuccessId || null } : null;
+      },
+      opnieuw: async function (ex) {
+        const b = appN8nBasis(), k = process.env.N8N_API_KEY;
+        if (!b || !k) throw new Error('n8n-API niet ingesteld');
+        const r = await fetch(b + '/api/v1/executions/' + encodeURIComponent(ex) + '/retry', { method: 'POST', headers: { 'X-N8N-API-KEY': k, accept: 'application/json', 'content-type': 'application/json' },
+          body: JSON.stringify({ loadWorkflow: true }), signal: AbortSignal.timeout(480000) });
+        if (!r.ok) throw new Error('n8n retry http ' + r.status);
+        const j = await r.json();
+        return { id: j && j.id != null ? j.id : null, status: j && j.status || null };
+      },
       meldAf: async function (kaart, alarmMs) {
         appStaat.meld = null;   // vers lezen
         const m = await appMeldingen();
