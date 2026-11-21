@@ -4781,6 +4781,7 @@ function handleRequest(req, res) {
       db: dbStand,
       // B103: noodstand databank-weg (pod zonder kluissecrets) + stand van db-wacht
       noodstand: noodstandInfo(),
+      sms_ingang: smsIngang ? smsIngang.health() : null,   // wv3668: fase + tellingen per uitslag/reden, nooit inhoud
       promedico_agenda: promedicoAgenda ? Object.assign({}, promedicoAgenda.health(), { app: typeof promedicoAppInfo === 'function' ? promedicoAppInfo() : { aan: false }, botsingen: typeof promedicoBotsingenInfo === 'function' ? promedicoBotsingenInfo() : { aan: false } }) : null,   // wv3132; wv3143: .app = Calendar-laag (laatste {op, dagen, ms}, geen tekst)
       // wv698: argv-detector (sleutelwaarden in /proc/*/cmdline); treffers_24u > 0 = er lekt iets, zie de box
       detector: argvDetInfo(),
@@ -17253,7 +17254,7 @@ const BERICHT_INVOER_MS = 2 * 60 * 1000;     // wv804 (ontwerp § 2): echte invo
 const BERICHT_BEZIG_MAX = 3;                 // wv804 Fable M1: bezig aan het eind van een bundel = hooguit 3× opnieuw plannen
 const BERICHT_CONTROLE_MARGE_MS = 90 * 1000; // wv292 (Fable wv263 #7): n8n kijkt na een uitgesteld seintje opnieuw (controle_na)
 const BERICHT_VOORLOPIG_MS = 5 * 60 * 1000;  // wv292 (Fable wv263 #6): voorlopig naar Telegram, zonder bevestiging weer knoppen in de app
-const BERICHT_RE = /^\/bericht(\/(bestand|stand|naar-telegram|sms-pas))?$/;   // wv3664: sms-pas = n8n toetst de pas van Davids sms-tik terug
+const BERICHT_RE = /^\/bericht(\/(bestand|stand|naar-telegram|sms-pas|sms-ingang))?$/;   // wv3664: sms-pas = n8n toetst de pas van Davids sms-tik terug; wv3668: sms-ingang = handtekening van een binnenkomende sms
 
 function berichtIsPad(req) { return BERICHT_RE.test(reqPath(req)); }
 function berichtStuur(res, status, obj) {
@@ -17874,7 +17875,7 @@ function berichtRoute(req, res) {
   BERICHT_T0.set(res, Date.now());   // wv1820 (review #3): de kaartlezing in berichtNieuw rekent vanaf hier (n8n wacht 8 s)
   if (req.method !== 'POST') { req.resume(); return berichtStuur(res, 405, { ok: false, fout: 'alleen POST' }); }
   // wv292 (Fable wv263 #10): stand en naar-telegram ook tijdens de noodstop, zodat n8n wat al in de app stond naar Telegram haalt
-  const naUit = p === '/bericht/stand' || p === '/bericht/naar-telegram';
+  const naUit = p === '/bericht/stand' || p === '/bericht/naar-telegram' || p === '/bericht/sms-ingang';   // wv3668: sms-toets los van de app-noodstop
   if (!naUit && fs.existsSync(APP_UIT)) { req.resume(); return berichtStuur(res, 503, { ok: false, fout: 'app staat uit (noodstop)', terugval: true }); }
   berichtBody(req, p === '/bericht/bestand' ? BERICHT_BESTAND_BODY_MAX : BERICHT_BODY_MAX, function (fout, d) {
     if (fout === 'afgebroken') return;
@@ -17886,6 +17887,7 @@ function berichtRoute(req, res) {
       if (!naUit && fs.existsSync(APP_UIT)) return berichtStuur(res, 503, { ok: false, fout: 'app staat uit (noodstop)', terugval: true });
       if (p === '/bericht') return berichtNieuw(res, d);
       if (p === '/bericht/sms-pas') return smsPasRoute(res, d);   // wv3664
+      if (p === '/bericht/sms-ingang') return smsIngangRoute(res, d);   // wv3668
       if (p === '/bericht/bestand') return berichtBestand(res, d);
       if (p === '/bericht/stand') return berichtStand(res, d);
       return berichtNaarTelegram(res, d);
@@ -18177,6 +18179,32 @@ async function appSmsKnop(res, id, knop, keuze, terug) {
   return klaar(u.pagina, u.tekst);
 }
 // ── einde wv3664 ──
+// ── wv3668 (besluitenpagina nr 3, C06 deel 2): een binnenkomende sms telt alleen met de handtekening van Davids telefoon ─────────────
+// n8n AI - SMS Gateway (webhook SMS Ontvangst, rawBody) → POST /bericht/sms-ingang {secret (pod), lijf_b64, x_signature, x_timestamp}
+// → {echt, echtheid: echt|onbevestigd|onjuist, reden, fase, bewaar}. Sleutel: kluisrij sms_gateway_signing_key (niet op de witte lijst,
+// zelfde weg als promedico_agenda_geheim). Fase: bestand SMS_INGANG_DIR/fase = "dicht" → onjuist niet bewaren; anders "meten" (alles
+// bewaren met markering). Zie sms-ingang.js voor het waarom. In api.log en staat alleen uitslag + reden; nooit lijf, nummer of handtekening.
+const SMS_INGANG_DIR = process.env.SMS_INGANG_DIR || '/opt/data/sms-ingang';
+const smsIngang = (function () {   // typeof: de poorttoets laadt blokken los in een vm zonder require/__dirname (dan stil null: 503 = onbevestigd)
+  if (typeof require !== 'function' || typeof __dirname !== 'string') return null;
+  try {
+    const staatPad = path.join(SMS_INGANG_DIR, 'staat.json');
+    return require(path.join(__dirname, 'sms-ingang.js')).maak({
+      kluisLees: function () { return promedicoKluisLees('sms_gateway_signing_key'); },
+      nu: Date.now,
+      fase: function () { try { return fs.readFileSync(path.join(SMS_INGANG_DIR, 'fase'), 'utf8').trim(); } catch (e) { return 'meten'; } },
+      laad: function () { try { return JSON.parse(fs.readFileSync(staatPad, 'utf8')); } catch (e) { return null; } },
+      bewaar: function (st) { fs.mkdirSync(SMS_INGANG_DIR, { recursive: true, mode: 0o700 }); const t = staatPad + '.tmp'; fs.writeFileSync(t, JSON.stringify(st), { mode: 0o600 }); fs.renameSync(t, staatPad); } });
+  } catch (e) { logError('sms-ingang', e); return null; }
+})();
+function smsIngangRoute(res, d) {
+  if (!smsIngang) return berichtStuur(res, 503, { ok: false, fout: 'sms-ingang zit niet in deze versie van de pod' });
+  return smsIngang.toets(d).then(function (r) {
+    res._log = Object.assign(res._log || {}, { sms_ingang: r.j.echtheid + (r.j.reden ? ' ' + r.j.reden : '') });
+    return berichtStuur(res, r.status, r.j);
+  }, function (e) { logError('sms-ingang', e); return berichtStuur(res, 500, { ok: false, fout: 'fout op de pod' }); });
+}
+// ── einde wv3668 ──
 // Volgorde (contract wv315; synchroon tot en met bezig, Fable #11): velden, entry, kanaal, knop, bezig, klaar, verlopen,
 // vingerafdruk (verbruikt), bezig + bewaren, grens, rol, sleutel; dan n8n.
 async function appAgendaRoute(req, res, a, s, d) {
