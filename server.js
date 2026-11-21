@@ -17214,7 +17214,8 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'personeelsscherm',     // wv3020: aanvraag extra pagina / publicatie Personeelsscherm; machinekamer, archief
   'onderhoud',            // wv1271: onderhoudsstand vault > 2 uur, één alarm; machinekamer, archief
   'facturen-sepa-door',   // wv2465: SEPA-batch Tolgaarde zelf naar nogbetalen@; hoofdkanaal, soort dag (zet de aanroep zelf)
-  'facturen-nogbetalen']);  // wv3369: betaalverzoek naar Cynthia (nogbetalen@) niet of onzeker verstuurd, dagplafond; hoofdkanaal, soort dag
+  'facturen-nogbetalen',  // wv3369: betaalverzoek naar Cynthia (nogbetalen@) niet of onzeker verstuurd, dagplafond; hoofdkanaal, soort dag
+  'pot-antwoord']);       // wv3677/wv3765: herstelbericht na een mislukte Ja op de POT-aantalkaart; hoofdkanaal, soort dag (mislukte handeling op Davids knop)
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
 const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
@@ -17222,7 +17223,7 @@ const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
 // in Telegram tikte David 17 van 18 regels aan (mediaan 7 min), in de app 28 van 80 (mediaan 289 min).
 // wv3719 (3C04, David Ja 21-11 13:22): heartbeat = dag. 11 van de 19 heartbeat-berichten (afval, "morgen laatste dag") kwamen
 // als archief binnen, zonder seintje. Een stille ronde (NIETS) komt hier nooit: de n8n-Heartbeat stuurt dan niets.
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'beleggen-waarom': 'dag', 'pot-loonrun': 'dag' };
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'beleggen-waarom': 'dag', 'pot-antwoord': 'dag', 'pot-loonrun': 'dag' };
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
