@@ -53,6 +53,8 @@ toets('A wv3316 appVanNaam: id of naam exact (zonder OVIS, accenten, haakjes); a
 toets('A wv3316 appVanAgentLabel: wvNNN na machinekamer: telt niet mee', C.appVanAgentLabel('machinekamer:wv3235 pot-nmbrs') === 'pot' && C.appVanAgentLabel('machinekamer:wv1 onzin') === null && C.appVanAgentLabel('machinekamer:wvx texere') === null);
 const kop = C.kop('pot', '/x/pot');
 toets('A kop uit de release noemt registerrijen en "vraagt Davids Ja"', /pot-sloel-notas/.test(kop) && /vraagt altijd Davids Ja/.test(kop) && /De vraag van David:$/.test(kop));
+toets('A wv3713 kop en draadkop noemen managers vooraf (alinea + vooraf.sh)', /Wat zeggen de managers/.test(kop) && /managers-vooraf\/vooraf\.sh/.test(kop) &&
+  /managers-vooraf\/vooraf\.sh/.test(C.draadKop('pot', 'd0123abcd', 'titel', 'doel', '/x/pot')));
 
 // ── B. werkbestanden ──
 const MK = require('./mk-tekst.js');
