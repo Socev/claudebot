@@ -326,6 +326,11 @@ class BudgetOp(Exception):
     pass
 
 
+class Geweigerd(RuntimeError):
+    """Workers AI weigerde dit verzoek met HTTP 400 (21-11-2026, wv3602: code 8007, pakket van 50 brokken > 60.000 tokens van bge-m3;
+    losse brokken en halve pakketten gingen wel). De foutregel bevat de eerste 200 tekens van de body (geen invoer, geen sleutel)."""
+
+
 def embed(teksten):
     tok = os.environ.get('CLOUDFLARE_API_TOKEN')
     if not tok:
@@ -355,12 +360,36 @@ def embed(teksten):
             if e.code in (429, 500, 502, 503, 504) and poging < 2:
                 time.sleep(10 * (poging + 1))
                 continue
-            raise RuntimeError('Workers AI HTTP %d' % e.code)
+            kort = re.sub(r'\s+', ' ', body[:200])
+            if e.code == 400:
+                raise Geweigerd('Workers AI HTTP 400: ' + kort)
+            raise RuntimeError('Workers AI HTTP %d: %s' % (e.code, kort))
         except (urllib.error.URLError, TimeoutError) as e:
             if poging < 2:
                 time.sleep(10 * (poging + 1))
                 continue
             raise RuntimeError('Workers AI onbereikbaar: ' + type(e).__name__)
+
+
+MAX_OVERGESLAGEN = 20   # meer enkel-geweigerde brokken in één ronde = systeemfout (sleutel, model, formaat), geen vieze brok: dan fout, exit 1
+
+
+def embed_pak(pak, uit, overgeslagen):
+    """Bedt een pakket in; bij HTTP 400 halveren tot de weigerende brok alleen overblijft; die wordt overgeslagen (komt in
+    overgeslagen: lijst (brok, foutregel)), de rest gaat door. Gelukte delen komen in uit: [(deelpakket, vectoren, neurons, tokens)],
+    zodat ze ook bewaard blijven als een later deel BudgetOp of een andere fout geeft. wv3602."""
+    try:
+        data, neur, tok = embed([embedtekst(p['pad'], p['kop'], p['tekst']) for p in pak])
+        uit.append((pak, data, neur, tok))
+    except Geweigerd as e:
+        if len(pak) == 1:
+            overgeslagen.append((pak[0], str(e)))
+            if len(overgeslagen) > MAX_OVERGESLAGEN:
+                raise RuntimeError('Workers AI weigerde %d brokken enkel; laatste: %s' % (len(overgeslagen), e))
+            return
+        h = len(pak) // 2
+        embed_pak(pak[:h], uit, overgeslagen)
+        embed_pak(pak[h:], uit, overgeslagen)
 
 
 # ── ronde ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -426,6 +455,7 @@ def ronde(max_neurons, max_min, met_mail, droog):
 
     # 2. inbedden wat nog geen vector heeft, binnen het dagbudget
     ingebed, neurons_run, reden = 0, 0.0, 'klaar'
+    overgeslagen = []   # (brok, foutregel): brokken die Workers AI ook alleen weigerde (HTTP 400); volgende nachten opnieuw geprobeerd
     if not droog:
         gebruikt = verbruik_vandaag()
         volgorde = ("case when b.pad in ('CLAUDE.md','AGENTS.md','index.md') then 0 when b.pad like '00\\_Systeem/%' then 1"
@@ -438,9 +468,10 @@ def ronde(max_neurons, max_min, met_mail, droog):
             if gebruikt >= max_neurons:
                 reden = 'dagbudget op'
                 break
+            niet = ''.join(" and b.hash <> '%s'" % p['hash'] for p, _ in overgeslagen if re.fullmatch(r'[0-9a-f]{64}', p['hash']))   # deze ronde geweigerd: niet opnieuw
             rijen = sql("select row_to_json(x) from (select distinct on (b.hash) b.hash, b.pad, b.kop, b.tekst, %s as r"
-                        " from vaultzoek.brok b where not exists (select 1 from vaultzoek.vector v where v.hash = b.hash)"
-                        " order by b.hash, %s) x order by x.r, x.pad limit 1000" % (volgorde, volgorde))
+                        " from vaultzoek.brok b where not exists (select 1 from vaultzoek.vector v where v.hash = b.hash)%s"
+                        " order by b.hash, %s) x order by x.r, x.pad limit 1000" % (volgorde, niet, volgorde))
             if not rijen:
                 break
             stop = False
@@ -450,17 +481,20 @@ def ronde(max_neurons, max_min, met_mail, droog):
                 if gebruikt + schat > max_neurons:   # vooraf: dit pakket mag het dagbudget niet over laten gaan
                     reden, stop = 'dagbudget op', True
                     break
+                uit = []
                 try:
-                    data, neur, tok = embed([embedtekst(p['pad'], p['kop'], p['tekst']) for p in pak])
+                    embed_pak(pak, uit, overgeslagen)
                 except BudgetOp as e:
                     reden, stop = str(e), True
+                finally:   # ook bij BudgetOp of een latere fout: wat al is ingebed (en betaald) wordt bewaard
+                    for deel, data, neur, tok in uit:
+                        per = max(1, tok // max(1, len(deel)))
+                        schrijf_vectoren([(p['hash'], '[' + ','.join('%.6g' % x for x in v) + ']', per) for p, v in zip(deel, data)], neur, tok)
+                        ingebed += len(deel)
+                        neurons_run += neur
+                        gebruikt += neur
+                if stop:
                     break
-                per = max(1, tok // max(1, len(pak)))
-                vect = [(p['hash'], '[' + ','.join('%.6g' % x for x in v) + ']', per) for p, v in zip(pak, data)]
-                schrijf_vectoren(vect, neur, tok)
-                ingebed += len(pak)
-                neurons_run += neur
-                gebruikt += neur
                 if gebruikt >= max_neurons or time.time() > eind:
                     break
             if stop:
@@ -472,6 +506,10 @@ def ronde(max_neurons, max_min, met_mail, droog):
     tel = sql('select (select count(*) from vaultzoek.bestand), (select count(*) from vaultzoek.brok),'
               ' (select count(*) from vaultzoek.vector),'
               ' (select count(distinct b.hash) from vaultzoek.brok b where not exists (select 1 from vaultzoek.vector v where v.hash = b.hash))')[0]
+    if overgeslagen:
+        stand['overgeslagen_brokken'] = len(overgeslagen)
+        stand['overgeslagen'] = ['%s › %s [%s]' % (p['pad'], p['kop'][:40], f[:120]) for p, f in overgeslagen[:10]]
+        log('overgeslagen', len(overgeslagen), 'brokken door Workers AI geweigerd:', ', '.join(p['pad'] for p, _ in overgeslagen[:10]))
     stand.update({'ingebed': ingebed, 'neurons_ronde': round(neurons_run, 1), 'stop': reden,
                   'db_bestanden': int(tel[0]), 'db_brokken': int(tel[1]), 'db_vectoren': int(tel[2]), 'zonder_vector': int(tel[3]),
                   'duur_s': round(time.time() - t0), 'eind': time.strftime('%Y-%m-%dT%H:%M:%S%z')})
