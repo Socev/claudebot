@@ -102,7 +102,16 @@ WACHT=(2 5 15)
 # zijn eigen adres. Een bestand met een andere vorm wordt met een logregel genegeerd: nooit een vrij adres uit een bestand.
 ADRES_ENV="${FETCH_SECRETS_ADRES_ENV:-/opt/data/.pg/adres.env}"
 LOKAAL=0
-if [ "$KANT" = olares ] && [ -f "$ADRES_ENV" ]; then
+# wv3873 (rapport Olares-uitval 21-22-11, fout 4): op kant vps zet naar-vps het adres zelf in de omgeving (pod-db.env: precies
+# SUPABASE_URL=http://127.0.0.1:8091 en SB_SQL_LOKAAL=1, de gepromoveerde reserve als databank). Dan dezelfde socketroute: het luik
+# op 8091 start pas ná fetch-secrets, dus de oude Supabase-route faalde drie keer en de pod stopte (exit 78). Alleen met precies die
+# twee waarden; anders de gewone route. Vervangt de noodpatch /srv/uitwijk/staat/fetch-secrets-nood.sh van 22-11.
+if [ "$KANT" = vps ] && [ "${SB_SQL_LOKAAL:-}" = 1 ] && [ "${SUPABASE_URL:-}" = "http://127.0.0.1:8091" ]; then
+  LOKAAL=1
+  POGINGEN=8
+  WACHT=(2 3 5 10 15 20 30)
+  log "eigen databank (uitwijk, pod-db.env): kluis via de unix-socket"
+elif [ "$KANT" = olares ] && [ -f "$ADRES_ENV" ]; then
   if [ "$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$ADRES_ENV" 2>/dev/null | LC_ALL=C sort)" = "$(printf 'SB_SQL_LOKAAL=1\nSUPABASE_URL=http://127.0.0.1:8091')" ]; then
     LOKAAL=1
     export SUPABASE_URL="http://127.0.0.1:8091" SB_SQL_LOKAAL=1

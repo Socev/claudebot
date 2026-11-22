@@ -9,6 +9,7 @@ set -uo pipefail
 HIER="$(cd "$(dirname "$0")" && pwd)"; SRC="$(dirname "$HIER")"
 PGB="${PG_BIN:-/usr/lib/postgresql/17/bin}"
 [ -x "$PGB/postgres" ] || { echo "SKIP: geen PostgreSQL 17 in $PGB"; exit 0; }
+umask 077   # wv3873: zoals de pod (rapport Olares-uitval fout 8/9)
 T="$(mktemp -d /tmp/db-terug.XXXXXX)"; chmod 700 "$T"
 P=$((56000 + RANDOM % 900)); P2=$((P + 1))
 WPID=""
@@ -107,6 +108,8 @@ ok "W A heeft nu de data van de uitwijk (tellingen + md5 gelijk)" '[ "$(q "selec
 ok "W schrijvend, tijdlijn 2" '[ "$(q "select pg_is_in_recovery()")" = f ] && [ "$(q "select timeline_id from pg_control_checkpoint()")" = 2 ]'
 OUD="$(ls -d "$T"/pg/17/data.oud-* 2>/dev/null | head -1)"
 ok "W oude datamap opzij (niet gewist)" '[ -n "$OUD" ] && [ -s "$OUD/PG_VERSION" ] && [ ! -e "$T/pg/17/terug-$ID" ]'
+# wv3873 (rapport fout 8/9): onder umask 077 (zoals de pod) moet db-wacht (pg, groep pgsock) map en kopie kunnen lezen
+ok "W ontvangstmap 2750 en kopie 0640, ook onder umask 077" '[ "$(stat -c %a "$T/pg/terug/$ID")" = 2750 ] && { [ ! -e "$T/pg/terug/$ID/data.tar" ] || [ "$(stat -c %a "$T/pg/terug/$ID/data.tar")" = 640 ]; }'
 ok "W verzoek opgeruimd, uitkomst 0640" '[ ! -e "$T/stop/terug" ] && [ "$(stat -c %a "$T/pg/terug-$ID.json")" = 640 ]'
 q "insert into public.proef values (9002, 'na-terug')" >/dev/null
 uit="$(ronde)"

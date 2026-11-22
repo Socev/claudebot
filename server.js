@@ -1663,6 +1663,11 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       if (!fs.existsSync(hier) && fs.existsSync(daar)) {
         schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'sessie-overgezet', naar: viaLoper ? 'socev' : 'claude' }));
         sessionId = '';
+      } else if (!fs.existsSync(hier) && !fs.existsSync(daar)) {
+        // wv3873 (rapport Olares-uitval fout 7): na een wissel naar de andere kant bestaat het transcript niet (gespreksverslagen gaan
+        // bewust niet mee); --resume gaf dan "No conversation found with session ID" en de beurt faalde. Nu begint het gesprek vers.
+        schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'sessie-onbekend', via: viaLoper ? 'socev' : 'claude' }));
+        sessionId = '';
       }
     }
     const eigenId = sessionId || crypto.randomUUID();
@@ -15917,9 +15922,31 @@ function appPushInfo() {
   return { abonnementen: n, met_meldingen: meld, verlopen: verlopen, sleutel: v && v.key ? 'geladen' : v && v.fout ? 'fout: ' + v.fout : 'nog niet gelezen', laatst: laatst };
 }
 
+// ── Passief-poort van de app (wv3873, bouwplan 'App blijft werken als Olares plat ligt' § 4.1 punt 3) ──
+// WAAROM. Straks draaien er altijd twee pods (Olares en de R230) en kiest de Pages Function de kant uit de stand bij de scheidsrechter.
+// Kiest ze verkeerd (oude lezing, race tijdens een wissel), dan mag de passieve kant niets doen: geen sessie, geen knop, geen
+// schrijven in zijn eigen (verouderde) app-staat. De rolcontrole zat per route (appRolOk op ± 40 van ± 250 routes; passkey/bevestig
+// had er geen). Nu één poort bovenaan handleApp: passief = alleen de routes in APP_PASSIEF_ROUTES, al het andere 409 met
+// X-Socev-Rol: passief (de Function leest dan de stand opnieuw). /app/status antwoordt passief zonder register of sessies aan te
+// raken. Elk antwoord draagt X-Socev-Kant (de balk "je werkt op …" komt uit het antwoord van de pod, niet uit de Function).
+// De controles per route (appRolOk) blijven als tweede slot staan. Toets: test/app-passief-poort.sh (alle routes uit handleApp).
+const APP_PASSIEF_ROUTES = new Set(['GET /app/status']);
+function appPassiefAntwoord(req, res, p) {
+  const route = req.method + ' ' + p;
+  res.setHeader('X-Socev-Rol', 'passief');
+  const info = { passief: true, kant: ROL_KANT, actieve_kant: rol.actieve_kant, reden: String(rol.reden || '').slice(0, 160) };
+  if (APP_PASSIEF_ROUTES.has(route)) {
+    res._app.reden = 'passief status';
+    return appStuur(res, 200, Object.assign({ ok: true, sessie: false, apparaat: null }, info));
+  }
+  res._app.reden = 'passief';
+  return appStuur(res, 409, Object.assign({ ok: false, fout: 'deze kant van Socev is nu passief (Socev draait op de andere kant); even geduld' }, info));
+}
+
 function handleApp(req, res) {
   const p = reqPath(req);
   res._log = { app: 1 };
+  try { res.setHeader('X-Socev-Kant', ROL_KANT); } catch (e) {}
   res._app = { route: p.slice(0, 64), status: 0, reden: null, apparaat: null, voorAuth: true };
   res.on('finish', function () {
     const o = res._app;
@@ -15943,9 +15970,16 @@ function handleApp(req, res) {
   if (!geheim) { req.resume(); return appWeiger(res, 503, 'niet ingericht', 'geen poortgeheim'); }
   if (!appGelijk(String(req.headers['x-app-poort'] || ''), geheim)) { req.resume(); return appWeiger(res, 401, 'niet toegestaan', 'poortgeheim'); }
   const cfg = appConfig();
+  // wv3873: centrale passief-poort (na poortgeheim en Access, vóór grenzen, body en elke route). Na een processtart wacht hij
+  // hooguit ROL_START_WACHT_MS op de eerste lezing (appRolOk), zoals /run en /agent.
   appAccessOk(req, cfg).then(function (afwijzing) {
+    if (afwijzing) return { afwijzing: afwijzing };
+    return appRolOk().then(function (primair) { return { primair: primair }; });
+  }).then(function (u) {
+    const afwijzing = u.afwijzing;
     if (afwijzing) { req.resume(); return appWeiger(res, 401, 'niet toegestaan', 'access: ' + afwijzing); }
     res._app.voorAuth = false;
+    if (!u.primair) { req.resume(); return appPassiefAntwoord(req, res, p); }
     // wv159 (Fable K9): concept bewaren heeft een eigen grens (APP_CONCEPT_PER_UUR) en telt niet mee in 'alles'
     // wv804: seintje-stand heeft een eigen teller per apparaat en telt evenmin mee
     // wv3084: volgen en verversen (APP_LICHTE_ROUTES) tellen in 'licht', de rest in 'alles'
@@ -15965,6 +15999,9 @@ function handleApp(req, res) {
       if (fout === 'groot' && (p === '/app/imagine/bewerk' || p === '/app/imagine/vergelijk' || p === '/app/imagine/incognito/bewerk')) return appWeiger(res, 413, 'het getekende stuk is te groot; teken het opnieuw', 'body groot');   // wv3021
       if (fout === 'groot' && p === '/app/brain/webpagina') return appWeiger(res, 413, 'deze pagina is te groot (hooguit 2 MB html)', 'body groot');   // wv2660
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
+      // wv3873 (Codex MOET 2): de rol kan tijdens het aanleveren van een trage body gewisseld zijn; vlak vóór de route nog eens (synchroon,
+      // de lease in rolPrimair() telt mee). Ruwe uploads lezen de stroom in hun route: ook die starten pas na deze controle.
+      if (!rolPrimair()) { req.resume(); return appPassiefAntwoord(req, res, p); }
       let reg;
       try { reg = appRegister(); } catch (e) { logError('app-register', e); return appWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'register kapot'); }
       const route = req.method + ' ' + p;
@@ -29188,6 +29225,10 @@ async function appZoekSnelOveral(req, res, a, d) {
 // Bouwplan: 01_Ontwikkeling/Uitwijk claudebot en n8n - bouwplan (6-10-2026).md §4.2.
 const ROL_BESTAND = serverPad('rol', process.env.ROL_BESTAND, serverEchteHome('bin', 'uitwijk-rol'), path.join(HOME, 'bin', 'uitwijk-rol'));
 const ROL_KANTEN = ['olares', 'vps'];
+// wv3873 (bouwplan 'app blijft werken' fase 1b): de pod die op de R230 altijd meedraait, is een stand-in zonder sleutels en zonder
+// app-staat. Hij mag NOOIT primair worden, ook niet als de stand op vps staat (dan neemt de volle uitwijkpod het over, niet hij):
+// anders zou hij met een leeg apparaatregister "koppelen open" melden. SOCEV_ALTIJD_PASSIEF=1 zet dat vast.
+const ROL_ALTIJD_PASSIEF = process.env.SOCEV_ALTIJD_PASSIEF === '1';
 const ROL_KANT = ROL_KANTEN.indexOf(String(process.env.SOCEV_KANT || 'olares')) >= 0 ? String(process.env.SOCEV_KANT || 'olares') : 'onbekend';
 const ROL_INTERVAL_MS = 60 * 1000;        // bij een geslaagde lezing
 const ROL_INTERVAL_FOUT_MS = 15 * 1000;   // na een mislukte lezing (en tot de eerste lukt)
@@ -29202,7 +29243,18 @@ let rolBezig = false, rolTimer = null;
 // Staat de poort ook in run.sh (image)? Zo niet, dan zijn bisync en GHAWA nog niet gegrendeld (tot een nieuw image).
 const ROL_RUNSH_POORT = (function () { try { return /rol_primair/.test(fs.readFileSync('/app/run.sh', 'utf8')); } catch (e) { return null; } })();
 
-function rolPrimair() { return rol.rol === 'primair'; }
+// wv3873 (bouwplan 'app blijft werken' § 4.1, Fable-review 22-11): primair is een LEASE. Alleen met een lezing van de scheidsrechter
+// die hooguit ROL_GRATIE_MS oud is; daarna passief, ook als er geen rolRonde meer loopt (event-loop of schijf vast, timer weg).
+// Zonder deze grens bleef een vastgelopen Olares die later loskwam 'primair' op een stand van uren geleden. De overgang zelf gaat
+// via rolZet + rolbestand, zodat /health, run.sh (bisync, GHAWA) en de log hetzelfde zien.
+function rolLeaseOk(t) { return !!rol.gelezen && (t || Date.now()) - rol.gelezen <= ROL_GRATIE_MS; }
+function rolPrimair() {
+  if (rol.rol !== 'primair') return false;
+  if (rolLeaseOk()) return true;
+  rolZet('passief', 'lease verlopen: stand ' + (rol.gelezen ? Math.round((Date.now() - rol.gelezen) / 1000) + ' s' : 'nooit') + ' niet gelezen');
+  rolSchrijfBestand();
+  return false;
+}
 
 function rolSchrijfBestand() {
   const tekst = 'rol=' + rol.rol + '\nkant=' + ROL_KANT + '\ntijd=' + Math.floor(Date.now() / 1000) +
@@ -29272,6 +29324,7 @@ async function rolRonde() {
     rol.gelezen = Date.now(); rol.fout = null; rol.fouten_op_rij = 0;
     rol.actieve_kant = s.actieve_kant; rol.stand_sinds = s.sinds; rol.stand_versie = s.versie;
     if (ROL_KANT === 'onbekend') rolZet('passief', 'SOCEV_KANT ongeldig');
+    else if (ROL_ALTIJD_PASSIEF) rolZet('passief', 'altijd passief (stand-in, actieve kant is ' + s.actieve_kant + ')');
     else rolZet(s.actieve_kant === ROL_KANT ? 'primair' : 'passief', 'actieve kant is ' + s.actieve_kant);
   } catch (e) {
     rol.fout = String((e && e.name === 'TimeoutError') ? 'timeout' : ((e && e.message) || e)).slice(0, 120);
@@ -29315,6 +29368,8 @@ function rolInfo() {
     gelezen_iso: rol.gelezen ? new Date(rol.gelezen).toISOString() : null,
     leeftijd_s: rol.gelezen ? Math.round((Date.now() - rol.gelezen) / 1000) : null,
     fout: rol.fout, fouten_op_rij: rol.fouten_op_rij, wissels: rol.wissels, runsh_poort: ROL_RUNSH_POORT,
+    altijd_passief: ROL_ALTIJD_PASSIEF || undefined,
+    lease_s: rol.gelezen ? Math.max(0, Math.round((rol.gelezen + ROL_GRATIE_MS - Date.now()) / 1000)) : 0,   // wv3873: zo lang nog primair zonder verse lezing
     // Kant zoals fetch-secrets.sh (image) hem toepaste; null = image van vóór stap 6d (dan geen n8n-override en het
     // Olares-tunneltoken nog in de omgeving). naar-vps eist hier 'vps' vóór de eerste beurt (review 6d #5).
     fetch_secrets_kant: process.env.FETCH_SECRETS_KANT || null,

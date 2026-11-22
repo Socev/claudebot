@@ -482,7 +482,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   CODE_WERK: require('./ovis-code.js').maak({ basis: path.join(W, 'ovis-code'), geheugenToets: require('./mk-tekst.js').geheugenToets }),
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   maxAgents: () => 6,   // wv3607: sinds 19-11 (max-agents.json) staat maxAgents() buiten het app-blok; zonder nep gaf /app/agents 500
-  rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
+  rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100, ROL_KANT: 'olares',   // wv3873: passief-poort
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
@@ -1544,7 +1544,7 @@ async function bewijs(o) {
     rolStub.primair = false;
     r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'x' }, { pot: M.jar });
     rolStub.primair = true;
-    toets('9 pod passief (uitwijk) -> 409, geen beurt', r.status === 409 && /reservekant/.test(r.j.fout));
+    toets('9 pod passief (uitwijk) -> 409 van de centrale passief-poort (wv3873), geen beurt', r.status === 409 && r.j.passief === true && /andere kant/.test(r.j.fout), JSON.stringify(r.j));
     fs.renameSync(path.join(DATA, 'machinekamer-omlijsting.txt'), path.join(DATA, 'omlijsting.weg'));
     r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'machinekamer', tekst: 'x' }, { pot: M.jar });
     fs.renameSync(path.join(DATA, 'omlijsting.weg'), path.join(DATA, 'machinekamer-omlijsting.txt'));
@@ -4446,8 +4446,9 @@ async function bewijs(o) {
       n8nStaat.portie.find((y) => y.positie === 2).message_id = 0;
       const rP0 = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
       rolStub.primair = true; n8nStaat.portie.find((y) => y.positie === 2).message_id = mid456;
-      toets('20 wv456 reservekant: met Telegram-bericht 409 "staat ook in Telegram", zonder (message_id 0) 409 zonder Telegram; niets naar n8n', rP1.status === 409 && /reservekant; het lijstje van vandaag staat ook in Telegram/.test(rP1.j.fout)
-        && rP0.status === 409 && /reservekant; probeer het later opnieuw/.test(rP0.j.fout) && !/Telegram/.test(rP0.j.fout) && vkStaat.aanroepen.length === nVk456, JSON.stringify([rP1.j, rP0.j, vkStaat.aanroepen.length - nVk456]));
+      // wv3873: de centrale passief-poort antwoordt vóór de route (David 22-11: de Telegram-verwijzing hoeft niet meer)
+      toets('20 wv456/wv3873 reservekant: 409 passief van de centrale poort (met en zonder Telegram-bericht); niets naar n8n', rP1.status === 409 && rP1.j.passief === true
+        && rP0.status === 409 && rP0.j.passief === true && !/Telegram/.test(rP0.j.fout) && vkStaat.aanroepen.length === nVk456, JSON.stringify([rP1.j, rP0.j, vkStaat.aanroepen.length - nVk456]));
       // K1: een verversing die loopt terwijl er getikt wordt, overschrijft de nieuwe stand niet
       vkStaat.antwoord = (b) => { const x = n8nStaat.portie.find((y) => y.nonce === b.nonce); Object.assign(x, { status: 'afgehandeld', keuze: 'gedaan', getikt_op: new Date().toISOString() }); return { ok: true, uitkomst: 'ok', popup: 'Gedaan.' }; };
       n8nStaat.portie.find((y) => y.positie === 2).status = 'open';
@@ -4680,7 +4681,7 @@ async function bewijs(o) {
       spNep.kapot = false;
       toets('18 kluis onleesbaar -> 503 "er is niets gewijzigd"', r.status === 503 && /niets gewijzigd/.test(r.j.fout) && spNep.schrijf.length === nS, JSON.stringify(r.j));
       // passieve kant
-      rolStub.primair = false; await vers(P);
+      await vers(P); rolStub.primair = false;   // wv3873: vers vóór passief (passkey/opties valt nu ook onder de passief-poort)
       r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: W1 + 'z' }, { pot: P.jar });
       rolStub.primair = true;
       toets('18 passieve kant -> 409, niets geschreven', r.status === 409 && spNep.schrijf.length === nS, JSON.stringify(r.j));
@@ -4755,7 +4756,7 @@ async function bewijs(o) {
         r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw3', waarde: WN }, { pot: P.jar });
         spNep.kapot = false;
         toets('18N kluis onleesbaar -> 503, niets geschreven', r.status === 503 && spNep.schrijf.length === nN + 1, JSON.stringify(r.j));
-        rolStub.primair = false; await vers(P);
+        await vers(P); rolStub.primair = false;   // wv3873: vers vóór passief (passkey/opties valt nu ook onder de passief-poort)
         r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw3', waarde: WN }, { pot: P.jar });
         rolStub.primair = true;
         toets('18N passieve kant -> 409', r.status === 409 && /passief/.test(r.j.fout) && spNep.schrijf.length === nN + 1, JSON.stringify(r.j));
@@ -4826,7 +4827,7 @@ async function bewijs(o) {
         r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_weg' }, { pot: P.jar });
         toets('18W proefrij weggooien -> 200, vorige ging mee', r.status === 200 && r.j.ok === true && r.j.ook_vorige === true && spNep.weg.length === 2 && !spNep.kluis.some((x) => x.naam === 'proef_weg'), JSON.stringify(r.j));
         spNep.kluis.push({ naam: 'proef_weg2', omschrijving: 'x', gewijzigd: '2026-10-08T10:00:00Z', witte_lijst: false, gemaskeerd: '••••', geweigerd: null, w: 'z'.repeat(30), weg_kan: true, vorige_weg_kan: false, vorige_van: null });
-        rolStub.primair = false; await vers(P);
+        await vers(P); rolStub.primair = false;   // wv3873: vers vóór passief (passkey/opties valt nu ook onder de passief-poort)
         r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_weg2' }, { pot: P.jar });
         rolStub.primair = true;
         toets('18W passieve kant -> 409, geen RPC', r.status === 409 && spNep.weg.length === 2, JSON.stringify(r.j));
@@ -5391,12 +5392,12 @@ async function bewijs(o) {
       sPf().vers_tot = Date.now() + 60000;
       r = await vraag('POST', '/app/facturen/instellingen/adres', { entiteit: 'tolgaarde', boekhoud_doel: 'nieuw-tg@acta.invalid' }, { pot: P.jar });
       toets('20h telefoon met verse vingerafdruk: adres gewijzigd en vingerafdruk verbruikt', r.status === 200 && sPf().vers_tot === 0, JSON.stringify(r.j));
-      // passieve kant: schrijven 409, lezen mag
+      // passieve kant: schrijven 409; sinds wv3873 ook lezen 409 (centrale passief-poort; leesstand op de passieve kant = fase 3 van het bouwplan)
       rolStub.primair = false;
       r = await vraag('POST', '/app/facturen/geen-factuur', { id: fn.id }, { pot: P.jar });
       const rl = await vraag('GET', '/app/facturen/lijst/beoordelen', undefined, { pot: P.jar });
       rolStub.primair = true;
-      toets('20h passieve kant: schrijven -> 409, lezen 200', r.status === 409 && rl.status === 200, JSON.stringify([r.status, rl.status]));
+      toets('20h passieve kant: schrijven en lezen -> 409 passief (wv3873)', r.status === 409 && rl.status === 409 && rl.j.passief === true, JSON.stringify([r.status, rl.status]));
       r = await vraag('GET', '/app/facturen/factuur/ffffffffffffffff', undefined, { pot: P.jar });
       toets('20h onbekende factuur -> 404; geen onverwachte fouten in logError', r.status === 404 && !logs.some((l) => /^facturen/.test(l)), JSON.stringify(logs.filter((l) => /facturen/.test(l))));
     }

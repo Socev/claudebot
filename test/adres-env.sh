@@ -101,6 +101,13 @@ draai inspring '  # x\n   \nSUPABASE_URL=http://127.0.0.1:8091\nSB_SQL_LOKAAL=1\
 toets 'B6c ingesprongen commentaar: lokaal zoals server.js' "$([ "$(regels "$W/inspring.rpc")" = 0 ] && [ "$(regels "$W/inspring.gosu")" = 1 ] && echo 1)"
 draai vps "$GOED" SOCEV_KANT=vps
 toets 'B7 kant vps: adres.env genegeerd, oude route' "$([ "$(regels "$W/vps.rpc")" = 1 ] && [ "$(regels "$W/vps.gosu")" = 0 ] && echo 1)"
+# wv3873 (rapport Olares-uitval fout 4): op kant vps zet naar-vps het adres in de omgeving (pod-db.env); dan de lokale route
+draai vpsdb - SOCEV_KANT=vps SUPABASE_URL=http://127.0.0.1:8091 SB_SQL_LOKAAL=1
+toets 'B8 kant vps met pod-db.env (8091 + SB_SQL_LOKAAL=1): lokale route, geen HTTP' "$([ "$(regels "$W/vpsdb.rpc")" = 0 ] && [ "$(regels "$W/vpsdb.gosu")" = 1 ] && grep -qx 'TOKEN van-lokaal' "$W/vpsdb.uit" && echo 1)" "$(tail -3 "$W/vpsdb.uit" | tr '\n' ' ')"
+draai vpsherh - SOCEV_KANT=vps SUPABASE_URL=http://127.0.0.1:8091 SB_SQL_LOKAAL=1 NEP_FAAL=3
+toets 'B8b kant vps: databank nog niet op, herhaalt (4 pogingen)' "$([ "$(cat "$W/vpsherh.rc")" = 0 ] && [ "$(regels "$W/vpsherh.gosu")" = 4 ] && echo 1)"
+draai vpsvreemd - SOCEV_KANT=vps SB_SQL_LOKAAL=1
+toets 'B9 kant vps met SB_SQL_LOKAAL=1 maar ander adres: oude route' "$([ "$(regels "$W/vpsvreemd.rpc")" = 1 ] && [ "$(regels "$W/vpsvreemd.gosu")" = 0 ] && echo 1)"
 
 # ── C. pod-geheimen.js tegen een wegwerp-cluster ────────────────────────────
 if [ -x "$PGB/initdb" ] && [ "$(id -u)" != 0 ]; then

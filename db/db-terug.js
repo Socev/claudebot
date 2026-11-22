@@ -76,7 +76,9 @@ if (!u) {
   let heeft = false;
   try { heeft = fs.statSync(tar).size === a.bytes && somVan(tar) === a.sha256; } catch (e) { heeft = false; }
   if (!heeft) {
-    try { fs.mkdirSync(map, { recursive: true, mode: 0o750 }); } catch (e) { uit({ uitkomst: 'fout', fout: 'ontvangstmap niet te maken (' + (e.code || e) + ')' }); }
+    // wv3873 (rapport fout 8/9): de pod draait met umask 077, dus mode bij mkdir/open/writeFile werd 0700/0600 en db-wacht (pg, groep
+    // pgsock via de setgid-map) kon map, kopie en verzoek niet lezen ("kopie ontbreekt", Olares bleef op "wisselt"). Daarom expliciet chmod.
+    try { fs.mkdirSync(map, { recursive: true, mode: 0o750 }); fs.chmodSync(map, 0o2750); } catch (e) { uit({ uitkomst: 'fout', fout: 'ontvangstmap niet te maken (' + (e.code || e) + ')' }); }
     const tmp = tar + '.tmp';
     const fd = fs.openSync(tmp, 'w', 0o640);
     const r = spawnSync(SSH[0], SSH.slice(1).concat([SUDO + 'cat ' + R230_MAP + '/' + id + '.tar']), { stdio: ['ignore', fd, 'pipe'], timeout: 15 * 60000 });
@@ -89,11 +91,13 @@ if (!u) {
       meld(Object.assign({ stand: 'gezien', fout: f }, kaart));
       uit({ uitkomst: 'bezig', id: id, fout: f });    // volgende ronde opnieuw
     }
+    fs.chmodSync(tmp, 0o640);
     fs.renameSync(tmp, tar);
   }
+  try { fs.chmodSync(map, 0o2750); fs.chmodSync(tar, 0o640); } catch (e) { uit({ uitkomst: 'fout', id: id, fout: 'rechten van de kopie niet te zetten (' + (e.code || e) + ')' }); }
   // 3 verzoek aan db-wacht (pg leest het; inhoud zonder geheimen)
   const regels = ['id=' + id, 'sha256=' + a.sha256, 'checkpoint_lsn=' + a.checkpoint_lsn, 'tijdlijn=' + a.tijdlijn, 'systeem_id=' + a.systeem_id].join('\n') + '\n';
-  try { fs.writeFileSync(path.join(STOPMAP, 'terug.tmp'), regels, { mode: 0o644 }); fs.renameSync(path.join(STOPMAP, 'terug.tmp'), path.join(STOPMAP, 'terug')); }
+  try { fs.writeFileSync(path.join(STOPMAP, 'terug.tmp'), regels, { mode: 0o644 }); fs.chmodSync(path.join(STOPMAP, 'terug.tmp'), 0o644); fs.renameSync(path.join(STOPMAP, 'terug.tmp'), path.join(STOPMAP, 'terug')); }
   catch (e) { uit({ uitkomst: 'fout', id: id, fout: 'verzoek aan db-wacht niet te zetten (' + (e.code || e) + ')' }); }
   meld(Object.assign({ stand: 'wisselt' }, kaart));
   const t0 = Date.now();

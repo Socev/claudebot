@@ -1096,6 +1096,11 @@ jobs:
       - name: Rooktest - adres.env (databankoverstap)
         run: docker run --rm -u claude -v "$PWD:/src:ro" --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} /src/test/adres-env.sh
 
+      # wv3873 (bouwplan 'app blijft werken als Olares plat ligt' § 4.1): centrale passief-poort van de app over ALLE routes van handleApp
+      # (echte server.js als proefkopie, nep-scheidsrechter en nep-Access), lease in rolPrimair() en de stand-in (SOCEV_ALTIJD_PASSIEF).
+      - name: Rooktest - passief-poort van de app (alle routes)
+        run: docker run --rm -u claude -v "$PWD:/src:ro" --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} /src/test/app-passief-poort.sh
+
       # B103 (actieplan Fable 19-11): pod start ook zonder eigen databank — noodstand 'databank-weg' in fetch-secrets (pg-uit, geen
       # antwoord), db-wacht wacht i.p.v. exit en start na herstel vanzelf, run.sh herstart de container zodra de databank er is, /health.noodstand.
       - name: Rooktest - noodstand zonder databank (B103)
