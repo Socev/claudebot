@@ -707,10 +707,15 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     ze('20_Prive/Herinneringen/Proefherinnering.md', '# herinnering\n');                                                   // Herinneringen: nooit
     ze('00_Systeem/Proefsysteem.md', '# sys\n');
     ze('10_Zakelijk/AGENTS.md', '# agents\n');
+    ze('10_Zakelijk/_Gedeeld/Skills-broncode/x/SKILL.md', '# skill\n'); ze('10_Zakelijk/Projecten/P/code/README-deploy.md', '# code\n'); ze('leeg.md', '');
     ze('10_Zakelijk/Tolgaarde/Losse notitie.md', '# Losse notitie\n' + 'y'.repeat(900) + '\n[[Proefpartij]]\n');           // los, groot
     ze('10_Zakelijk/Tolgaarde/Kleine los.md', '# Klein\n');                                                               // los, klein
     ze('10_Zakelijk/Tolgaarde/Gelinkt.md', '# Gelinkt\n[[Kleine los]]\n'.replace('Kleine los', 'Losse notitie') + '');      // linkt naar Losse notitie
     ze('10_Zakelijk/Tolgaarde/Bron achtig.md', '---\ntype: bron\n---\n# bron\n');                                          // type bron: nooit
+    ze('10_Zakelijk/Tolgaarde/Nu - TG.md', '---\ntype: entiteit-nu\nbron: pod nachtstap\n---\n# Nu\n');                     // machine: nooit
+    ze('10_Zakelijk/Tolgaarde/Promedico-agenda/Week.md', '---\nbron: promedico-agenda@1 (extensie)\n---\n# week\n');        // machine (bron): nooit
+    ze('10_Zakelijk/Tolgaarde/Promedico-agenda/Week - botsingen.md', '---\nsoort: x\nmodule: promedico-betekenis@1\n---\n# b\n');   // machine (module): nooit
+    ze('10_Zakelijk/Tolgaarde/Shopper/Lange kop.md', '---\ntype: shopper-zoektocht\naannames: ["' + 'z'.repeat(5000) + '"]\n---\n# s\n');   // kop langer dan 4 kB: toch herkend
     for (let i = 0; i < 6; i++) ze('10_Zakelijk/Tolgaarde/Bronnen/TG - 2026-11-' + String(10 + i) + ' - mail ' + i + '.md', '[[Proefpartij]] [[Grootpartij]]\n');
     for (let i = 0; i < 4; i++) ze('30_Conversaties/WhatsApp/Groep - 2026-11-0' + (i + 1) + '.md', '[[Weinigpartij]] [[Grootpartij]]\n');
     ze('30_Conversaties/WhatsApp/Groep - 2026-10-01.md', '[[Weinigpartij]]\n');   // buiten de 30 dagen
@@ -729,7 +734,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       JSON.stringify(dunP) === JSON.stringify(['10_Zakelijk/_Gedeeld/Relaties/Proefpartij.md']) && e1.j.dun[0][3] === 6 && e1.j.dun_n === 1, e1.j.dun);
     toets('17 los: niemand linkt ernaar, grootste eerst; niet Systeem, AGENTS, Herinneringen, type bron/rekening, niet als er een link heen gaat',
       losP.indexOf('10_Zakelijk/Tolgaarde/Kleine los.md') >= 0 && losP.indexOf('10_Zakelijk/Tolgaarde/Gelinkt.md') >= 0 && losP.indexOf('10_Zakelijk/Tolgaarde/Losse notitie.md') < 0 &&
-      !losP.some((p) => /Proefsysteem|AGENTS|Herinneringen|Bron achtig|Proefrekening|Bronnen\//.test(p)) &&
+      !losP.some((p) => /Proefsysteem|AGENTS|Herinneringen|Bron achtig|Proefrekening|Bronnen\/|Nu - TG|Promedico-agenda|Shopper|SKILL|README|leeg/.test(p)) &&
       e1.j.los.every((x, i, a) => !i || a[i - 1][2] >= x[2]), e1.j.los);
     // klus: niet in de lijst, onbekende soort
     const kNiet = await se.app('POST /app/secondbrain/klus', { pad: '00_Systeem/Proefsysteem.md', soort: 'oogst' }, {});
@@ -739,7 +744,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     const g1 = gestart[0] || {};
     toets('17 klus: eerste tik start precies één klus (label socev: Oogst — naam, grondwet vooraan, pad in de opdracht, 45 min)',
       k1.j.stand === 'gestart' && gestart.length === 1 && g1.label === 'socev: Oogst — Proefpartij' && g1.prompt.indexOf('GRONDWET-KERN v1') === 0 &&
-      g1.prompt.indexOf('10_Zakelijk/_Gedeeld/Relaties/Proefpartij.md') > 0 && /onderwerp-oogsten/.test(g1.prompt) && /second-brain-verwerk-raw-input/.test(g1.prompt) && g1.min === 45, [k1.j, g1.label]);
+      g1.prompt.indexOf('10_Zakelijk/_Gedeeld/Relaties/Proefpartij.md') > 0 && /onderwerp-oogsten/.test(g1.prompt) && /second-brain-verwerk-raw-input/.test(g1.prompt) && /Mail doorzocht op <datum>/.test(g1.prompt) && g1.min === 45, [k1.j, g1.label]);
     const k2 = await se.app('POST /app/secondbrain/klus', { pad: dunP[0], soort: 'links' }, {});
     toets('17 klus: tweede tik (ook de andere knop) terwijl die loopt start niets', k2.j.stand === 'loopt' && gestart.length === 1, k2.j);
     standen['a'.repeat(16)] = 'loopt';

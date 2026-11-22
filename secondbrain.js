@@ -1216,8 +1216,9 @@ function maak(opt) {
   //     de maat van de review (≥ 10 in 30 dagen, < 1,5 kB; toen 55, op mtime) geeft nu 3 pagina's (mtime van bronnen is onbruikbaar, zie
   //     bronverkeer); ≥ 5 en < 2 kB geeft er ± 20, vooral partijen (Relaties) en entiteiten.
   //  2. los: nergens naartoe gelinkt = geen enkel bestand (ook geen bron) linkt naar de pagina. Buiten beide lijsten: Systeem, Ontwikkeling,
-  //     Herinneringen (MemoryLane; de linkcheck legt geen links naar een herinnering), Cijfermeester, _Gedeeld/Skills, OCR-wachtrij,
-  //     AGENTS/CLAUDE/README/index, en pagina's met type bron, gegenereerd of rekening (die mag niemand bewerken). Gemeten 22-11: ± 180.
+  //     Herinneringen (MemoryLane; de linkcheck legt geen links naar een herinnering), Cijfermeester, _Gedeeld/Skills(-broncode), OCR-wachtrij,
+  //     code- en Techniekmappen, AGENTS/CLAUDE/README/SETUP/SKILL/index, lege bestanden, pagina's met type bron, gegenereerd of rekening (die mag niemand bewerken) en wat een machine schrijft
+  //     (EINDJES_TYPE_UIT / EINDJES_BRON_UIT). Gemeten 22-11: 31 (de 604 van de review was vooral machinewerk).
   // Per regel twee knoppen (app): Oogst dit onderwerp (skill onderwerp-oogsten) en Leg de links (skill second-brain-linkcheck voor dit ene
   // doel). Elke tik = één achtergrondklus van Socev (opt.klus: start/stand/grondwet uit server.js). Grenzen: alleen een pagina die nu in een
   // van de lijsten staat; per pagina één klus tegelijk; hooguit EINDJES_LOPEND tegelijk en EINDJES_PER_DAG per dag. Eerst reserveren
@@ -1226,9 +1227,13 @@ function maak(opt) {
   // klus, 60 min). Codex MOET 1: de daggrens telt elke start (lijst s), niet de paden.
   const EINDJES_DAGEN = 30, EINDJES_MIN = 5, EINDJES_MAX_G = 2048, EINDJES_DUN_MAX = 80, EINDJES_LOS_MAX = 400, EINDJES_KOP = 4096;
   const EINDJES_LOPEND = 2, EINDJES_PER_DAG = 10, EINDJES_ONBEKEND_MS = 75 * 60000, EINDJES_LOOPT_MAX_MS = 3 * 3600000, EINDJES_BEWAAR_DAGEN = 7;
-  const EINDJES_UIT = /^(00_Systeem|01_Ontwikkeling|20_Prive\/Herinneringen|90_Cijfermeester)\/|(^|\/)(_Gedeeld\/Skills|OCR-wachtrij)\//;
-  const EINDJES_NAAM_UIT = /^(AGENTS|CLAUDE|README|index)\.md$/i;
-  const EINDJES_TYPE_UIT = /^["']?(bron|gegenereerd|rekening)["']?$/i;
+  const EINDJES_UIT = /^(00_Systeem|01_Ontwikkeling|20_Prive\/Herinneringen|90_Cijfermeester)\/|(^|\/)(_Gedeeld\/Skills(-broncode)?|OCR-wachtrij|code|Techniek)\//;
+  const EINDJES_NAAM_UIT = /^(AGENTS|CLAUDE|README[^/]*|SETUP|SKILL|index)\.md$/i;
+  // Door een machine geschreven (gemeten 22-11: ± 95 van de 143 'nergens gelinkt' — Cijfer-Meester-bladen, NZa-verweerpunten, Nu-pagina's,
+  // Promedico-weken, bandjes-archief, Shopper): die hoeven geen links en zijn geen onderwerp om aan te vullen. Op type, op bron (pod/databank)
+  // of op een module met versie (module: promedico-betekenis@1).
+  const EINDJES_TYPE_UIT = /^["']?(bron|gegenereerd|rekening|cijferblad|verweerpunt-naloop|entiteit-nu|bandje-archief|shopper-zoektocht|register|bouwlog|systeemdocumentatie|instructie|feitenregister-bijdrage)["']?$/i;
+  const EINDJES_BRON_UIT = /^["']?(pod |databank |promedico-agenda@)/i;
   const KLUS_SOORTEN = { oogst: { label: 'Oogst', min: 45 }, links: { label: 'Leg de links', min: 30 } };
   let eindjesCache = null;   // { sig, dag, j }
   const kopTypeCache = new Map();   // pad → { m, uit }
@@ -1241,14 +1246,18 @@ function maak(opt) {
       try {
         const buf = Buffer.alloc(Math.min(EINDJES_KOP, b.g || EINDJES_KOP)), n = fs.readSync(fd, buf, 0, buf.length, 0);
         const v = fmVelden(buf.slice(0, n).toString('utf8').replace(/^﻿/, ''));
-        uit = !!(v && (EINDJES_TYPE_UIT.test(String(v.type || '').trim()) || v.ovis_bronnotitie !== undefined));
+        // een lange frontmatter (Shopper) past niet altijd in de eerste 4 kB: dan geldt wat er wel staat
+        const t = buf.slice(0, n).toString('utf8').replace(/^﻿/, '');
+        const m = v ? null : /^---\r?\n([\s\S]*)$/.exec(t);
+        const veld = function (naam) { if (v) return v[naam] !== undefined ? String(v[naam]).trim() : null; const x = m && new RegExp('^' + naam + ':[ \\t]*(.*)$', 'm').exec(m[1]); return x ? x[1].trim() : null; };
+        uit = !!((v || m) && (EINDJES_TYPE_UIT.test(veld('type') || '') || EINDJES_BRON_UIT.test(veld('bron') || '') || /@\d/.test(veld('module') || '') || veld('ovis_bronnotitie') !== null));
       } finally { fs.closeSync(fd); }
     } catch (e) { uit = false; }
     kopTypeCache.set(b.p, { m: b.m, uit: uit });
     return uit;
   }
   function eindjesKandidaat(b) {
-    return b && !b.v && b.s === 'md' && !EINDJES_UIT.test(b.p) && !EINDJES_NAAM_UIT.test(b.p.split('/').pop());
+    return b && !b.v && b.s === 'md' && b.g > 0 && !EINDJES_UIT.test(b.p) && !EINDJES_NAAM_UIT.test(b.p.split('/').pop());
   }
   function eindjesLijsten(k) {
     const dag = herkomstDag(nu());
@@ -1354,7 +1363,8 @@ function maak(opt) {
       'ovis:-blok laat je de frontmatter (op updated: na) en elk <!-- ovis:blok -->-blok ongemoeid; een nieuw herkenningskenmerk (naam, adres, mailadres, ' +
       'domein, KvK) alleen als voorstel in je rapport, nooit op de pagina.\n' +
       '6. Ruim de tussenbestanden op (laatste stap van de skill). Geen verslag in 00_Systeem/Jev nodig.\n' +
-      'Niets gevonden: laat de pagina zoals hij is en zeg dat.' + slot;
+      'Niets om op te nemen: zet dan alleen onder "Wat we weten" één regel "Mail doorzocht op <datum>: <aantal> berichten, niets om op te nemen ' +
+      '(<waarom, in een paar woorden>)." zodat David op de pagina ziet dat het gedaan is, en zeg dat.' + slot;   // proef 22-11 (LHV): 385 mails, niets erdoor
     return kop +
       'Waarom: naar deze pagina linkt nog niets, dus hij is in Davids brein niet te vinden vanaf andere pagina\'s. David vraagt je de links te leggen.\n' +
       '1. Volg de skill second-brain-linkcheck, maar alleen voor dit ene doel: stap 1 voor deze pagina (bestandsnaam, kop en aliases).\n' +
