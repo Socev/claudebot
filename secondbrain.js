@@ -69,6 +69,8 @@ const DOMEINEN = ['Tolgaarde', 'Groenhouten', 'HAGRO', 'POT', 'DBH', 'Holding', 
 // vóór wv3405: app-weergave en de schrijfpoorten van de vault. streng = poortstand voor alles wat het huis verlaat (Zoek snel-model, Docs › Delen).
 const GEHEIMEN = require('./geheimen.js');
 const LW = require('./lees-of-weiger.js');   // wv3423 (B80): niet kunnen lezen is nooit leeg
+// wv3750: de vaste landkaart (optioneel in de release; ontbreekt hij, dan geen plekken en schikt de app zelf zoals vroeger)
+const BS = (function () { try { return require('./brein-schik.js'); } catch (e) { return null; } })();
 function masker(t, vast, bsnMasker, streng) {
   let s = GEHEIMEN.maskeer(t, { streng: streng === true }).tekst;
   if (vast) {
@@ -446,9 +448,8 @@ function maak(opt) {
   // Weergave P4: verborgen (bronnen, raw_input, _INBOX, gesprekken) alleen uit kaart en zoeklijst, met "alles" erbij. Geen afscherming per
   // apparaat meer (wv3446, David 19-11-2026: "dat soort filtering doe je niet meer. NERGENS.").
 
-  function kaartVoor(ctx, alles) {
-    const k = vers(false);
-    if (!k) return { status: 503, j: { ok: false, fout: 'de kaart is nu niet te bouwen' } };
+  // De knopen en lijnen zoals de App ze krijgt (alles = met het verborgen deel); ook de invoer van de nachtschikking (wv3750).
+  function zichtbaar(k, alles) {
     const naar = new Map(), knopen = [];
     const tel = {};
     let verborgen = 0;
@@ -467,10 +468,72 @@ function maak(opt) {
       }
     });
     knopen.forEach(function (b) { tel[b.d] = (tel[b.d] || 0) + 1; });
-    return { status: 200, j: { ok: true, bijgewerkt: new Date(k.op).toISOString(), alles: !!alles,
+    return { knopen: knopen, lijnen: lijnen, graad: graad, tel: tel, verborgen: verborgen };
+  }
+
+  // wv3750 (besluitenpagina nr 483 = 3C183): de vaste landkaart. De nachtstap (schikNacht) rekent de plekken uit (brein-schik.js, in een
+  // worker_thread) en bewaart ze in schikking.json naast kaart.json (0600, alleen paden + getallen); kaartVoor stuurt ze mee in de gewone
+  // weergave (niet bij "alles": het verborgen deel zit niet in de schikking). plek3/plek2: platte lijst gehele getallen per knoop, null voor
+  // een pagina die er sinds de nacht bij kwam (de app legt die bij zijn buren). Mislukt de nacht, dan blijft het bestand van gisteren.
+  let schikCache = null;   // { mtime, j }
+  function leesSchikking() {
+    if (!BS) return null;
+    let st;
+    try { st = fs.statSync(path.join(DIR, 'schikking.json')); } catch (e) { schikCache = null; return null; }
+    if (schikCache && schikCache.mtime === st.mtimeMs) return schikCache.j;
+    const j = BS.lees(DIR);
+    schikCache = { mtime: st.mtimeMs, j: j };
+    return j;
+  }
+  function plekkenVoor(knopen) {
+    const s = leesSchikking();
+    if (!s) return null;
+    const p3 = new Array(knopen.length * 3), p2 = new Array(knopen.length * 2);
+    let mis = 0;
+    knopen.forEach(function (b, i) {
+      const a = Object.prototype.hasOwnProperty.call(s.d3, b.p) ? s.d3[b.p] : null, c = Object.prototype.hasOwnProperty.call(s.d2, b.p) ? s.d2[b.p] : null;
+      const goed = function (v, n) { return Array.isArray(v) && v.length === n && v.every(function (g) { return typeof g === 'number' && isFinite(g); }); };
+      if (goed(a, 3)) { p3[i * 3] = a[0]; p3[i * 3 + 1] = a[1]; p3[i * 3 + 2] = a[2]; } else { p3[i * 3] = p3[i * 3 + 1] = p3[i * 3 + 2] = null; mis++; }
+      if (goed(c, 2)) { p2[i * 2] = c[0]; p2[i * 2 + 1] = c[1]; } else { p2[i * 2] = p2[i * 2 + 1] = null; }
+    });
+    return { plek3: p3, plek2: p2, plek_dag: s.dag || null, plek_mis: mis };
+  }
+  let schikBezig = null, schikLaatst = null;
+  async function schikNacht(datum, opt2) {
+    if (!BS) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+    if (schikBezig) return schikBezig;
+    const ms = (opt2 && opt2.ms) || 150000;
+    schikBezig = (async function () {
+      const t0 = Date.now();
+      const k = vers(false);
+      if (!k) throw new Error('de kaart is nu niet te bouwen');
+      const z = zichtbaar(k, false);
+      const inv = BS.invoerUitKaart(z.knopen, z.lijnen);
+      const vorig = leesSchikking();
+      const r = await (opt2 && opt2.reken ? opt2.reken(inv, vorig, ms) : BS.schikDraad(inv, vorig ? { d3: vorig.d3, d2: vorig.d2 } : null, ms));
+      mkdir();
+      BS.schrijf(DIR, { versie: BS.VERSIE, dag: datum || null, gebouwd: new Date(nu()).toISOString(), n: inv.paden.length, d3: r.d3, d2: r.d2 });
+      schikLaatst = { t: new Date(nu()).toISOString(), ok: true, n: inv.paden.length, ms: Date.now() - t0, warm: !!r.warm3 };
+      return { ok: true, detail: { n: inv.paden.length, ms: Date.now() - t0, warm: !!r.warm3, lijsten: r.lijsten } };
+    })().catch(function (e) {
+      schikLaatst = { t: new Date(nu()).toISOString(), ok: false, fout: String(e && e.message || e).slice(0, 160) };
+      fout('secondbrain-schik', e);
+      throw e;
+    }).finally(function () { schikBezig = null; });
+    return schikBezig;
+  }
+
+  function kaartVoor(ctx, alles) {
+    const k = vers(false);
+    if (!k) return { status: 503, j: { ok: false, fout: 'de kaart is nu niet te bouwen' } };
+    const z = zichtbaar(k, alles);
+    const knopen = z.knopen, graad = z.graad, tel = z.tel;
+    const j = { ok: true, bijgewerkt: new Date(k.op).toISOString(), alles: !!alles,
       domeinen: DOMEINEN.map(function (n, i) { return { i: i, naam: n, n: tel[n] || 0 }; }),
       knopen: knopen.map(function (b, li) { return [b.p, DOMEINEN.indexOf(b.d), b.s, new Date(b.m).toISOString().slice(0, 10), graad[li]]; }),
-      lijnen: lijnen, verborgen_n: verborgen } };
+      lijnen: z.lijnen, verborgen_n: z.verborgen };
+    if (!alles) { let pl = null; try { pl = plekkenVoor(knopen); } catch (e) { pl = null; fout('secondbrain-plek', e); } if (pl) Object.assign(j, pl); }
+    return { status: 200, j: j };
   }
 
   // Pad uit de kaart (exacte tekst, ook NFC/hoofdletters), dan realpath binnen de vault en lstat geen symlink (P7).
@@ -1163,10 +1226,11 @@ function maak(opt) {
       gebouwd: k && k.op ? new Date(k.op).toISOString() : null, duur_ms: k ? k.duur : null, nacht: laatsteNacht,
       gelezen: k && typeof k.gelezen === 'number' ? k.gelezen : null, hergebruik: k ? k.hergebruik || 0 : 0,   // wv2607: linkcache zichtbaar
       overgeslagen: overgeslagen.length, overgeslagen_mappen: overgeslagen.slice(0, 5).map(function (x) { return x.pad.split('/').slice(0, 2).join('/') + ' (' + x.code + ')'; }),   // wv3423 (B80)
-      bouw_fout: bouwFout, herkomst: herkomstStand() };   // wv3608
+      bouw_fout: bouwFout, herkomst: herkomstStand(),   // wv3608
+      schik: BS ? { laatst: schikLaatst, dag: (function () { try { const s = leesSchikking(); return s ? s.dag || null : null; } catch (e) { return null; } })() } : null };   // wv3750
   }
 
-  return { mkdir: mkdir, laadBewaard: laadBewaard, app: app, health: health, vers: vers, koppelNaam: koppelNaam, nacht: nacht, bron: bron,
+  return { mkdir: mkdir, laadBewaard: laadBewaard, app: app, health: health, vers: vers, koppelNaam: koppelNaam, nacht: nacht, bron: bron, schikNacht: schikNacht,
     _los: function (doel, bron, md) { return los(doel, bron, md, vers(false)); },
     _herkomstNu: function () { if (herkomstTimer) { clearTimeout(herkomstTimer); herkomstSchrijf(); } } };   // wv3608: alleen voor de toets
 }

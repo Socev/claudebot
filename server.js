@@ -24166,6 +24166,12 @@ const nachtketen = (function () {
         const d = ctx.datum.split('-').map(Number);   // zelfde datumvorm als de oude 03:50-klok (J-M-D zonder voorloopnul)
         return { ok: true, al_gedaan: !secondbrain.nacht(d[0] + '-' + d[1] + '-' + d[2]) || undefined };
       } },
+      // wv3750 (besluitenpagina nr 483 = 3C183): de vaste landkaart van Brain, ná de kaartbouw; rekenen in een worker_thread met harde grens
+      // 150 s; alleen bij succes een nieuwe schikking.json, anders blijft die van gisteren (de app tekent dan die). Een fout meldt de keten.
+      { naam: 'secondbrain-schik', start_na: [3, 52], na: ['secondbrain-kaart'], limiet_min: 5, pogingen: 2, inProces: true, meldtZelf: false, doe: async function (ctx) {
+        if (!secondbrain || typeof secondbrain.schikNacht !== 'function') return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        return secondbrain.schikNacht(ctx.datum);
+      } },
       { naam: 'veeg', start_na: [3, 50], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(scriptsVeeg) },
       // wv2526: AVG-stukken per praktijk naar hun privé-repo; kindproces met eigen harde grens (4 min); een fout meldt alleen de keten (box-rij)
       { naam: 'avg-spiegel', start_na: [4, 0], limiet_min: 5, pogingen: 2, meldtZelf: false, doe: function (ctx) { return avgSpiegelRonde(ctx); } },
@@ -25677,7 +25683,8 @@ if (brainTekst && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setTimeou
 if (secondbrain) setInterval(function () {
   try {
     const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' }));
-    if (d.getHours() === 3 && d.getMinutes() >= 50 && !nachtketenActief()) secondbrain.nacht(d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate());
+    if (d.getHours() === 3 && d.getMinutes() >= 50 && !nachtketenActief()) secondbrain.nacht(d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate())
+      && typeof secondbrain.schikNacht === 'function' && secondbrain.schikNacht(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')).catch(function () {});   // wv3750: zonder keten de oude klok (na een verse kaart)
   } catch (e) { logError('secondbrain-nacht', e); }
 }, 5 * 60000).unref();
 async function appSecondBrain(req, res, a, d, route) {
