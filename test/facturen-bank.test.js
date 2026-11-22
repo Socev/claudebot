@@ -783,7 +783,8 @@ test('dubbele factuur en verzending mislukt: signalen met hun knoppen; gevolgen 
 test('alle signalen: elke knop geeft een les, onbekende knop/zonder wie geweigerd, en geen gevolg betaalt, mailt of maakt een IBAN bekend', () => {
   const TOEGESTAAN = new Set(['upload_openen', 'uitzondering_maken', 'leverancier_bijwerken', 'tekst_tonen', 'factuur_status', 'betaalspoor', 'betaallijst', 'koppelen', 'transactie_verwijderen',
     'terug_koppelen',   // wv1415: een terugboeking aan zijn factuur koppelen (geen betaling)
-    'afschrift_opnieuw']);   // wv2992: een POT-afschrift opnieuw in de wachtrij (zoals Opnieuw proberen bij een factuur)
+    'afschrift_opnieuw',   // wv2992: een POT-afschrift opnieuw in de wachtrij (zoals Opnieuw proberen bij een factuur)
+    'rest_vervalt']);   // wv3913 (C57): deels betaald klopt zo — de gekoppelde betalingen tellen als volledig (geen betaling)
   const opties = { wie: 'eigenaar', nu: '2026-10-22T10:00:00Z', categorie: 'overig', leverancier: 'la', transactie: 't1', toelichting: 'uitgezocht en in orde' };
   for (const soort of B.SIGNAAL_SOORTEN) {
     const s = B.maakSignaal(soort, { transacties: ['t1', 't2'], facturen: ['f1'], naam: 'Leverancier A B.V.', leverancier: 'la', bedrag_centen: -1000, eigen_iban: ABN_TG, details: { nummer: 'A-1', datums: ['2026-10-01', '2026-10-05'], te_verwijderen: 't2' } });
@@ -816,11 +817,18 @@ test('alle signalen: elke knop geeft een les, onbekende knop/zonder wie geweiger
   assert.deepEqual(B.afhandelSignaal(af, 'opnieuw_proberen', opties).gevolgen, [{ actie: 'afschrift_opnieuw', afschrift: 'dddddddddddd0001' }]);
   assert.equal(B.afhandelSignaal(af, 'terug_naar_beoordelen', opties).fout, 'voorwaarde');
   assert.equal(B.afhandelSignaal(B.maakSignaal('verzending_mislukt', { facturen: ['f1'] }), 'al_geregeld', opties).fout, 'voorwaarde', 'factuursignaal: geen Weg, al geregeld');
+  // wv3913 (C57): het restsignaal bij een deelbetaling heeft Klopt zo (met toelichting) en geen Naar betaallijst; het gewone signaal omgekeerd
+  const dl = B.maakSignaal('te_betalen_niet_betaald', { facturen: ['f1'], bedrag_centen: 6000, details: { deels: { betaald_centen: 4000, rest_centen: 6000, factuur_centen: 10000 } } });
+  assert.deepEqual(dl.knoppen, ['rest_vervalt', 'is_al_betaald']);
+  assert.equal(B.afhandelSignaal(dl, 'naar_betaallijst', opties).fout, 'voorwaarde');
+  assert.equal(B.afhandelSignaal(dl, 'rest_vervalt', Object.assign({}, opties, { toelichting: '' })).fout, 'vereist');
+  assert.match(B.signaalUitleg(dl), /Deels betaald: .*De rest/);
+  assert.deepEqual(B.maakSignaal('te_betalen_niet_betaald', { facturen: ['f1'] }).knoppen, ['naar_betaallijst', 'is_al_betaald']);
   // de tabel uit ontwerp § 4.6, knop voor knop
   assert.deepEqual(Object.fromEntries(B.SIGNAAL_SOORTEN.map((s) => [s, Object.keys(B.SIGNALEN[s].knoppen)])), {
     geen_factuur: ['factuur_uploaden', 'is_uitzondering', 'alleen_portaal'], dubbel_betaald: ['zet_op_incasso', 'terugvraagtekst', 'geen_dubbel'],
     dubbele_factuur: ['is_dubbel', 'toch_factuur'], verzending_mislukt: ['opnieuw_proberen', 'terug_naar_beoordelen', 'al_geregeld'], incasso_niet_gezien: ['toch_zelf_betalen', 'afwachten'],
-    te_betalen_niet_betaald: ['naar_betaallijst', 'is_al_betaald'], ingevoerd_niet_gezien: ['opnieuw_kijken', 'koppelen'], onbekend_iban: ['uitzoeken'],
+    te_betalen_niet_betaald: ['naar_betaallijst', 'rest_vervalt', 'is_al_betaald'], ingevoerd_niet_gezien: ['opnieuw_kijken', 'koppelen'], onbekend_iban: ['uitzoeken'],
     mogelijk_dubbel_geupload: ['is_hetzelfde', 'zijn_er_twee'],
     teruggeboekt: ['opnieuw_betalen', 'leverancier_incasseert'], afwijkend_bedrag: ['klopt', 'uitzoeken'],
     dienst_zonder_betaling: ['wegzetten'], betaling_zonder_dienst: ['wegzetten'], roosternaam_zonder_koppeling: ['wegzetten'], factuur_dagen_afwijkend: ['wegzetten'], rekening_onbekend: ['wegzetten'],

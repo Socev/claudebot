@@ -1057,7 +1057,15 @@ function bandTekst(d) {
     (PER_FREQ[d.frequentie] ? ' ' + PER_FREQ[d.frequentie] : '');
 }
 // Eén zin bij een signaal voor de kaart in de App (nu alleen afwijkend_bedrag; andere soorten: null). s = signaal met details en bedrag_centen.
+// wv3913 (C57): restsignaal bij een deelbetaling
+function isDeels(s) { return !!(s && s.details && s.details.deels); }
 function signaalUitleg(s) {
+  if (s && s.soort === 'te_betalen_niet_betaald' && isDeels(s)) {
+    const d = s.details.deels;
+    return 'Deels betaald: ' + eurTekst(d.betaald_centen) + (Number.isSafeInteger(d.factuur_centen) ? ' van ' + eurTekst(d.factuur_centen) : '') + ' staat op de bank. De rest (' +
+      eurTekst(d.rest_centen) + ') is nog niet betaald' + (s.details.verval ? ', en de vervaldatum (' + dagNL(s.details.verval) + ') is voorbij' : '') +
+      '. Betaal de rest met de hand, of kies "Klopt zo" als de leverancier minder rekende.';
+  }
   // wv2057: waarom "niet gezien" (de bank van die rekening is al verder dan de termijn)
   if (s && s.soort === 'ingevoerd_niet_gezien') {
     const d = s.details || {};
@@ -1193,8 +1201,12 @@ const SIGNALEN = {
   te_betalen_niet_betaald: {
     titel: 'Te betalen, niet betaald',
     knoppen: {
-      naar_betaallijst: { label: 'Naar betaallijst', vereist: [], gevolgen: (s) => [{ actie: 'betaallijst', factuur: s.facturen[0] }],
+      // wv3913 (C57): bij een deelbetaling (details.deels) niet naar de betaallijst (die betaalt het hele bedrag; de batch weigert hem ook)
+      naar_betaallijst: { label: 'Naar betaallijst', vereist: [], geldt: (s) => !isDeels(s), gevolgen: (s) => [{ actie: 'betaallijst', factuur: s.facturen[0] }],
         les: (s) => 'Factuur van ' + naamVan(s) + ' voorbij de vervaldatum; op de betaallijst gezet.' },
+      rest_vervalt: { label: 'Klopt zo (rest vervalt)', vereist: ['toelichting'], geldt: (s) => isDeels(s),
+        gevolgen: (s, o) => [{ actie: 'rest_vervalt', factuur: s.facturen[0], toelichting: String(o.toelichting).slice(0, 300) }, { actie: 'betaalspoor', factuur: s.facturen[0], gebeurtenis: 'bankmatch' }],
+        les: (s, o) => 'Factuur van ' + naamVan(s) + ' deels betaald en zo goed: ' + String(o.toelichting).slice(0, 160) },
       is_al_betaald: { label: 'Is al betaald (koppelen)', vereist: ['transactie'],
         gevolgen: (s, o) => [{ actie: 'koppelen', factuur: s.facturen[0], transactie: o.transactie }, { actie: 'betaalspoor', factuur: s.facturen[0], gebeurtenis: 'bankmatch' }],
         les: (s) => 'Betaling aan ' + naamVan(s) + ' was er al maar werd niet herkend; met de hand gekoppeld.' },
@@ -1513,11 +1525,18 @@ function bankcontrole(inv) {
   const TERUG = 'sepa_terug';
   const netto = (fid) => {
     const ks = betaald.get(fid) || [];
-    let n = ks.filter((k) => k.methode === TERUG).length;
-    if (!n) return ks;
+    const terug = ks.filter((k) => k.methode === TERUG);
+    if (!terug.length) return ks;
     const af = ks.filter((k) => k.methode !== TERUG && txMap.has(k.tx) && txMap.get(k.tx).bedrag_centen < 0);
     const weg = new Set();
-    for (const k of af.filter((x) => /^sepa_/.test(String(x.methode || ''))).concat(af)) { if (!n) break; if (!weg.has(k)) { weg.add(k); n--; } }
+    // wv3913 (C57, diffreview): bij voorkeur de betaling met precies het teruggeboekte bedrag (termijn 40 + 60, de 60 terug → 40 betaald), dan
+    // een SEPA-koppeling, dan de eerste; zo kloppen "deels betaald" en de rest
+    for (const tb of terug) {
+      const tbb = txMap.has(tb.tx) ? txMap.get(tb.tx).bedrag_centen : null;
+      const vrij = af.filter((k) => !weg.has(k)), gelijk = (k) => tbb !== null && -txMap.get(k.tx).bedrag_centen === tbb, sepa = (k) => /^sepa_/.test(String(k.methode || ''));
+      const k = vrij.find((x) => gelijk(x) && sepa(x)) || vrij.find(gelijk) || vrij.find(sepa) || vrij[0];
+      if (k) weg.add(k);
+    }
     return ks.filter((k) => k.methode !== TERUG && !weg.has(k));
   };
   const heeftTerug = (fid) => (betaald.get(fid) || []).some((k) => k.methode === TERUG);
@@ -1527,7 +1546,8 @@ function bankcontrole(inv) {
     // een mens-koppeling telt alleen als volledig als hij dat zegt (termijnbetalingen: de eerste termijn dekt de factuur niet; natoets #3)
     if (ks.some((k) => k.volledig === true || k.methode === 'incasso' || k.methode === 'valuta' || (txFacturen.get(k.tx) || []).length > 1)) return true;
     const som = ks.reduce((s, k) => s + (txMap.has(k.tx) ? -txMap.get(k.tx).bedrag_centen : 0), 0);
-    return teBetalen(f) > 0 ? som >= teBetalen(f) : som <= teBetalen(f);
+    // wv3913 (C57): kwijt_centen = wat David bij deels betaald liet vervallen (Klopt zo)
+    return teBetalen(f) > 0 ? som + (Number(f.kwijt_centen) || 0) >= teBetalen(f) : som <= teBetalen(f);
   };
   const isPrive = (f) => !!f && (f.entiteit === 'prive' || !!f.prive || !!f.alleen_eigenaar || !!f.patientkenmerk);
   const eigenaarVan = (tx, fids) => !!(tx && tx.alleen_eigenaar) || (fids || []).some((id) => isPrive(fMap.get(id)));
@@ -1919,8 +1939,21 @@ function bankcontrole(inv) {
   const dekking = dekkingVan(txs);   // wv2057: per eigen rekening de laatste boekdatum die binnen is
   const actief = new Set(txs.filter((t) => t.bedrag_centen < 0).map((t) => ibanNorm(t.eigen_iban)).filter(Boolean));   // natoets ZOU 2
   const gekoppeld = (f) => netto(f.id).length > 0 || voorgesteld.has(f.id);
+  // wv3913 (C57, Fable-review M5): deels betaald = netto een betaling gekoppeld die de factuur niet dekt (en geen voorstel open); dan wel een
+  // restsignaal ("te betalen, niet betaald" met details.deels en de rest als bedrag), met een eigen sleutel per set deelbetalingen
+  const deelsVan = (f) => {
+    const ks = netto(f.id);
+    if (!ks.length || voorgesteld.has(f.id) || voldaan(f) || !(teBetalen(f) > 0) || f.betaalspoor === 'betaald_gezien') return null;
+    const som = ks.reduce((x, k) => x + (txMap.has(k.tx) ? -txMap.get(k.tx).bedrag_centen : 0), 0);
+    // sleutel = de hele set netto deelbetalingen (diffreview MOET 2: een extra post met een oudere boekdatum is ook een nieuwe gebeurtenis)
+    const set = [...new Set(ks.map((k) => k.tx))].sort();
+    // eigen: een meegetelde bankpost is alleen voor de eigenaar → het restsignaal ook (de bedragen staan erin; diffreview ronde 7)
+    const eigen = ks.some((k) => txMap.has(k.tx) && !!txMap.get(k.tx).alleen_eigenaar);
+    return set.length ? { betaald_centen: som, rest_centen: teBetalen(f) - som - (Number(f.kwijt_centen) || 0), set: set.join(','), eigen } : null;
+  };
   for (const f of facturen) {
-    if (NIET_OPEN.includes(f.status) || gekoppeld(f) || f.entiteit === 'prive' || !zichtbaar.has(f.entiteit)) continue;
+    const deels = NIET_OPEN.includes(f.status) ? null : deelsVan(f);
+    if (NIET_OPEN.includes(f.status) || (gekoppeld(f) && !deels) || f.entiteit === 'prive' || !zichtbaar.has(f.entiteit)) continue;
     // een creditnota vraagt geen betaling: nooit "te betalen, niet betaald" of "incasso niet gezien" (wv855, overdracht F3 #1)
     if (f.soort === 'creditnota' || (Number.isSafeInteger(Number(f.incl)) && Number(f.incl) < 0)) continue;
     // wv1415: na een terugboeking spreekt eerst dat signaal; is het afgehandeld, dan het gewone factuursignaal met een eigen sleutel (een
@@ -1929,12 +1962,19 @@ function bankcontrole(inv) {
       .sort((a, b) => (a.boekdatum < b.boekdatum ? -1 : a.boekdatum > b.boekdatum ? 1 : String(a.id).localeCompare(String(b.id)))).map((t) => t.id);
     if ((terugSig.get(f.id) || []).some((sl) => bestaandOpen.has(sl) || !bestaandSleutel.has(sl))) continue;
     const l = levVan(f.leverancier, ctx);
-    const basis = { facturen: [f.id], entiteit: f.entiteit, naam: l ? l.naam : null, leverancier: f.leverancier || null, bedrag_centen: teBetalen(f),
+    const basis = { facturen: [f.id], entiteit: f.entiteit, naam: l ? l.naam : null, leverancier: f.leverancier || null, bedrag_centen: teBetalen(f) - (Number(f.kwijt_centen) || 0),   // wv3913: min wat vervallen is
       datum: f.vervaldatum || null, alleen_eigenaar: isPrive(f),
       sleutel_extra: [terug.length ? 'na_terug=' + terug[terug.length - 1] : '', losLaatst.has(f.id) ? 'na_los=' + losLaatst.get(f.id) : ''].filter(Boolean).join(';') || undefined };
     let verval = f.vervaldatum && isIsoDatum(f.vervaldatum) ? f.vervaldatum : (f.factuurdatum && isIsoDatum(f.factuurdatum) ? plusDagen(f.factuurdatum, 14) : null);
     // wv1415 (diffreview ZOU 3): na een terugboeking telt de termijn opnieuw, vanaf twee weken na de terugboeking
     if (terug.length) { const tb = plusDagen(txMap.get(terug[terug.length - 1]).boekdatum, 14); if (!verval || tb > verval) verval = tb; }
+    if (deels) {
+      if (['te_betalen', 'ingevoerd', 'incasso_verwacht'].includes(f.betaalspoor) && verval && vandaag > verval)
+        signalen.push(maakSignaal('te_betalen_niet_betaald', Object.assign({}, basis, { bedrag_centen: deels.rest_centen, alleen_eigenaar: basis.alleen_eigenaar || deels.eigen,
+          sleutel_extra: [basis.sleutel_extra, 'deels=' + deels.set].filter(Boolean).join(';'),
+          details: { nummer: f.nummer, deels: { betaald_centen: deels.betaald_centen, rest_centen: deels.rest_centen, factuur_centen: teBetalen(f) }, verval } })));
+      continue;
+    }
     if (f.betaalspoor === 'incasso_verwacht' && verval && dagenTussen(verval, vandaag) > 14) signalen.push(maakSignaal('incasso_niet_gezien', basis));
     else if (f.betaalspoor === 'te_betalen' && verval && vandaag > verval) signalen.push(maakSignaal('te_betalen_niet_betaald', basis));
     // wv1405: een betaling die in een batch met een latere uitvoerdatum staat, telt pas vanaf die datum (anders een vals signaal per regel).

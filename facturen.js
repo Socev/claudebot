@@ -391,6 +391,9 @@ function detail(fdb, r, id, nu, nogBetalen) {
     opdrachten: fdb.db.prepare('SELECT id, status, verstuur_na, poging, fout, modus, aangemaakt_op, opgehaald_op FROM opdracht WHERE factuur = ? ORDER BY aangemaakt_op DESC').all(f.id),
     koppelingen: fdb.db.prepare('SELECT k.bron, k.methode, k.zekerheid, k.volledig, k.wanneer, t.* FROM koppeling k JOIN bank_transactie t ON t.id = k.transactie WHERE k.factuur = ? AND ' + kf)
       .all(f.id, ...kp).map((k) => Object.assign(txKort(k), { koppeling: { bron: k.bron, methode: k.methode, zekerheid: k.zekerheid, volledig: k.volledig } })),
+    // wv3913 (C57): { betaald_centen, rest_centen } als er een betaling hangt die de factuur niet dekt; alleen de eigenaar (de som telt ook
+    // afgeschermde bankposten mee; diffreview ronde 3)
+    deels: isEig(r) ? deelsVan(fdb, f) : undefined,
     entiteiten: ents,
     verzendmodus: D.metaLees(fdb, 'verzendmodus'),
     bedragpatroon: bedragpatroonVoor(fdb, r, f, ctx.vandaag),
@@ -1656,6 +1659,7 @@ function sepaBeoordeel(fdb, f, lev, ctx, vandaag, rek) {
   if (!S.isEer(iban)) return nee('rekening buiten de EER: met de hand (adres en BIC nodig)');
   if (K.magBevestigen(Object.assign({}, f, { status: 'te_beoordelen' }), { leverancier: lev, ctx }).redenen.some((x) => /IBAN/.test(x))) return nee('rekeningnummer nog niet nagebeld');
   if (fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j) return nee('er is al een bankbetaling aan gekoppeld');
+  if (heeftKwijt(fdb, f.id)) return nee(KWIJT_REDEN);   // wv3913 (C57)
   const kp = kaartPaypalBetaald(fdb, f.id);   // wv3911 (C08, Fable-review facturen-bank M1)
   if (kp) return nee(kp.reden);
   if (fdb.db.prepare("SELECT 1 FROM voorstel v WHERE v.status = 'open' AND EXISTS (SELECT 1 FROM json_each(v.facturen) j WHERE j.value = ?) LIMIT 1").get(f.id))
@@ -2161,6 +2165,7 @@ function nbNiet(fdb, f) {
   const kp = kaartPaypalBetaald(fdb, f.id);   // wv3911 (C08): met de regel erbij, en "Toch betalen" als uitweg
   if (kp) return kp.reden;
   if (fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j) return 'er is al een bankbetaling aan gekoppeld';
+  if (heeftKwijt(fdb, f.id)) return KWIJT_REDEN;   // wv3913 (C57)
   return null;
 }
 // Kenmerk van patiëntgegevens (zelfde eisen als D.factuurTwijfel): op de factuur of een stuk, of de patiëntregel legde niet positief 'geen
@@ -2872,9 +2877,13 @@ function voerGevolgUit(fdb, r, s, g, nu, uit, o) {
       const f = D.factuurVoorKern(fdb, g.factuur);
       if (!f || !magFactuur(r, f)) weiger(404, 'factuur niet gevonden');
       if (f.betaalspoor === 'betaald_gezien' && g.gebeurtenis === 'bankmatch') return { actie: g.actie, factuur: f.id, betaalspoor: f.betaalspoor };
+      // wv3913 (C57): "Is al betaald (koppelen)" met een post die de factuur niet dekt → deels betaald, het spoor blijft (de bankcontrole geeft een restsignaal)
+      if (g.gebeurtenis === 'bankmatch' && fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j === 1 && !dekking(fdb, f).dekt)
+        return { actie: g.actie, factuur: f.id, betaalspoor: f.betaalspoor, deels: true };
       // wv1415 (diffreview MOET 2/3): de knop bij een terugboeking verandert het spoor alleen als de factuur netto niet gedekt is (geen
       // nieuwe, geziene betaling) en nog op de teruggeboekte batch staat; anders laat hij het spoor zoals het is.
-      const gedekt = () => fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j === 1;
+      // wv3913 (C57, diffreview ronde 5): gedekt = netto een betaling én die dekt het bedrag (40 + 60 betaald, 60 terug → niet gedekt)
+      const gedekt = () => fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j === 1 && dekking(fdb, f).dekt;
       if (g.gebeurtenis === 'teruggeboekt') {
         const nogDeze = f.betaalspoor === 'ingevoerd' && g.batch && (() => { const e = sepaEerder(fdb, f.id); return !!e && e.pmtinf_id === g.batch && f.uitvoer_op === e.uitvoerdatum; })();
         if (gedekt() || !(f.betaalspoor === 'betaald_gezien' || nogDeze)) return { actie: g.actie, factuur: f.id, betaalspoor: f.betaalspoor };
@@ -2907,6 +2916,20 @@ function voerGevolgUit(fdb, r, s, g, nu, uit, o) {
       return { actie: g.actie, factuur: g.factuur };
     }
     case 'koppelen': return Object.assign({ actie: g.actie }, koppelIntern(fdb, r, String(g.transactie || ''), g.factuur, true, nu));
+    case 'rest_vervalt': {
+      // wv3913 (C57): David zegt bij "deels betaald" dat het zo klopt (korting, afgesproken minder): de rest vervalt als besluit (niet als vlag
+      // op de koppelingen; diffreview ronde 4), zodat een latere terugboeking van een termijn de factuur weer open zet
+      eisEigenaar(r);
+      const f = D.factuurVoorKern(fdb, g.factuur);
+      if (!f || !magFactuur(r, f)) weiger(404, 'factuur niet gevonden');
+      if (fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j !== 1) weiger(409, 'er hangt geen betaling meer aan deze factuur; ververs de lijst');
+      const dk = dekking(fdb, f);
+      if (dk.dekt || !(dk.rest_centen > 0)) weiger(409, 'de factuur is intussen al gedekt; ververs de lijst');
+      besluitRij(fdb, f.id, { stap: 'betaling', veld: 'rest_vervalt', waarde: String(dk.rest_centen), bron: 'mens', toelichting: g.toelichting || null }, r.wie, wanneer);
+      D.audit(fdb, { wie: r.wie, wat: 'rest_vervalt', object_soort: 'factuur', object_id: f.id, entiteit: f.entiteit,
+        voor: { betaald_centen: dk.betaald_centen, rest_centen: dk.rest_centen }, na: { vervallen_centen: dk.rest_centen }, wanneer });
+      return { actie: g.actie, factuur: f.id, vervallen_centen: dk.rest_centen };
+    }
     case 'terug_koppelen': {
       // wv1415: de bijschrijving van een terugboeking aan zijn factuur (heft één betaling op); bestaat hij al (automatisch), dan niets
       const t = fdb.db.prepare('SELECT * FROM bank_transactie WHERE id = ? AND verwijderd_op IS NULL').get(String(g.transactie || ''));
@@ -2935,16 +2958,67 @@ function koppelIntern(fdb, r, txId, fId, volledig, nu) {
   // eigen batch hoort bij het signaal Teruggeboekt (terug_koppelen), niet hier.
   if (Number(t.bedrag_centen) > 0 && !K.isCreditnota(f)) weiger(409, 'dit is een bijschrijving; die telt niet als betaling van deze factuur');
   const wanneer = nuIso(nu);
-  const n = fdb.db.prepare("INSERT INTO koppeling (transactie, factuur, bron, methode, zekerheid, volledig, alleen_eigenaar, wie, wanneer) VALUES (?, ?, 'mens', 'handmatig', 1, ?, ?, ?, ?) ON CONFLICT DO NOTHING")
-    .run(t.id, f.id, volledig ? 1 : 0, t.alleen_eigenaar || f.alleen_eigenaar || f.patientkenmerk ? 1 : 0, r.wie, wanneer).changes;
+  // wv3913 (C57, Fable-review facturen-bank M5): "volledig" is een wens; betaald gezien alleen als de gekoppelde betalingen (deze erbij) de
+  // factuur ook dekken. Een deelbetaling (40 % met het nummer erin, "Ja, koppel") laat de factuur dus open: deels betaald. De vlag volledig = 1
+  // krijgt de koppeling alleen als de dekking niet uit de som volgt (andere valuta, geen geldig bedrag): de som wordt elke keer opnieuw
+  // geteld, zodat een latere terugboeking van een termijn de factuur weer open zet (diffreview MOET 1).
+  const n = fdb.db.prepare("INSERT INTO koppeling (transactie, factuur, bron, methode, zekerheid, volledig, alleen_eigenaar, wie, wanneer) VALUES (?, ?, 'mens', 'handmatig', 1, 0, ?, ?, ?) ON CONFLICT DO NOTHING")
+    .run(t.id, f.id, t.alleen_eigenaar || f.alleen_eigenaar || f.patientkenmerk ? 1 : 0, r.wie, wanneer).changes;
+  const dk = dekking(fdb, f);
+  const vol = !!volledig && dk.dekt;
+  if (n && vol && !dk.uit_som) fdb.db.prepare("UPDATE koppeling SET volledig = 1 WHERE transactie = ? AND factuur = ? AND bron = 'mens' AND methode = 'handmatig'").run(t.id, f.id);
   let spoor = f.betaalspoor;
   // wv1415 (diffreview MOET 4): niet als een terugboeking deze betaling opheft (bv. "Ja, koppel" op een batchvoorstel na een terugboeking)
-  if (volledig && f.betaalspoor && f.betaalspoor !== 'betaald_gezien' && fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j === 1) {
+  if (vol && f.betaalspoor && f.betaalspoor !== 'betaald_gezien' && fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j === 1) {
     const ov = K.betaalspoorOvergang(f.betaalspoor, 'bankmatch');
     if (ov.ok) { fdb.db.prepare('UPDATE factuur SET betaalspoor = ?, betaald_gezien_op = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND betaalspoor = ?').run(ov.naar, t.boekdatum, wanneer, f.id, f.betaalspoor); spoor = ov.naar; }
   }
-  if (n) D.audit(fdb, { wie: r.wie, wat: 'koppelen', object_soort: 'koppeling', object_id: t.id + ':' + f.id, entiteit: f.entiteit, na: { volledig: !!volledig, betaalspoor: spoor }, wanneer });
-  return { nieuw: n === 1, betaalspoor: spoor };
+  const deels = !dk.dekt && dk.betaald_centen !== 0 ? { betaald_centen: dk.betaald_centen, rest_centen: dk.rest_centen } : undefined;
+  if (n) D.audit(fdb, { wie: r.wie, wat: 'koppelen', object_soort: 'koppeling', object_id: t.id + ':' + f.id, entiteit: f.entiteit, na: { volledig: vol, betaalspoor: spoor, deels: !!deels }, wanneer });
+  return { nieuw: n === 1, betaalspoor: spoor, volledig: vol, deels };
+}
+/*
+ * wv3913 (C57, Fable-review facturen-bank M5): dekken de gekoppelde betalingen deze factuur? Dezelfde regel als voldaan() in de bankcontrole
+ * (facturen-bank.js): eerst heft elke terugboeking (methode sepa_terug) één betaling op (bij voorkeur een SEPA-koppeling); van wat overblijft
+ * dekt een koppeling met volledig = 1, een incasso- of valutakoppeling, een verzamelbetaling (één post aan meer facturen) of een post in een
+ * andere valuta dan de factuur (niet op te tellen); anders de som van de posten (afschrijving positief) tegen het factuurbedrag (creditnota: de
+ * bijschrijving moet het tegoed dekken), plus wat David liet vervallen (Klopt zo). → { dekt, betaald_centen, rest_centen }; zonder netto betaling dekt hij niet (betaald_centen 0).
+ */
+// wv3913 (C57, diffreview ronde 4): "Klopt zo (rest vervalt)" = besluit stap betaling, veld rest_vervalt, waarde = het vervallen bedrag in centen.
+// Apart van de koppelingen: een latere terugboeking van een termijn zet de factuur dan weer open (netto betaald + vervallen < factuurbedrag).
+const KWIJT_WAAR = "stap = 'betaling' AND veld = 'rest_vervalt'";
+const KWIJT_SOM = "coalesce(sum(CAST(waarde AS INTEGER)), 0)";
+// diffreview ronde 6: een factuur waarvan een deel vervallen is, gaat nooit met het volle bedrag in een batch of naar Cynthia (ook niet als de
+// betaling daarna helemaal terugkwam): de rest betaalt David met de hand
+const KWIJT_REDEN = 'een deel liet je vervallen (Klopt zo): het bedrag klopt niet meer, betaal de rest met de hand';
+function heeftKwijt(fdb, fid) { return !!fdb.db.prepare('SELECT 1 FROM besluit WHERE factuur = ? AND ' + KWIJT_WAAR + ' LIMIT 1').get(fid); }
+function dekking(fdb, f) {
+  const incl = Number(f.incl);
+  const kwijt = Number(fdb.db.prepare('SELECT ' + KWIJT_SOM + ' AS c FROM besluit WHERE factuur = ? AND ' + KWIJT_WAAR).get(f.id).c) || 0;
+  const ks = fdb.db.prepare('SELECT k.methode, k.volledig, t.bedrag_centen, t.valuta, (SELECT count(*) FROM koppeling k2 WHERE k2.transactie = k.transactie) AS n ' +
+    'FROM koppeling k JOIN bank_transactie t ON t.id = k.transactie WHERE k.factuur = ? ORDER BY k.id').all(f.id);
+  // elke terugboeking heft bij voorkeur de betaling met precies zijn bedrag op (diffreview ronde 2), dan een SEPA-koppeling, dan de eerste
+  const af = ks.filter((k) => k.methode !== 'sepa_terug' && Number(k.bedrag_centen) < 0);
+  const weg = new Set();
+  for (const tb of ks.filter((k) => k.methode === 'sepa_terug')) {
+    const vrij = af.filter((k) => !weg.has(k)), gelijk = (k) => -Number(k.bedrag_centen) === Number(tb.bedrag_centen), sepa = (k) => /^sepa_/.test(String(k.methode || ''));
+    const k = vrij.find((x) => gelijk(x) && sepa(x)) || vrij.find(gelijk) || vrij.find(sepa) || vrij[0];
+    if (k) weg.add(k);
+  }
+  const netto = ks.filter((k) => k.methode !== 'sepa_terug' && !weg.has(k));
+  if (!netto.length) return { dekt: false, betaald_centen: 0, rest_centen: Number.isSafeInteger(incl) ? incl - (incl > 0 ? kwijt : 0) : 0 };
+  const som = netto.reduce((x, k) => x - Number(k.bedrag_centen), 0);
+  const zeker = !Number.isSafeInteger(incl) || netto.some((k) => k.volledig === 1 || k.methode === 'incasso' || k.methode === 'valuta' || Number(k.n) > 1 ||
+    (f.valuta && k.valuta && String(f.valuta).toUpperCase() !== String(k.valuta).toUpperCase()));
+  const uitSom = incl > 0 ? som + kwijt >= incl : som <= incl;
+  const dekt = zeker || uitSom;
+  return { dekt, uit_som: !zeker && uitSom, betaald_centen: som, rest_centen: dekt ? 0 : incl - som - (incl > 0 ? kwijt : 0) };
+}
+// wv3913 (C57): deels betaald = er hangt netto een betaling aan, die dekt de factuur niet en het spoor staat niet op betaald gezien
+function deelsVan(fdb, f) {
+  if (!f || f.betaalspoor === 'betaald_gezien' || fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j !== 1) return null;
+  const dk = dekking(fdb, f);
+  return dk.dekt ? null : { betaald_centen: dk.betaald_centen, rest_centen: dk.rest_centen };
 }
 /*
  * wv3452 (Fable-review facturen-kern M3 / facturen-bank M2; voorwaarde voor fase 3 van "naar Cynthia", ontwerp 19-11 § 4): een koppeling
@@ -3285,6 +3359,9 @@ function bankcontroleToepassen(fdb, nu) {
     alleen_eigenaar: !!t.alleen_eigenaar, is_incasso: !!t.is_incasso }));
   const facturen = fdb.db.prepare("SELECT * FROM factuur WHERE status NOT IN ('geen_factuur') AND (factuurdatum IS NULL OR factuurdatum >= ? OR betaalspoor IN ('te_betalen','ingevoerd','incasso_verwacht'))")
     .all(K.plusDagen(van, -60)).map((f) => Object.assign({}, f, { patientkenmerk: !!f.patientkenmerk, alleen_eigenaar: !!f.alleen_eigenaar }));
+  // wv3913 (C57): wat David bij "deels betaald" liet vervallen (Klopt zo) telt bij de bankcontrole mee als gedekt
+  const kwijt = new Map(fdb.db.prepare("SELECT factuur, " + KWIJT_SOM + " AS c FROM besluit WHERE " + KWIJT_WAAR + " GROUP BY factuur").all().map((x) => [x.factuur, Number(x.c) || 0]));
+  for (const f of facturen) if (kwijt.has(f.id)) f.kwijt_centen = kwijt.get(f.id);
   const ibans = {};
   for (const k of fdb.db.prepare('SELECT entiteit, iban FROM rekening').all()) (ibans[k.entiteit] = ibans[k.entiteit] || []).push(k.iban);
   const leveranciers = leverancierLijst(fdb);
@@ -3377,11 +3454,29 @@ function bankcontroleToepassen(fdb, nu) {
     const v = B.betaalVerwachting(f, verw);
     return !!v && v.verwacht !== d.verwacht;
   };
+  // wv3913 (C57): per factuur telt alleen het jongste open restsignaal (nieuwe set deelbetalingen = nieuwe sleutel); oudere gaan dicht als 'bijgewerkt'
+  const nieuwsteDeels = new Map();
+  for (const x of fdb.db.prepare("SELECT id, facturen FROM signaal WHERE status = 'open' AND soort = 'te_betalen_niet_betaald' AND json_extract(details, '$.deels') IS NOT NULL ORDER BY aangemaakt_op, rowid").all())
+    for (const fid of json(x.facturen, []) || []) nieuwsteDeels.set(fid, x.id);
   // wv3912 (C54): ook "Betaling teruggeboekt" na een teruggeboekte incasso (details.storno) gaat dicht als de leverancier opnieuw incasseerde
   for (const s of fdb.db.prepare("SELECT id, facturen, entiteit, soort, details FROM signaal WHERE status = 'open' AND soort IN ('ingevoerd_niet_gezien','te_betalen_niet_betaald','incasso_niet_gezien','teruggeboekt')").all()) {
     const fids = json(s.facturen, []) || [];
     if (!fids.length) continue;
     if (s.soort === 'teruggeboekt' && !((json(s.details, {}) || {}).storno)) continue;
+    // wv3913 (C57): een restsignaal (details.deels) gaat pas dicht als de rest betaald is, of 'bijgewerkt' als er intussen een andere deelbetaling hangt
+    const dd = s.soort === 'te_betalen_niet_betaald' ? ((json(s.details, {}) || {}).deels || null) : null;
+    if (dd) {
+      const f = spoor.get(fids[0]);
+      const dk = f ? dekking(fdb, f) : { dekt: true };
+      const afd = dk.dekt || !f || f.betaalspoor === 'betaald_gezien' ? 'vanzelf_gezien'
+        : nieuwsteDeels.get(fids[0]) !== s.id || netto.get(fids[0]).j !== 1 ? 'bijgewerkt' : null;   // nieuwere set, of losgemaakt (dan het gewone signaal)
+      if (!afd) continue;
+      if (!fdb.db.prepare("UPDATE signaal SET status = 'afgehandeld', afhandeling = ?, wie = 'bankcontrole', wanneer = ? WHERE id = ? AND status = 'open'").run(afd, wanneer, s.id).changes) continue;
+      tel[afd] = (tel[afd] || 0) + 1;
+      D.audit(fdb, { wie: 'bankcontrole', wat: 'signaal_' + afd, object_soort: 'signaal', object_id: s.id, entiteit: s.entiteit || null, voor: { status: 'open' },
+        na: { status: 'afgehandeld', soort: s.soort }, wanneer });
+      continue;
+    }
     const af = fids.every((id) => netto.get(id).j === 1) ? 'vanzelf_gezien'
       : s.soort === 'ingevoerd_niet_gezien' && (fids.every((id) => { const x = spoor.get(id); return !x || (x.betaalspoor !== 'ingevoerd' && x.betaalspoor !== 'betaald_gezien'); }) ||
         andereDatum(s, fids)) ? 'niet_meer_ingevoerd' : null;
