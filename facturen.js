@@ -63,7 +63,7 @@ const ROUTES = {
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'feit', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering',
     'betaaldatum', 'sepa-batch', 'sepa-bestand', 'sepa-specificatie', 'regel', 'regel-weg', 'afzender-voorstel', 'maand-specificatie', 'bank-keuze',
-    'leverancier/verzendwijze', 'bevestig-groep', 'koppel-zeker', 'naar-cynthia', 'ontkoppel', 'herlees'],
+    'leverancier/verzendwijze', 'bevestig-groep', 'koppel-zeker', 'naar-cynthia', 'ontkoppel', 'herlees', 'kaart-toch-betalen'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (sinds wv2547 ook vanaf een vaste plek, onder het invoerslot) én die hier een verse vingerafdruk vragen.
 const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus', 'POST /app/facturen/leverancier/verzendwijze'];
@@ -1626,6 +1626,8 @@ function sepaBeoordeel(fdb, f, lev, ctx, vandaag, rek) {
   if (!S.isEer(iban)) return nee('rekening buiten de EER: met de hand (adres en BIC nodig)');
   if (K.magBevestigen(Object.assign({}, f, { status: 'te_beoordelen' }), { leverancier: lev, ctx }).redenen.some((x) => /IBAN/.test(x))) return nee('rekeningnummer nog niet nagebeld');
   if (fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j) return nee('er is al een bankbetaling aan gekoppeld');
+  const kp = kaartPaypalBetaald(fdb, f.id);   // wv3911 (C08, Fable-review facturen-bank M1)
+  if (kp) return nee(kp.reden);
   if (fdb.db.prepare("SELECT 1 FROM voorstel v WHERE v.status = 'open' AND EXISTS (SELECT 1 FROM json_each(v.facturen) j WHERE j.value = ?) LIMIT 1").get(f.id))
     return nee('er staat een koppelvoorstel open (Bankcontrole)');
   if (uitvoer.te_ver) return nee('uitvoerdatum ligt meer dan 364 dagen vooruit; kies een datum');
@@ -2028,6 +2030,52 @@ const NB_STATUS = ['wacht', 'verzenden', 'verstuurd', 'onzeker', 'mislukt', 'ver
 const NB_ZET = ['status', 'reden', 'verzonden_op', 'message_id'];
 function nbAanOk(aan) { return String(aan || '').trim().toLowerCase() === NOGBETALEN.aan; }
 // Hoort deze factuur (D.factuurVoorKern) nu (nog) bij Cynthia? → null of de reden waarom niet (zonder inhoud).
+/*
+ * wv3911 (besluitenpagina nr 23 = C08, David Ja 22-11 18:20; Fable-review facturen-bank M1): hangt deze factuur aan een creditcard- of
+ * PayPal-betaling, dan is hij al betaald: niet in een SEPA-batch en niet naar Cynthia (nogbetalen@). → null | { bron, reden }. De reden noemt
+ * de regel (bron, datum, bij wie, bedrag), zodat David een verkeerde koppeling herkent. Uitweg: "Toch betalen" (kaartTochBetalen) legt een
+ * besluit vast; daarna houdt deze toets hem niet meer tegen (de koppeling zelf blijft staan). Codex-review MOET 1: het besluit geldt alleen
+ * voor de koppelingen die er toen lagen; een kaart- of PayPal-regel die later (koppeling_op nieuwer) aan de factuur hangt, houdt hem weer tegen.
+ * Zelfde regel in het vangnet onbetaald (facturen-kaart.js).
+ */
+function kaartPaypalBetaald(fdb, factuurId) {
+  const toch = fdb.db.prepare("SELECT max(wanneer) AS w FROM besluit WHERE factuur = ? AND stap = 'kaart_paypal' AND veld = 'toch_betalen' AND waarde = '1'").get(factuurId).w;
+  if (toch) {
+    const laatst = fdb.db.prepare('SELECT max(t) AS t FROM (SELECT coalesce(koppeling_op, aangemaakt_op) AS t FROM kaart_regel WHERE factuur = ? ' +
+      'UNION ALL SELECT coalesce(koppeling_op, aangemaakt_op) FROM paypal_regel WHERE factuur = ?)').get(factuurId, factuurId).t;
+    if (!laatst || String(toch) > String(laatst)) return null;
+  }
+  const k = fdb.db.prepare("SELECT transactiedatum AS datum, coalesce(nullif(trim(handelaar), ''), omschrijving) AS wie, bedrag_centen AS c FROM kaart_regel WHERE factuur = ? ORDER BY transactiedatum, id LIMIT 1").get(factuurId);
+  const p = k ? null : fdb.db.prepare('SELECT datum, tegenpartij AS wie, -bedrag_centen AS c, valuta FROM paypal_regel WHERE factuur = ? ORDER BY datum, id LIMIT 1').get(factuurId);
+  const x = k || p;
+  if (!x) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(x.datum || ''));
+  const n = Math.abs(Number(x.c) || 0);
+  const bedrag = (p && p.valuta && p.valuta !== 'EUR' ? p.valuta + ' ' : '€ ') + String(Math.floor(n / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + String(n % 100).padStart(2, '0');
+  const delen = [k ? 'creditcard' : 'PayPal', m ? Number(m[3]) + '-' + Number(m[2]) + '-' + m[1] : null, kort(String(x.wie || '').replace(/\s+/g, ' ').trim(), 40) || null, bedrag].filter(Boolean);
+  return { bron: k ? 'kaart' : 'paypal', reden: 'al betaald via kaart/PayPal (' + delen.join(', ') + ')' };
+}
+/*
+ * wv3911: POST kaart-toch-betalen { id, versie? }: de kaart- of PayPal-koppeling klopt niet, de factuur moet toch betaald worden. Alleen David in
+ * zijn eigen app; alleen voor een bevestigde factuur op te_betalen die door kaartPaypalBetaald wordt tegengehouden. Legt een besluit (mens) en een
+ * auditrij vast; verstuurt niets: daarna verschijnt de gewone knop Naar Cynthia (met verse vingerafdruk) of kan hij in een batch.
+ */
+function kaartTochBetalen(fdb, r, d, nu) {
+  eisEigenaar(r);
+  if (r.ingang !== 'app') weiger(403, 'toch betalen kiest David in zijn eigen app');
+  const id = vraagId(d, 'id');
+  return D.transactie(fdb, function () {
+    const f = D.factuurVoorKern(fdb, factuurOf404(fdb, r, id).id);
+    if (d.versie !== undefined && d.versie !== f.versie) weiger(409, 'de factuur is intussen gewijzigd; laad de lijst opnieuw', { versie: f.versie });
+    if (!ONDERWEG.includes(f.status) || f.betaalspoor !== 'te_betalen') weiger(409, 'alleen voor een bevestigde factuur die nog betaald moet worden');
+    const kp = kaartPaypalBetaald(fdb, f.id);
+    if (!kp) weiger(409, 'deze factuur hangt niet (meer) aan een kaart- of PayPal-betaling');
+    const wanneer = nuIso(nu);
+    besluitRij(fdb, f.id, K.besluit('kaart_paypal', 'toch_betalen', '1', 'mens', kort('koppeling klopt niet, toch betalen: ' + kp.reden, 480)), r.wie, wanneer);
+    D.audit(fdb, { wie: r.wie, wat: 'kaart_paypal_toch_betalen', object_soort: 'factuur', object_id: f.id, entiteit: f.entiteit, voor: { tegengehouden: kp.reden }, na: { toch_betalen: true }, wanneer });
+    return { factuur: f.id, toch_betalen: true };
+  });
+}
 function nbNiet(fdb, f) {
   if (!f) return 'factuur ontbreekt';
   if (!f.entiteit || f.entiteit === 'prive') return 'Privé gaat niet naar Cynthia';
@@ -2035,7 +2083,8 @@ function nbNiet(fdb, f) {
   if (K.isCreditnota(f)) return 'creditnota: niets te betalen';
   if (!ONDERWEG.includes(f.status) || !f.bevestigd_op) return 'niet (meer) bevestigd';
   if (f.betaalspoor !== 'te_betalen') return f.betaalspoor === 'betaald_gezien' ? 'al betaald gezien op de bank' : 'staat niet meer op te betalen (' + f.betaalspoor + ')';
-  if (fdb.db.prepare('SELECT 1 FROM kaart_regel WHERE factuur = ? UNION ALL SELECT 1 FROM paypal_regel WHERE factuur = ? LIMIT 1').get(f.id, f.id)) return 'al betaald met creditcard of PayPal';
+  const kp = kaartPaypalBetaald(fdb, f.id);   // wv3911 (C08): met de regel erbij, en "Toch betalen" als uitweg
+  if (kp) return kp.reden;
   if (fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j) return 'er is al een bankbetaling aan gekoppeld';
   return null;
 }
@@ -2120,7 +2169,11 @@ function nbStand(fdb, f, nogBetalen) {
   const op = !l ? null : st === 'wacht' ? l.verstuur_na : st === 'verstuurd' ? (l.verzonden_op || l.bijgewerkt_op) : l.bijgewerkt_op;
   const niet = nbNiet(fdb, f);
   const knop = nogBetalen === 'auto' && !niet && (st === 'geen' || st === 'vervallen' || st === 'mislukt') ? (st === 'mislukt' ? 'opnieuw' : 'naar') : null;
-  return { status: st, op: op || null, reden: st === 'mislukt' || st === 'vervallen' ? kort(l.reden, 160) : null, knop, niet: knop || st !== 'geen' ? null : niet };
+  // wv3911: tegengehouden door een kaart-/PayPal-koppeling → knop Toch betalen (uitweg bij een verkeerde koppeling)
+  const toch = !knop && (st === 'geen' || st === 'vervallen' || st === 'mislukt') && f.betaalspoor === 'te_betalen' && ONDERWEG.includes(f.status) && !!kaartPaypalBetaald(fdb, f.id);
+  const uit = { status: st, op: op || null, reden: st === 'mislukt' || st === 'vervallen' ? kort(l.reden, 160) : null, knop, niet: knop || st !== 'geen' ? null : niet };
+  if (toch) uit.toch_betalen = true;
+  return uit;
 }
 // In de transactie van bevestig. → { status, verstuur_na, let_op } of { niet: reden } (geen rij).
 function nbReserveer(fdb, r, factuurId, aanleiding, verstuurNa, nu, wanneer) {
@@ -4655,6 +4708,7 @@ function maak(opties) {
         case 'koppel-zeker': { const j = koppelZeker(fdb, r, d, nu, vo); return ok(j, 'koppel-zeker ' + j.gekoppeld.length + '/' + (j.gekoppeld.length + j.geweigerd.length)); }   // wv2661
         case 'terugdraaien': return ok(terugdraaien(fdb, r, d, nu), 'terugdraaien ' + kort(d.id, 16));
         case 'naar-cynthia': { const j = naarCynthia(fdb, r, d, nu, vo); return ok(j, 'naar-cynthia ' + kort(d.id, 16) + (j.opnieuw ? ' opnieuw' : '')); }   // wv3372
+        case 'kaart-toch-betalen': return ok(kaartTochBetalen(fdb, r, d, nu), 'kaart-toch-betalen ' + kort(d.id, 16));   // wv3911 (C08)
         case 'ontkoppel': { const j = ontkoppel(fdb, r, d, nu, vo); return ok(j, 'ontkoppel ' + kort(d.factuur, 16) + ' ' + j.betaalspoor_voor + '>' + j.betaalspoor); }   // wv3452
         case 'nagebeld': return ok(nagebeld(fdb, r, d, nu, vo), 'nagebeld ' + kort(d.id, 16));
         case 'geen-factuur': return ok(gebeurtenisRoute(fdb, r, d, 'geen_factuur', nu));

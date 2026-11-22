@@ -224,7 +224,7 @@ test('voorbereid: mail met bijlage (byte-gelijk), LET OP uit de database, claim 
   const w = new Date(NU).toISOString();
   t.fdb.db.prepare("INSERT INTO paypal_regel (id, account, event_code, status, tijdstip, datum, bedrag_centen, valuta, factuur, aangemaakt_op) VALUES ('PPPROEF0001', 'ACCOUNT01', 'T0006', 'S', '2026-11-18T10:00:00Z', '2026-11-18', -100, 'EUR', ?, ?)").run(b, w);
   const vb = t.routes.nogBetalen.voorbereid(t.fdb, t.rij(b).id, { nu: T });
-  assert.deepEqual([vb.actie, vb.status, vb.reden], ['niet', 'vervallen', 'al betaald met creditcard of PayPal']);
+  assert.deepEqual([vb.actie, vb.status, vb.reden], ['niet', 'vervallen', 'al betaald via kaart/PayPal (PayPal, 18-11-2026, € 1,00)']);
   // patiëntkenmerk (geen vastgelegd 'geen kenmerk') → zonder bijlage, zonder vrije omschrijving, LET OP bovenaan
   const c = nieuweFactuur(t, { patient: true });
   bevestig(t, c);

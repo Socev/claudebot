@@ -123,8 +123,12 @@ function onbetaald(fdb) {
     "AND (SELECT count(*) FROM koppeling k WHERE k.factuur = f.id AND coalesce(k.methode, '') <> 'sepa_terug') <= " +
     "(SELECT count(*) FROM koppeling k WHERE k.factuur = f.id AND k.methode = 'sepa_terug') " +
     "AND NOT EXISTS (SELECT 1 FROM voorstel v WHERE v.status = 'open' AND EXISTS (SELECT 1 FROM json_each(v.facturen) j WHERE j.value = f.id)) " +
-    // wv2959: aan een creditcardregel gekoppeld = betaald (via de kaart)
-    "AND NOT EXISTS (SELECT 1 FROM kaart_regel kr WHERE kr.factuur = f.id)").all();
+    // wv2959: aan een creditcardregel gekoppeld = betaald (via de kaart); wv3911 (C08): ook PayPal, tenzij David "Toch betalen" koos
+    "AND NOT ((EXISTS (SELECT 1 FROM kaart_regel kr WHERE kr.factuur = f.id) OR EXISTS (SELECT 1 FROM paypal_regel pr WHERE pr.factuur = f.id)) " +
+    // (Codex MOET 1) "Toch betalen" telt alleen als het besluit nieuwer is dan de laatste koppeling (zoals kaartPaypalBetaald in facturen.js)
+    "AND coalesce((SELECT max(b.wanneer) FROM besluit b WHERE b.factuur = f.id AND b.stap = 'kaart_paypal' AND b.veld = 'toch_betalen' AND b.waarde = '1'), '') <= " +
+    "(SELECT max(t) FROM (SELECT coalesce(kr.koppeling_op, kr.aangemaakt_op) AS t FROM kaart_regel kr WHERE kr.factuur = f.id " +
+    "UNION ALL SELECT coalesce(pr.koppeling_op, pr.aangemaakt_op) FROM paypal_regel pr WHERE pr.factuur = f.id)))").all();
 }
 function onbetaaldKaart(r, grens, nuKort) {
   const naam = String(r.naam || 'onbekende leverancier').slice(0, 50);

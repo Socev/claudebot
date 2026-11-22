@@ -398,3 +398,98 @@ test('routes: naar-cynthia staat in ROUTES.POST en past in het app-routepatroon'
   assert.ok(F.ROUTES.POST.includes('naar-cynthia'));
   assert.ok(/^[a-z0-9/-]{1,64}$/.test('naar-cynthia'));
 });
+
+// ───────────────────────────── wv3911 (C08): al betaald via kaart of PayPal ─────────────────────────────
+
+// Een creditcardregel (verzonnen kaart, bestand en handelaar) aan een factuur hangen
+function kaartKoppel(t, factuurId, o) {
+  o = o || {};
+  const rek = t.fdb.db.prepare("SELECT id FROM rekening WHERE entiteit = 'tolgaarde' ORDER BY id LIMIT 1").get();
+  const w = o.op || new Date(NU - 7200000).toISOString();
+  let kaart = t.fdb.db.prepare('SELECT id FROM kaart LIMIT 1').get();
+  if (!kaart) {
+    kaart = { id: D.nieuwId() };
+    t.fdb.db.prepare("INSERT INTO kaart (id, uitgever, klantnummer, laatste4, entiteit, rekening, aangemaakt_door, aangemaakt_op) VALUES (?, 'ICS', '12345678', '0000', 'tolgaarde', ?, 'proef', ?)").run(kaart.id, rek.id, w);
+    t.fdb.db.prepare("INSERT INTO kaart_bestand (id, kaart, sha256, formaat, aantal, nieuw, geupload_door, geupload_op) VALUES (?, ?, ?, 'ics_csv', 1, 1, 'proef', ?)").run(D.nieuwId(), kaart.id, crypto.randomBytes(32).toString('hex'), w);
+  }
+  const best = t.fdb.db.prepare('SELECT id FROM kaart_bestand WHERE kaart = ? LIMIT 1').get(kaart.id);
+  t.fdb.db.prepare("INSERT INTO kaart_regel (id, kaart, bestand, sleutel, soort, transactiedatum, omschrijving, bedrag_centen, overzicht, handelaar, factuur, koppeling_op, aangemaakt_op) " +
+    "VALUES (?, ?, ?, ?, 'transactie', '2026-11-12', 'PROEFWINKEL ONLINE', ?, '2026-11', ?, ?, ?, ?)")
+    .run(D.nieuwId(), kaart.id, best.id, crypto.randomBytes(32).toString('hex'), o.centen || 41281, o.handelaar === undefined ? 'Proefwinkel' : o.handelaar, factuurId, w, w);
+}
+
+test('C08: aan een kaartregel gekoppeld → niet naar Cynthia en niet in een batch, met de regel in de reden; Toch betalen is de uitweg', () => {
+  const t = opzet();
+  const id = oudeTeBetalen(t);
+  kaartKoppel(t, id);
+  const REDEN = 'al betaald via kaart/PayPal (creditcard, 12-11-2026, Proefwinkel, € 412,81)';
+  let { rij } = betaalRij(t, id);
+  assert.deepEqual(rij.cynthia, { status: 'geen', op: null, reden: null, knop: null, niet: REDEN, toch_betalen: true });
+  assert.equal(rij.batch_reden, REDEN, 'SEPA-batch weigert met dezelfde reden');
+  // knop Naar Cynthia geweigerd met de reden
+  let r = t.call('POST', 'naar-cynthia', { id });
+  assert.equal(r.status, 409);
+  assert.match(JSON.stringify(r.j), /al betaald via kaart\/PayPal \(creditcard/);
+  // sepa-batch op de rekening: geweigerd met de reden
+  const rek = t.fdb.db.prepare("SELECT id FROM rekening WHERE entiteit = 'tolgaarde' AND controle = 1 ORDER BY id LIMIT 1").get();
+  assert.ok(rek, 'zaad heeft een rekening met controle');
+  r = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [id] });
+  assert.equal(r.status, 409);
+  assert.deepEqual(r.j.geweigerd, [{ id, reden: REDEN }]);
+  // uitweg: alleen David in zijn app
+  assert.equal(t.call('POST', 'kaart-toch-betalen', { id }, { rol: t.pm() }).status, 403);
+  assert.equal(t.call('POST', 'kaart-toch-betalen', { id }, { rol: { soort: 'eigenaar', wie: 'david (proef)', entiteiten: null, ingang: 'fac' } }).status, 403, 'niet buiten de eigen app');
+  const f0 = t.fac(id);
+  assert.equal(t.call('POST', 'kaart-toch-betalen', { id, versie: f0.versie + 3 }).status, 409);
+  r = t.call('POST', 'kaart-toch-betalen', { id, versie: f0.versie });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(t.n("SELECT count(*) AS n FROM besluit WHERE factuur = ? AND stap = 'kaart_paypal' AND veld = 'toch_betalen' AND waarde = '1' AND bron = 'mens'", id), 1);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE object_id = ? AND wat = 'kaart_paypal_toch_betalen'", id), 1);
+  assert.equal(t.rij(id), undefined, 'Toch betalen verstuurt zelf niets');
+  ({ rij } = betaalRij(t, id));
+  assert.deepEqual(rij.cynthia, { status: 'geen', op: null, reden: null, knop: 'naar', niet: null });
+  assert.notEqual(rij.batch_reden, REDEN);
+  assert.equal(t.call('POST', 'kaart-toch-betalen', { id }).status, 409, 'tweede keer: niets meer tegen te houden');
+  // daarna gaat Naar Cynthia gewoon (verse vingerafdruk)
+  r = t.call('POST', 'naar-cynthia', { id });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+});
+
+test('C08: kaartregel al gekoppeld vóór Bevestigen → geen betaalverzoek, wel de reden; PayPal telt ook; vangnet onbetaald slaat PayPal over', () => {
+  const t = opzet();
+  const f = nieuweFactuur(t);
+  kaartKoppel(t, f.id, { handelaar: null, centen: 100 });
+  const b = bevestig(t, f.id);
+  assert.equal(b.status, 200, JSON.stringify(b.j));
+  assert.equal(t.rij(f.id), undefined);
+  assert.deepEqual(b.j.nogbetalen, { niet: 'al betaald via kaart/PayPal (creditcard, 12-11-2026, PROEFWINKEL ONLINE, € 1,00)' });
+  // PayPal (vreemde valuta, met tegenpartij)
+  const p = oudeTeBetalen(t);
+  t.fdb.db.prepare("INSERT INTO paypal_regel (id, account, event_code, status, tijdstip, datum, bedrag_centen, valuta, tegenpartij, factuur, aangemaakt_op) VALUES ('PPPROEF0911', 'ACCOUNT01', 'T0006', 'S', '2026-11-18T10:00:00Z', '2026-11-18', -123456, 'USD', 'Proef  Software Inc', ?, ?)").run(p, new Date(NU - 3600000).toISOString());
+  const { rij } = betaalRij(t, p);
+  assert.equal(rij.cynthia.niet, 'al betaald via kaart/PayPal (PayPal, 18-11-2026, Proef Software Inc, USD 1.234,56)');
+  const KA = require(path.join(ROOT, 'facturen-kaart.js'));
+  assert.equal(KA.onbetaald(t.fdb).some((x) => x.id === p), false, 'PayPal-betaald = geen onbetaald-kaart');
+  assert.equal(t.call('POST', 'kaart-toch-betalen', { id: p }).status, 200);
+  assert.equal(KA.onbetaald(t.fdb).some((x) => x.id === p), true, 'na Toch betalen weer in het vangnet');
+  assert.equal(betaalRij(t, p).rij.cynthia.knop, 'naar');
+  // Codex MOET 1: een kaartregel die ná Toch betalen gekoppeld wordt, houdt hem weer tegen (het besluit gold de oude koppeling)
+  kaartKoppel(t, p, { centen: 5000, op: new Date(NU + 60000).toISOString() });
+  const na = betaalRij(t, p, { nu: NU + 120000 }).rij;
+  assert.deepEqual([na.cynthia.knop, na.cynthia.toch_betalen, na.batch_reden], [null, true, 'al betaald via kaart/PayPal (creditcard, 12-11-2026, Proefwinkel, € 50,00)']);
+  assert.equal(KA.onbetaald(t.fdb).some((x) => x.id === p), false);
+  assert.equal(t.call('POST', 'kaart-toch-betalen', { id: p }, { nu: NU + 180000 }).status, 200, 'opnieuw Toch betalen kan');
+  assert.equal(betaalRij(t, p, { nu: NU + 240000 }).rij.cynthia.knop, 'naar');
+});
+
+test('C08 (Codex ZOU 1): na een mislukte verzending en daarna een kaartkoppeling: reden en Toch betalen, geen Stuur opnieuw', () => {
+  const t = opzet();
+  const f = nieuweFactuur(t);
+  assert.equal(bevestig(t, f.id).status, 200);
+  const rij = t.rij(f.id);
+  assert.equal(t.routes.nogBetalen.voorbereid(t.fdb, rij.id, { nu: NU + 2 * 3600000 }).actie, 'versturen');
+  assert.equal(t.routes.nogBetalen.uitkomst(t.fdb, rij.id, 'verzenden', 'mislukt', { reden: 'proef: zeker niet verstuurd' }, NU + 2 * 3600000), true);
+  kaartKoppel(t, f.id);
+  const c = betaalRij(t, f.id).rij.cynthia;
+  assert.deepEqual([c.status, c.knop, c.toch_betalen], ['mislukt', null, true]);
+});

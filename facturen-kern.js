@@ -1496,6 +1496,9 @@ function opdrachtOvergang(op, gebeurtenis, nu) {
 }
 
 // verstuur_na: het volgende hele uur (standaard) of dagelijks op een vast uur in Nederlandse tijd. Puur: `nu` in ms.
+// wv3911 (besluitenpagina nr 45 = C35, David Ja 22-11 18:20): altijd minstens BEDENKTIJD_MS na Bevestigen, zodat terugdraaien kan zolang de
+// opdracht wacht: 13:20 → 14:00, 13:59 → 15:00 (was 14:00); bij dagelijks 17:00 en bevestigd 16:45 → morgen 17:00.
+const BEDENKTIJD_MS = 30 * 60 * 1000;
 function amsterdamOffsetMs(t) {
   const d = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date(t));
   const g = (k) => Number(d.find((x) => x.type === k).value);
@@ -1504,7 +1507,8 @@ function amsterdamOffsetMs(t) {
 function verstuurNa(nu, instelling) {
   if (!Number.isFinite(nu)) throw new KernFout('nu', 'verstuurNa vraagt nu (ms)');
   const ins = instelling || { soort: 'uur' };
-  if (ins.soort === 'uur') return new Date((Math.floor(nu / 3600000) + 1) * 3600000).toISOString();
+  const vroegst = nu + BEDENKTIJD_MS;
+  if (ins.soort === 'uur') return new Date(Math.ceil(vroegst / 3600000) * 3600000).toISOString();
   if (ins.soort === 'dagelijks') {
     const uur = Number(ins.uur);
     if (!(Number.isInteger(uur) && uur >= 0 && uur <= 23)) throw new KernFout('instelling', 'uur 0–23');
@@ -1513,7 +1517,7 @@ function verstuurNa(nu, instelling) {
       const naief = Date.UTC(lok.getUTCFullYear(), lok.getUTCMonth(), lok.getUTCDate() + dag, uur);
       let t = naief - amsterdamOffsetMs(naief - 3600000);
       t = naief - amsterdamOffsetMs(t);
-      if (t > nu) return new Date(t).toISOString();
+      if (t >= vroegst) return new Date(t).toISOString();
     }
   }
   throw new KernFout('instelling', 'onbekende verzendinstelling');
@@ -1703,7 +1707,7 @@ module.exports = {
   leerUitBevestiging,
   // overgangen (§ 4.4)
   STATUSSEN, GEBEURTENISSEN, STATUS_OVERGANGEN, statusOvergang, BETAALSPOREN, BETAALSPOOR_OVERGANGEN, betaalspoorBegin, betaalspoorOvergang, betaalspoorNaOntkoppel, isCreditnota,
-  OPDRACHT_STATUSSEN, claimbaar, opdrachtOvergang, verstuurNa, MAX_POGINGEN, OPGEHAALD_TIMEOUT_MS,
+  OPDRACHT_STATUSSEN, claimbaar, opdrachtOvergang, verstuurNa, BEDENKTIJD_MS, MAX_POGINGEN, OPGEHAALD_TIMEOUT_MS,
   // opdracht + vingerafdruk
   vingerafdrukCanoniek, vingerafdruk, maakOpdracht,
   // rollen

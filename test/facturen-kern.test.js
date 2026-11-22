@@ -643,10 +643,22 @@ test('opdracht: pas na verstuur_na, 30 min, max 3 pogingen, tweede gelukt verand
   assert.throws(() => K.claimbaar(op), /nu/);
 });
 
-test('verstuur_na: volgende hele uur; dagelijks 17:00 Nederlandse tijd (ook rond de wintertijd)', () => {
-  assert.equal(K.verstuurNa(Date.parse('2026-10-22T14:50:00Z')), '2026-10-22T15:00:00.000Z');
+test('verstuur_na: volgende hele uur, minstens 30 minuten bedenktijd (wv3911, C35); dagelijks 17:00 Nederlandse tijd (ook rond de wintertijd)', () => {
+  assert.equal(K.BEDENKTIJD_MS, 30 * 60 * 1000);
+  // de toets uit het besluit (NL-tijd, 22-10 = zomertijd +2): bevestigd 13:59 → 15:00, bevestigd 13:20 → 14:00
+  assert.equal(K.verstuurNa(Date.parse('2026-10-22T11:59:00Z')), '2026-10-22T13:00:00.000Z');
+  assert.equal(K.verstuurNa(Date.parse('2026-10-22T11:20:00Z')), '2026-10-22T12:00:00.000Z');
+  assert.equal(K.verstuurNa(Date.parse('2026-10-22T11:30:00Z')), '2026-10-22T12:00:00.000Z', 'precies 30 minuten mag');
+  assert.equal(K.verstuurNa(Date.parse('2026-10-22T11:30:00.001Z')), '2026-10-22T13:00:00.000Z');
+  for (let m = 0; m < 24 * 60; m += 7) {   // nooit minder dan 30 en nooit meer dan 90 minuten
+    const nu = Date.parse('2026-10-22T00:00:00Z') + m * 60000, w = Date.parse(K.verstuurNa(nu)) - nu;
+    assert.ok(w >= 30 * 60000 && w <= 90 * 60000, String(m));
+    assert.equal(Date.parse(K.verstuurNa(nu)) % 3600000, 0);
+  }
+  assert.equal(K.verstuurNa(Date.parse('2026-10-22T14:50:00Z')), '2026-10-22T16:00:00.000Z');
   assert.equal(K.verstuurNa(Date.parse('2026-10-22T14:00:00Z')), '2026-10-22T15:00:00.000Z');
   assert.equal(K.verstuurNa(Date.parse('2026-10-22T14:30:00Z'), { soort: 'dagelijks', uur: 17 }), '2026-10-22T15:00:00.000Z');
+  assert.equal(K.verstuurNa(Date.parse('2026-10-22T14:45:00Z'), { soort: 'dagelijks', uur: 17 }), '2026-10-23T15:00:00.000Z', '16:45 NL: minder dan 30 minuten → morgen');
   assert.equal(K.verstuurNa(Date.parse('2026-10-22T16:30:00Z'), { soort: 'dagelijks', uur: 17 }), '2026-10-23T15:00:00.000Z');
   assert.equal(K.verstuurNa(Date.parse('2026-10-25T00:30:00Z'), { soort: 'dagelijks', uur: 17 }), '2026-10-25T16:00:00.000Z');
   assert.throws(() => K.verstuurNa(Date.parse('2026-10-22T14:00:00Z'), { soort: 'dagelijks', uur: 24 }));
