@@ -628,3 +628,119 @@ test('wv3404 review MOET 2: een vertraagde intrekking zet de tijd van een nieuwe
   open(); await p1; o.d1.voor = null;
   assert.strictEqual(o.d1.db.prepare("SELECT op FROM blok WHERE soort = 'onderdeel' AND sleutel = 'funds'").get().op, op2, 'blok-tijd liep terug');
 });
+
+// ── wv3918 (C55, David Ja 22-11 nr 65): "nog in te delen" telt niet als gift en bevriest het blok niet ──
+test('wv3918 C55: Unknown verandert Gifts niet en houdt het blok tegen; later indelen bevriest niet; kruisproef oude regel bevriest wel', () => {
+  const rij = (id, jaar, b, soort, datum) => ({ id, datum: datum || jaar + '-05-01', jaar, bedrag_cent: b, soort: soort || 'Donation (bank transfer)' });
+  const basis = [];
+  for (const j of [2024, 2025, 2026]) for (let i = 0; i < 11; i++) basis.push(rij(j + '-' + i, j, 1000 + i));
+  const b0 = D.ghawaBlok(basis, new Map(), '2026-10-31');
+  assert.ok(b0.mag && b0.onbekend === 0);
+  const vorig = [b0.giften];
+  // een afschrijving in een oud jaar, nog niet ingedeeld
+  const met = basis.concat(rij('u1', 2025, -2500, 'Unknown'));
+  const u = D.ghawaBlok(met, vorig, '2026-10-31', b0.groepen);
+  assert.ok(!u.mag, 'Unknown houdt het blok tegen');
+  assert.ok(u.redenen.some((r) => /nog in te delen: 1/.test(r)), u.redenen.join());
+  assert.strictEqual(u.onbekend, 1);
+  assert.deepStrictEqual(u.blok.years.map((y) => y.gifts), b0.blok.years.map((y) => y.gifts), 'Gifts gelijk: Unknown is geen (negatieve) gift');
+  assert.strictEqual(u.blok.balance.eur_cent, b0.blok.balance.eur_cent - 2500, 'het saldo telt hem wel (zo sluit de bank)');
+  assert.ok(!u.giften.has('u1'));
+  // Unknown ná de standdatum houdt niet tegen
+  assert.ok(D.ghawaBlok(basis.concat(rij('u2', 2026, -100, 'Unknown', '2026-11-05')), vorig, '2026-10-31', b0.groepen).mag, 'na de stand: geen rem');
+  // later ingedeeld als kosten: meteen weer een nieuw blok (geen bevriezing)
+  const ingedeeld = basis.concat(rij('u1', 2025, -2500, 'Bank costs'));
+  const i1 = D.ghawaBlok(ingedeeld, vorig, '2026-10-31', b0.groepen);
+  assert.ok(i1.mag, 'later indelen bevriest niet: ' + i1.redenen.join());
+  // kruisproef: zo ging het vóór wv3918 — Unknown als gift gepubliceerd, daarna ingedeeld = 1 verdwenen gift in 2025, blijvend bevroren
+  const oudVorig = [new Map([...b0.giften, ['u1', { jaar: 2025, bedrag_cent: -2500 }]])];
+  const oud = D.ghawaBlok(ingedeeld, oudVorig, '2026-10-31', b0.groepen);
+  assert.ok(!oud.mag && oud.redenen.some((r) => /jaar 2025: 1 gewijzigd/.test(r)), 'kruisproef: oude regel bevriest');
+  // jaartal 2027 in een proefstand: het blok rekent het nieuwe jaar gewoon mee
+  const j27 = basis.concat(Array.from({ length: 11 }, (_, i) => rij('2027-' + i, 2027, 2000 + i)));
+  const b27 = D.ghawaBlok(j27, [b0.giften], '2027-11-30', b0.groepen);
+  assert.ok(b27.mag, b27.redenen.join());
+  assert.ok(b27.blok.years.some((y) => y.year === '2027'));
+  assert.strictEqual(D.maandenAchter('2026-10-31', '2026-12-31'), 2);
+  assert.strictEqual(D.maandenAchter('2026-11-30', '2027-01-31'), 2);
+  assert.strictEqual(D.maandenAchter('2026-10-31', '2026-11-30'), 1);
+});
+
+test('wv3918 C55: "Still to raise" telt een overboeking naar ECG na de blok-stand niet dubbel', () => {
+  const r = [{ id: 'e1', datum: '2026-11-05', jaar: 2026, bedrag_cent: -100000, soort: 'Transfer to ECG' },
+    { id: 'e0', datum: '2026-10-20', jaar: 2026, bedrag_cent: -50000, soort: 'Transfer to ECG' },
+    { id: 'e2', datum: '2026-11-25', jaar: 2026, bedrag_cent: -70000, soort: 'Transfer to ECG' },
+    { id: 'g', datum: '2026-11-06', jaar: 2026, bedrag_cent: 9000, soort: 'Donation (bank transfer)' }];
+  assert.strictEqual(D.naarEcgNaStand(r, '2026-10-31', '2026-11-20'), -100000, 'alleen na de stand én al in het ECG-afschrift');
+  assert.strictEqual(D.naarEcgNaStand(r, '2026-10-31', '2026-10-31'), 0, 'ECG-afschrift nog niet zo ver: staat alleen in het GHAWA-saldo');
+  assert.strictEqual(D.naarEcgNaStand(r, null, '2026-11-20'), 0);
+});
+
+test('wv3918 C55: zichtbare reden, > 1 maand bevroren = één signaal + Toch delen (alleen dan, met kruisproef), indelen sluit het signaal', async () => {
+  const o = omgeving();
+  await alleAan(o, ['overview', 'totals']);
+  const blokNu = () => { const s = o.sql(); const r = s.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_blok'").get(); s.close(); return r ? JSON.parse(r.waarde) : null; };
+  assert.strictEqual(blokNu().as_of, '2026-10-31');
+  const sg = () => { const s = o.sql(); const r = s.prepare("SELECT tekst, op, dicht_op FROM signaal WHERE id = 'delen:blok'").get(); s.close(); return r; };
+  // een afschrijving van november, nog niet ingedeeld
+  const s = o.sql();
+  s.prepare("INSERT INTO bankregel_ghawa (id, rekening, datum, jaar, bedrag_cent, soort, volg) VALUES ('U1', 'Current NL00', '2026-11-12', 2026, -4200, 'Unknown', 900)").run();
+  for (let i = 0; i < 3; i++) s.prepare("INSERT INTO bankregel_ghawa (id, rekening, datum, jaar, bedrag_cent, soort, volg) VALUES (?, 'Current NL00', '2026-11-1' || ?, 2026, ?, 'Donation (bank transfer)', ?)").run('N' + i, i, 1500 + i, 901 + i);
+  s.close();
+  o.zetNu(Date.parse('2026-12-03T12:00:00Z'));   // stand 30-11: één maand achter, nog niet bevroren
+  o.m.markeerVuil(); await o.m.ronde();
+  let st = o.m.staat().ghawa_blok;
+  assert.ok(!st.nieuw_mag && /1 bankregel van GHAWA nog in te delen/.test(st.wacht_reden), JSON.stringify(st));
+  assert.strictEqual(st.bevroren, false); assert.strictEqual(st.toch_kan, false);
+  assert.strictEqual(blokNu().as_of, '2026-10-31', 'oude stand blijft buiten');
+  assert.ok(!sg() || sg().dicht_op, 'nog geen signaal');
+  const kand = o.m._bouw(o.m._lees()).sb;   // review ZOU 1: met de juiste stand en hash, zodat juist de termijn weigert
+  const r0 = await o.m.blokToch('toets', { stand: kand.stand, blok: kand.hash });
+  assert.strictEqual(r0.status, 409, 'kruisproef: Toch delen kan niet vóór > 1 maand');
+  assert.ok(/meer dan een maand/.test(r0.body.fout), r0.body.fout);
+  assert.strictEqual(blokNu().as_of, '2026-10-31');
+  // januari: stand 31-12, blok van 31-10 = > 1 maand bevroren
+  o.zetNu(Date.parse('2027-01-04T12:00:00Z'));
+  await o.m.ronde();
+  st = o.m.staat().ghawa_blok;
+  assert.ok(st.bevroren && st.toch_kan, JSON.stringify(st));
+  const s1 = sg();
+  assert.ok(s1 && !s1.dicht_op && /31-10-2026/.test(s1.tekst) && /Toch delen/.test(s1.tekst) && /Deel die regels in/.test(s1.tekst), JSON.stringify(s1));
+  assert.ok(!/4200|42,00|Proef/.test(s1.tekst), 'geen bedrag of naam in het signaal');
+  o.zetNu(Date.parse('2027-01-04T13:00:00Z'));
+  await o.m.ronde();
+  assert.strictEqual(sg().op, s1.op, 'dezelfde regel niet elke ronde opnieuw');
+  // review MOET 1: een bevestiging van een ander (ouder) blok of zonder stand/hash weigert; de app stuurt wat hij toonde
+  assert.strictEqual((await o.m.blokToch('toets')).status, 409, 'zonder wat David zag: nee');
+  assert.strictEqual((await o.m.blokToch('toets', { stand: st.toch_stand, blok: 'ouder' })).status, 409, 'ander blok: nee');
+  assert.strictEqual(blokNu().as_of, '2026-10-31', 'na een weigering niets gedeeld');
+  // Toch delen: precies dit blok gaat mee; daarna is het signaal dicht
+  const r1 = await o.m.blokToch('toets', { stand: st.toch_stand, blok: st.toch_blok });
+  assert.strictEqual(r1.status, 200, JSON.stringify(r1.body));
+  assert.strictEqual(blokNu().as_of, '2026-12-31');
+  assert.ok(deelVan(o, 'totals') && deelVan(o, 'totals').as_of === '2026-12-31', 'buiten staat de nieuwe stand');
+  assert.ok(sg().dicht_op, 'signaal dicht');
+  assert.ok(o.m.staat().ghawa_blok.toch_gebruikt);
+});
+
+test('wv3918 C55: later indelen bevriest niet (integraal) en Toch delen geldt alleen voor het blok dat David zag', async () => {
+  const o = omgeving();
+  await alleAan(o, ['overview', 'totals']);
+  const s = o.sql();
+  s.prepare("INSERT INTO bankregel_ghawa (id, rekening, datum, jaar, bedrag_cent, soort, volg) VALUES ('U1', 'Current NL00', '2026-11-12', 2026, -4200, 'Unknown', 900)").run();
+  s.close();
+  o.zetNu(Date.parse('2027-01-04T12:00:00Z'));
+  await o.m.ronde();
+  assert.ok(o.m.staat().ghawa_blok.toch_kan);
+  // David koos Toch delen voor een ander (ouder) blok van dezelfde stand: geldt niet
+  const z = o.sql(); z.prepare("INSERT INTO deel_stand (sleutel, waarde) VALUES ('ghawa_toch', ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde").run(JSON.stringify({ stand: '2026-12-31', blok: 'ander' })); z.close();
+  o.m.markeerVuil(); await o.m.ronde();
+  assert.strictEqual(o.m.staat().ghawa_blok.nieuw_mag, false, 'kruisproef: keuze voor een ander blok geldt niet');
+  // ingedeeld als bankkosten → meteen een nieuw blok, geen bevriezing, signaal dicht
+  const t = o.sql(); t.prepare("UPDATE bankregel_ghawa SET soort = 'Bank costs' WHERE id = 'U1'").run(); t.close();
+  o.m.markeerVuil(); await o.m.ronde();
+  const st = o.m.staat().ghawa_blok;
+  assert.ok(st.nieuw_mag && !st.wacht_reden && st.stand === '2026-12-31', JSON.stringify(st));
+  const q = o.sql(); const sg = q.prepare("SELECT dicht_op FROM signaal WHERE id = 'delen:blok'").get(); q.close();
+  assert.ok(sg && sg.dicht_op, 'signaal dicht na indelen');
+});

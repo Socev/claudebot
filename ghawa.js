@@ -378,7 +378,14 @@ function bereken(d) {
     const rs = omw.filter((x) => kwartaal(x.datum) === q); const e = som(rs, (x) => x.eur), g = som(rs, (x) => x.gmd);
     return { kwartaal: q, eur: e, gmd: g, koers: e ? g / e : null, aantal: rs.length };
   });
-  const cashKoers = Number(inst.eur_cash_rate || 0);
+  // wv3918 (C55): de koers per contante opname uit de gegevens (instelling eur_cash_rates = JSON { "JJJJ-MM-DD": koers }); eur_cash_rate (de
+  // ene opname van 7-2-2025) blijft de terugval. Een opname zonder eigen koers terwijl er meer dan één is = signaal, niet stil dezelfde koers.
+  let cashKoersen = {};
+  try { const j = inst.eur_cash_rates ? JSON.parse(inst.eur_cash_rates) : {}; if (j && typeof j === 'object' && !Array.isArray(j)) cashKoersen = j; } catch (e) { signalen.push({ soort: 'contante koersen onleesbaar' }); }
+  const cashTerug = Number(inst.eur_cash_rate || 0);
+  const cashOpnames = rek.EUR.filter((b) => b.soort === 'Cash withdrawal');
+  const koersVoor = (b) => { const k = Number(cashKoersen[b.datum]); return k > 0 ? k : cashTerug; };
+  for (const b of cashOpnames) if (!(Number(cashKoersen[b.datum]) > 0) && (cashOpnames.length > 1 || !(cashTerug > 0))) signalen.push({ soort: 'contante opname zonder eigen koers', id: b.datum });
   const ecgEur = { ontvangen: som(rek.EUR.filter((b) => b.soort === 'Transfer in from NL'), (b) => b.bedrag_cent),
     omgewisseld: -somSoort('EUR', 'Conversion out'), contant: -somSoort('EUR', 'Cash withdrawal'), bankkosten: -somSoort('EUR', 'Bank charge'),
     overig: -somSoort('EUR', 'Payment from EUR account'), saldo: saldo.EUR, datum: laatsteDatum.EUR };
@@ -431,7 +438,8 @@ function bereken(d) {
   const C = { kwartalen: omwKw, totaal: omwTot };
   const uitbetaald = -som(rek.GMD.filter((b) => ['Cheque withdrawal', 'Cash withdrawal', 'Payment to supplier', 'Reversal'].indexOf(b.soort) >= 0), (b) => b.bedrag_cent);
   const gespec = som(d.uitgaven.filter((u) => u.betaald_van === 'GMD (ECG)' && u.regel !== '15.1'), (u) => u.gmd_cent);
-  const contantGmd = Math.round(ecgEur.contant * cashKoers);
+  const contantGmd = Math.round(som(cashOpnames, (b) => -b.bedrag_cent * koersVoor(b)));
+  const cashKoers = ecgEur.contant ? contantGmd / ecgEur.contant : cashTerug;   // bij één opname precies zijn koers; bij meer het gewogen gemiddelde
   const D = { uitbetaald, gespecificeerd: gespec, verschil_gmd_rekening: uitbetaald - gespec, contant_eur: ecgEur.contant, contant_koers: cashKoers,
     contant_gmd: contantGmd, niet_gespecificeerd: uitbetaald - gespec + contantGmd };
   D.niet_gespecificeerd_eur = r2(D.niet_gespecificeerd / 100 / koers);
@@ -439,8 +447,11 @@ function bereken(d) {
   E.onbekend = groep('onbekend');   // wv2880: uit de bank, nog niet ingedeeld; telt mee zodat het saldo sluit
   E.berekend = E.opgehaald - E.kosten - E.wilde_ganzen - E.naar_ecg + E.onbekend;
   E.afschrift = ghawaAfschrift; E.verschil = E.berekend - E.afschrift; E.keten_breuken = d.ghawaKetenBreuken;
-  E.ecg_2026 = som(naarEcg.filter((x) => x.van === 'Stichting GHAWA (Triodos)' && x.datum >= '2026-01-01'), (x) => x.eur)
-    - som(rek.EUR.filter((b) => b.soort === 'Transfer in from NL' && b.datum >= '2026-01-01'), (b) => b.bedrag_cent);
+  // wv3918 (C55): het lopende jaar uit de gegevens (vandaag), niet vast 2026
+  const jaarVan = String((d.vandaag || new Date().toISOString()).slice(0, 4)) + '-01-01';
+  E.ecg_jaar = jaarVan.slice(0, 4);
+  E.ecg_dit_jaar = som(naarEcg.filter((x) => x.van === 'Stichting GHAWA (Triodos)' && x.datum >= jaarVan), (x) => x.eur)
+    - som(rek.EUR.filter((b) => b.soort === 'Transfer in from NL' && b.datum >= jaarVan), (b) => b.bedrag_cent);
   const F = { ontvangen: cent(inst.wg_received_gmd), gerapporteerd: som(d.uitgaven, (u) => u.wg_cent) };
   F.verschil = F.ontvangen === null ? null : F.ontvangen - F.gerapporteerd;
   const G = d.opnameUitleg.map((g) => ({ wat: g.wat, gmd: g.gmd_cent, uitleg: g.uitleg }));
@@ -468,10 +479,14 @@ function overzicht(d, k) {
   for (const f of d.fondsen.filter((x) => x.status === 'Committed - not yet received')) aandacht.push({ toon: 'info', label: 'toezegging',
     titel: f.gever + ': € ' + Math.round(f.eur_cent / 100).toLocaleString('nl-NL') + ' nog niet binnen', sub: 'bedoeld voor ' + (f.doel || f.project || '').toLowerCase() });
   if (!k.sluit) aandacht.push({ toon: 'fout', label: 'sluit niet', titel: 'Een aansluiting sluit niet op de cent', sub: 'zie Geldstromen › Sluit het?' });
+  // wv3918 (C55): een contante opname van de eurorekening zonder eigen koers telt anders stil tegen de koers van een andere opname
+  for (const sg of (k.signalen || []).filter((x) => x.soort === 'contante opname zonder eigen koers' || x.soort === 'contante koersen onleesbaar'))
+    aandacht.push({ toon: 'wacht', label: 'koers', titel: sg.id ? 'Contante opname van de eurorekening op ' + sg.id + ' heeft nog geen eigen koers' : 'De koersen van de contante opnames zijn onleesbaar',
+      sub: 'vraag ECG tegen welke koers hij is gewisseld; de machinekamer zet hem erin' });
   // wv2880 (fase 2): signalen van het bijhouden, posten om in te delen, termijnen van fondsen, AFAS-geld binnen maar nog toegezegd
   for (const s of d.signalen || []) aandacht.push({ toon: 'fout', label: s.soort === 'bank' ? 'bank' : s.soort === 'delen' ? 'delen' : 'afschrift', titel: s.tekst, sub: 'sinds ' + String(s.op).slice(0, 10), scherm: s.soort === 'delen' ? 'delen' : 'ronde' });   // wv2889: poort van Delen met ECG
   const onb = (d.ghawaBank && d.ghawaBank.onbekend) || 0;
-  if (onb) aandacht.push({ toon: 'wacht', label: 'indelen', titel: onb + (onb === 1 ? ' bankregel' : ' bankregels') + ' van GHAWA nog in te delen', sub: 'één tik per regel', scherm: 'indelen' });
+  if (onb) aandacht.push({ toon: 'wacht', label: 'indelen', titel: onb + (onb === 1 ? ' bankregel' : ' bankregels') + ' van GHAWA nog in te delen', sub: 'één tik per regel; tot dan krijgt ECG geen nieuwe GHAWA-cijfers', scherm: 'indelen' });
   for (const t of termijnen(d, k.vandaag)) aandacht.push({ toon: t.dagen < 0 ? 'fout' : 'info', label: 'termijn', titel: t.gever + ': ' + (t.dagen < 0 ? 'termijn verlopen' : 'termijn over ' + t.dagen + (t.dagen === 1 ? ' dag' : ' dagen')),
     sub: 'op ' + t.termijn, scherm: 'fondsen' });
   const afas = afasBank(d);

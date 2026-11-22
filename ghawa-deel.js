@@ -19,6 +19,9 @@
  *    Een nieuw blok gaat alleen mee als voor ELK getal het aantal gewijzigde giften t.o.v. het vorige gepubliceerde blok 0 of ≥ 3 is (nieuw,
  *    ander bedrag of jaar, verdwenen) én het lopende jaar ≥ 10 giftregels heeft; anders blijft het vorige blok staan. Een jaar met < 10
  *    giftregels gaat samen met een buurjaar ("2023–2024"). Ook "nog te werven" in Overview rekent met het saldo uit het blok.
+ *    wv3918 (C55): "nog in te delen" (Unknown) is geen gift, en zolang er tot de standdatum zulke regels zijn komt er geen nieuw blok (reden
+ *    zichtbaar). Staat het blok ≥ 2 maandstanden stil: één regel in Vraagt aandacht en de bewuste uitweg "Toch delen" (vingerafdruk, alleen
+ *    voor precies het blok dat dan klaarstaat). "Nog te werven" trekt een overboeking naar ECG na de blok-stand één keer af.
  *  - POORT (vóór elke verzending én dagelijks op wat buiten staat): alleen op tekstwaarden; privé-donateursnamen en hun onderscheidende
  *    naamdelen, persoonsnamen (behalve David en Momodou), rekeningnummers van GHAWA (eigen en tegenrekeningen) en ECG, IBAN-vorm,
  *    cijferreeksen ≥ 9. Getallen apart: eindig, geheel (behalve rate/pct), |x| ≤ 1e13. Eén treffer = dat onderdeel meteen dicht (blok-rij +
@@ -70,7 +73,11 @@ const FASE_EN = {   // vaste Engelse beschrijving per fase (de databank heeft Ne
 };
 const AANSLUITING = { A: 'ECG bank statements per quarter', B: 'Cheques against handwritten lists', C: 'Conversions EUR to GMD', D: 'Paid out against itemised',
   E: 'GHAWA bank', F: 'Wilde Ganzen received against reported' };
-const GIFT = ['Donation (bank transfer)', 'Donation online (Mollie)', 'Sponsor AFAS (pharmacy)', 'Unknown'];
+// wv3918 (C55, David Ja 22-11 nr 65): "nog in te delen" (Unknown) is GEEN gift. Telde het mee, dan stond een afschrijving als negatieve gift buiten
+// en bevroor het jaarblok blijvend zodra David hem indeelde (die ene regel verdween uit de giften: 1 gewijzigd, nooit meer 0 of ≥ 3).
+const GIFT = ['Donation (bank transfer)', 'Donation online (Mollie)', 'Sponsor AFAS (pharmacy)'];
+const ONBEKEND = 'Unknown';
+const BEVROREN_MAANDEN = 2;   // blok-stand ≥ 2 maandstanden achter = > 1 maand bevroren: signaal in Vraagt aandacht + de uitweg Toch delen
 const RENTE_KOSTEN = ['Interest', 'Bank costs', 'Bank fee foreign payment', 'Other costs'];
 const HOUDBAAR_MS = 72 * 3600000, VERS_MS = 6 * 3600000, RONDE_MS = 15 * 60000, TERUG_MS = 24 * 3600000, LOG_MS = 3600000;
 const STUK = 60000, MAX_AANROEPEN = 20, GRENS = 1e13, FOUT_MELD_MS = 24 * 3600000;
@@ -292,6 +299,10 @@ function ghawaBlok(rijen, vorigeGiften, stand, vorigeGroepen) {
   const nu = new Map(tot.filter(gift).map((r) => [r.id, { jaar: r.jaar, bedrag_cent: r.bedrag_cent }]));
   const historie = vorigeGiften instanceof Map ? [vorigeGiften] : (vorigeGiften || []);
   const redenen = [];
+  // wv3918 (C55): zolang er tot de standdatum regels "nog in te delen" zijn geen nieuw blok; zo gaat er nooit een stand buiten waarin een later
+  // ingedeelde regel nog ontbrak (of als gift meetelde), en bevriest indelen het blok achteraf niet
+  const onbekend = tot.filter((r) => r.soort === ONBEKEND).length;
+  if (onbekend) redenen.push('nog in te delen: ' + onbekend);
   if (telJaar(standJaar) < 10) redenen.push('lopend jaar < 10 giftregels');
   const telOk = (n) => n === 0 || n >= 3;
   let totaal = 0;
@@ -307,7 +318,25 @@ function ghawaBlok(rijen, vorigeGiften, stand, vorigeGroepen) {
     if (!telOk(t)) redenen.push('saldo: ' + t + ' gewijzigd');
     totaal = t;
   }
-  return { blok, giften: nu, groepen, mag: redenen.length === 0, redenen, gewijzigd: totaal };
+  return { blok, giften: nu, groepen, mag: redenen.length === 0, redenen, gewijzigd: totaal, onbekend };
+}
+// wv3918 (C55): hoeveel maandstanden het gebruikte blok achterloopt op de stand van nu (beide 'JJJJ-MM-DD', einde maand)
+function maandenAchter(oud, st) {
+  if (!oud || !st) return 0;
+  return (Number(st.slice(0, 4)) - Number(oud.slice(0, 4))) * 12 + Number(st.slice(5, 7)) - Number(oud.slice(5, 7));
+}
+// Overboekingen GHAWA → ECG ná de blok-stand die ECG al kan hebben (op of vóór de datum van het laatste ECG-euroafschrift): die staan zowel in het
+// (oudere) GHAWA-saldo van het blok als in het (nieuwere) ECG-saldo. "Still to raise" trekt ze daarom één keer af (wv3918, C55; bedragen < 0).
+function naarEcgNaStand(rijen, stand, ecgDatum) {
+  if (!stand || !ecgDatum) return 0;
+  return (rijen || []).filter((r) => r.soort === 'Transfer to ECG' && r.datum > stand && r.datum <= ecgDatum).reduce((s, r) => s + r.bedrag_cent, 0);
+}
+
+function nlDatum(d) { return d && /^\d{4}-\d{2}-\d{2}/.test(d) ? Number(d.slice(8, 10)) + '-' + Number(d.slice(5, 7)) + '-' + d.slice(0, 4) : String(d || ''); }
+function blokReden(sb) {   // in gewone taal, zonder bedragen of namen
+  if (sb.onbekend) return sb.onbekend + (sb.onbekend === 1 ? ' bankregel' : ' bankregels') + ' van GHAWA nog in te delen';
+  if (sb.redenen.some((r) => /lopend jaar/.test(r))) return 'het lopende jaar heeft nog te weinig giften';
+  return 'te weinig gewijzigde giften sinds het vorige blok';
 }
 
 // ── pakketten ──
@@ -352,7 +381,7 @@ function bouwPakketten(x) {
   let teWerven = null;
   if (blok) {
     const w = k.werven, koers = k.koers;
-    const ghawaVrij = (blok.balance.eur_cent - k.ghawa.geoormerkt) / 100;
+    const ghawaVrij = (blok.balance.eur_cent + (x.naarEcgNa || 0) - k.ghawa.geoormerkt) / 100;   // naarEcgNa ≤ 0: al bij ECG, niet dubbel
     const bouwNa = Math.max(0, k.bouw.open_eur_exact - w.oormerk_bouw), apoNa = Math.max(0, k.apotheek.open_eur_exact - w.oormerk_apo);
     teWerven = Math.round(Math.max(0, bouwNa + apoNa - k.ecg.eur.saldo / 100 - k.ecg.gmd.saldo / 100 / koers - ghawaVrij) * 100);
   }
@@ -471,7 +500,7 @@ function maak(o) {
     const d = G.leesData(o.dbPad); d.vandaag = amsDag(nu());
     const k = G.bereken(d);
     const db = open(true);
-    let rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud, groepen;
+    let rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud, groepen, toch;
     try {
       const a = (sql, ...p) => db.prepare(sql).all(...p);
       rijen = { regels: a('SELECT id, activiteit, post, aantal, prijs_cent, begroot_cent, status FROM begrotingsregel ORDER BY volgorde'),
@@ -498,20 +527,30 @@ function maak(o) {
       blokOud = b ? JSON.parse(b.waarde) : null;
       const gr = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_groepen'").get();
       groepen = gr ? JSON.parse(gr.waarde) : null;
+      const tc = db.prepare("SELECT waarde FROM deel_stand WHERE sleutel = 'ghawa_toch'").get();
+      try { toch = tc && tc.waarde ? JSON.parse(tc.waarde) : null; } catch (e) { toch = null; }
     } finally { db.close(); }
     let stichting = null;
     try { stichting = S.leesVault(o.vault); } catch (e) { fout('ghawa-deel-vault', e); }
     const mp = mijlpalenEngels(o.vault, S);
     const personenSoort = new Map([...l.personen.entries()].map(([n, s]) => [norm(n), s]));
-    return { d, k, rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud, groepen, stichting, mp, personenSoort };
+    return { d, k, rijen, l, goed, gedeeld, vorig, ghawaRijen, blokOud, groepen, toch, stichting, mp, personenSoort };
   }
   function bouw(x, opties) {
     const lab = maakLabels(x.l, sleutel);
     const st = eindVorigeMaand(nu());
     const sb = ghawaBlok(x.ghawaRijen, x.vorig, st, x.groepen);
+    // wv3918 (C55): het blok staat > 1 maand stil → David kan bewust "toch delen" (met vingerafdruk); dat geldt alleen voor precies deze stand
+    sb.stand = st;
+    // gebonden aan precies het blok dat David zag: verandert er daarna nog iets (zelfde stand), dan geldt de oude keuze niet
+    sb.hash = sha256(JSON.stringify(sb.blok));
+    if (!sb.mag && x.toch && x.toch.stand === st && x.toch.blok === sb.hash) { sb.mag = true; sb.toch = true; }
+    sb.achter = x.blokOud ? maandenAchter(x.blokOud.as_of, st) : 0;
+    sb.bevroren = !sb.mag && !!x.blokOud && sb.achter >= BEVROREN_MAANDEN;
     const blok = sb.mag ? sb.blok : x.blokOud;
     sb.nieuw = sb.mag && JSON.stringify(sb.blok) !== JSON.stringify(x.blokOud);
-    const b = bouwPakketten({ k: x.k, d: x.d, rijen: x.rijen, stichting: x.stichting, lab, goed: x.goed, mijlpalen: x.mp.rijen, gedeeldeOverleggen: x.gedeeld, blok, personenSoort: x.personenSoort, rekLabels: x.l.rekLabels });
+    const naarEcgNa = blok ? naarEcgNaStand(x.ghawaRijen, blok.as_of, x.k.ecg.eur.datum) : 0;
+    const b = bouwPakketten({ k: x.k, d: x.d, rijen: x.rijen, stichting: x.stichting, lab, goed: x.goed, mijlpalen: x.mp.rijen, gedeeldeOverleggen: x.gedeeld, blok, naarEcgNa, personenSoort: x.personenSoort, rekLabels: x.l.rekLabels });
     const p = poortLijsten(x.l);
     // een nieuwe tekst die zelf de poort niet haalt, kan David niet delen
     for (const t of b.nieuw) t.poort_ok = poortTekst(t.tekst, p) === null;
@@ -609,6 +648,11 @@ function maak(o) {
   function signaal(id, tekst) {   // één regel in Vraagt aandacht (ghawa.js toont de tabel signaal); nooit de treffer zelf
     metDb((db) => { try { db.prepare("INSERT INTO signaal (id, soort, tekst, op) VALUES (?, 'delen', ?, ?) ON CONFLICT (id) DO UPDATE SET tekst = excluded.tekst, op = excluded.op, dicht_op = NULL").run('delen:' + id, tekst, iso(nu())); } catch (e) { fout('ghawa-deel-signaal', e); } });
   }
+  function signaalEens(id, tekst) {   // wv3918: dezelfde open regel niet elke ronde opnieuw (op blijft staan)
+    const r = metDb((db) => { try { return db.prepare('SELECT tekst, dicht_op FROM signaal WHERE id = ?').get('delen:' + id); } catch (e) { return null; } });
+    if (r && r.dicht_op == null && r.tekst === tekst) return;
+    signaal(id, tekst);
+  }
   function signaalDicht(id) { metDb((db) => { try { db.prepare("UPDATE signaal SET dicht_op = ? WHERE id = ? AND dicht_op IS NULL").run(iso(nu()), 'delen:' + id); } catch (e) { /* geen tabel */ } }); }
   const naamNl = (id) => (ONDERDELEN.find((x) => x[0] === id) || [id, id, id])[2];
 
@@ -666,6 +710,10 @@ function maak(o) {
       });
     }
     uit.blok = { nieuw: !!b.sb.nieuw, gewijzigd: b.sb.gewijzigd, redenen: b.sb.redenen.length };
+    // wv3918 (C55): > 1 maand bevroren = één regel in Vraagt aandacht (alleen als ECG de GHAWA-cijfers krijgt), met de uitweg; weer vers = dicht
+    if (b.sb.bevroren && ['totals', 'overview'].some(isAan)) signaalEens('blok', 'Delen met ECG: de GHAWA-cijfers voor ECG staan nog op de stand van ' + nlDatum(x.blokOud.as_of)
+      + ' (' + blokReden(b.sb) + '). ' + (b.sb.onbekend ? 'Deel die regels in' : 'Dat lost zich op als er genoeg nieuwe giften zijn') + ', of kies onder Delen met ECG bewust "Toch delen".');
+    else signaalDicht('blok');
     for (const id of IDS.filter(isAan)) {   // opnieuw gelezen: tussendoor uitgezet = niet meer zetten
       const doc = b.pakket[id];
       if (!doc) continue;
@@ -939,7 +987,9 @@ function maak(o) {
       teksten_aantal: uniek.size, teksten_besluit: Object.fromEntries(tellen.map((r) => [r.besluit, r.n])),
       overleggen: ((x.stichting && x.stichting.overleggen) || []).map((ov) => ({ sleutel: ov.sleutel, datum: ov.datum, titel: ov.titel, gedeeld: x.gedeeld.has(ov.sleutel) })),
       mijlpalen_zonder_engels: x.mp.zonder, mijlpalen: x.mp.rijen.length,
-      ghawa_blok: { stand: b.blokGebruikt ? b.blokGebruikt.as_of : null, nieuw_mag: b.sb.mag, wacht_reden: b.sb.mag ? null : (b.sb.redenen.some((r) => /lopend jaar/.test(r)) ? 'het lopende jaar heeft nog te weinig giften' : 'te weinig gewijzigde giften sinds het vorige blok') },
+      ghawa_blok: { stand: b.blokGebruikt ? b.blokGebruikt.as_of : null, nieuw_mag: b.sb.mag, wacht_reden: b.sb.mag ? null : blokReden(b.sb),
+        onbekend: b.sb.onbekend, bevroren: b.sb.bevroren, toch_kan: b.sb.bevroren && ['totals', 'overview'].some(isAan), toch_gebruikt: !!b.sb.toch,
+        toch_stand: b.sb.bevroren ? b.sb.stand : null, toch_blok: b.sb.bevroren ? b.sb.hash : null },   // de app stuurt beide terug bij Toch delen
       log: log.map((r) => ({ naam: naamVan.get(r.hash) || 'onbekend', onderdeel: r.onderdeel, op: r.op })),
       laatste_push: stand('laatste_push'), laatste_ronde: stand('laatste_ronde'), laatste_terug: stand('laatste_terug'),
       fout: laatst && laatst.fout ? 'De laatste ronde naar buiten lukte niet; de pod probeert het opnieuw.' : null,
@@ -951,9 +1001,24 @@ function maak(o) {
       laatste_terug: stand('laatste_terug'), kijkers: Number(stand('bezoekers_n') || 0), fout: !!(laatst && laatst.fout), fout_sinds: stand('fout_sinds') || null };
   }
   function markeerVuil() { vuil++; }
+  // wv3918 (C55): de bewuste uitweg. Alleen bij een blok dat > 1 maand stilstaat; geldt voor precies het blok dat nu klaarstaat (stand + hash).
+  // Naar buiten: server.js eist een verse vingerafdruk. Gevolg (staat bij de knop): wie oude en nieuwe cijfers naast elkaar legt, kan dan het bedrag
+  // van één of twee giften afleiden; regels "nog in te delen" tellen als gift niet mee.
+  async function blokToch(door, zag) {
+    const x = lees(), b = bouw(x);
+    if (b.sb.mag) return { status: 200, body: { ok: true, nodig: false } };
+    // review wv3918 MOET 1: alleen precies het blok dat David in de app zag (stand + hash); intussen veranderd = opnieuw kijken
+    if (!zag || zag.stand !== b.sb.stand || zag.blok !== b.sb.hash) return { status: 409, body: { ok: false, fout: 'De cijfers zijn intussen veranderd; kijk opnieuw en kies dan pas Toch delen.', ververs: true } };
+    if (!b.sb.bevroren) return { status: 409, body: { ok: false, fout: 'Toch delen kan pas als de cijfers voor ECG meer dan een maand stilstaan.' } };
+    if (!['totals', 'overview'].some(isAan)) return { status: 409, body: { ok: false, fout: 'Overzicht en GHAWA-totalen staan allebei uit; er gaat niets mee.' } };
+    standZet('ghawa_toch', JSON.stringify({ stand: b.sb.stand, blok: b.sb.hash, op: iso(nu()), door: door || null }));
+    vuil++;
+    try { await inRij(ronde); laatsteRonde = nu(); } catch (e) { fout('ghawa-deel-toch', e); return { status: 200, body: { ok: true, stand: b.sb.stand, fout: 'gekozen; de push volgt binnen een paar minuten' } }; }
+    return { status: 200, body: { ok: true, stand: b.sb.stand } };
+  }
   return { tik, foutGemeld, ronde: () => inRij(ronde), terugLees: () => inRij(terugLees), logOphalen: () => inRij(logOphalen), schakel, noodstop, kijkerErbij, kijkerEraf, tekstBesluit, overlegDeel,
-    staat, health, markeerVuil, _lees: lees, _bouw: bouw, _rij: inRij, _zet: zet };
+    staat, health, markeerVuil, blokToch, _lees: lees, _bouw: bouw, _rij: inRij, _zet: zet };
 }
 
-module.exports = { maak, rekLabel, varianten, poort, poortTekst, poortLijsten, lijstenVan, maakLabels, ghawaBlok, bouwPakketten, mijlpalenEngels, maskeer, chequeNamen, adresHash,
+module.exports = { maak, rekLabel, varianten, poort, poortTekst, poortLijsten, lijstenVan, maakLabels, ghawaBlok, maandenAchter, naarEcgNaStand, bouwPakketten, mijlpalenEngels, maskeer, chequeNamen, adresHash,
   eindVorigeMaand, technischOk, DEEL_KOLOMMEN, D1_SCHEMA, IDS, ONDERDELEN, PENDING, HOLD, GIFT };

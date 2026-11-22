@@ -16128,7 +16128,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|fondsen|ronde|donateurs|indelen|doelen|stichting|overleg|mensen|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)
           || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank)$/.test(route)
           || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)
-          || /^(GET \/app\/ghawa\/delen|POST \/app\/ghawa\/delen\/(onderdeel|noodstop|kijker|kijker-weg|tekst|overleg))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
+          || /^(GET \/app\/ghawa\/delen|POST \/app\/ghawa\/delen\/(onderdeel|noodstop|kijker|kijker-weg|tekst|overleg|blok))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
         if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag|medisch)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
         if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
@@ -26768,7 +26768,7 @@ async function appGhawaDelen(req, res, a, s, route, d) {
   const door = a && a.id ? 'app ' + String(a.id).slice(0, 8) : 'app';
   // naar buiten (onderdeel aan, iemand erbij, tekst delen, overleg delen, noodstop eraf): verse vingerafdruk en nooit vanaf een vaste plek;
   // dichter maken (uit, eraf, noodstop aan, tekst vasthouden) mag altijd en zonder vingerafdruk
-  const naarBuiten = (wat === 'onderdeel' && b.aan === true) || wat === 'kijker' || (wat === 'tekst' && b.besluit === 'share') || (wat === 'overleg' && b.aan === true) || (wat === 'noodstop' && b.aan === false);
+  const naarBuiten = (wat === 'onderdeel' && b.aan === true) || wat === 'kijker' || (wat === 'tekst' && b.besluit === 'share') || (wat === 'overleg' && b.aan === true) || (wat === 'noodstop' && b.aan === false) || wat === 'blok';
   if (naarBuiten) {
     if (a && a.soort === 'vast') return appWeiger(res, 403, 'delen kan alleen vanaf je telefoon of een meereizend apparaat', 'ghawa-deel vast');
     if (!appVersOk(a, s)) { res._app.reden = 'ghawa-deel ' + wat + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het delen met je vingerafdruk', vers_nodig: true }); }
@@ -26781,6 +26781,7 @@ async function appGhawaDelen(req, res, a, s, route, d) {
     else if (wat === 'kijker-weg') u = await ghawaDeel.kijkerEraf(String(b.hash || ''));
     else if (wat === 'tekst') u = ghawaDeel.tekstBesluit(String(b.hash || ''), String(b.besluit || ''), door);
     else if (wat === 'overleg') u = ghawaDeel.overlegDeel(String(b.sleutel || ''), b.aan === true, door);
+    else if (wat === 'blok' && b.toch === true) u = await ghawaDeel.blokToch(door, { stand: String(b.stand || ''), blok: String(b.blok || '') });   // wv3918 (C55): bewust toch delen
     else return appWeiger(res, 404, 'onbekend', 'ghawa-deel onbekend');
   } catch (e) { logError('ghawa-deel', e); return appWeiger(res, 503, 'Dat lukte nu niet; probeer het zo opnieuw', 'ghawa-deel fout'); }
   res._app.reden = ('ghawa-deel ' + wat + ' ' + (b.id || (b.besluit || '') || (b.aan === true ? 'aan' : b.aan === false ? 'uit' : '')) + ' (' + u.status + ')').slice(0, 80);   // geen naam, adres of tekst

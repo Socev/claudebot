@@ -125,3 +125,31 @@ test('csv-lezer: aanhalingstekens, komma en regeleinde in een veld', () => {
   assert.deepStrictEqual(G.csvLees('a,b\n"x, ""y""","r1\nr2"\n'), [['a', 'b'], ['x, "y"', 'r1\nr2']]);
   assert.strictEqual(G.cent('2666620.78'), 266662078); assert.strictEqual(G.cent(''), null); assert.throws(() => G.cent('12a'));
 });
+
+test('wv3918 (C55): jaartal en contante koers uit de gegevens, niet vast in de rekenkern', () => {
+  const { db } = vers();
+  const d = G.leesData(db);
+  d.vandaag = '2027-02-01';
+  const k27 = G.bereken(d);
+  assert.strictEqual(k27.aansluiting.E.ecg_jaar, '2027');
+  assert.ok(!('ecg_2026' in k27.aansluiting.E), 'geen vast 2026 meer');
+  d.vandaag = '2026-11-10';
+  assert.strictEqual(G.bereken(d).aansluiting.E.ecg_jaar, '2026');
+  // één opname, alleen de terugval: zelfde uitkomst als voorheen en geen signaal
+  const k = G.bereken(G.leesData(db));
+  assert.strictEqual(k.aansluiting.D.contant_gmd, 73800);
+  assert.ok(!k.signalen.some((s) => /koers/.test(s.soort)));
+  // eigen koers per opname uit de instelling wint (kruisproef: andere koers → ander bedrag)
+  const { DatabaseSync } = require('node:sqlite');
+  const s = new DatabaseSync(db);
+  s.prepare("INSERT INTO instelling (sleutel, waarde, toelichting) VALUES ('eur_cash_rates', ?, 'proef') ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde").run(JSON.stringify({ '2025-02-07': 75 }));
+  s.close();
+  const k2 = G.bereken(G.leesData(db));
+  assert.strictEqual(k2.aansluiting.D.contant_gmd, 75000);
+  assert.strictEqual(k2.aansluiting.D.contant_koers, 75);
+  // geen koers te vinden = signaal en een regel in Vraagt aandacht (niet stil 0)
+  const s2 = new DatabaseSync(db);
+  s2.prepare("DELETE FROM instelling WHERE sleutel IN ('eur_cash_rates', 'eur_cash_rate')").run(); s2.close();
+  const d3 = G.leesData(db), k3 = G.bereken(d3);
+  assert.ok(k3.signalen.some((x) => x.soort === 'contante opname zonder eigen koers' && x.id === '2025-02-07'));
+});
