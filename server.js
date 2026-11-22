@@ -32689,7 +32689,7 @@ async function nmbrsBetaalNa() {
   const tekst = nieuw.map(function (l) {
     return l.status === 'klaar' && !l.hard.length
       ? 'POT-salarissen ' + l.periode + ' (loonrun ' + l.nummer + ') staan ' + (l.gewijzigd ? 'opnieuw klaar, gewijzigd sinds de vorige melding: ' : 'klaar: ') + l.aantal + ' betaling' + (l.aantal === 1 ? '' : 'en') + ', ' + eur(l.totaal_centen) + ' totaal. ' +
-        'Kies in Facturen › Betalen › POT de betaaldatum en download de betaallijst voor POT-invoer.' + (l.zacht.length ? ' Let op: ' + l.zacht.join('; ') + '.' : '')
+        'Kies in Facturen › Betalen › POT de betaaldatum en download de betaallijst voor POT-invoer.' + ((l.zacht_kort || l.zacht).length ? ' Let op: ' + (l.zacht_kort || l.zacht).join('; ') + '.' : '')
       : 'POT-salarissen ' + l.periode + ' (loonrun ' + l.nummer + '): nog geen bestand mogelijk (' + l.hard.join('; ') + '). Zie Facturen › Betalen › POT; tot dan geldt de lijst van Aurore.';
   }).join('\n');
   const sl = crypto.createHash('sha256').update(nieuw.map(function (l) { return l.run; }).join(',')).digest('hex').slice(0, 16);

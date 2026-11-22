@@ -657,6 +657,8 @@ async function betaalRonde(L, d, cid, jaar, invoer, uit) {
       d.prepare('delete from betaalregel where run = ?').run(r.id);
       const zet = d.prepare('insert into betaalregel (run, volg, e2e, naam, iban, centen, oms) values (?, ?, ?, ?, ?, ?, ?)');
       sam.regels.slice(0, B.MAX_REGELS).forEach(function (x, i) { zet.run(r.id, i + 1, x.persnr, x.naam || '', x.iban || '', x.centen, x.mw); });
+      // wv3917 (2C15): afgekeurde regels (negatief bedrag) met een negatief volgnummer: alleen om ze in de app als punt te tonen, nooit in een bestand
+      (sam.afgekeurd || []).slice(0, B.MAX_REGELS).forEach(function (x, i) { zet.run(r.id, -(i + 1), x.persnr, x.naam || '', x.iban || '', x.centen, x.mw); });
       d.prepare("insert into betaallijst (run, bedrijf, status, pogingen, opgehaald, formaat, aantal, totaal_centen, medewerkers_run, controle, dbtr_iban, sha, gewijzigd) values (?, ?, ?, 0, ?, 'runoutput', ?, ?, ?, ?, null, ?, ?) " +
         'on conflict (run) do update set status = excluded.status, pogingen = 0, opgehaald = excluded.opgehaald, formaat = excluded.formaat, aantal = excluded.aantal, ' +
         'totaal_centen = excluded.totaal_centen, medewerkers_run = excluded.medewerkers_run, controle = excluded.controle, dbtr_iban = null, sha = excluded.sha, gewijzigd = excluded.gewijzigd' +
@@ -1492,17 +1494,23 @@ function betaalRun(d, run) {
 // review wv3232 ronde 2 MOET 2: de versie die David in de app ziet (regels + controles); de download geeft alleen deze versie
 function betaalVersie(b) { return crypto.createHash('sha256').update(String(b.l.sha || '') + '|' + String(b.l.controle || '') + '|' + String(b.l.status || '')).digest('hex').slice(0, 16); }
 function betaalRegels(d, run) {
-  return lid(d, 'select e2e, naam, iban, centen from betaalregel where run = ? order by volg', [run])
+  return lid(d, 'select e2e, naam, iban, centen from betaalregel where run = ? and volg > 0 order by volg', [run])
+    .map(function (r) { return { persnr: r.e2e, naam: r.naam, iban: r.iban || null, centen: r.centen }; });
+}
+// wv3917: de afgekeurde regels (volg < 0); komen nooit in een bestand
+function betaalAfgekeurd(d, run) {
+  return lid(d, 'select e2e, naam, iban, centen from betaalregel where run = ? and volg < 0 order by volg desc', [run])
     .map(function (r) { return { persnr: r.e2e, naam: r.naam, iban: r.iban || null, centen: r.centen }; });
 }
 // De controle opnieuw op de bewaarde regels (lijst én download rekenen zo hetzelfde); zachte punten van het ophalen blijven staan.
 function betaalHercontrole(B, b, regels) {
   if (b.c.bron !== 'runoutput') return { hard: ['onleesbaar'], zacht: [] };   // nog van de oude SEPA-route: wacht op de volgende ronde
   if (regels.length !== b.l.aantal) return { hard: ['regels_gewist'], zacht: b.c.zacht || [] };
-  const hard = (b.c.hard || []).concat(B.controleRegels(regels, b.l.status !== 'wacht_iban'));
+  // wv3917 (2C15): 'dubbel' (gedeelde rekening) is sinds 22-11 zacht; een oude bewaarde controle met dat harde punt telt tot de volgende lezing zacht
+  const hard = (b.c.hard || []).filter(function (h) { return h !== 'dubbel'; }).concat(B.controleRegels(regels, b.l.status !== 'wacht_iban'));
   // review wv3232 ronde 4 MOET 1: alleen een lijst die de laatste 2 dagen nog tegen Nmbrs is nagekeken (bedragen én IBAN's) mag een bestand geven
   if (!(Date.now() - Date.parse(b.l.opgehaald) <= BETAAL_VERS_MS)) hard.push('verouderd');
-  return { hard: [...new Set(hard)], zacht: b.c.zacht || [] };
+  return { hard: [...new Set(hard)], zacht: [...new Set((b.c.zacht || []).concat(B.zachtRegels(regels, b.l.status !== 'wacht_iban')))] };
 }
 function kindBetaallijst(invoer, dir) {
   if (!fs.existsSync(path.join(dir, 'nmbrs.' + 'sqlite'))) return { ok: true, lijsten: [] };
@@ -1518,10 +1526,11 @@ function kindBetaallijst(invoer, dir) {
       const ruw = betaalRegels(d, id);
       const regels = ruw.map(function (r) { return { naam: r.naam, iban4: r.iban ? '…' + String(r.iban).slice(-4) : '—', centen: r.centen }; });
       const h = b.l.status === 'klaar' || b.l.status === 'wacht_iban' ? betaalHercontrole(B, b, ruw) : { hard: b.c.hard || [], zacht: b.c.zacht || [] };
+      // wv3917: zacht = met namen en laatste 4 cijfers voor de app; zacht_kort = zonder namen, voor de melding
       return { run: id, jaar: b.run.year, nummer: b.run.number, periode: B.maandTekst(b.run, b.c.periode_soort), aangemaakt: b.run.createdAt, status: b.l.status,
         opgehaald: b.l.opgehaald, aantal: b.l.aantal, totaal_centen: b.l.totaal_centen, netto_centen: b.c.netto_centen == null ? null : b.c.netto_centen,
         medewerkers_run: b.l.medewerkers_run, definitief: b.c.definitief === true, gewijzigd: b.c.gewijzigd === true,
-        hard: h.hard.map(function (x) { return B.UITLEG[x] || x; }), zacht: h.zacht.map(function (x) { return B.UITLEG[x] || x; }),
+        hard: h.hard.map(function (x) { return B.UITLEG[x] || x; }), zacht: B.zachtDetail(h.zacht, ruw, betaalAfgekeurd(d, id)), zacht_kort: h.zacht.map(function (x) { return B.UITLEG[x] || x; }),
         ophalen: b.c.ophalen || null, gemeld: b.l.gemeld, gedownload: b.l.gedownload, regels: regels, versie: betaalVersie(b) };
     }).filter(Boolean);
     return { ok: true, lijsten: lijsten };

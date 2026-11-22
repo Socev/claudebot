@@ -177,12 +177,14 @@ test('wv3232 regels + controle: alles goed → klaar; open run → zacht voorlop
   const nul = ctl(runOutput([{ id: E(1), bank: '10.00' }, { id: E(2), bank: '0.00' }]), { in_run: [E(1), E(2)] });
   assert.equal(nul.c.aantal, 1); assert.deepEqual(nul.c.zacht, ['aantal_medewerkers']);
 });
-test('wv3232 controle hard: negatief, onbekende medewerker, geen IBAN, mod-97, dubbel IBAN, onleesbaar, leeg', () => {
-  assert.ok(ctl(runOutput([{ id: E(1), bank: '-10.00' }]), { in_run: [E(1)] }).c.hard.includes('bedrag_niet_positief'));
+test('wv3232 controle hard: negatief (sinds wv3917 per regel), onbekende medewerker, geen IBAN, mod-97, onleesbaar, leeg', () => {
+  // wv3917: één negatief bedrag als enige regel → die regel afgekeurd, de lijst dus leeg (hard); bewaarde regel ≤ 0 blijft hard
+  const neg = ctl(runOutput([{ id: E(1), bank: '-10.00' }]), { in_run: [E(1)] });
+  assert.ok(neg.c.hard.includes('leeg')); assert.ok(neg.c.zacht.includes('regel_afgekeurd')); assert.equal(neg.sam.afgekeurd.length, 1);
+  assert.deepEqual(B.controleRegels([{ persnr: '1', naam: 'Proef, Anna', iban: I1, centen: -5 }], true), ['bedrag_niet_positief']);
   assert.ok(ctl(runOutput([{ id: E(4), bank: '10.00' }]), { in_run: [E(4)] }).c.hard.includes('medewerker_onbekend'));
   assert.ok(ctl(RO3(), {}, MW, { [E(1)]: { iban: I1 }, [E(2)]: { iban: I2 } }).c.hard.includes('iban_ontbreekt'));
   assert.ok(ctl(RO3(), {}, MW, { [E(1)]: { iban: 'NL70TEST0000000001' }, [E(2)]: { iban: I2 }, [E(3)]: { iban: I3 } }).c.hard.includes('iban_mod97'));
-  assert.ok(ctl(RO3(), {}, MW, { [E(1)]: { iban: I1 }, [E(2)]: { iban: I1 }, [E(3)]: { iban: I3 } }).c.hard.includes('dubbel'));
   assert.ok(ctl(runOutput([{ id: E(1), bank: 'x' }]), { in_run: [E(1)] }).c.hard.includes('onleesbaar'));
   assert.ok(ctl('<reports></reports>', { in_run: [] }).c.hard.includes('leeg'));
 });
@@ -194,6 +196,27 @@ test('wv3232 controle zacht: netto deels anders, aantal medewerkers, niet in run
   assert.deepEqual(ctl(RO3(), {}, MW, { [E(1)]: { iban: I1, recent: true }, [E(2)]: { iban: I2 }, [E(3)]: { iban: I3 } }).c.zacht, ['iban_recent_gewijzigd']);
   const z = ctl(RO3(), {}, MW, null);
   assert.deepEqual(z.c.hard, []); assert.ok(z.sam.regels.every((x) => x.iban === null));
+});
+test('wv3917 (2C15) gedeelde rekening = zacht punt met beide namen en laatste 4; negatief bedrag keurt alleen die regel af', () => {
+  const g = ctl(RO3(), {}, MW, { [E(1)]: { iban: I1 }, [E(2)]: { iban: I1 }, [E(3)]: { iban: I3 } });
+  assert.deepEqual(g.c.hard, []); assert.deepEqual(g.c.zacht, ['iban_gedeeld']); assert.equal(g.c.aantal, 3); assert.equal(g.c.totaal_centen, 483325);
+  assert.deepEqual(B.controleRegels(g.sam.regels, true), [], 'ook bij lijst en download niet meer hard');
+  const t = B.zachtDetail(g.c.zacht, g.sam.regels, []);
+  assert.equal(t.length, 1); assert.match(t[0], /^Anna Proef en Bert van Voorbeeld hebben hetzelfde rekeningnummer \(…0001\)/);
+  // zonder bankrecht geen IBAN, dus ook geen gedeeld-punt
+  assert.deepEqual(ctl(RO3(), {}, MW, null).c.zacht, []);
+  // negatief: alleen die regel weg, punt erbij; geen extra 'aantal_medewerkers' of 'netto'-punt door de afgekeurde regel
+  const n = ctl(runOutput([{ id: E(1), bank: '2345.60' }, { id: E(2), bank: '-25.00' }, { id: E(3), bank: '987.65' }]));
+  assert.deepEqual(n.c.hard, []); assert.deepEqual(n.c.zacht, ['regel_afgekeurd']); assert.equal(n.c.aantal, 2); assert.equal(n.c.totaal_centen, 333325);
+  assert.deepEqual(n.sam.regels.map((x) => x.persnr), ['101', '103']); assert.deepEqual(n.sam.afgekeurd.map((x) => x.persnr), ['102']);
+  assert.match(B.zachtDetail(n.c.zacht, n.sam.regels, n.sam.afgekeurd)[0], /^Bert van Voorbeeld \(…0002\): negatief bedrag \(€ -25,00\); deze regel staat niet in het bestand/);
+  // de melding (UITLEG) noemt geen namen
+  assert.ok(!/Proef|Anna|Bert/.test(B.UITLEG.iban_gedeeld + B.UITLEG.regel_afgekeurd));
+  // CSV met gedeelde rekening: pas na 'bewust', dan beide regels erin
+  const a = { run: { year: 2026, number: 12, periodEnd: 11 }, periode_soort: 'month', regels: g.sam.regels, controle: { hard: [], zacht: g.c.zacht }, datum: '2026-11-25', vandaag: '2026-11-22' };
+  assert.equal(B.csvBestand(a).code, 'bewust');
+  const csv = B.csvBestand(Object.assign({}, a, { bewust: true }));
+  assert.equal(csv.ok, true); assert.equal((csv.tekst.match(new RegExp(I1, 'g')) || []).length, 4, 'twee regels × (Rekeningnr + IBAN)');
 });
 test('wv3232 ibanKeuze: bankAccount1 nieuwste wint; recent gewijzigd; geen type maar één IBAN; twee IBAN zonder bankAccount1 → geen', () => {
   const nu = Date.parse('2026-11-16T12:00:00Z');
@@ -458,5 +481,40 @@ test('2B13 ronde: run output met &#x110000; → ronde loopt door (ok), lijst afg
     const x = (await kind(o.dir, 'betaallijst', {})).lijsten[0];
     assert.equal(x.status, 'afgekeurd'); assert.ok(x.hard.some((h) => /niet \(helemaal\) te lezen/.test(h)), JSON.stringify(x.hard));
     assert.equal((await kind(o.dir, 'betaalbestand', ARG({ formaat: 'csv' }))).code, 'controle');
+  } finally { o.sluit(); }
+});
+
+test('wv3917 (2C15) ronde: twee medewerkers op één IBAN → klaar, punt met namen in de app, melding zonder namen, CSV/pain met beide; negatief → alleen die regel weg', async () => {
+  const M = { log: [], doc202: 0, ro: RO3, ibans: [I1, I1, I3] };
+  const o = await opzet(M);
+  try {
+    let r = await kind(o.dir, 'ronde', INV(), o.env);
+    assert.equal(r.betaal.klaar, 1, JSON.stringify(r.betaal));
+    let x = (await kind(o.dir, 'betaallijst', {})).lijsten[0];
+    assert.equal(x.status, 'klaar'); assert.deepEqual(x.hard, []); assert.equal(x.aantal, 3);
+    assert.equal(x.zacht.length, 1); assert.match(x.zacht[0], /Anna Proef en Bert van Voorbeeld hebben hetzelfde rekeningnummer \(…0001\)/);
+    assert.deepEqual(x.zacht_kort, [B.UITLEG.iban_gedeeld]);
+    assert.equal((await kind(o.dir, 'betaalbestand', ARG({ formaat: 'csv' }))).code, 'bewust');
+    const csv = await kind(o.dir, 'betaalbestand', ARG({ formaat: 'csv', bewust: true }));
+    assert.equal(csv.ok, true, JSON.stringify(csv)); assert.equal(csv.aantal, 3);
+    const xml = await kind(o.dir, 'betaalbestand', ARG({ bewust: true }));
+    assert.equal(xml.ok, true, JSON.stringify(xml)); assert.equal(xml.aantal, 3); const v = xsd(xml.tekst); if (v !== null) assert.equal(v, 'OK');
+    // oude bewaarde controle met het harde punt 'dubbel' (van vóór 22-11) houdt een klaar-lijst niet meer tegen
+    let dd = o.db(); const c0 = JSON.parse(dd.prepare('select controle from betaallijst').get().controle);
+    dd.prepare('update betaallijst set controle = ?').run(JSON.stringify(Object.assign(c0, { hard: ['dubbel'], zacht: [] }))); dd.close();
+    x = (await kind(o.dir, 'betaallijst', {})).lijsten[0];
+    assert.deepEqual(x.hard, []); assert.equal(x.zacht.length, 1, 'gedeeld-punt opnieuw berekend uit de regels');
+    // negatief bedrag bij Bert: lijst klaar met 2 regels; Bert als punt, niet in het bestand
+    M.ro = () => runOutput([{ id: E(1), bank: '2345.60' }, { id: E(2), bank: '-25.00' }, { id: E(3), bank: '987.65' }]); M.ibans = [I1, I2, I3];
+    dd = o.db(); dd.prepare('update betaallijst set opgehaald = ?').run(new Date(Date.now() - 25 * 3600000).toISOString()); dd.close();
+    r = await kind(o.dir, 'ronde', INV(), o.env);
+    x = (await kind(o.dir, 'betaallijst', {})).lijsten[0];
+    assert.equal(x.status, 'klaar', JSON.stringify(x.hard)); assert.deepEqual(x.hard, []); assert.equal(x.aantal, 2); assert.equal(x.totaal_centen, 333325);
+    assert.deepEqual(x.regels.map((y) => y.naam), ['Proef, Anna', 'Toets, Cor']);
+    assert.ok(x.zacht.some((z) => /^Bert van Voorbeeld \(…0002\): negatief bedrag \(€ -25,00\)/.test(z)), JSON.stringify(x.zacht));
+    assert.ok(x.zacht_kort.includes(B.UITLEG.regel_afgekeurd)); assert.ok(!/Bert|Voorbeeld/.test(JSON.stringify(x.zacht_kort)));
+    const c2 = await kind(o.dir, 'betaalbestand', ARG({ formaat: 'csv', bewust: true }));
+    assert.equal(c2.ok, true, JSON.stringify(c2)); assert.equal(c2.aantal, 2); assert.ok(!c2.tekst.includes('Voorbeeld')); assert.ok(!c2.tekst.includes(I2));
+    const uit = JSON.stringify(r); assert.ok(![I1, I2, 'Proef', 'Bert'].some((y) => uit.includes(y)), 'geen naam of IBAN in de ronde-uitvoer');
   } finally { o.sluit(); }
 });

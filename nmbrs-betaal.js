@@ -282,20 +282,30 @@ function leesRunRegels(tekst) {
 }
 /*
  * Regels maken. o = { medewerkers: { id: { persnr, naam } }, ibans: { id: { iban, recent } } of null (geen bankrecht) }.
- * Eén regel per medewerker met Per Bank ≠ 0 (ook negatief: dat keurt de controle af). → { regels: [{ mw, persnr, naam, iban, centen, netto, recent }] }
+ * Eén regel per medewerker met Per Bank > 0. → { regels: [{ mw, persnr, naam, iban, centen, netto, recent }], afgekeurd: [zelfde vorm] }
+ * wv3917 (besluitenpagina nr 115 = 2C15, David Ja 22-11-2026): een negatief Per Bank keurt alleen die ene regel af (in afgekeurd, niet in het
+ * bestand; de app toont hem als punt dat David bewust moet zien), niet meer de hele lijst.
  */
 function regelsUitRun(ro, o) {
   o = o || {};
-  const regels = [];
-  if (!ro || !ro.ok) return { regels };
+  const regels = [], afgekeurd = [];
+  if (!ro || !ro.ok) return { regels, afgekeurd };
   for (const id of Object.keys(ro.per)) {
     const p = ro.per[id];
     if (p.bank === 0) continue;
     const m = (o.medewerkers || {})[id] || null, b = o.ibans ? o.ibans[id] || null : null;
-    regels.push({ mw: id, persnr: m ? m.persnr : null, naam: m ? m.naam : null, iban: b && b.iban ? ibanNorm(b.iban) : null, centen: p.bank, netto: p.netto, recent: !!(b && b.recent) });
+    const x = { mw: id, persnr: m ? m.persnr : null, naam: m ? m.naam : null, iban: b && b.iban ? ibanNorm(b.iban) : null, centen: p.bank, netto: p.netto, recent: !!(b && b.recent) };
+    (Number.isSafeInteger(p.bank) && p.bank < 0 ? afgekeurd : regels).push(x);
   }
-  regels.sort((a, c) => String(a.naam || '').localeCompare(String(c.naam || ''), 'nl') || String(a.persnr).localeCompare(String(c.persnr)));
-  return { regels };
+  const volg = (a, c) => String(a.naam || '').localeCompare(String(c.naam || ''), 'nl') || String(a.persnr).localeCompare(String(c.persnr));
+  regels.sort(volg); afgekeurd.sort(volg);
+  return { regels, afgekeurd };
+}
+// wv3917 (2C15): twee of meer betalingen naar hetzelfde rekeningnummer → [{ iban, namen }] (alleen rekeningen met ≥ 2 regels)
+function gedeeldeRekeningen(r) {
+  const per = new Map();
+  for (const x of r || []) { if (!x || !x.iban) continue; const k = ibanNorm(x.iban); if (!per.has(k)) per.set(k, []); per.get(k).push(x.naam || null); }
+  return [...per].filter(([, n]) => n.length > 1).map(([iban, namen]) => ({ iban, namen }));
 }
 // Controles op de regels zelf (ook bij lijst en download opnieuw, op de bewaarde regels). metIban: false = nog geen bankrecht.
 function controleRegels(r, metIban) {
@@ -308,10 +318,14 @@ function controleRegels(r, metIban) {
   if (metIban) {
     if (r.some((x) => !x.iban)) hard.push('iban_ontbreekt');
     else if (r.some((x) => !mod97(x.iban))) hard.push('iban_mod97');
-    const gezien = new Set();
-    for (const x of r) { if (!x.iban) continue; if (gezien.has(x.iban)) { hard.push('dubbel'); break; } gezien.add(x.iban); }
+    // wv3917 (2C15, David Ja 22-11-2026): twee medewerkers op één rekening is geen afkeuring meer maar een zacht punt (zachtRegels)
   }
   return hard;
+}
+// Zachte punten uit de regels zelf (ook bij lijst en download opnieuw). Restrisico (bewust, Davids keuze): een verkeerd overgenomen IBAN dat
+// toevallig gelijk is aan dat van een collega wordt een waarschuwing die David moet aanvinken, geen blokkade meer.
+function zachtRegels(r, metIban) {
+  return metIban && gedeeldeRekeningen(r).length ? ['iban_gedeeld'] : [];
 }
 /*
  * o = { in_run: [employeeId] of null, definitief: run vergrendeld, met_iban: bankrecht (anders geen IBAN-controles; status wacht_iban) }. → { hard, zacht, aantal, totaal_centen, netto_centen }.
@@ -323,15 +337,20 @@ function controleRun(ro, sam, o) {
   if (!ro || !ro.ok || ro.onleesbaar) hard.push('onleesbaar');
   if (ro && ro.te_veel) hard.push('te_veel_regels');
   if (ro && ro.dubbel) hard.push('dubbel_rapport');
+  const af = (sam && sam.afgekeurd) || [];
   hard.push(...controleRegels(r, o.met_iban === true));
+  zacht.push(...zachtRegels(r, o.met_iban === true));
+  if (af.length) zacht.push('regel_afgekeurd');
   const totaal = r.reduce((s, x) => s + (Number.isSafeInteger(x.centen) ? x.centen : 0), 0);
+  // vergelijken met alles wat Nmbrs per bank zet, ook de afgekeurde regels (die staan al als eigen punt)
+  const bankAlles = totaal + af.reduce((s, x) => s + x.centen, 0);
   const netto = ro && ro.ok ? Object.keys(ro.per).reduce((s, k) => s + ro.per[k].netto, 0) : 0;
-  if (ro && ro.ok && (netto !== totaal || Object.keys(ro.per).some((k) => ro.per[k].netto !== ro.per[k].bank))) zacht.push('netto_niet_alles_per_bank');
+  if (ro && ro.ok && (netto !== bankAlles || Object.keys(ro.per).some((k) => ro.per[k].netto !== ro.per[k].bank))) zacht.push('netto_niet_alles_per_bank');
   if (!Array.isArray(o.in_run)) zacht.push('medewerkers_run_onbekend');
   else {
-    if (o.in_run.length !== r.length) zacht.push('aantal_medewerkers');
+    if (o.in_run.length !== r.length + af.length) zacht.push('aantal_medewerkers');
     const set = new Set(o.in_run);
-    if (r.some((x) => !set.has(x.mw))) zacht.push('niet_in_run');
+    if (r.concat(af).some((x) => !set.has(x.mw))) zacht.push('niet_in_run');
   }
   if (r.some((x) => x.recent)) zacht.push('iban_recent_gewijzigd');
   if (o.definitief !== true) zacht.push('voorlopig');
@@ -342,7 +361,10 @@ const UITLEG = {
   iban_mod97: 'een rekeningnummer haalt de controle (mod-97) niet', iban_ontbreekt: 'van een medewerker staat geen rekeningnummer in Nmbrs',
   bedrag_onleesbaar: 'een bedrag is niet te lezen', bedrag_niet_positief: 'een bedrag is nul of negatief',
   medewerker_onbekend: 'een betaalde medewerker staat (nog) niet in de kopie van Nmbrs (naam of personeelsnummer ontbreekt)',
-  dubbel: 'twee betalingen naar hetzelfde rekeningnummer', dubbel_rapport: 'Nmbrs noemt dezelfde medewerker twee keer voor dezelfde periode in deze loonrun', pot_rekening_onbekend: 'de POT-rekening staat niet (geldig) in de Facturen-app',
+  dubbel: 'twee betalingen naar hetzelfde rekeningnummer',
+  iban_gedeeld: 'twee (of meer) medewerkers hebben hetzelfde rekeningnummer; beide betalingen staan in het bestand, controleer of dat klopt',
+  regel_afgekeurd: 'een medewerker heeft een negatief bedrag; die regel staat niet in het bestand, regel die betaling zelf',
+  dubbel_rapport: 'Nmbrs noemt dezelfde medewerker twee keer voor dezelfde periode in deze loonrun', pot_rekening_onbekend: 'de POT-rekening staat niet (geldig) in de Facturen-app',
   medewerkers_run_onbekend: 'het aantal medewerkers in de loonrun is niet bekend', aantal_medewerkers: 'het aantal betalingen is anders dan het aantal medewerkers in de loonrun',
   niet_in_run: 'een betaling is voor iemand die Nmbrs niet bij deze loonrun noemt',
   netto_niet_alles_per_bank: 'niet het hele netto gaat per bank (Per Bank wijkt af van Totaal netto)',
@@ -407,5 +429,26 @@ function csvBestand(a) {
   return { ok: true, naam: bestandNaam(a.run, a.datum, 'csv'), tekst, type: 'text/csv', aantal: rijen.length, totaal_centen: a.regels.reduce((s, r) => s + r.centen, 0), sha256: S.sha256(tekst) };
 }
 
-module.exports = { ontpak, leesRunOutput, leesRunRegels, regelsUitRun, controleRegels, controleRun, bestand, csvBestand, naamGewoon, mod97, centen, ibanNorm, maandTekst, bestandNaam, UITLEG,
+// wv3917: de zachte punten in de app met de details die David nodig heeft (naam en de laatste 4 cijfers); de melding gebruikt UITLEG zonder namen.
+// r = bewaarde regels ({ naam, iban, centen }), af = afgekeurde regels (zelfde vorm).
+function vier(iban) { return iban ? '…' + String(iban).slice(-4) : '—'; }
+function euroTekst(c) { return '€ ' + (c < 0 ? '-' : '') + (Math.abs(c) / 100).toLocaleString('nl-NL', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function zachtDetail(codes, r, af) {
+  const uit = [];
+  for (const z of codes || []) {
+    if (z === 'iban_gedeeld') {
+      const g = gedeeldeRekeningen(r);
+      if (!g.length) { uit.push(UITLEG[z]); continue; }
+      for (const x of g) uit.push(x.namen.map((n) => naamGewoon(n) || 'een onbekende medewerker').join(' en ') + ' hebben hetzelfde rekeningnummer (' + vier(x.iban) +
+        '); beide betalingen staan in het bestand, controleer of dat klopt');
+    } else if (z === 'regel_afgekeurd') {
+      if (!(af || []).length) { uit.push(UITLEG[z]); continue; }
+      for (const x of af) uit.push((naamGewoon(x.naam) || 'een onbekende medewerker') + ' (' + vier(x.iban) + '): negatief bedrag (' + euroTekst(x.centen) +
+        '); deze regel staat niet in het bestand, regel die betaling zelf');
+    } else uit.push(UITLEG[z] || z);
+  }
+  return uit;
+}
+
+module.exports = { ontpak, leesRunOutput, leesRunRegels, regelsUitRun, controleRegels, zachtRegels, gedeeldeRekeningen, zachtDetail, controleRun, bestand, csvBestand, naamGewoon, mod97, centen, ibanNorm, maandTekst, bestandNaam, UITLEG,
   MAX_REGELS, CODE_BANK, CODE_NETTO };
