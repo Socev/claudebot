@@ -107,6 +107,11 @@ const bewust = W.OVERIG.filter((w) => w.bewust_uit), gewoon = W.OVERIG.find((w) 
 const sb = W.stand({ workflows: live.filter((w) => !bewust.some((b) => b.n8n === w.id) && w.id !== gewoon.n8n), hartslag: hs, nu: NU });
 toets('4p check: bewust uit telt niet als uit of weg, gewone overig wel', bewust.length >= 1 && !sb.check.niet_actief.some((x) => bewust.some((b) => b.n8n === x.id)) &&
   sb.check.niet_actief.some((x) => x.id === gewoon.n8n && x.overig), sb.check.niet_actief);
+// wv3871: bewust_uit geldt ook voor n8n-werkers (FV2 uit sinds 21-11); een gewone n8n-werker die uit staat blijft een bevinding
+const bewustN = W.WERKERS.filter((w) => w.n8n && w.bewust_uit), gewoonN = W.WERKERS.find((w) => w.n8n && !w.bewust_uit);
+const sbn = W.stand({ workflows: live.filter((w) => !bewustN.some((b) => b.n8n === w.id) && w.id !== gewoonN.n8n), hartslag: hs, nu: NU });
+toets('4q wv3871 check: n8n-werker bewust uit telt niet als uit, gewone n8n-werker wel', bewustN.length >= 2 && !sbn.check.niet_actief.some((x) => bewustN.some((b) => b.n8n === x.id)) &&
+  sbn.check.niet_actief.some((x) => x.id === gewoonN.n8n && !x.overig), sbn.check.niet_actief);
 
 // 5 Ploeg.md
 const md = W.markdown(st, '2026-11-02');

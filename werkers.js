@@ -77,8 +77,8 @@ const N8N = [
   {"id": "n8n-FjPfBi64ND5PboBW", "naam": "Dagelijkse briefing", "soort": "wachter", "n8n": "FjPfBi64ND5PboBW", "sessie": "hoofd", "model": "pod-standaard", "hartslag": [], "uitkomst": "Bericht aan David (hoofd) + audio"},
   {"id": "n8n-GYzoDYNbU70K6Xxl", "naam": "Dagplanner - proactieve dagstart", "soort": "wachter", "n8n": "GYzoDYNbU70K6Xxl", "sessie": "hoofd", "model": "pod-standaard", "hartslag": [], "uitkomst": "hoofdsessie (stuurbestand)"},
   {"id": "n8n-h9fgRMuNxFEowfTQ", "naam": "Dienstwaarschuwer", "soort": "routine", "n8n": "h9fgRMuNxFEowfTQ", "model": "geen", "hartslag": [], "uitkomst": "Bericht aan David (hoofd)"},
-  {"id": "n8n-scxWN2NUtsDRVdIb", "naam": "FV2 - 2 Extractie (elke 30 min, :15/:45)", "soort": "routine", "module": "facturen", "n8n": "scxWN2NUtsDRVdIb", "model": "lokaal", "hartslag": [], "uitkomst": "Supabase fv"},
-  {"id": "n8n-NriiDaTuwS0xlDWS", "naam": "FV2 - Hulp - Waarneemdiensten iCal (1e van de maand 05:30)", "soort": "routine", "module": "facturen", "n8n": "NriiDaTuwS0xlDWS", "model": "geen", "hartslag": [], "uitkomst": "Supabase fv"},
+  {"id": "n8n-scxWN2NUtsDRVdIb", "naam": "FV2 - 2 Extractie (elke 30 min, :15/:45)", "soort": "routine", "module": "facturen", "n8n": "scxWN2NUtsDRVdIb", "model": "lokaal", "hartslag": [], "uitkomst": "Supabase fv", "bewust_uit": true},
+  {"id": "n8n-NriiDaTuwS0xlDWS", "naam": "FV2 - Hulp - Waarneemdiensten iCal (1e van de maand 05:30)", "soort": "routine", "module": "facturen", "n8n": "NriiDaTuwS0xlDWS", "model": "geen", "hartslag": [], "uitkomst": "Supabase fv", "bewust_uit": true},
   {"id": "n8n-pwXNABV5CYnnv0as", "naam": "Heartbeat - proactief overdag", "soort": "wachter", "n8n": "pwXNABV5CYnnv0as", "sessie": "hoofd", "model": "pod-standaard", "hartslag": [], "uitkomst": "Bericht aan David (hoofd)"},
   {"id": "n8n-lKcF3Oxt8WVeELPJ", "naam": "Nachtconsolidatie - dromen (03:00)", "soort": "wachter", "n8n": "lKcF3Oxt8WVeELPJ", "sessie": "hoofd", "skill": "nachtconsolidatie", "model": "pod-standaard", "hartslag": [], "uitkomst": "vault (actueel, logboek, deadlines)"},
   {"id": "n8n-vNsdkyTQIaGhU0Fj", "naam": "Nachtelijke raw_input-verwerking", "soort": "wachter", "n8n": "vNsdkyTQIaGhU0Fj", "sessie": "hoofd", "skill": "second-brain-verwerk-raw-input", "model": "pod-standaard", "hartslag": [], "uitkomst": "vault + Bericht (hoofd/machinekamer)"},
@@ -119,7 +119,8 @@ const POD = [
   { id: 'ovis-deadlines', naam: 'OVIS Calendar (deadline-register op de tijdlijn)', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke nacht 03:45–03:59',
     model: 'geen', hartslag: ['ovis-deadlines'], uitkomst: 'deadlines in de databank + tijdlijn-momentopname voor de agenda-wachter', bron: 'sb2-nacht.js → kalender_deadlines.py' },
   { id: 'offsite', naam: 'Offsite-back-ups (podstaat, health-pod, Supabase)', soort: 'routine', trigger: 'pod', rooster: 'elke nacht, eerste wekkertik na middernacht / 02:40 / 03:00',
-    model: 'geen', hartslag: ['podstaat_offsite', 'healthpod_offsite', 'supabase_offsite'], uitkomst: 'versleuteld op Drive', uitzetbaar: false, bron: 'bin/vault-offsite.sh' },
+    model: 'geen', hartslag: ['podstaat_offsite', 'healthpod_offsite', 'supabase_offsite', 'pg_dump_offsite'], uitkomst: 'versleuteld op Drive', uitzetbaar: false,
+    bron: 'bin/vault-offsite.sh (sinds 16-11 ook bin/pgdump-offsite.sh: pg_dump van de eigen databank, wv3187; in het register sinds wv3871)' },
   { id: 'vaultzoek', naam: 'Zoeken op betekenis (eigen index)', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke nacht 02:10–04:49',
     model: 'geen (embeddings bge-m3 via Workers AI, gratis dagtegoed)', hartslag: ['vaultzoek'], uitkomst: 'brokken + vectoren in de eigen databank (schema vaultzoek) voor vault-rag en Brain op betekenis',
     bron: 'server.js vaultzoekTik → vaultzoek-index.py (wv3295)' },
@@ -151,10 +152,15 @@ const POD = [
     bron: 'mk-scripts/leusdocs-ggz/ronde.py run (wv2862)' },
   { id: 'leusdocs-fto', naam: 'Leusdocs FTO-medicatieafspraken (dagcontrole)', soort: 'wachter', trigger: 'tikker', rooster: 'elke dag 07:00 (werkvoorraadrij; het script zet zelf de rij van morgen)',
     model: 'claude-sonnet-5-5', hartslag: ['leusdocs_fto'], uitkomst: 'stil bij gelijk; vraag aan David (knoppen) bij een wijziging; box (dag 1) en David (dag 3) bij onleesbaar', bron: 'mk-scripts/leusdocs-fto/ronde.py run (wv2869)' },
+  // wv3871 (DM12): weekcontrole van OVIS Crisis stempelde sinds 21-11 zonder werker
+  { id: 'crisis-bronnen', naam: 'OVIS Crisis weekcontrole (bronnen en interne nummers)', soort: 'wachter', trigger: 'tikker', rooster: 'elke maandag 06:00 (werkvoorraadrij)',
+    model: 'claude-sonnet-5-5', hartslag: ['crisis_bronnen'], uitkomst: 'stil bij gelijk; box-rij of vraag aan David bij een verschil', bron: 'mk-scripts/crisis-bewaking/ronde.py run (wv3726)' },
 ];
 
 // ── actieve n8n-workflows die geen werker zijn (kanaal, luik, JIMMY) ──
 // bewust_uit (wv2177): staat uit in n8n en hoort uit te staan (de JIMMY-stromen, gemeten 1-11-2026); geen bevinding zolang hij uit staat.
+// wv3871 (DM12): ook de FV2-stromen (alle 11 uit sinds 21-11-2026, David Ja op besluitenpagina nr 10, wv3673); bewust_uit geldt sinds
+// wv3871 ook voor n8n-werkers (N8N), niet alleen voor OVERIG.
 const OVERIG = [
   {"n8n": "LeqoYYEvJPhAKPS3", "naam": "Agenda-knoppen", "soort": "luik"},
   {"n8n": "JD0yNxPq79jXk25J", "naam": "Agenda-Wachter API", "soort": "luik"},
@@ -186,11 +192,11 @@ const OVERIG = [
   {"n8n": "02Jga3TIAEigwgw0", "naam": "WhatsApp Chats Zoeken (webhook)", "soort": "luik"},
   {"n8n": "nDj2qyAC5hJL5eUU", "naam": "Claude Debug via Telegram", "soort": "kanaal", "sessie": "telegram-debug", "uitzetbaar": false},
   {"n8n": "OfQgM9h4qGY2dFm8", "naam": "Claude via Telegram", "soort": "kanaal", "sessie": "hoofd", "uitzetbaar": false},
-  {"n8n": "yeF9UZ6t7Z7PfBH1", "naam": "FV2 - 5 Dashboard + Status + SEPA-pagina (web)", "soort": "luik"},
-  {"n8n": "nbtGLStSN0sQ4ns3", "naam": "FV2 - 7 Bankimport (handmatig, uploadformulier)", "soort": "luik"},
-  {"n8n": "rA3bpcRfShuLXIk2", "naam": "FV2 - Hulp - Backtest Harvest (eenmalig, handmatig)", "soort": "luik"},
-  {"n8n": "rzFcROmWRQsINhBE", "naam": "FV2 - Sub - Forward na OK (dashboard/Telegram)", "soort": "luik"},
-  {"n8n": "Z8lwj3ctPEuXPqPE", "naam": "FV2 - Sub - Normaliseer document", "soort": "luik"},
+  {"n8n": "yeF9UZ6t7Z7PfBH1", "naam": "FV2 - 5 Dashboard + Status + SEPA-pagina (web)", "soort": "luik", "bewust_uit": true},
+  {"n8n": "nbtGLStSN0sQ4ns3", "naam": "FV2 - 7 Bankimport (handmatig, uploadformulier)", "soort": "luik", "bewust_uit": true},
+  {"n8n": "rA3bpcRfShuLXIk2", "naam": "FV2 - Hulp - Backtest Harvest (eenmalig, handmatig)", "soort": "luik", "bewust_uit": true},
+  {"n8n": "rzFcROmWRQsINhBE", "naam": "FV2 - Sub - Forward na OK (dashboard/Telegram)", "soort": "luik", "bewust_uit": true},
+  {"n8n": "Z8lwj3ctPEuXPqPE", "naam": "FV2 - Sub - Normaliseer document", "soort": "luik", "bewust_uit": true},
   {"n8n": "4R2JPMAwJq9xCZNi", "naam": "GHAWA Website via Telegram", "soort": "kanaal", "bewust_uit": true},   // wv3190: door David gearchiveerd 10-11-2026 (wv2885)
   {"n8n": "mPIDK1kI5x6zB6iu", "naam": "JIMMY - Chat via Telegram", "soort": "jimmy", "bewust_uit": true},
   {"n8n": "sXgSLOEYc9mBcThI", "naam": "JIMMY - Cijfercontrole", "soort": "jimmy", "bewust_uit": true},
@@ -324,7 +330,7 @@ function check(workflows, hartslag, schakelaars) {
     const ids = new Set(actief.map(function (w) { return w.id; }));
     uit.n8n_actief = actief.length;
     uit.ontbreekt = actief.filter(function (w) { return !BEKEND_N8N.has(w.id); }).map(function (w) { return { id: w.id, naam: String(w.name || '').slice(0, 80) }; });
-    uit.niet_actief = N8N.filter(function (w) { return !ids.has(w.n8n) && !(sch[w.id] && sch[w.id].geldig && !sch[w.id].verlopen); }).map(function (w) { return { id: w.n8n, naam: w.naam }; })
+    uit.niet_actief = N8N.filter(function (w) { return !ids.has(w.n8n) && !w.bewust_uit && !(sch[w.id] && sch[w.id].geldig && !sch[w.id].verlopen); }).map(function (w) { return { id: w.n8n, naam: w.naam }; })
       .concat(OVERIG.filter(function (w) { return !ids.has(w.n8n) && !w.bewust_uit; }).map(function (w) { return { id: w.n8n, naam: w.naam, overig: true }; }));
   }
   if (Array.isArray(hartslag)) {
