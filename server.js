@@ -4701,7 +4701,7 @@ function handleRequest(req, res) {
       bankluis: fs.existsSync(BANK_SCRIPT),
       bunqluis: fs.existsSync(path.join(__dirname, 'bunq-lezer.js')) && fs.existsSync(path.join(BANK_DIR, 'bunq', 'staat.json')),   // wv683
       bankarchief: fs.existsSync(path.join(__dirname, 'bank-archief.js')),   // wv687: transactiedatabase in deze release
-      homey: typeof homeyInfo === 'function' ? homeyInfo() : null,   // wv3460: Homey (Athom MCP; gekoppeld, laatste meting, noodkopie; geen tokens)
+      homey: typeof HOMEY_POD !== 'undefined' && HOMEY_POD ? HOMEY_POD.homeyInfo() : null,   // wv3460: Homey (Athom MCP; gekoppeld, laatste meting, noodkopie; geen tokens)
       tibber_data: tibberInfo(),   // wv2625: Tibber Data API (module in de release?, laatste ronde, noodkopie; geen tokens)
       nmbrs: nmbrsInfo(),   // wv2797: Nmbrs (module in de release?, laatste ronde in aantallen, noodkopie, dood; geen tokens of namen)
       bankarchief_fout: bankArchiefFoutLaatst ? bankArchiefFoutLaatst.tijd : null,   // wv687: laatste schrijffout (tekst in api.log en de box)
@@ -29217,7 +29217,7 @@ const server = http.createServer(function (req, res) {
     if (berichtIsPad(req)) return berichtRoute(req, res);   // wv263: bericht aan David (intern, API_SECRET)
     if (bankIsPad(req)) return bankTerug(req, res);   // wv680: terugkeer van de bank na koppelen (bank.socev.dev)
     if (tibberIsPad(req)) return tibberTerug(req, res);   // wv2625: terugkeer van Tibber na toestemming (bank.socev.dev)
-    if (homeyIsPad(req)) return homeyTerug(req, res);   // wv3460: terugkeer van Homey (Athom) na Davids inlog (bank.socev.dev; form_post)
+    if (HOMEY_POD && HOMEY_POD.homeyIsPad(req)) return HOMEY_POD.homeyTerug(req, res);   // wv3460: terugkeer van Homey (Athom) na Davids inlog (bank.socev.dev; form_post)
     if (nmbrsIsPad(req)) return nmbrsTerug(req, res);   // wv2797: terugkeer van Nmbrs na toestemming (bank.socev.dev)
     handleRequest(req, res);
   } catch (e) {
@@ -30148,7 +30148,7 @@ async function smalActie(actie, d, wie) {
   }
   if (actie === 'bank') return bankSmal(d);   // wv680: alleen-lezen bankluis (zie bankSmal)
   if (actie === 'beleggen') return beleggenSmal(d);   // wv3756: Socev in het gewone gesprek (stand, dagboekregel); nooit handelen
-  if (actie === 'homey') return homeySmal(d, wie);   // wv3460: Homey (Athom MCP), alleen API_SECRET (zie homeySmal)
+  if (actie === 'homey') return HOMEY_POD ? HOMEY_POD.homeySmal(d, wie) : (!wie || !wie.mk ? { status: 403, j: { ok: false, fout: 'homey alleen vanuit de machinekamer (API_SECRET)' } } : { status: 404, j: { ok: false, fout: 'homey.js zit niet in deze release' } });   // wv3460: Homey (Athom MCP), alleen API_SECRET (zie homeySmal in homey.js; wv3886)
   if (actie === 'tibber') return tibberSmal(d, wie);   // wv2625: Tibber Data API, alleen API_SECRET (zie tibberSmal)
   if (actie === 'nmbrs') return nmbrsSmal(d, wie);   // wv2797: Nmbrs (salarisadministratie), alleen API_SECRET (zie nmbrsSmal)
   if (actie === 'ah') return typeof ahSmal === 'function' ? ahSmal(d, wie) : { status: 404, j: { ok: false, fout: 'niet in deze release' } };   // wv2703: AH-kassabonnen (stand, ronde), alleen API_SECRET
@@ -32063,163 +32063,27 @@ function tibberTerug(req, res) {
 // homey_mcp_refresh (de pod schrijft hem zelf bij de eerste inlog en bij elke rotatie).
 const HOMEY_DIR = typeof serverPad === 'function' ? serverPad('homey_dir', process.env.HOMEY_DIR, '/opt/data/homey', serverProefDeel('homey')) : (process.env.HOMEY_DIR || '/opt/data/homey');
 const HOMEY_SCRIPT = process.env.HOMEY_SCRIPT || path.join(__dirname, 'homey.js');
-const HOMEY_TERUG_PER_UUR = 30;
-const homeyTerugTijden = [];
 let homeyMod = null;
 try { homeyMod = require(HOMEY_SCRIPT); } catch (e) { homeyMod = null; }   // niet in deze release: route 404, smal 404
-let homeyBezig = false;
-function homeyIsPad(req) { return reqPath(req) === '/homey/terug'; }
-async function homeyKluisLees() {
-  const rijen = await tibberMgmt("select name, decrypted_secret as w from vault.decrypted_secrets where name in ('homey_mcp_client_id', 'homey_mcp_client_secret', 'homey_mcp_refresh')");
-  const w = { client_id: '', client_secret: '', refresh: '' };
-  rijen.forEach(function (x) {
-    if (x && x.name === 'homey_mcp_client_id') w.client_id = String(x.w || '').trim();
-    if (x && x.name === 'homey_mcp_client_secret') w.client_secret = String(x.w || '').trim();
-    if (x && x.name === 'homey_mcp_refresh') w.refresh = String(x.w || '').trim();
-  });
-  return w;
-}
-async function homeyKluisZet(waarde) {
-  if (typeof waarde !== 'string' || !/^[A-Za-z0-9._~+\/=-]{16,4096}$/.test(waarde)) throw new Error('token heeft een onverwachte vorm');
-  const n = (await tibberMgmt("select count(*)::int as n from vault.secrets where name = 'homey_mcp_refresh'"))[0];
-  if (!n || (n.n !== 0 && n.n !== 1)) throw new Error('kluis: homey_mcp_refresh niet eenduidig');
-  const q = n.n === 1 ? "select count(*)::int as n from (select vault.update_secret(id, $hm$" + waarde + "$hm$) from vault.secrets where name = 'homey_mcp_refresh') x"
-    : "select count(*)::int as n from (select vault.create_secret($hm$" + waarde + "$hm$, 'homey_mcp_refresh', 'Homey MCP (Athom) refresh token; pod schrijft zelf (wv3460)')) x";
-  const z = (await tibberMgmt(q))[0];
-  if (!z || z.n !== 1) throw new Error('kluis: niet precies één regel geschreven');
-  const t = (await tibberMgmt("select encode(sha256(convert_to(decrypted_secret, 'UTF8')), 'hex') as h from vault.decrypted_secrets where name = 'homey_mcp_refresh'"))[0];
-  return t && typeof t.h === 'string' ? t.h : null;
-}
-async function homeyKind(opdracht, invoer) {
-  const env = { HOMEY_DIR: HOMEY_DIR };
-  ['PATH', 'HOME', 'TZ', 'LANG'].forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
-  ['HOMEY_BASIS', 'HOMEY_PAUZE_MS'].forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });   // alleen de toets (127.0.0.1)
-  const r = await smalKind(process.execPath, ['--no-warnings', HOMEY_SCRIPT, opdracht], JSON.stringify(invoer || {}), 120000, env);
-  let j = null;
-  try { j = JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch (e) {}
-  if (r.code !== 0 && r.stderr) logError('homey-' + opdracht, new Error(String(r.stderr).slice(0, 200)));
-  return { code: r.code, j: j && typeof j === 'object' ? j : null };
-}
-function homeyDeps() { return { dir: HOMEY_DIR, kluisLees: homeyKluisLees, kluisZet: homeyKluisZet, kind: homeyKind }; }
-function homeySchoon(u) { const o = {}; Object.keys(u || {}).forEach(function (k) { if (k[0] !== '_') o[k] = u[k]; }); return o; }
-function homeyRondeLees() { try { return JSON.parse(fs.readFileSync(path.join(HOMEY_DIR, 'ronde.json'), 'utf8')); } catch (e) { return null; } }
-function homeyInfo() {
-  const r = homeyRondeLees();
-  let gekoppeld = null; try { gekoppeld = JSON.parse(fs.readFileSync(path.join(HOMEY_DIR, 'gekoppeld.json'), 'utf8')).tijd || null; } catch (e) {}
-  return { module: !!homeyMod, gekoppeld: gekoppeld, laatste: r ? { tijd: r.eind || null, ok: r.ok === true, soort: r.soort || 'meet', reden: r.reden || undefined, tools: r.tools, alleen_lezen: r.alleen_lezen,
-    minuten: r.minuten, gaten: r.gaten && r.gaten.length ? r.gaten : undefined } : null,
-    nood: fs.existsSync(path.join(HOMEY_DIR, 'refresh.nood')), vault: homeyVaultStaat() };
-}
-function homeyBoxRij(reden, tekst) {
-  try {
-    const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
-    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
-    const t = VV().lees(pad);
-    const kenmerk = 'homey-' + reden + '-' + dag;
-    if (t.indexOf(kenmerk) >= 0) return;
-    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
-    if (!eerste) return;
-    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
-    const voorstel = reden === 'grant' ? 'koppeling dood (verlopen, ingetrokken of al gebruikt). Nieuwe inloglink: `POST /smal/homey {opdracht: link}` (API_SECRET) en die als Voor jou-kaart aan David geven. Niet herhalen tot David opnieuw inlogde.'
-      : reden === 'kluis' ? 'het nieuwe refresh token staat als noodkopie in `/opt/data/homey/refresh.nood` (600); de volgende ronde zet hem eerst in de kluis. Kluis nagaan; daarna `POST /smal/homey {opdracht: meet}`.'
-      : reden === 'gat' ? 'de dongle gaf het laatste uur geen enkele fasewaarde (offline, stroomloos of uit Homey). Homey-app: staat de Energy Dongle online? Daarna `POST /smal/homey {opdracht: lees}`.'
-      : 'api.log `homey` en `POST /smal/homey {opdracht: stand}` nalopen.';
-    const rij = '\n## [direct] ' + tijd + ' — Homey (MCP): ' + String(tekst || reden).replace(/[\r\n]+/g, ' ').slice(0, 90) + ' (pod, automatisch) #homey\n' +
-      '- status: open\n- van: pod homey (server.js, wv3460; hooguit 1× per dag per reden; kenmerk ' + kenmerk + ')\n' +
-      '- gevolg als er niets gebeurt: Socev ziet Homey (energie, apparaten) niet.\n- voorstel: ' + voorstel + '\n';
-    VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
-  } catch (e) { logError('homey-box', e); }
-}
-const HOMEY_MELD_NA_REEKS = ['gat', 'netwerk', 'kind'];
-let homeyMisReeks = 0;   // mislukte rondes op rij (in het geheugen; een herstart begint opnieuw te tellen)
-async function homeyRondeDraai(bron, soort) {
-  if (!homeyMod) return { ok: false, fout: 'homey.js zit niet in deze release' };
-  if (homeyBezig) return { ok: false, reden: 'bezig', fout: 'er loopt al een Homey-ronde' };
-  homeyBezig = true;
-  soort = soort === 'lees' ? 'lees' : 'meet';
-  try {
-    const u = homeySchoon(await homeyMod.ronde(homeyDeps(), soort));
-    u.eind = new Date().toISOString();
-    schrijfLog(nu() + ' homey ' + velden({ opdracht: soort, bron: bron, ok: u.ok === true, reden: u.reden, tools: u.tools, minuten: u.minuten, gaten: u.gaten && u.gaten.length ? u.gaten.join('+') : undefined, geroteerd: u.geroteerd, nood: u.nood || undefined }));
-    if (u.reden !== 'bezig') {
-      try { const p = path.join(HOMEY_DIR, 'ronde.json'), tmp = p + '.' + process.pid + '.tmp', vorig = homeyRondeLees() || {};
-        fs.writeFileSync(tmp, JSON.stringify({ eind: u.eind, soort: soort, ok: u.ok === true, reden: u.reden || null, fout: u.ok === true ? null : String(u.fout || '').slice(0, 160),
-          tools: soort === 'meet' ? u.tools : vorig.tools, alleen_lezen: soort === 'meet' ? u.alleen_lezen : vorig.alleen_lezen, server: soort === 'meet' ? u.server : vorig.server,
-          minuten: u.minuten, gaten: u.gaten, verloopt_s: u.verloopt_s, geroteerd: u.geroteerd }), { mode: 0o600 });
-        fs.renameSync(tmp, p); }
-      catch (e) { logError('homey-ronde-json', e); }
-    }
-    // wv3482 (Fable-review energie, bevinding 4): gat (dongle geeft niets), netwerk en kind pas na 3 mislukte rondes op rij; 'bezig' telt niet mee
-    if (u.reden !== 'bezig') homeyMisReeks = u.ok === true ? 0 : homeyMisReeks + 1;
-    if (u.ok !== true && ['grant', 'kluis', 'client', 'token', 'mcp', 'http', 'dongle'].indexOf(u.reden) >= 0) homeyBoxRij(u.reden, u.fout);   // wv3462: ook leesfouten (1× per dag per reden)
-    else if (u.ok !== true && HOMEY_MELD_NA_REEKS.indexOf(u.reden) >= 0 && homeyMisReeks >= 3) homeyBoxRij(u.reden, homeyMisReeks + ' rondes op rij mislukt: ' + String(u.fout || u.reden));
-    else if (u.nood) homeyBoxRij('kluis', u.fout);
-    return u;
-  } finally { homeyBezig = false; }
-}
-async function homeySmal(d, wie) {
-  if (!wie || !wie.mk) return { status: 403, j: { ok: false, fout: 'homey alleen vanuit de machinekamer (API_SECRET)' } };
-  if (!homeyMod) return { status: 404, j: { ok: false, fout: 'homey.js zit niet in deze release' } };
-  if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
-  const opdracht = String(d.opdracht || '');
-  if (opdracht === 'link') {
-    let k; try { k = await homeyKluisLees(); } catch (e) { return { status: 503, j: { ok: false, fout: 'kluis nu niet bereikbaar' } }; }
-    if (!k.client_id) return { status: 409, j: { ok: false, fout: 'homey_mcp_client_id ontbreekt in de kluis' } };
-    const l = homeyMod.linkMaak(HOMEY_DIR, k.client_id);
-    schrijfLog(nu() + ' homey ' + velden({ opdracht: 'link' }));
-    return { status: 200, j: { ok: true, url: l.url, geldig_tot: l.geldig_tot } };
-  }
-  if (opdracht === 'meet' || opdracht === 'lees') { const u = await homeyRondeDraai('machinekamer', opdracht); return { status: u.reden === 'bezig' ? 409 : 200, j: u }; }
-  if (opdracht === 'vault') { const v = homeyVaultSchrijf(true); return { status: v.ok ? 200 : 409, j: v }; }
-  if (opdracht === 'stand') {
-    const s = await homeyKind('stand', {});
-    return { status: 200, j: Object.assign({ ok: !!(s.j && s.j.ok) }, homeySchoon(s.j), { info: homeyInfo() }) };
-  }
-  return { status: 400, j: { ok: false, fout: 'opdracht: link, meet, lees, vault, stand' } };
-}
-// wv3462 (20-11-2026): fasemeting. WAAROM. Bij laden + koken klapt thuis de fasezekering (3 × 25 A); de Homey Energy Dongle meet per fase.
-// HOE. homeyTik (elke 5 min) start hooguit één leesronde per 55 min (Insights 'lastHour' = 5-s-waarden van het laatste uur; per minuut
-// de grootste naar HOMEY_DIR/meting). wv3482: lastHour is het enige venster, dus een mislukte ronde komt na ± 10 min terug (hooguit 3
-// herpogingen per uur; niet bij een dode of ontbrekende koppeling); de boxrij zit in homeyRondeDraai.
-// Eén keer per NL-dag (vanaf 01:00) zet homeyVaultSchrijf de tabel van de laatste 14 dagen tussen de markers op de energiepagina.
-const HOMEY_LEES_MS = 55 * 60 * 1000, HOMEY_HERPOGING_MS = 10 * 60 * 1000, HOMEY_HERPOGING_MAX = 3;
-const HOMEY_GEEN_HERPOGING = ['dood', 'grant', 'client', 'sleutel', 'toestemming'];   // opnieuw proberen helpt niet: wacht op een inlog of de kluis
-const HOMEY_P_ENERGIE = '20_Prive/Financien/Energieverbruik thuis (Tibber).md';
-let homeyLeesPoging = 0, homeyVolgende = 0, homeyHerpogingen = 0;
-function homeyVaultStaat() { try { return JSON.parse(fs.readFileSync(path.join(HOMEY_DIR, 'vault.json'), 'utf8')); } catch (e) { return null; } }
-function homeyVaultSchrijf(dwing) {
-  if (!homeyMod || typeof homeyMod.vaultBlok !== 'function') return { ok: false, fout: 'homey.js zonder dagtabel' };
-  const nuIso = new Date().toISOString(), nl = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' });
-  const vorig = homeyVaultStaat();
-  if (!dwing && ((vorig && vorig.dag === nl.slice(0, 10)) || Number(nl.slice(11, 13)) < 1)) return { ok: false, fout: 'vandaag al geschreven' };
-  let z = null;
-  try {
-    const blok = homeyMod.vaultBlok(HOMEY_DIR, nuIso);
-    const ok = VV().wijzig(path.join(VAULT, HOMEY_P_ENERGIE), function (pagina) { z = homeyMod.blokZet(pagina, blok); return z; }, { krimpGrens: true });
-    if (!ok || z == null) { if (z == null) homeyBoxRij('vault', 'dagtabel niet gezet: markers op de energiepagina half of dubbel'); return { ok: false, fout: z == null ? 'markers half of dubbel' : 'pagina veranderde tijdens schrijven' }; }
-    const p = path.join(HOMEY_DIR, 'vault.json'), tmp = p + '.' + process.pid + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify({ dag: nl.slice(0, 10), tijd: nuIso }), { mode: 0o600 }); fs.renameSync(tmp, p);
-    schrijfLog(nu() + ' homey ' + velden({ opdracht: 'vault', ok: true }));
-    return { ok: true, dag: nl.slice(0, 10) };
-  } catch (e) { logError('homey-vault', e); return { ok: false, fout: String(e && e.message || e).slice(0, 120) }; }
-}
-// Na een leesronde: wanneer de volgende. Gelukt → over HOMEY_LEES_MS; mislukt → over HOMEY_HERPOGING_MS, hooguit HOMEY_HERPOGING_MAX keer
-// achter elkaar, daarna terug op het uurritme (gerekend vanaf de laatste gewone poging).
-function homeyNaLees(u, t) {
-  if (u && u.ok === true) { homeyHerpogingen = 0; homeyVolgende = t + HOMEY_LEES_MS; return; }
-  if (u && HOMEY_GEEN_HERPOGING.indexOf(u.reden) < 0 && homeyHerpogingen < HOMEY_HERPOGING_MAX) { homeyHerpogingen++; homeyVolgende = t + HOMEY_HERPOGING_MS; return; }
-  homeyHerpogingen = 0; homeyVolgende = Math.max(t + HOMEY_HERPOGING_MS, homeyLeesPoging + HOMEY_LEES_MS);
-}
-function homeyTik() {
-  if (!homeyMod || homeyBezig || homeyNuBezig || !rolPrimair() || Date.now() < homeyVolgende) return;   // wv3586: niet tijdens een momentopname van de App
-  if (!fs.existsSync(path.join(HOMEY_DIR, 'gekoppeld.json'))) return;
-  const t = Date.now();
-  if (!homeyHerpogingen) homeyLeesPoging = t;   // begin van een uurvenster; herpogingen schuiven het niet op
-  homeyVolgende = t + HOMEY_LEES_MS;   // tot de ronde terug is: geen tweede start
-  return homeyRondeDraai('uur', 'lees').then(function (u) { homeyNaLees(u, t); if (u && u.ok === true) homeyVaultSchrijf(false); })
-    .catch(function (e) { homeyNaLees({ ok: false, reden: 'fout' }, t); logError('homey-lees', e); });
-}
-if (homeyMod && SERVER_ECHT) { setTimeout(homeyTik, 4 * 60000).unref(); setInterval(homeyTik, 5 * 60000).unref(); }
+// wv3886: de homey*-functies (kluis, kind, ronde, box, /smal, dagtabel, uurtik, momentopname, terugkeer) en hun staat staan in homey.js
+// pod(S, mod); hier alleen de koppeling. Getters: lui gelezen (geen TDZ). Zonder homey.js in de release: HOMEY_POD null (route 404, smal 404).
+const HOMEY_POD = homeyMod && typeof homeyMod.pod === 'function' ? homeyMod.pod({
+    get HOMEY_DIR() { return HOMEY_DIR; },
+    get HOMEY_SCRIPT() { return HOMEY_SCRIPT; },
+    get VAULT() { return VAULT; },
+    get VV() { return VV; },
+    get bankPagina() { return bankPagina; },
+    get logError() { return logError; },
+    get nu() { return nu; },
+    get reqPath() { return reqPath; },
+    get rolPrimair() { return rolPrimair; },
+    get schrijfLog() { return schrijfLog; },
+    get smalKind() { return smalKind; },
+    get tibberMgmt() { return tibberMgmt; },
+    get velden() { return velden; },
+    get Date() { return Date; }
+  }) : null;
+if (homeyMod && SERVER_ECHT && HOMEY_POD) { setTimeout(HOMEY_POD.homeyTik, 4 * 60000).unref(); setInterval(HOMEY_POD.homeyTik, 5 * 60000).unref(); }
 // ── wv3586 (David 20-11-2026 16:38, Ja 16:48): OVIS Energie — App Energie (Homey-fasemeting + Tibber-uurprijs), alleen lezen ──────────
 // WAAROM. Thuis klapt de hoofdzekering (3 × 25 A) bij laden + koken; David wil op zijn telefoon zien hoe vol elke fase nu is, wat de
 // laadpaal doet, het dagverloop en de stroomprijs. HOE. GET /app/energie rekent uit HOMEY_DIR (homey.js energieScherm, puur) en leest de
@@ -32227,26 +32091,7 @@ if (homeyMod && SERVER_ECHT) { setTimeout(homeyTik, 4 * 60000).unref(); setInter
 // getallen van dongle en laadpaal naar HOMEY_DIR/nu.json), hooguit één per 30 s, alleen als het scherm open is; niet tegelijk met de
 // uurronde (bestandsslot + homeyNuBezig). Morgenprijzen: na 13:00 zonder prijzen voor morgen start één extra Tibber-uurronde (≤ 1 per uur).
 // Niets schakelt; bouwplan vault 01_Ontwikkeling/OVIS Energie - app (bouwplan 20-11-2026).md.
-let homeyNuBezig = null, homeyNuLaatst = 0, energieMorgenPoging = 0;
-const HOMEY_NU_MS = 30 * 1000;
-function homeyNuDraai() {
-  if (!homeyMod) return Promise.resolve({ ok: false, reden: 'module' });
-  if (!rolPrimair()) return Promise.resolve({ ok: false, reden: 'reserve' });
-  if (!fs.existsSync(path.join(HOMEY_DIR, 'gekoppeld.json'))) return Promise.resolve({ ok: false, reden: 'toestemming' });
-  if (homeyNuBezig) return homeyNuBezig;
-  if (homeyBezig) return Promise.resolve({ ok: false, reden: 'bezig' });
-  if (Date.now() - homeyNuLaatst < HOMEY_NU_MS) return Promise.resolve({ ok: true, reden: 'kort' });
-  homeyNuLaatst = Date.now();
-  homeyNuBezig = homeyMod.ronde(homeyDeps(), 'nu').then(function (r) {
-    const u = homeySchoon(r);
-    schrijfLog(nu() + ' homey ' + velden({ opdracht: 'nu', bron: 'app', ok: u.ok === true, reden: u.reden || undefined, geroteerd: u.geroteerd || undefined, nood: u.nood || undefined }));
-    if (u.ok !== true && u.reden === 'grant') homeyBoxRij('grant', u.fout);   // de uurronde ziet daarna alleen nog 'dood'
-    else if (u.nood) homeyBoxRij('kluis', u.fout);
-    return u;
-  }).catch(function (e) { logError('homey-nu', e); return { ok: false, reden: 'fout' }; })
-    .finally(function () { homeyNuBezig = null; });
-  return homeyNuBezig;
-}
+let energieMorgenPoging = 0;
 function energieNlDag(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
 // Uurprijzen (Tibber, totaal per kWh) van vandaag en morgen, read-only. → { vandaag: [{uur, totaal, niveau}], morgen: [...] }
 function energiePrijzen(nuMs) {
@@ -32289,12 +32134,12 @@ function energieMorgenMisschien(prijzen, nuMs) {
 appStaat.tellers.energie = [];
 appStaat.tellers.energie_nu = [];
 async function appEnergie(req, res, a, route, d) {
-  if (!homeyMod || typeof homeyMod.energieScherm !== 'function') return appWeiger(res, 404, 'Energie zit niet in deze versie van de pod', 'energie ontbreekt');
+  if (!homeyMod || !HOMEY_POD || typeof homeyMod.energieScherm !== 'function') return appWeiger(res, 404, 'Energie zit niet in deze versie van de pod', 'energie ontbreekt');
   if (!appTeller('energie', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens energie');
   let meting = null;
   if (route === 'POST /app/energie/nu') {
     if (!appTeller('energie_nu', 150, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 150)', 'grens energie nu');
-    const r = await Promise.race([homeyNuDraai(), new Promise(function (ok) { setTimeout(function () { ok({ ok: false, reden: 'traag' }); }, 20000).unref(); })]);
+    const r = await Promise.race([HOMEY_POD.homeyNuDraai(), new Promise(function (ok) { setTimeout(function () { ok({ ok: false, reden: 'traag' }); }, 20000).unref(); })]);
     meting = { ok: r.ok === true, reden: r.reden || null };
   }
   const nuMs = Date.now();
@@ -32303,7 +32148,7 @@ async function appEnergie(req, res, a, route, d) {
   catch (e) { logError('energie', e); return appWeiger(res, 503, 'Energie kon de meting nu niet lezen; probeer het zo opnieuw', 'energie fout'); }
   body.prijzen = energiePrijzen(nuMs);
   body.prijzen.morgen_gevraagd = energieMorgenMisschien(body.prijzen, nuMs);
-  const r = homeyRondeLees();
+  const r = HOMEY_POD.homeyRondeLees();
   body.koppeling = { gekoppeld: fs.existsSync(path.join(HOMEY_DIR, 'gekoppeld.json')), ronde: r ? { tijd: r.eind || null, ok: r.ok === true } : null };
   if (meting) body.meting = meting;
   if (!meting || meting.ok) res._app.stil = true;
@@ -32410,47 +32255,6 @@ async function besluitenTik() {
 }
 if (besluitenMod && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setTimeout(function () { besluitenTik(); }, 240000).unref(); setInterval(function () { besluitenTik(); }, 15 * 60000).unref(); }
 // ── einde Besluitenpagina ──
-// Terugkeer na Davids inlog. Athom levert code en state als form_post (POST, application/x-www-form-urlencoded); GET met query ook.
-function homeyTerug(req, res) {
-  const kaal404 = function () { if (!res.headersSent) { res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('niet gevonden'); } };
-  if (!homeyMod || (req.method !== 'GET' && req.method !== 'POST')) { req.resume(); return kaal404(); }
-  const verder = function (q) {
-    const state = q.get('state') || '', code = q.get('code') || '', fout = q.get('error') || '';
-    if (!/^[0-9a-f]{64}$/.test(state) || code.length > 2000 || /[^\x21-\x7e]/.test(code) || fout.length > 100 || (!code && !fout)) return kaal404();
-    res._log = { homey_terug: 1 };
-    if (!rolPrimair()) return bankPagina(res, 503, 'Even niet beschikbaar', 'Er is niets gekoppeld. Probeer het later opnieuw met een nieuwe link van Socev.');
-    if (!homeyMod.stateOpen(HOMEY_DIR, state)) return kaal404();
-    const t = Date.now();
-    while (homeyTerugTijden.length && t - homeyTerugTijden[0] > 3600000) homeyTerugTijden.shift();
-    if (homeyTerugTijden.length >= HOMEY_TERUG_PER_UUR) { res.writeHead(429, { 'Content-Type': 'text/plain' }); return res.end('te vaak'); }
-    homeyTerugTijden.push(t);
-    homeyMod.terug(homeyDeps(), state, code, fout ? 'ja' : '').then(function (u) {
-      res._log.homey = u.soort;
-      schrijfLog(nu() + ' homey ' + velden({ opdracht: 'terug', soort: u.soort, reden: u.reden, nood: u.nood || undefined, scope: u.scope || undefined }));
-      if (u.soort === 'dicht') return kaal404();
-      if (u.soort === 'bezig') return bankPagina(res, 503, 'Nog even geduld', 'Socev was net bezig met Homey. Laad deze pagina over een minuut opnieuw; de link is nog geldig.');
-      if (u.soort !== 'gekoppeld') return bankPagina(res, 200, 'Niet gekoppeld', 'De koppeling werd afgebroken of lukte niet. Er is niets bewaard. Wil je het opnieuw proberen, vraag dan om een nieuwe link.');
-      try { fs.writeFileSync(path.join(HOMEY_DIR, 'gekoppeld.json'), JSON.stringify({ tijd: new Date().toISOString() }), { mode: 0o600 }); } catch (e) {}
-      if (u.nood) homeyBoxRij('kluis', 'inlog gelukt, kluis nog niet bijgewerkt');
-      bankPagina(res, 200, 'Gekoppeld', 'Homey is gekoppeld; Socev kan nu alleen meekijken, niets schakelen. Je kunt dit venster sluiten.');
-      homeyRondeDraai('inlog').catch(function (e) { logError('homey-ronde', e); });   // meteen de toollijst meten
-    }).catch(function (e) {
-      logError('homey-terug', e);
-      if (!res.headersSent) bankPagina(res, 502, 'Koppelen lukte niet', 'Er ging iets mis. Er is niets gekoppeld. Vraag om een nieuwe link.');
-    });
-  };
-  if (req.method === 'GET') {
-    req.resume();
-    let q; try { q = new URL(req.url, 'http://x').searchParams; } catch (e) { return kaal404(); }
-    return verder(q);
-  }
-  if (!/^application\/x-www-form-urlencoded\b/i.test(String(req.headers['content-type'] || ''))) { req.resume(); return kaal404(); }
-  let body = '', te = false;
-  req.setEncoding('utf8');
-  req.on('data', function (c) { if (te) return; body += c; if (body.length > 8192) { te = true; body = ''; } });
-  req.on('end', function () { if (te) return kaal404(); verder(new URLSearchParams(body)); });
-  req.on('error', function () { kaal404(); });
-}
 // ── wv2707: Tibber-uurverbruik dagelijks bij (oude GraphQL-API, leessleutel tibber_lezen) ─────────────────────────────────
 // WAAROM. De uurtabel verbruik in tibber.sqlite kwam eenmalig uit mk-scripts/wv2583/tibber-lees.py en stopte op 6-11; de Data API-ronde
 // hierboven geeft geen uurverbruik. HOE. Eén keer per dag na de bankronde (naast tibberNaBankRonde): de sleutel uit de kluis (Management-API,

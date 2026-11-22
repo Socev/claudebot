@@ -8,13 +8,15 @@ const SRC = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const begin = SRC.indexOf('// ── wv3460: Homey (Athom MCP, alleen lezen)'), eind = SRC.indexOf('// ── wv2707: Tibber-uurverbruik dagelijks bij');
 assert.ok(begin > 0 && eind > begin);
 const BLOK = SRC.slice(begin, eind);
+const ECHT = require(path.join(__dirname, '..', 'homey.js'));   // wv3886: de homey*-functies staan in homey.js pod(S, mod)
 
 function omgeving(open, pagina, dir, extra) {
   extra = extra || {};
   const geroepen = [];
   const mod = { stateOpen: function (dir, s) { return s === open; }, terug: async function (deps, s, c, f) { geroepen.push({ s: s, c: c, f: f }); return { soort: 'gekoppeld' }; },
     ronde: extra.ronde || async function () { return { ok: true, tools: 0 }; }, vaultBlok: function () { return '<!-- homey-fase:begin -->\nX\n<!-- homey-fase:einde -->'; },
-    blokZet: function (p, b) { return /homey-fase:begin -->[\s\S]*homey-fase:begin/.test(p) ? null : p + '\n' + b; }, linkMaak: function () { return { url: 'x', geldig_tot: 'y' }; }, energieScherm: extra.energieScherm };
+    blokZet: function (p, b) { return /homey-fase:begin -->[\s\S]*homey-fase:begin/.test(p) ? null : p + '\n' + b; }, linkMaak: function () { return { url: 'x', geldig_tot: 'y' }; }, energieScherm: extra.energieScherm,
+    pod: function (S) { return ECHT.pod(S, mod); } };
   const ctx = { require: function (p) { if (/homey\.js$/.test(p)) return mod; return require(p); }, process: { env: { HOMEY_DIR: dir || '/tmp/homey-route-proef' } }, path: path, fs: fs,
     __dirname: '/x', reqPath: function (req) { return new URL(req.url, 'http://x').pathname; }, rolPrimair: function () { return true; },
     bankPagina: function (res, status, kop) { res.writeHead(status, {}); res.end(kop); }, schrijfLog: function () {}, nu: function () { return ''; }, velden: function () { return ''; },
@@ -25,8 +27,8 @@ function omgeving(open, pagina, dir, extra) {
     tibberUurScript: function () { return __filename; }, tibberUurDraai: extra.tibberUurDraai,
     appStuur: function (res, status, obj) { res.status = status; res.obj = obj; }, appWeiger: function (res, status, fout) { res.status = status; res.obj = { ok: false, fout: fout }; } };
   vm.createContext(ctx);
-  vm.runInContext(BLOK + '\n;this.homeyTerug = homeyTerug; this.homeyIsPad = homeyIsPad; this.homeyVaultSchrijf = homeyVaultSchrijf; this.homeyTik = homeyTik; this.appEnergie = appEnergie; this.homeyNuBezigNu = function () { return homeyNuBezig; };' +
-    ' this.homeyStand = function () { return { volgende: homeyVolgende, herpogingen: homeyHerpogingen, reeks: homeyMisReeks }; };', ctx);
+  vm.runInContext(BLOK + '\n;this.homeyTerug = HOMEY_POD.homeyTerug; this.homeyIsPad = HOMEY_POD.homeyIsPad; this.homeyVaultSchrijf = HOMEY_POD.homeyVaultSchrijf; this.homeyTik = HOMEY_POD.homeyTik; this.appEnergie = appEnergie; this.homeyNuBezigNu = function () { return HOMEY_POD.homeyStand().nu_bezig; };' +
+    ' this.homeyStand = function () { const s = HOMEY_POD.homeyStand(); return { volgende: s.volgende, herpogingen: s.herpogingen, reeks: s.reeks }; };', ctx);
   return { ctx: ctx, geroepen: geroepen };
 }
 function verzoek(methode, url, body, type) {
