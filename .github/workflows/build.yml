@@ -128,17 +128,13 @@ jobs:
           if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' | grep -vE '^(test/|homey\.js$)' | xargs grep -nE "mcp\.athom\.com|api\.athom\.com" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een ander bestand dan homey.js roept Athom aan"; exit 1; fi
           echo "homey.js: alleen lezen."
 
-      # tibber-data.js (wv2625): Tibber Data API alleen lezen. Eén fetch, altijd achter verzoekToets, redirects uit; POST alleen op het
-      # tokenendpoint; geen eigen netwerk- of procesmodule; geen ander bestand (tests uitgezonderd) roept data-api.tibber.com aan.
-      - name: tibber-data.js mag alleen lezen
+      # tibber-data.js (wv2625) is sinds 22-11-2026 weg (wv3930, laadhistorie per auto uit): geen enkel bestand (tests uitgezonderd) roept
+      # de Tibber Data API nog aan. Daarna in dezelfde stap: nmbrs-data.js en tibber-uur.js alleen lezen.
+      - name: Tibber Data API dicht, nmbrs-data.js en tibber-uur.js alleen lezen
         if: ${{ !cancelled() }}
         run: |
-          C=$(grep -vE '^\s*(\*|//)' tibber-data.js)
-          if [ "$(echo "$C" | grep -cE "\bfetch\s*\(")" != "1" ] || ! echo "$C" | grep -qE "const doel = verzoekToets\(methode, url\);" || ! echo "$C" | grep -qE "redirect: 'error'"; then echo "::error::fetch buiten roep(), zonder verzoekToets of met redirects"; exit 1; fi
-          if echo "$C" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|import\(|process\.binding"; then echo "::error::tibber-data.js laadt een netwerk- of procesmodule"; exit 1; fi
-          if echo "$C" | grep -nE "roep\('(PUT|PATCH|DELETE)'"; then echo "::error::tibber-data.js schrijft naar Tibber"; exit 1; fi
-          if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' | grep -vE '^(test/|tibber-data\.js$)' | xargs grep -nE "data-api\.tibber\.com" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een ander bestand dan tibber-data.js roept de Tibber Data API aan"; exit 1; fi
-          echo "tibber-data.js: alleen lezen."
+          if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' | grep -vE '^test/' | xargs grep -nE "data-api\.tibber\.com" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een bestand roept de Tibber Data API aan (uit sinds wv3930)"; exit 1; fi
+          echo "Tibber Data API: niet aangeroepen."
           # nmbrs-data.js (wv2797): Nmbrs REST alleen lezen. Eén fetch, altijd achter verzoekToets, redirects uit; POST alleen token/revocation;
           # geen eigen netwerk- of procesmodule; geen schrijvende methode; geen ander bestand (tests uitgezonderd) roept api.nmbrsapp.com aan;
           # verboden endpoints (BSN, adres, bank, gezin, verzuim, loonstroken) staan niet op de witte lijst.
@@ -338,7 +334,6 @@ jobs:
           t test/nmbrs-data.sh   # wv2797: Nmbrs REST — witte lijst verzoeken en velden, scopes exact (+ intrekken), state eenmalig, rotatie vóór gebruik, noodkopie, slot, journaal, signalen S1–S6 (S4 maand- en uurloon), kruisproef veldfilter
           t test/nmbrs-vault.sh   # wv2799: blok "Stand in Nmbrs" in dossiers + urenverloop per entiteit; geen bedrag in de vault (kruisproef), alleen gekoppelde bestaande pagina's
           t test/nmbrs-dga.sh   # wv3662: Davids eigen looncomponenten (Holding, alleen de DGA, andere reports nooit bewaard), poort zonder looncodefilter alleen binnen dgaRonde, laadvergoeding naast laadschatting + signaal één keer per venster; kruisproef filter/poort
-          t test/tibber-data.sh   # wv2625: Tibber Data API — witte lijst, scopes exact, state eenmalig, rotatie vóór gebruik, noodkopie, slot, veldfilter, log zonder code/state
           # wv1225: de drie bankluis-toetsen ook op vaste momenten (toets én elk bank-lezer.js-kind op dezelfde klok): 00:30 NL met de UTC-datum
           # nog op gisteren, 1-1 00:30 NL (jaarwissel), na de zomertijdwissel, en op dag 1–9 van een maand
           for nu in 2026-12-15T23:30:00Z 2026-12-31T23:30:00Z 2027-04-10T22:30:00Z 2026-11-03T10:00:00Z; do

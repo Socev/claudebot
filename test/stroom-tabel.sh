@@ -108,7 +108,7 @@ async function ronde(facturen, pagina, staat) {
 
   // ── aansluiting ──
   const src = fs.readFileSync('server.js', 'utf8'), mod = fs.readFileSync('stroom-tabel.js', 'utf8');
-  toets('server.js: na de bankronde, één keer per dag, alleen-lezen Facturen, vault-veilig', /tibberNaBankRonde\(\); \} catch[^\n]*\n\s*try \{ stroomTabelNaBankRonde\(\); \}/.test(src) &&
+  toets('server.js: na de bankronde, één keer per dag, alleen-lezen Facturen, vault-veilig', /bankVerrijkStart\(5\);[^\n]*\n\s*try \{ stroomTabelNaBankRonde\(\); \}/.test(src) &&
     /vorige\.dag === dag\) return;/.test(src) && /facturenMod\.open\(FACTUREN_DIR, \{ alleenLezen: true \}\)/.test(src) && /VV\(\)\.wijzig\(path\.join\(VAULT, stroomTabel\.P_ENERGIE\)/.test(src));
   toets('stroom-tabel.js: geen netwerk-, proces- of bestandsmodule', !/require\(/.test(mod));
   toets('uitrol.sh en Dockerfile: stroom-tabel.js gaat mee in de release', /RELEASE_OPTIONEEL="[^"]*\bstroom-tabel\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&

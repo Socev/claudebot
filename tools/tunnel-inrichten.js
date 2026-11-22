@@ -171,8 +171,7 @@ function ingress() {
     // Bankluis (wv680): alleen /bank/terug (de query met code en state telt niet mee in het pad); de rest 404.
     { hostname: BANK, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
     { hostname: BANK, path: '^/bank/terug$', service: 'http://localhost:8080' },
-    // Tibber Data API (wv2625): terugkeer na Davids toestemming; zelfde soort deur (alleen GET met bekende, onverbruikte state, anders 404)
-    { hostname: BANK, path: '^/tibber/terug$', service: 'http://localhost:8080' },
+    // Tibber Data API (wv2625): /tibber/terug sinds 22-11-2026 dicht (wv3930, laadhistorie uit); valt onder de 404 hieronder.
     // Nmbrs (wv2797): terugkeer na Davids toestemming; zelfde soort deur (alleen GET met bekende, onverbruikte state, anders 404)
     { hostname: BANK, path: '^/nmbrs/terug$', service: 'http://localhost:8080' },
     // Homey (wv3460): terugkeer na Davids inlog bij Athom (form_post = POST met formulier, of GET); bekende, onverbruikte state, anders 404

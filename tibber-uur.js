@@ -3,7 +3,7 @@
  * tibber-uur.js — Tibber-uurverbruik en uurprijzen dagelijks bij (wv2707, 8-11-2026). Alleen lezen.
  *
  * WAAROM. De uurtabel verbruik in TIBBER_DIR/tibber.sqlite kwam eenmalig uit mk-scripts/wv2583/tibber-lees.py en stopte op 6-11 13:00.
- * De dagelijkse ronde van tibber-data.js haalt alleen de Data API (auto's, geen uurverbruik). Zonder verversen blijven het uurverbruik,
+ * De dagelijkse ronde van tibber-data.js (Data API, auto's; uit sinds wv3930, 22-11-2026) gaf geen uurverbruik. Zonder verversen blijven het uurverbruik,
  * de uurprijzen en de lopende maand (Financiën › Uitgaven › Stroom) op de stand van 6-11 staan.
  *
  * TWEE ROLLEN.

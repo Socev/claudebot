@@ -177,7 +177,8 @@ srv.listen(0, '127.0.0.1', async function () {
     let primair = true;
     const g = { require, fs, path, crypto, Buffer, console, URL, URLSearchParams, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, spawn, VAULT: W, __dirname: process.cwd(),
       process: { env: penv, execPath: process.execPath, pid: process.pid },
-      reqPath: (req) => req.url, SERVER_ECHT: false, schrijfLog: (x) => logs.push(x), nu: () => '2026-11-08 08:00:00', velden: (o) => Object.keys(o).filter((k) => o[k] != null && o[k] !== '').map((k) => k + '=' + o[k]).join(' '),
+      reqPath: (req) => req.url, SERVER_ECHT: false, appStaat: { tellers: {} },   // appStaat: het knipsel zet sinds wv3586 appStaat.tellers.energie
+       schrijfLog: (x) => logs.push(x), nu: () => '2026-11-08 08:00:00', velden: (o) => Object.keys(o).filter((k) => o[k] != null && o[k] !== '').map((k) => k + '=' + o[k]).join(' '),
       logError: (wat, e) => logs.push('fout ' + wat + ' ' + (e && e.message)), rolPrimair: () => primair,
       VV: () => ({ lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: (p, t) => fs.writeFileSync(p, t) }), bankPagina: () => {},
       fetch: async function (url, o) {
@@ -194,7 +195,7 @@ srv.listen(0, '127.0.0.1', async function () {
     let sm = await S.tibberSmal({ opdracht: 'uur' }, { mk: false });
     toets('server: uur zonder API_SECRET → 403', sm.status === 403 && M.log.length === 0);
     sm = await S.tibberSmal({ opdracht: 'uur' }, { mk: true });
-    toets('server: /smal/tibber uur → ok (ook zonder tibber-data.js)', sm.status === 200 && sm.j.ok === true && sm.j.gevuld === 736, sm);
+    toets('server: /smal/tibber uur → ok', sm.status === 200 && sm.j.ok === true && sm.j.gevuld === 736, sm);
     toets('server: kluis vraagt alleen tibber_lezen', queries.length === 1 && /name = 'tibber_lezen'$/.test(queries[0]), queries);
     const uj = S.tibberUurLees();
     toets('server: uur.json (600) met dag, laatste uur en maand, zonder sleutel', uj && uj.ok === true && uj.pogingen === 1 && uj.maand && uj.maand.maand === (() => { const d3 = new DatabaseSync(path.join(DIR3, 'tibber.sqlite')); const m = T0.maandSom(d3).maand; d3.close(); return m; })() && uj.laatste_uur &&
