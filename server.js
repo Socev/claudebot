@@ -16155,7 +16155,7 @@ function handleApp(req, res) {
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
         if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|fondsen|ronde|donateurs|indelen|doelen|stichting|overleg|mensen|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)
-          || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank)$/.test(route)
+          || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank|vraag|gmail)$/.test(route)   // wv3919: vraag (antwoord/gesloten), gmail (concept)
           || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)
           || /^(GET \/app\/ghawa\/delen|POST \/app\/ghawa\/delen\/(onderdeel|noodstop|kijker|kijker-weg|tekst|overleg|blok))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
@@ -26850,6 +26850,7 @@ async function appGhawa(req, res, a, route, d, s) {
   if (/^(GET|POST) \/app\/ghawa\/delen/.test(route)) return appGhawaDelen(req, res, a, s, route, d);   // wv2889
   const post = route.indexOf('POST ') === 0;
   if (post && !appTeller('ghawa-schrijf', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa-schrijf');
+  if (route === 'POST /app/ghawa/gmail') return appGhawaGmail(res, a, d || {});   // wv3919 (2C63 b, c)
   let u;
   // wv2886: Doelen en Statuten lezen de site (git, alleen lezen), Overleg de Actie-Bewaker; beide met een eigen cache, een fout = scherm zonder dat deel
   const extra = {};
@@ -26862,11 +26863,39 @@ async function appGhawa(req, res, a, route, d, s) {
   if (post && u.status === 200 && ghawaDeel) ghawaDeel.markeerVuil();   // wv2889: het gedeelde deel bij de volgende ronde (≥ 15 min) bij
   return appStuur(res, u.status, u.body);
 }
+// wv3919 (2C63 b, c): de vragen aan ECG (portie van hooguit 4) of de opvolgmail aan een fonds als CONCEPT in Davids Gmail, via het mailluik
+// (n8n AI - Mailconcept naar Gmail, zelfde weg als Bandjes en het POT-afschrift). Nooit versturen. Eén tegelijk (dubbel tikken = één concept);
+// pas na de bevestiging van het luik legt de pod vast dat de vragen in een concept staan (de volgende portie slaat ze dan 14 dagen over).
+let ghawaGmailBezig = false;
+async function appGhawaGmail(res, a, d) {
+  if (!appTeller('ghawa-gmail', 12, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa-gmail');
+  if (ghawaGmailBezig) return appWeiger(res, 409, 'er wordt al een concept gemaakt; even geduld', 'ghawa gmail bezig');
+  const cv = ghawaApp.conceptVoor({ wat: String(d.wat || ''), id: d.id, aan: d.aan });
+  if (!cv.ok) return appWeiger(res, cv.status || 400, cv.fout, 'ghawa gmail ' + String(d.wat || '').slice(0, 8) + ' geweigerd');
+  ghawaGmailBezig = true;
+  let r;
+  try { r = typeof bandjesMailConcept === 'function' ? await bandjesMailConcept({ aan: cv.aan, onderwerp: cv.onderwerp, bericht: cv.bericht }) : { ok: false, zeker: true, reden: 'het mailluik zit niet in deze versie van de pod' }; }
+  finally { ghawaGmailBezig = false; }
+  if (!r.ok) { res._app.reden = 'ghawa gmail ' + cv.wat + ' mislukt'; return appStuur(res, 502, { ok: false, fout: (r.zeker ? 'Er staat geen concept in Gmail: ' : 'Niet zeker of het concept in Gmail staat (kijk even bij Concepten): ') + r.reden }); }
+  try { ghawaApp.conceptGezet(cv, a && a.id ? 'app ' + String(a.id).slice(0, 8) : 'app'); } catch (e) { logError('ghawa-gmail', e); }
+  res._app.reden = ('ghawa gmail ' + cv.wat + ' ' + cv.ids.join(',')).slice(0, 80);   // id's, geen adres of tekst
+  if (ghawaDeel) ghawaDeel.markeerVuil();
+  return appStuur(res, 200, { ok: true, wat: cv.wat, ids: cv.ids, gmail: typeof APP_GMAIL_CONCEPTEN === 'string' ? APP_GMAIL_CONCEPTEN : 'https://mail.google.com/mail/u/0/#drafts',
+    melding: 'Het concept staat in Gmail (Concepten). Nakijken en versturen doe je zelf.' });
+}
+// wv3919 (2C63 b): toezeggingen met een verlopen verwachte datum = één Voor jou-kaart per fonds en datum; ontvangen/ingetrokken/nieuwe datum = dicht
+async function ghawaFondsKaarten() {
+  const u = ghawaApp.fondsKaarten();
+  for (const k of u.zet) { await aixVoorJou(k); ghawaApp.kaartGezet(k.sleutel); }
+  for (const sl of u.dicht) { try { await aixVoorJouSluit(sl, 'GHAWA: de toezegging is ontvangen, ingetrokken of heeft een nieuwe datum'); } catch (e) { logError('ghawa-fondskaart', e); continue; } ghawaApp.kaartDicht(sl); }
+  return u.zet.length;
+}
 // wv2880: elk uur tussen 9 en 21 uur de GHAWA-bank bij (ook als niemand kijkt) en de maandronde: ECG-cijfers ouder dan 35 dagen = één kaart per maand.
 const GHAWA_TIKKEN = !!(ghawaApp && ((typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) || process.env.GHAWA_RONDE === '1'));
 async function ghawaRondeTik() {
   ghawaApp.bankBij(false);
   if (ghawaSite && Date.now() - ghawaSiteCijfersOp > 6 * 3600000) { try { await ghawaSiteCijfers(); } catch (e) { logError('ghawa-site', e); ghawaSiteCijfersOp = Date.now(); } }   // wv2883
+  try { await ghawaFondsKaarten(); } catch (e) { logError('ghawa-fondskaart', e); }   // wv3919
   const k = ghawaApp.maandKaart();
   if (!k) return null;
   await aixVoorJou(k);

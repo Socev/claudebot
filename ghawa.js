@@ -279,6 +279,9 @@ function leesData(dbPad) {
     uit.afschriften = f2 ? a('SELECT naam, formaat, munt, van, tot, regels, nieuw, al_bekend, uitkomst, fout, op FROM afschrift ORDER BY op DESC LIMIT 12') : [];
     uit.ronde = f2 ? a('SELECT maand, stap, op FROM ronde') : [];
     uit.fondsLog = f2 ? a('SELECT fonds, veld, oud, nieuw, op FROM fonds_log ORDER BY nr DESC LIMIT 50') : [];
+    uit.vraagLog = heeft('vraag_log') ? a('SELECT vraag, veld, oud, nieuw, op FROM vraag_log ORDER BY nr DESC LIMIT 300') : [];   // wv3919
+    // wv3919 (2C63 c): het adres van ECG voor het Gmail-concept = de ECG-kijker van Delen met ECG (David zette hem daar zelf); nooit in de code
+    uit.ecgAdres = heeft('deel_kijker') ? ((db.prepare("SELECT adres FROM deel_kijker WHERE rol = 'ecg' AND weg_op IS NULL ORDER BY op DESC LIMIT 1").get() || {}).adres || null) : null;
     uit.ghawaBank = f2 ? db.prepare("SELECT COUNT(*) AS n, SUM(soort = 'Unknown') AS onbekend, MAX(datum) AS tot FROM bankregel_ghawa WHERE herkomst = 'bank'").get() : { n: 0, onbekend: 0, tot: null };
     uit.ecgAfschrift = f2 ? db.prepare("SELECT COUNT(*) AS n FROM bankregel_ecg WHERE herkomst = 'afschrift'").get().n : 0;
     db.exec('COMMIT');
@@ -422,6 +425,20 @@ function bereken(d) {
     bouw_na_oormerk: r2(bouwNa), apo_na_oormerk: r2(apoNa), apo_overschot: r2(apoOverschot), ecg_eur: saldo.EUR / 100, ecg_gmd_in_eur: r2(ecgGmdEur),
     ghawa_vrij: r2(ghawaVrij), nog_te_werven: r2(nogTeWerven), verwacht_vaste_donateurs: vasteDonateurs / 100,
     verwacht_online: online ? online.eur_cent / 100 : null };
+  // wv3919 (2C63 f): wanneer is het rond bij gelijke instroom (vaste donateurs + online per jaar), en wat doet de koers. Alleen de dalasi-delen
+  // (open in de begroting en het GMD-saldo bij ECG) rekenen anders; toezeggingen, het eurosaldo en GHAWA staan in euro.
+  const wervenBij = (kk) => Math.max(0, Math.max(0, bouw.open / 100 / kk - fondsBouw / 100) + Math.max(0, apo.open / 100 / kk - fondsApo / 100)
+    - saldo.EUR / 100 - saldo.GMD / 100 / kk - ghawaVrij);
+  const perJaar = vasteDonateurs / 100 + (online && online.eur_cent > 0 ? online.eur_cent / 100 : 0);
+  const vandaagK = String(d.vandaag || new Date().toISOString()).slice(0, 10);
+  if (nogTeWerven <= 0) werven.gedekt = { nu: true };
+  else if (perJaar > 0) {
+    const maanden = Math.ceil(nogTeWerven / (perJaar / 12));
+    const j = Number(vandaagK.slice(0, 4)), m = Number(vandaagK.slice(5, 7)) - 1 + maanden;
+    werven.gedekt = { nu: false, maanden, rond: (j + Math.floor(m / 12)) + '-' + String((m % 12) + 1).padStart(2, '0'), per_jaar: r2(perJaar) };
+  } else werven.gedekt = null;
+  const kLaag = Math.round(koers) - 5, kHoog = Math.round(koers) + 5;
+  werven.koers_effect = [kLaag, kHoog].filter((x) => x > 0).map((x) => ({ koers: x, nog_te_werven: r2(wervenBij(x)), verschil: r2(wervenBij(x) - nogTeWerven) }));
 
   // 6. aansluitingen A t/m G
   const A = { GMD: kwartalen.GMD, EUR: kwartalen.EUR, verschil: som(kwartalen.GMD, (q) => Math.abs(q.verschil)) + som(kwartalen.EUR, (q) => Math.abs(q.verschil)),
@@ -487,6 +504,9 @@ function overzicht(d, k) {
   for (const s of d.signalen || []) aandacht.push({ toon: 'fout', label: s.soort === 'bank' ? 'bank' : s.soort === 'delen' ? 'delen' : 'afschrift', titel: s.tekst, sub: 'sinds ' + String(s.op).slice(0, 10), scherm: s.soort === 'delen' ? 'delen' : 'ronde' });   // wv2889: poort van Delen met ECG
   const onb = (d.ghawaBank && d.ghawaBank.onbekend) || 0;
   if (onb) aandacht.push({ toon: 'wacht', label: 'indelen', titel: onb + (onb === 1 ? ' bankregel' : ' bankregels') + ' van GHAWA nog in te delen', sub: 'één tik per regel; tot dan krijgt ECG geen nieuwe GHAWA-cijfers', scherm: 'indelen' });
+  // wv3919 (2C63 b): een toezegging zonder verwachte datum let nergens op; één regel tot David er een datum bij zet
+  for (const f of d.fondsen.filter((x) => x.status === 'Committed - not yet received' && !x.termijn)) aandacht.push({ toon: 'wacht', label: 'datum',
+    titel: dossierVan(f.gever) + ': wanneer verwacht je de € ' + Math.round((f.eur_cent || 0) / 100).toLocaleString('nl-NL') + '?', sub: 'zet een verwachte datum; is die voorbij, dan staat er een opvolgmail klaar', scherm: 'fondsen' });
   for (const t of termijnen(d, k.vandaag)) aandacht.push({ toon: t.dagen < 0 ? 'fout' : 'info', label: 'termijn', titel: t.gever + ': ' + (t.dagen < 0 ? 'termijn verlopen' : 'termijn over ' + t.dagen + (t.dagen === 1 ? ' dag' : ' dagen')),
     sub: 'op ' + t.termijn, scherm: 'fondsen' });
   const afas = afasBank(d);
@@ -536,19 +556,51 @@ function geldRoute(d, k) {
     werven: k.werven, aansluiting: k.aansluiting, sluit: k.sluit };
 }
 function vragenRoute(d, k) {
-  return { datastand: k.datastand, vragen: d.vragen.map((v) => ({ id: v.id, onderwerp: v.onderwerp, vraag: v.vraag, gmd: v.gmd_cent, wie: v.wie, status: v.status, antwoord: v.antwoord })),
-    concept: vragenConcept(d) };
+  const log = d.vraagLog || [];
+  const portie = vragenPortie(d, k.vandaag);
+  return { datastand: k.datastand, statussen: VRAAG_STATUSSEN,
+    vragen: d.vragen.map((v) => ({ id: v.id, onderwerp: v.onderwerp, vraag: v.vraag, gmd: v.gmd_cent, wie: v.wie, status: v.status, antwoord: v.antwoord,
+      gesloten_op: v.gesloten_op || null, concept_op: v.concept_op || null, log: log.filter((l) => l.vraag === v.id).slice(0, 5) })),
+    concept: portie ? portie.bericht : null, portie: portie ? { ids: portie.ids, onderwerp: portie.onderwerp, rest: portie.rest } : null,
+    aan: (d.meta && d.meta['mail:ecg']) || d.ecgAdres || null, site: GHAWA_DEEL_URL };
 }
-// wv2880: de open vragen als één conceptbericht in het Engels (David kopieert en verstuurt zelf; de pod stuurt niets naar ECG)
-function vragenConcept(d) {
+const VRAAG_STATUSSEN = ['Open', 'Partly answered', 'Closed'];
+const GHAWA_DEEL_URL = 'https://ghawa.socev.dev';
+const PORTIE = 4;
+// wv2880 → wv3919 (2C63 c): de open vragen aan ECG in kleine porties (hooguit 4, grootste bedrag eerst; zonder bedrag daarna op nummer), met
+// de link naar de gedeelde stand. Een vraag die in de laatste 14 dagen al in een Gmail-concept stond, slaat de volgende portie over (staan ze
+// allemaal net in een concept, dan begint hij weer vooraan). Engels, zoals ECG de vragen kreeg. De pod verstuurt nooit: alleen een concept.
+function vragenPortie(d, vandaag) {
   const open = d.vragen.filter((v) => STATUS_OPEN.test(v.status || '') && !/david|ghawa/i.test(v.wie || ''));
   if (!open.length) return null;
-  const r = ['Dear Momodou,', '', 'To keep the finances of the health centre up to date, could you help me with these open questions?', ''];
-  for (const v of open) r.push('- ' + v.id + ' (' + (v.onderwerp || 'question') + '): ' + String(v.vraag || '').replace(/\s+/g, ' ').trim() +
+  const nu = Date.parse(String(vandaag || new Date().toISOString()).slice(0, 10));
+  const recent = (v) => v.concept_op && nu - Date.parse(String(v.concept_op).slice(0, 10)) < 14 * 86400000;
+  const volg = (a, b) => (b.gmd_cent || 0) - (a.gmd_cent || 0) || String(a.id).localeCompare(String(b.id), 'en', { numeric: true });
+  let kies = open.filter((v) => !recent(v)).sort(volg);
+  if (!kies.length) kies = open.slice().sort(volg);
+  const deel = kies.slice(0, PORTIE);
+  const r = ['Dear Momodou,', '', 'To keep the finances of the health centre up to date, could you help me with ' + (deel.length === 1 ? 'this question' : 'these ' + deel.length + ' questions') + '?', ''];
+  for (const v of deel) r.push('- ' + v.id + ' (' + (v.onderwerp || 'question') + '): ' + String(v.vraag || '').replace(/\s+/g, ' ').trim() +
     (v.gmd_cent ? ' [GMD ' + Math.round(v.gmd_cent / 100).toLocaleString('en-GB') + ']' : ''));
-  r.push('', 'Thank you very much.', '', 'Kind regards,', 'David');
-  return r.join('\n');
+  r.push('', 'You can see the current figures at ' + GHAWA_DEEL_URL + ' (log in with your e-mail address).', '', 'Thank you very much.', '', 'Kind regards,', 'David');
+  return { ids: deel.map((v) => v.id), bericht: r.join('\n'), onderwerp: 'Health centre Sukuta: ' + deel.length + ' open question' + (deel.length === 1 ? '' : 's') + ' (' + deel.map((v) => v.id).join(', ') + ')',
+    rest: open.length - deel.length };
 }
+// wv3919 (2C63 b): opvolgmail aan een fonds waarvan de verwachte datum voorbij is (Nederlands, u-vorm; David past hem aan in Gmail).
+function fondsOpvolg(f, k) {
+  const naam = dossierVan(f.gever);
+  const bedrag = '€ ' + Math.round((f.eur_cent || 0) / 100).toLocaleString('nl-NL');
+  const nl = (x) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(x || '')); return m ? Number(m[3]) + ' ' + ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'][Number(m[2]) - 1] + ' ' + m[1] : ''; };
+  const doel = String(f.doel || (f.project === 'Pharmacy' ? 'de apotheek' : 'de bouw')).toLowerCase();
+  const pct = k && k.bouw && k.bouw.pct != null ? Math.round(k.bouw.pct * 100) : null;
+  const r = ['Beste ' + naam + ',', '', 'Stichting GHAWA kreeg van u een toezegging van ' + bedrag + ' voor ' + doel + ' van het gezondheidscentrum in Sukuta (Gambia). ' +
+    'Wij hadden de betaling verwacht rond ' + nl(f.termijn) + ', maar zien hem nog niet op onze rekening.', '',
+    'Mag ik vragen hoe het ermee staat en wanneer wij het bedrag kunnen verwachten? Hebt u daarvoor nog iets van ons nodig, dan hoor ik het graag.', ''];
+  if (pct != null) r.push('Ter informatie: de bouw is nu voor ongeveer ' + pct + ' % gerealiseerd.', '');
+  r.push('Met vriendelijke groet,', '', 'David', 'Stichting GHAWA');
+  return { onderwerp: 'Toezegging ' + bedrag + ' voor het gezondheidscentrum in Sukuta', bericht: r.join('\n') };
+}
+const verlopen = (f, vandaag) => f.status === 'Committed - not yet received' && f.termijn && f.termijn < String(vandaag).slice(0, 10);
 // ── wv2880 (fase 2): fondsen en dossiers, donateurs (INTERN), indelen (INTERN), maandronde ──
 const DOSSIER = [[/wilde ganzen/i, 'Wilde Ganzen'], [/afas/i, 'AFAS Foundation'], [/rotary/i, 'Rotary Club Leusden'], [/rota\b/i, 'ROTA'], [/ghawa/i, 'Stichting GHAWA']];
 const dossierVan = (g) => { const x = DOSSIER.find((d) => d[0].test(g || '')); return x ? x[1] : g; };
@@ -576,7 +628,9 @@ function fondsenRoute(d, k) {
     return { naam, toegezegd: s(/^Committed/), ontvangen: s(/^Received/), verwacht_per_jaar: s(/^Expected/),
       oormerk: [...new Set(fs.map((f) => f.doel || f.project).filter(Boolean))].join(', ') || null, termijn: t[0] || null,
       fondsen: fs.map((f) => ({ id: f.id, gever: f.gever, soort: f.soort, project: f.project, doel: f.doel, eur: f.eur_cent, datum: f.datum, status: f.status,
-        waar: f.waar, notitie: f.notitie, termijn: f.termijn || null, gewijzigd_op: f.gewijzigd_op || null })),
+        waar: f.waar, notitie: f.notitie, termijn: f.termijn || null, gewijzigd_op: f.gewijzigd_op || null,
+        opvolg: verlopen(f, k.vandaag) ? fondsOpvolg(f, k) : null })),   // wv3919 (2C63 b)
+      aan: (d.meta && d.meta['mail:fonds:' + naam]) || null,
       log: log.filter((l) => fs.some((f) => f.id === l.fonds)).slice(0, 5) };
   });
   return { datastand: k.datastand, standen: k.standen, dossiers, statussen: BIJ.FONDS_STATUS, afas: afasBank(d), termijnen: termijnen(d, k.vandaag) };
@@ -742,6 +796,7 @@ function maak(cfg) {
     if (scherm === 'indelen') r = schrijf((db) => BIJ.indelen(db, b.id, b.soort, GHAWA_SOORTEN, nu));
     else if (scherm === 'fonds') r = schrijf((db) => BIJ.fondsZet(db, b.id, { status: b.status, termijn: b.termijn, bevestigd: b.bevestigd }, nu, (v && v.door) || 'app'));
     else if (scherm === 'ronde') r = schrijf((db) => BIJ.rondeZet(db, String(b.stap || ''), b.aan !== false, nu));
+    else if (scherm === 'vraag') r = schrijf((db) => BIJ.vraagZet(db, b.id, { antwoord: b.antwoord, status: b.status, bevestigd: b.bevestigd }, nu, (v && v.door) || 'app'));   // wv3919 (2C63 a)
     else if (scherm === 'bank') r = Object.assign({ ok: true }, bankBij(true));
     else if (scherm === 'afschrift') {
       const b64 = typeof b.bestand === 'string' ? b.bestand : '';
@@ -751,7 +806,7 @@ function maak(cfg) {
     } else return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'ghawa onbekend POST ' + scherm };
     const st = r.ok === false ? (r.status || 400) : 200;
     const kort = scherm === 'afschrift' ? (r.uitkomst || '') + ' ' + (r.munt || '') + ' nieuw ' + (r.nieuw || 0) : scherm === 'bank' ? (r.uitkomst || '') + ' ' + (r.nieuw || 0)
-      : scherm === 'indelen' ? String(b.id || '').slice(0, 8) : scherm === 'fonds' ? String(b.id || '').slice(0, 6) : String(b.stap || '').slice(0, 12);
+      : scherm === 'indelen' ? String(b.id || '').slice(0, 8) : scherm === 'fonds' || scherm === 'vraag' ? String(b.id || '').slice(0, 6) : String(b.stap || '').slice(0, 12);
     const body = Object.assign({}, r); delete body.status;
     return { status: st, body: Object.assign({ ok: st === 200 }, body), reden: 'ghawa POST ' + scherm + ' ' + kort };
   }
@@ -775,13 +830,78 @@ function maak(cfg) {
     const afas = d.fondsen.filter((f) => /AFAS/i.test(f.gever || '') && f.eur_cent != null);
     return { bouw_gmd: k.bouw.begroot / 100, koers: k.koers, afas_eur: afas.length ? afas.reduce((t, f) => t + f.eur_cent, 0) / 100 : null };
   }
+  // ── wv3919 (2C63 b, c): Gmail-concepten (de server roept het mailluik aan; hier alleen tekst, adres en wat er daarna vastligt) ──
+  const ADRES = /^[^\s@,;<>"]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
+  function adressen(aan) {   // kale adressen, komma-gescheiden (de knoop splitst op komma's), hooguit 3
+    const l = String(aan || '').split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean);
+    if (!l.length || l.length > 3 || l.some((x) => x.length > 120 || !ADRES.test(x))) return null;
+    return l.join(',');
+  }
+  // → { ok, aan, onderwerp, bericht, ids } of { ok: false, status, fout }
+  function conceptVoor(b) {
+    if (!c.dbPad || !fs.existsSync(c.dbPad)) return { ok: false, status: 503, fout: 'De GHAWA-databank is er nog niet' };
+    if (!gemigreerd) schrijf(() => null);
+    const aan = adressen(b && b.aan);
+    if (!aan) return { ok: false, status: 400, fout: 'vul een geldig mailadres in (hooguit drie, met komma ertussen)' };
+    const d = lees(); const k = bereken(d);
+    if (b.wat === 'vragen') {
+      const p = vragenPortie(d, k.vandaag);
+      if (!p) return { ok: false, status: 409, fout: 'er staan geen open vragen bij ECG' };
+      return { ok: true, wat: 'vragen', aan, onderwerp: p.onderwerp, bericht: p.bericht, ids: p.ids };
+    }
+    if (b.wat === 'fonds') {
+      const f = d.fondsen.find((x) => x.id === String(b.id || ''));
+      if (!f) return { ok: false, status: 404, fout: 'dat fonds bestaat niet' };
+      if (!verlopen(f, k.vandaag)) return { ok: false, status: 409, fout: 'de verwachte datum van deze toezegging is nog niet voorbij' };
+      const o = fondsOpvolg(f, k);
+      return { ok: true, wat: 'fonds', aan, onderwerp: o.onderwerp, bericht: o.bericht, ids: [f.id], dossier: dossierVan(f.gever) };
+    }
+    return { ok: false, status: 404, fout: 'onbekend' };
+  }
+  function conceptGezet(cv, door) {   // het concept staat in Gmail: adres onthouden, vragen 14 dagen overslaan, logboek, maandstap "vragen" af
+    const nu = nuIso();
+    schrijf((db) => {
+      const zetMeta = db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)');
+      if (cv.wat === 'vragen') { zetMeta.run('mail:ecg', cv.aan); BIJ.vragenInConcept(db, cv.ids, nu, door); BIJ.rondeZet(db, 'vragen', true, nu); }
+      else { zetMeta.run('mail:fonds:' + cv.dossier, cv.aan);
+        db.prepare('INSERT INTO fonds_log (fonds, veld, oud, nieuw, op, door) VALUES (?,?,?,?,?,?)').run(cv.ids[0], 'opvolgmail', null, 'Gmail-concept', nu, String(door || 'app').slice(0, 40)); }
+    });
+  }
+  // Voor jou: één kaart per toezegging waarvan de verwachte datum voorbij is (sleutel per fonds en datum: een nieuwe datum = later
+  // eventueel een nieuwe kaart, nooit dubbel). → [kaart]; en de sleutels van kaarten die dicht mogen (ontvangen, ingetrokken of nieuwe datum).
+  function fondsKaarten() {
+    if (!c.dbPad || !fs.existsSync(c.dbPad)) return { zet: [], dicht: [] };
+    if (!gemigreerd) schrijf(() => null);
+    const d = lees(); const k = bereken(d);
+    const zet = [], dicht = [];
+    for (const f of d.fondsen) {
+      const sl = 'ghawa-fonds-' + String(f.id).toLowerCase() + '-' + f.termijn;
+      if (verlopen(f, k.vandaag) && !d.meta['kaart:' + sl]) {
+        const naam = dossierVan(f.gever), bedrag = '€ ' + Math.round((f.eur_cent || 0) / 100).toLocaleString('nl-NL');
+        zet.push({ sleutel: sl, soort: 'doen', titel: 'GHAWA — ' + naam + ' herinneren aan de toezegging van ' + bedrag,
+          waarom: 'Je verwachtte de ' + bedrag + ' van ' + naam + ' uiterlijk ' + f.termijn.split('-').reverse().join('-') + '; hij staat nog niet als ontvangen. Er staat een korte opvolgmail voor je klaar.',
+          stappen: ['Open Apps › GHAWA › Fondsen en dossiers.', 'Bij ' + naam + ' staat de opvolgmail: vul het adres in en tik op Zet als concept in Gmail (of kopieer hem).',
+            'Kijk het concept na in Gmail en verstuur het zelf. Komt het geld binnen, zet de toezegging dan op ontvangen; verwacht je het later, zet een nieuwe datum.'],
+          waar: 'overal', prive: false, duur_min: 5, volgorde: 45,
+          herkomst: { handmatig: 'ghawa-fonds', fonds: f.id, termijn: f.termijn, module: 'ghawa', doel: { scherm: 'ghawa', focus: 'fondsen' } } });
+      }
+    }
+    for (const [sleutel] of Object.entries(d.meta)) {
+      const m = /^kaart:(ghawa-fonds-(.+)-(\d{4}-\d{2}-\d{2}))$/.exec(sleutel);
+      if (!m || d.meta['kaartdicht:' + m[1]]) continue;
+      const f = d.fondsen.find((x) => String(x.id).toLowerCase() === m[2]);
+      if (!f || f.status !== 'Committed - not yet received' || f.termijn !== m[3]) dicht.push(m[1]);
+    }
+    return { zet, dicht };
+  }
+  function kaartDicht(sleutel) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('kaartdicht:' + String(sleutel).slice(0, 60), nuIso())); }
   function siteCijfersZet(v) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('site:cijfers', JSON.stringify(Object.assign({ op: nuIso() }, v)))); }
   function siteCijfers() { try { const d = lees(); return d.meta['site:cijfers'] ? JSON.parse(d.meta['site:cijfers']) : null; } catch (e) { return null; } }
   function kaartGezet(sleutel) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('kaart:' + String(sleutel).slice(0, 60), nuIso())); }
-  return { app, info, bankBij, maandKaart, kaartGezet, totalen, siteCijfersZet, siteCijfers };
+  return { app, info, bankBij, maandKaart, kaartGezet, totalen, siteCijfersZet, siteCijfers, conceptVoor, conceptGezet, fondsKaarten, kaartDicht };
 }
 
-module.exports = { maak, invoer, leesData, bereken, csvLees, cent, SCHEMA, TABELLEN, GHAWA_SOORTEN, donateursRoute, indelenRoute };
+module.exports = { maak, invoer, leesData, bereken, csvLees, cent, SCHEMA, TABELLEN, GHAWA_SOORTEN, donateursRoute, indelenRoute, vragenPortie, fondsOpvolg };
 
 if (require.main === module) {
   const [cmd, a1, a2] = process.argv.slice(2);

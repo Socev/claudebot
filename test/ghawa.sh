@@ -26,7 +26,11 @@ grep -q "const ghawaApp = (function () {" server.js || { echo "ROOD  server.js: 
 grep -qE "if \(route === 'GET /app/ghawa' \|\| /\^GET .*ghawa.*\.test\(route\)" server.js || { echo "ROOD  server.js: route /app/ghawa niet in de app-poort"; f=1; }
 grep -qE "^\s+ghawa: typeof ghawaInfo === 'function'" server.js || { echo "ROOD  server.js: /health.ghawa ontbreekt"; f=1; }
 P=$(grep -oE "POST \\\\/app\\\\/ghawa\\\\/\([a-z|]+\)" server.js)
-[ "$P" = 'POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank)' ] || { echo "ROOD  server.js: POST-routes voor GHAWA zijn niet precies de vijf van fase 2 ($P)"; f=1; }
+[ "$P" = 'POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank|vraag|gmail)' ] || { echo "ROOD  server.js: POST-routes voor GHAWA zijn niet precies de vijf van fase 2 plus vraag en gmail (wv3919) ($P)"; f=1; }
+# wv3919 (2C63 c): het Gmail-concept gaat alleen via het mailluik (bandjesMailConcept: aan, onderwerp, bericht → concept); geen eigen fetch
+GM=$(awk '/^async function appGhawaGmail/,/^}/' server.js)
+echo "$GM" | grep -qE "bandjesMailConcept\(\{ aan: cv\.aan, onderwerp: cv\.onderwerp, bericht: cv\.bericht \}\)" && ! echo "$GM" | grep -qE "\bfetch\s*\(" \
+  || { echo "ROOD  server.js: appGhawaGmail niet alleen via het mailluik"; f=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* ghawa\.js ghawa-bij\.js" uitrol.sh || { echo "ROOD  uitrol.sh: ghawa.js/ghawa-bij.js niet in RELEASE_OPTIONEEL"; f=1; }
 grep -qE "'ghawa'" app-vast.js || { echo "ROOD  app-vast.js: ghawa niet in APP_IDS"; f=1; }
 [ $f = 0 ] && echo "GROEN koppeling server.js, uitrol.sh en APP_IDS"
@@ -45,5 +49,5 @@ echo "$PB" | grep -q "if (wat === 'publiceer') {" && echo "$PB" | grep -q "a.soo
 grep -qF "/^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)" server.js || { echo "ROOD  server.js: website-routes niet precies GET + concept/weg/publiceer"; f=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* ghawa-site\.js ghawa-stichting\.js" uitrol.sh || { echo "ROOD  uitrol.sh: ghawa-site.js/ghawa-stichting.js niet in RELEASE_OPTIONEEL"; f=1; }
 [ $f = 0 ] && echo "GROEN website: alleen git, staging 2× / main 1×, publiceren achter vingerafdruk"
-node --no-warnings --test --test-reporter=spec test/ghawa.test.js test/ghawa-bij.test.js test/ghawa-site.test.js test/ghawa-stichting.test.js || f=1
+node --no-warnings --test --test-reporter=spec test/ghawa.test.js test/ghawa-bij.test.js test/ghawa-2c63.test.js test/ghawa-site.test.js test/ghawa-stichting.test.js || f=1
 exit $f

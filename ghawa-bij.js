@@ -44,6 +44,7 @@ const EXTRA_KOLOMMEN = [
   ['bankregel_ecg', 'herkomst', "TEXT NOT NULL DEFAULT 'overdracht'"], ['bankregel_ecg', 'afschrift', 'TEXT'],
   ['geldstroom', 'herkomst', "TEXT NOT NULL DEFAULT 'overdracht'"], ['geldstroom', 'referentie', 'TEXT'],
   ['fonds', 'termijn', 'TEXT'], ['fonds', 'gewijzigd_op', 'TEXT'],
+  ['open_vraag', 'gewijzigd_op', 'TEXT'], ['open_vraag', 'gesloten_op', 'TEXT'], ['open_vraag', 'concept_op', 'TEXT'],   // wv3919 (2C63 a, c)
 ];
 const SCHEMA_BIJ = `
 CREATE TABLE IF NOT EXISTS fonds_log (nr INTEGER PRIMARY KEY, fonds TEXT NOT NULL, veld TEXT NOT NULL, oud TEXT, nieuw TEXT, op TEXT NOT NULL, door TEXT);
@@ -51,8 +52,9 @@ CREATE TABLE IF NOT EXISTS afschrift (id TEXT PRIMARY KEY, naam TEXT, formaat TE
   nieuw INTEGER, al_bekend INTEGER, uitkomst TEXT NOT NULL, fout TEXT, op TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS signaal (id TEXT PRIMARY KEY, soort TEXT NOT NULL, tekst TEXT NOT NULL, op TEXT NOT NULL, dicht_op TEXT);
 CREATE TABLE IF NOT EXISTS ronde (maand TEXT NOT NULL, stap TEXT NOT NULL, op TEXT NOT NULL, PRIMARY KEY (maand, stap));
+CREATE TABLE IF NOT EXISTS vraag_log (nr INTEGER PRIMARY KEY, vraag TEXT NOT NULL, veld TEXT NOT NULL, oud TEXT, nieuw TEXT, op TEXT NOT NULL, door TEXT);
 `;
-const BIJ_TABELLEN = ['fonds_log', 'afschrift', 'signaal', 'ronde'];
+const BIJ_TABELLEN = ['fonds_log', 'afschrift', 'signaal', 'ronde', 'vraag_log'];
 
 // Schema bijwerken zonder iets weg te gooien (bestaande databank van fase 1); idempotent.
 function migreer(db) {
@@ -80,6 +82,7 @@ function fase2Gegevens(db) {
   if (kol('bankregel_ghawa', 'herkomst')) n += db.prepare("SELECT COUNT(*) AS n FROM bankregel_ghawa WHERE herkomst <> 'overdracht'").get().n;
   if (kol('bankregel_ecg', 'herkomst')) n += db.prepare("SELECT COUNT(*) AS n FROM bankregel_ecg WHERE herkomst <> 'overdracht'").get().n;
   if (heeft('fonds_log')) n += db.prepare('SELECT COUNT(*) AS n FROM fonds_log').get().n;
+  if (heeft('vraag_log')) n += db.prepare('SELECT COUNT(*) AS n FROM vraag_log').get().n;   // wv3919: een herinvoer zou beantwoorde vragen weer openzetten
   return n;
 }
 
@@ -574,6 +577,49 @@ function fondsZet(db, id, w, nu, door) {
   return { ok: true, id: f.id, gewijzigd: zet.length };
 }
 
+// ═══════════════ 3b. Open vragen (wv3919, 2C63 a) ═══════════════
+// Antwoord erbij en/of de stand (Open, Partly answered, Closed), met bevestiging; elke wijziging met datum in vraag_log (zoals fondsen).
+// Gesloten zet gesloten_op; weer openen wist hem. Het antwoord is vrije tekst van David: voor het gedeelde deel gaat het door de
+// tekstgoedkeuring van ghawa-deel.js (nieuwe tekst = eerst "pending"), dus hier geen eigen filter.
+const VRAAG_STATUS = ['Open', 'Partly answered', 'Closed'];
+function vraagZet(db, id, w, nu, door) {
+  const v = db.prepare('SELECT * FROM open_vraag WHERE id = ?').get(String(id || ''));
+  if (!v) return { ok: false, status: 404, fout: 'die vraag bestaat niet' };
+  if (w.bevestigd !== true) return { ok: false, status: 400, fout: 'bevestig de wijziging' };
+  const zet = [];
+  if (w.antwoord !== undefined) {
+    if (w.antwoord !== null && typeof w.antwoord !== 'string') return { ok: false, status: 400, fout: 'antwoord als tekst' };
+    const a = w.antwoord === null ? null : String(w.antwoord).replace(/\r\n?/g, '\n').trim();
+    if (a && a.length > 2000) return { ok: false, status: 400, fout: 'antwoord hooguit 2000 tekens' };
+    const nieuw = a || null;
+    if (nieuw !== (v.antwoord || null)) zet.push(['antwoord', v.antwoord || null, nieuw]);
+  }
+  if (w.status !== undefined) {
+    if (VRAAG_STATUS.indexOf(w.status) < 0) return { ok: false, status: 400, fout: 'onbekende stand' };
+    if (w.status !== v.status) zet.push(['status', v.status, w.status]);
+  }
+  if (!zet.length) return { ok: true, id: v.id, gewijzigd: 0 };
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const [veld, oud, nieuw] of zet) {
+      if (veld === 'antwoord') db.prepare('UPDATE open_vraag SET antwoord = ?, gewijzigd_op = ? WHERE id = ?').run(nieuw, nu, v.id);
+      else db.prepare('UPDATE open_vraag SET status = ?, gewijzigd_op = ?, gesloten_op = ? WHERE id = ?').run(nieuw, nu, nieuw === 'Closed' ? nu : null, v.id);
+      db.prepare('INSERT INTO vraag_log (vraag, veld, oud, nieuw, op, door) VALUES (?,?,?,?,?,?)').run(v.id, veld, oud, nieuw, nu, schoon(door, 40) || null);
+    }
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  return { ok: true, id: v.id, gewijzigd: zet.length };
+}
+// wv3919 (2C63 c): deze vragen staan nu in een Gmail-concept (de volgende portie slaat ze 14 dagen over); één regel in vraag_log per vraag.
+function vragenInConcept(db, ids, nu, door) {
+  const zet = db.prepare('UPDATE open_vraag SET concept_op = ? WHERE id = ?');
+  const log = db.prepare('INSERT INTO vraag_log (vraag, veld, oud, nieuw, op, door) VALUES (?,?,?,?,?,?)');
+  db.exec('BEGIN IMMEDIATE');
+  try { for (const id of ids) { if (zet.run(nu, String(id)).changes) log.run(String(id), 'concept', null, 'Gmail-concept', nu, schoon(door, 40) || null); } db.exec('COMMIT'); }
+  catch (e) { db.exec('ROLLBACK'); throw e; }
+  return { ok: true, n: ids.length };
+}
+
 // ═══════════════ 4. Maandronde ═══════════════
 const RONDE_STAPPEN = ['afschriften', 'indelen', 'aansluiting', 'vragen', 'delen'];
 const AFVINKBAAR = ['aansluiting', 'vragen'];
@@ -606,4 +652,4 @@ function rondeKaart(st, nu) {
 
 module.exports = { rekeningenUit, SOORT_ONBEKEND, FONDS_STATUS, RONDE_STAPPEN, AFVINKBAAR, BIJ_TABELLEN, SCHEMA_BIJ, migreer, fase2Gegevens,
   leesFacturen, bankBij, deelInGhawa, chequeNaam, leerKaart, indelen, datumEco, centEco, leesEcgCsv, leesEcgPdfTekst, pdfNaarTekst, deelInEcg, ecgAfschrift,
-  koppelStromen, fondsZet, rondeZet, rondeKaart, maandVan, dagen, ibanUit };
+  koppelStromen, fondsZet, rondeZet, VRAAG_STATUS, vraagZet, vragenInConcept, rondeKaart, maandVan, dagen, ibanUit };
