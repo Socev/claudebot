@@ -2929,3 +2929,44 @@ test('wv2842 POT-batch: de extensie boekt per betaling (geen batch- of EndToEnd-
   // review wv2842 ZOU 1: ondubbelzinnig (eigen IBAN, precies het bedrag, op de uitvoerdatum) = automatisch gekoppeld, geen voorstel
   assert.deepEqual(stand, [['betaald_gezien', 1, 0], ['betaald_gezien', 1, 0]]);
 });
+
+// wv3912 (C54, David Ja 22-11-2026): teruggeboekte incasso in de echte toepassing: koppeling sepa_terug, factuur weer te betalen, één signaal met
+// uitleg en de twee knoppen; incasseert de leverancier opnieuw (gekoppeld), dan gaat het signaal vanzelf dicht; geen tweede signaal
+test('wv3912 storno: teruggeboekte incasso → weer te betalen + signaal Teruggeboekt; na de her-incasso vanzelf dicht', () => {
+  const t = opzet();
+  const id = teBetalenFactuur(t, { incl: 4321, velden: { betaalwijze: 'incasso', betaalspoor: 'betaald_gezien' } });
+  const f = t.f('id = ?', [id]);
+  const rek = t.fdb.db.prepare("SELECT id, iban, entiteit FROM rekening WHERE entiteit = ? AND alleen_eigenaar = 0 LIMIT 1").get(f.entiteit);
+  assert.ok(rek && f.iban, 'zaad heeft een rekening en de factuur een IBAN');
+  const tx = (dag, centen, inc) => {
+    const tid = D.nieuwId();
+    t.fdb.db.prepare('INSERT INTO bank_transactie (id, rekening, entiteit, eigen_iban, boekdatum, bedrag_centen, tegenpartij_iban, is_incasso, entry_ref, formaat, bankluis_sleutel, alleen_eigenaar, aangemaakt_op) ' +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'bankluis', ?, 0, '2026-11-01T00:00:00Z')").run(tid, rek.id, rek.entiteit, rek.iban, dag, centen, f.iban, inc ? 1 : 0, 'bankluis:wv3912|' + tid, 'wv3912-' + tid);
+    return tid;
+  };
+  const hand = (tid) => t.fdb.db.prepare("INSERT INTO koppeling (transactie, factuur, bron, methode, zekerheid, volledig, alleen_eigenaar, wie, wanneer) VALUES (?, ?, 'mens', 'handmatig', 1, 1, 0, 'proef', '2026-11-01T00:00:00Z')").run(tid, id);
+  const inc = tx('2026-10-28', -4321, true);
+  hand(inc);
+  tx('2026-10-30', 4321, false);
+  const NA = Date.parse('2026-11-02T10:00:00Z');
+  const tel = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NA));
+  assert.equal(tel.teruggeboekt, 1);
+  assert.equal(t.f('id = ?', [id]).betaalspoor, 'te_betalen');
+  assert.deepEqual(t.fdb.db.prepare('SELECT methode FROM koppeling WHERE factuur = ? ORDER BY methode').all(id).map((x) => x.methode), ['handmatig', 'sepa_terug']);
+  const sig = t.fdb.db.prepare("SELECT * FROM signaal WHERE soort = 'teruggeboekt' AND facturen LIKE ?").all('%' + id + '%');
+  assert.equal(sig.length, 1);
+  assert.equal(JSON.parse(sig[0].details).storno.incasso, inc);
+  assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE soort = 'dubbel_betaald' AND facturen LIKE ?", ['%' + id + '%']), 0);
+  const s = (t.call('GET', 'bank', null, { nu: NA }).j.signalen || []).find((x) => x.id === sig[0].id);
+  assert.ok(s && /terug op de rekening/.test(s.uitleg || ''), JSON.stringify(s && s.uitleg));
+  assert.deepEqual(s.knoppen.map((k) => k.knop), ['opnieuw_betalen', 'leverancier_incasseert']);
+  // nog een ronde: niets nieuws
+  const tel2 = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NA + 3600000));
+  assert.deepEqual([tel2.koppelingen, tel2.signalen, tel2.teruggeboekt || 0], [0, 0, 0]);
+  // de leverancier incasseert opnieuw (met de hand gekoppeld): het signaal gaat vanzelf dicht
+  hand(tx('2026-11-10', -4321, true));
+  const tel3 = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NA + 7200000));
+  assert.equal(tel3.vanzelf_gezien, 1);
+  assert.deepEqual(Object.values(t.fdb.db.prepare('SELECT status, afhandeling FROM signaal WHERE id = ?').get(sig[0].id)), ['afgehandeld', 'vanzelf_gezien']);
+  assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE soort IN ('dubbel_betaald','teruggeboekt') AND facturen LIKE ?", ['%' + id + '%']), 1);
+});

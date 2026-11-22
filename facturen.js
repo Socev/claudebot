@@ -3302,9 +3302,11 @@ function bankcontroleToepassen(fdb, nu) {
     const v = B.betaalVerwachting(f, verw);
     return !!v && v.verwacht !== d.verwacht;
   };
-  for (const s of fdb.db.prepare("SELECT id, facturen, entiteit, soort, details FROM signaal WHERE status = 'open' AND soort IN ('ingevoerd_niet_gezien','te_betalen_niet_betaald','incasso_niet_gezien')").all()) {
+  // wv3912 (C54): ook "Betaling teruggeboekt" na een teruggeboekte incasso (details.storno) gaat dicht als de leverancier opnieuw incasseerde
+  for (const s of fdb.db.prepare("SELECT id, facturen, entiteit, soort, details FROM signaal WHERE status = 'open' AND soort IN ('ingevoerd_niet_gezien','te_betalen_niet_betaald','incasso_niet_gezien','teruggeboekt')").all()) {
     const fids = json(s.facturen, []) || [];
     if (!fids.length) continue;
+    if (s.soort === 'teruggeboekt' && !((json(s.details, {}) || {}).storno)) continue;
     const af = fids.every((id) => netto.get(id).j === 1) ? 'vanzelf_gezien'
       : s.soort === 'ingevoerd_niet_gezien' && (fids.every((id) => { const x = spoor.get(id); return !x || (x.betaalspoor !== 'ingevoerd' && x.betaalspoor !== 'betaald_gezien'); }) ||
         andereDatum(s, fids)) ? 'niet_meer_ingevoerd' : null;

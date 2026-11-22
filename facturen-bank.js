@@ -19,7 +19,7 @@
  */
 const crypto = require('crypto');
 const { leesMt940, parseAbnDesc, ibanFromAbnAccount, Mt940Fout, ABN_TYPES } = require('./mt940-lezer.js');
-const { ibanNorm, normNaam, normNummer, dagenTussen, plusDagen, isIsoDatum, ibanNaamPast, VERZAMEL_RE } = require('./facturen-kern.js');
+const { ibanNorm, normNaam, normNummer, dagenTussen, plusDagen, isIsoDatum, ibanNaamPast, VERZAMEL_RE, isCreditnota } = require('./facturen-kern.js');
 
 class BankWeigering extends Error {
   constructor(code, uitleg) { super(uitleg || code); this.code = code; this.uitleg = uitleg || code; }
@@ -858,20 +858,23 @@ function referentieStukken(tx) {
   const stukken = new Set(t.split(/[\s,;:/()]+/).map(normNummer).filter(Boolean));
   return { stukken, plat: normNummer(t) || '', mach: tx.is_incasso ? machtigingStuk(tx) : null };
 }
-function noemtFactuur(ref, f) {
+// Via welk veld noemt de betaling de factuur? 'nummer' | 'kenmerk' | null (wv3912: de bankcontrole weegt een kenmerk zwaarder af dan een nummer).
+function noemtVia(ref, f) {
   for (const [veld, w] of [['nummer', f.nummer], ['kenmerk', f.kenmerk]]) {
     const n = normNummer(w);
     if (!n || n.length < 3 || !/\d/.test(n)) continue;
     if (veld === 'kenmerk' && ref.mach && n === ref.mach) continue;
-    if (ref.stukken.has(n)) return true;
-    if (n.length >= 12 && /^\d+$/.test(n) && ref.plat.indexOf(n) >= 0) return true;
+    if (ref.stukken.has(n)) return veld;
+    if (n.length >= 12 && /^\d+$/.test(n) && ref.plat.indexOf(n) >= 0) return veld;
   }
-  return false;
+  return null;
 }
+function noemtFactuur(ref, f) { return noemtVia(ref, f) !== null; }
 // wv1317 (David 26-10-2026): een betaling ruim vóór de factuurdatum is geen betaling van die factuur, tenzij de omschrijving het nummer
 // noemt (stap 1). Gemeten op 153 zekere paren (kenmerk + bedrag) uit het FV2-archief: 2 vóór de factuurdatum (4 en 6 dagen), 0 meer
 // dan 7 dagen. Zo koppelde de huur van september en oktober aan de factuur van november (voorstel 1 en 2, 25-10).
 const VOORUIT_MARGE = 7;
+const KENMERK_VENSTER = 60, KENMERK_VAST = 3, TWEEDE_VENSTER = 30, TWEEDE_VENSTER_SERIE = 20;   // wv3912 (C25), zie bankcontrole
 function vooruitBetaald(tx, f) { return !!(f.factuurdatum && isIsoDatum(f.factuurdatum) && dagenTussen(tx.boekdatum, f.factuurdatum) > VOORUIT_MARGE); }
 // Noemt de betaling een ánder factuurnummer? Bewust smal (diffreview wv1317 MOET 1: een te grove regel liet juiste koppelingen vallen):
 // (1) het EERSTE nummerstuk direct na het woord factuur/factuurnummer/invoice/nota (de bank knipt soms met spaties: "53. 73.00303") met
@@ -1064,6 +1067,12 @@ function signaalUitleg(s) {
   }
   // wv2293: DocPlan-controle rooster ↔ betaling (docplan-controle.js); details zonder IBAN of bedrag, alleen praktijk, maand, dagen en datums
   if (s && DOCPLAN_SOORTEN.includes(s.soort)) return docplanUitleg(s);
+  // wv3912 (C54): een teruggeboekte incasso (storno), niet een eigen SEPA-batch
+  if (s && s.soort === 'teruggeboekt' && s.details && s.details.storno) {
+    const st = s.details.storno;
+    return 'De incasso van ' + dagNL(st.incasso_datum) + ' kwam op ' + dagNL(s.datum) + ' terug op de rekening (' + eurTekst(Math.abs(Number(s.bedrag_centen) || 0)) +
+      '). Deze factuur staat daarom weer op niet betaald. Incasseert de leverancier opnieuw, dan koppelt de bank dat vanzelf.';
+  }
   if (!s || s.soort !== 'afwijkend_bedrag') return null;
   const d = s.details || {};
   return bandTekst(d).replace(/^g/, 'G') + ', nu ' + eurTekst(Math.abs(Number(s.bedrag_centen) || 0)) + (d.datum ? ' op ' + dagNL(d.datum) : '') + '.' +
@@ -1448,6 +1457,16 @@ function dubbelGeupload(transacties) {
  * geen gelijkwaardig alternatief is; al het andere wordt een voorstel dat een mens bevestigt.
  */
 // Komt een batch-id (PmtInfId) als los stuk in de tekst van de bank voor? Hoofdletterongevoelig; "…-1" telt niet in "…-10" (wv1405).
+// wv3912 (C54): storno = bijschrijving van een incasso terug, binnen 10 dagen (zelfde regel als fin-toewijzing en keten-match). Dezelfde tegenpartij:
+// beide IBAN's bekend → gelijk; anders hetzelfde incassant-id; anders exact dezelfde (genormaliseerde) naam van minstens 4 tekens.
+const STORNO_DAGEN = 10;
+function zelfdePartij(a, b) {
+  const ia = ibanNorm(a.tegenpartij_iban), ib = ibanNorm(b.tegenpartij_iban);
+  if (ia && ib) return ia === ib;
+  if (a.incassant_id && b.incassant_id) return String(a.incassant_id).trim().toUpperCase() === String(b.incassant_id).trim().toUpperCase();
+  const na = normNaam(a.tegenpartij_naam || ''), nb = normNaam(b.tegenpartij_naam || '');
+  return na.length >= 4 && na === nb;
+}
 function noemtBatchId(tekst, id) {
   if (!tekst || !id) return false;
   const t = String(tekst).toUpperCase(), p = String(id).toUpperCase();
@@ -1512,6 +1531,54 @@ function bankcontrole(inv) {
     if (w && !(losLaatst.get(o.factuur) >= w)) losLaatst.set(o.factuur, w);
   }
   const los = (txId, fids) => (fids || []).some((fid) => losPaar.has(txId + '|' + fid));
+  /*
+   * wv3912 (Fable-review facturen-bank H1, besluit C25, David Ja 22-11-2026): de kenmerk-route van "dubbel betaald". Een factuurkenmerk is vaak
+   * een klant- of contractnummer dat in elke betaling staat (13 valse meldingen over één abonnementsfactuur, alle maandincasso's van een jaar,
+   * alle vóór de factuurdatum). Het kenmerk telt daarom alleen als (1) de betaling niet ruim vóór de factuurdatum ligt (VOORUIT_MARGE), (2) binnen
+   * ± 60 dagen van een gekoppelde betaling van die factuur valt, en (3) het kenmerk niet vast is: niet ook het kenmerk van een andere factuur
+   * van die leverancier en niet in ≥ 3 afschrijvingen aan die tegenpartij. Het factuurnummer zelf blijft altijd tellen (ook vooruit; wv20-11).
+   */
+  const vastKenmerk = new Map();
+  const kenmerkVast = (f, tx) => {
+    if (vastKenmerk.has(f.id)) return vastKenmerk.get(f.id);
+    const n = normNummer(f.kenmerk), l = levVan(f.leverancier, ctx), li = levIbans(l), fi = ibanNorm(f.iban);
+    let vast = facturen.some((g) => g.id !== f.id && g.entiteit === f.entiteit && f.leverancier && g.leverancier === f.leverancier && normNummer(g.kenmerk) === n);
+    if (!vast) {
+      const zelf = { kenmerk: f.kenmerk };
+      const naar = (t) => { const ti = ibanNorm(t.tegenpartij_iban); if (ti && (ti === fi || li.has(ti))) return true; const lt = leverancierBijTx(t, ctx); return !!(lt && !lt.deel && l && lt.leverancier.id === l.id); };
+      vast = txs.filter((t) => t.bedrag_centen < 0 && t.entiteit === tx.entiteit && naar(t) && noemtFactuur(referentieStukken(t), zelf)).length >= KENMERK_VAST;
+    }
+    vastKenmerk.set(f.id, vast);
+    return vast;
+  };
+  const kenmerkTelt = (tx, f, eerdere) => !vooruitBetaald(tx, f) && eerdere.some((e) => Math.abs(dagenTussen(e.boekdatum, tx.boekdatum)) <= KENMERK_VENSTER) && !kenmerkVast(f, tx);
+  /*
+   * wv3912 (H2, besluit C25): een echte tweede overboeking zonder factuurnummer. Twee overboekingen (geen incasso: incasso tegen handmatig dekt de
+   * regel hierboven al) naar het rekeningnummer van een al voldane factuur, exact zijn bedrag, binnen TWEEDE_VENSTER dagen van een gekoppelde
+   * overboeking. Niet als er nog een open factuur met dat bedrag bij die tegenpartij is (dan is het waarschijnlijk die), niet vooruit en niet als
+   * de betaling een ander factuurnummer noemt. Vaste maandbedragen (≥ 3 afschrijvingen met dit bedrag aan dit rekeningnummer) liggen ± 28–31
+   * dagen uit elkaar: daar telt alleen een tweede binnen TWEEDE_VENSTER_SERIE dagen.
+   */
+  const serieTel = new Map();
+  const isSerie = (tx, tegen, bedrag) => {
+    const s = tx.entiteit + '|' + tegen + '|' + bedrag;
+    if (!serieTel.has(s)) serieTel.set(s, txs.filter((t) => t.entiteit === tx.entiteit && t.bedrag_centen === -bedrag && ibanNorm(t.tegenpartij_iban) === tegen).length);
+    return serieTel.get(s) >= KENMERK_VAST;
+  };
+  const tweedeOverboeking = (tx, al, ref, tegen) => {
+    if (tx.is_incasso || !tegen) return null;
+    const bedrag = -tx.bedrag_centen;
+    const venster = isSerie(tx, tegen, bedrag) ? TWEEDE_VENSTER_SERIE : TWEEDE_VENSTER;
+    return al.find((f) => {
+      const l = levVan(f.leverancier, ctx);
+      if (teBetalen(f) !== bedrag || !(ibanNorm(f.iban) === tegen || levIbans(l).has(tegen))) return false;
+      if (vooruitBetaald(tx, f) || andereFactuurGenoemd(tx, f, ref)) return false;
+      const eerdere = netto(f.id).map((k) => txMap.get(k.tx)).filter((e) => e && e.id !== tx.id && e.bedrag_centen < 0 && !e.is_incasso);
+      if (!eerdere.some((e) => Math.abs(dagenTussen(e.boekdatum, tx.boekdatum)) <= venster)) return false;
+      return !(fPerEnt.get(tx.entiteit) || []).some((g) => g.id !== f.id && !NIET_OPEN.includes(g.status) && !voldaan(g) && teBetalen(g) === bedrag &&
+        (ibanNorm(g.iban) === tegen || (!!f.leverancier && g.leverancier === f.leverancier)));
+    }) || null;
+  };
   const uit = { koppelingen: [], voorstellen: [], uitzonderingen: [], betaalspoor: [], signalen: [], heropenen: [] };
   const signalen = [];
   /*
@@ -1668,6 +1735,47 @@ function bankcontrole(inv) {
   txs.forEach(ronde1);
 
   /*
+   * wv3912 (Fable-review facturen-bank M3, besluit C54, David Ja 22-11-2026): een teruggeboekte incasso (storno). Dezelfde regel als
+   * fin-toewijzing en keten-match: een bijschrijving van precies het bedrag van een gekoppelde incasso, van dezelfde tegenpartij (IBAN, anders
+   * incassant-id, anders exact dezelfde naam), op dezelfde eigen rekening, binnen STORNO_DAGEN na die incasso. Dan een koppeling sepa_terug
+   * (heft die betaling op, zoals bij een eigen batch), het spoor uit de eindstand (betaald_gezien → te_betalen; stond hij nog niet op betaald,
+   * dan blijft het spoor) en het signaal Teruggeboekt. Een her-incasso koppelt daarna gewoon (ronde 1 nog eens voor wat nu open is), zonder vals
+   * "dubbel betaald". Niet bij een bijschrijving die al ergens aan hangt, een open creditnota met dat bedrag (geld terug op een creditnota), een
+   * eerdere losmaking door David, of een incasso die meer facturen tegelijk betaalde.
+   */
+  const stornoAf = new Set();
+  const stornoRonde = () => {
+  let stornoNieuw = 0;
+  for (const b of txs) {
+    if (richtingVan(b) !== 'bij' || txFacturen.has(b.id) || sepaAf.has(b.id)) continue;
+    let kand = txs.filter((t) => t.is_incasso && t.bedrag_centen === -b.bedrag_centen && t.entiteit === b.entiteit && ibanNorm(t.eigen_iban) === ibanNorm(b.eigen_iban) &&
+      !stornoAf.has(t.id) && t.boekdatum <= b.boekdatum && dagenTussen(t.boekdatum, b.boekdatum) <= STORNO_DAGEN && zelfdePartij(t, b) &&
+      (txFacturen.get(t.id) || []).length === 1 && netto(txFacturen.get(t.id)[0]).some((k) => k.tx === t.id));
+    // Codex MOET (ronde 2): meer incasso's van verschillende facturen passen → alleen als de terugboeking precies één van die facturen noemt; anders
+    // niets (niet gokken welke factuur weer te betalen wordt)
+    const fidsVan = (lijst) => new Set(lijst.map((t) => txFacturen.get(t.id)[0]));
+    if (fidsVan(kand).size > 1) { const ref = referentieStukken(b); kand = kand.filter((t) => noemtVia(ref, fMap.get(txFacturen.get(t.id)[0]) || {}) === 'nummer'); }
+    if (fidsVan(kand).size !== 1) continue;
+    const a = kand[kand.length - 1];
+    const fid = txFacturen.get(a.id)[0], f = fMap.get(fid);
+    if (!f || los(b.id, [fid])) continue;
+    if ((fPerEnt.get(b.entiteit) || []).some((g) => isCreditnota(g) && teBetalen(g) === -b.bedrag_centen && !voldaan(g) && (!!f.leverancier && g.leverancier === f.leverancier))) continue;
+    stornoAf.add(a.id);
+    uit.koppelingen.push({ transactie: b.id, factuur: fid, bron: 'auto', methode: TERUG, zekerheid: 1, alleen_eigenaar: eigenaarVan(b, [fid]) });
+    koppel(b.id, fid, TERUG, 'auto');
+    uit.betaalspoor = uit.betaalspoor.filter((x) => !(x.factuur === fid && x.gebeurtenis === 'bankmatch'));   // een bankmatch van deze ronde vervalt
+    const k = { factuur: fid, pmtinf_id: null, datum: null, centen: -a.bedrag_centen, exact: true, storno: { incasso: a.id, incasso_datum: a.boekdatum } };
+    nieuwTerug.set(fid, k);
+    terugKand0.push({ tx: b, k });
+    stornoNieuw++;
+  }
+  return stornoNieuw;
+  };
+  // incasso → storno → her-incasso → nog een storno in één upload (Codex MOET 4): herhalen tot er geen nieuwe storno meer is (elke ronde verbruikt
+  // minstens één bijschrijving, dus dit eindigt)
+  while (stornoRonde()) txs.forEach(ronde1);
+
+  /*
    * wv1415: één spoorbesluit per factuur met een terugboeking, uit de eindstand van deze ronde en steeds vanaf het opgeslagen spoor (zo
    * hangt het niet af van de volgorde in het bestand): netto gedekt → bankmatch; niet gedekt en deze ronde teruggeboekt → weer te betalen
    * (vanaf ingevoerd alleen als de factuur nog op de teruggeboekte batch staat, niet als hij intussen in een nieuwe batch zit of na
@@ -1679,7 +1787,7 @@ function bankcontrole(inv) {
     if (!f || !f.betaalspoor) continue;
     if (voldaan(f)) { if (f.betaalspoor !== 'betaald_gezien') uit.betaalspoor.push({ factuur: fid, gebeurtenis: 'bankmatch', van: f.betaalspoor, naar: 'betaald_gezien' }); continue; }
     const k = nieuwTerug.get(fid);
-    if (k && (f.betaalspoor === 'betaald_gezien' || (f.betaalspoor === 'ingevoerd' && f.uitvoer_op === k.datum)))
+    if (k && (f.betaalspoor === 'betaald_gezien' || (!k.storno && f.betaalspoor === 'ingevoerd' && f.uitvoer_op === k.datum)))
       uit.betaalspoor.push({ factuur: fid, gebeurtenis: 'teruggeboekt', van: f.betaalspoor, naar: 'te_betalen' });
   }
   const terugSig = new Map();   // factuur → sleutels van zijn terugboekingssignalen (factuursignalen wachten zolang er één open staat)
@@ -1688,7 +1796,7 @@ function bankcontrole(inv) {
     if (k.exact && voldaan(f)) continue;   // al opnieuw betaald: niets te doen
     const s = maakSignaal('teruggeboekt', { transacties: [tx.id], facturen: [k.factuur], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: l ? l.naam : tx.tegenpartij_naam,
       leverancier: f.leverancier || null, tegenpartij_iban: tx.tegenpartij_iban, bedrag_centen: tx.bedrag_centen, datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar || isPrive(f),
-      details: { nummer: f.nummer, batch: k.pmtinf_id, uitvoerdatum: k.datum, verwacht_centen: k.centen, automatisch: k.exact } });
+      details: Object.assign({ nummer: f.nummer, batch: k.pmtinf_id, uitvoerdatum: k.datum, verwacht_centen: k.centen, automatisch: k.exact }, k.storno ? { storno: k.storno } : {}) });
     signalen.push(s);
     terugSig.set(k.factuur, (terugSig.get(k.factuur) || []).concat([s.sleutel]));
   }
@@ -1742,11 +1850,13 @@ function bankcontrole(inv) {
         const l = levVan(f.leverancier, ctx);
         const zelfdeLev = !!(l && ((lv && lv.leverancier.id === l.id) || (tegen && levIbans(l).has(tegen))));
         if (!zelfdeLev) return false;   // een factuurnummer alleen is niet genoeg: "1001" komt bij veel leveranciers voor (diffreview wv798 #1)
-        if (noemtFactuur(ref, f)) return true;
         const eerdere = (betaald.get(f.id) || []).map((k) => txMap.get(k.tx)).filter(Boolean);
+        const via = noemtVia(ref, f);
+        if (via === 'nummer') return true;
+        if (via === 'kenmerk' && kenmerkTelt(tx, f, eerdere)) return true;
         // ander soort betaling (handmatig vs incasso) aan dezelfde leverancier binnen 60 dagen: het klassieke "zelf betaald én geïncasseerd"
         return eerdere.some((e) => e.is_incasso !== tx.is_incasso && Math.abs(dagenTussen(e.boekdatum, tx.boekdatum)) <= 60);
-      });
+      }) || tweedeOverboeking(tx, al, ref, tegen);
       if (dubbel) {
         const eerdere = (betaald.get(dubbel.id) || []).map((k) => txMap.get(k.tx)).filter(Boolean);
         signalen.push(maakSignaal('dubbel_betaald', Object.assign({}, basis, {

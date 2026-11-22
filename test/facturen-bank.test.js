@@ -1101,10 +1101,12 @@ test('wv1317 één open voorstel per factuur: de dichtstbijzijnde betaling krijg
   const na = controle({ transacties: [t2, t1], facturen: [e], afgewezenVoorstellen: [r.voorstellen[0].sleutel] });
   assert.deepEqual(na.voorstellen.map((v) => [v.transactie, v.facturen[0]]), [[t2.id, 'e1']]);
   assert.deepEqual(na.signalen.filter((s) => s.soort === 'geen_factuur').map((s) => s.transacties[0]), [t1.id]);
-  // David bevestigt t1 → e1: dan krijgt t2 alsnog "geen factuur"
+  // David bevestigt t1 → e1: t2 (26 dagen later, zelfde rekeningnummer, exact het bedrag, geen andere open factuur) is sinds wv3912 (C25/H2)
+  // een tweede overboeking → "dubbel betaald" in plaats van "geen factuur"
   const bev = controle({ transacties: [t2, t1], facturen: [e], koppelingen: [{ transactie: t1.id, factuur: 'e1', bron: 'mens', volledig: true }] });
   assert.deepEqual(bev.voorstellen, []);
-  assert.deepEqual(bev.signalen.filter((s) => s.soort === 'geen_factuur').map((s) => s.transacties[0]), [t2.id]);
+  assert.deepEqual(bev.signalen.filter((s) => s.soort === 'geen_factuur').map((s) => s.transacties[0]), []);
+  assert.deepEqual(bev.signalen.filter((s) => s.soort === 'dubbel_betaald').map((s) => s.transacties), [[t1.id, t2.id]]);
   // binnen de periode (tussen factuur- en vervaldatum) wint van net na de vervaldatum
   const tIn = tx({ boekdatum: '2026-09-05', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD });
   const tNa = tx({ boekdatum: '2026-09-16', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD });
@@ -1590,4 +1592,134 @@ test('maandincasso met het klantnummer (machtiging) als factuurkenmerk: geen dub
   const vooraf = tx({ boekdatum: '2026-09-20', bedrag_centen: -605, tegenpartij_iban: LEV.C, omschrijving: 'factuur 20269990001' });
   const r3 = controle({ transacties: [vooraf, gekoppeld], facturen: [f], koppelingen: [{ transactie: gekoppeld.id, factuur: 'mk1', bron: 'mens', methode: 'handmatig', volledig: true }] });
   assert.deepEqual(soorten(r3), ['dubbel_betaald']);
+});
+
+// ── wv3912 (Fable-review facturen-bank H1/H2/M3; besluitenpagina C25 + C54, David Ja 22-11-2026) ──
+const kop = (t, fid, methode) => ({ transactie: t.id, factuur: fid, bron: methode === 'handmatig' ? 'mens' : 'auto', methode: methode || 'iban_bedrag', volledig: methode === 'handmatig' ? true : undefined });
+test('wv3912 H1: abonnementsfactuur met een vast kenmerk (geen machtiging) → oude maandincasso\'s vóór de factuurdatum geven 0 "dubbel betaald"', () => {
+  const f = fac({ id: 'ab1', leverancier: 'lc', nummer: 'INV-77001', kenmerk: 'KL880123', incl: 1999, betaalwijze: 'incasso', betaalspoor: 'betaald_gezien',
+    factuurdatum: '2026-11-08', vervaldatum: '2026-11-22' });
+  const maand = (d) => tx({ boekdatum: d, bedrag_centen: -1999, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000301', tegenpartij_iban: LEV.C, omschrijving: 'Abonnement KL880123 ' + d });
+  const reeks = ['2025-11-09', '2025-12-09', '2026-01-09', '2026-02-09', '2026-03-09', '2026-04-09', '2026-05-09', '2026-06-09', '2026-07-09', '2026-08-09',
+    '2026-09-09', '2026-10-09'].map(maand);
+  const gekoppeld = maand('2026-11-09');
+  const r = controle({ transacties: reeks.concat([gekoppeld]), facturen: [f], koppelingen: [kop(gekoppeld, 'ab1', 'handmatig')] });
+  assert.deepEqual(r.signalen.filter((s) => s.soort === 'dubbel_betaald'), []);
+  // het vaste kenmerk telt ook binnen het venster niet (≥ 3 afschrijvingen noemen het)
+  const kort = maand('2026-11-12');
+  const r2 = controle({ transacties: reeks.slice(-3).concat([gekoppeld, kort]), facturen: [f], koppelingen: [kop(gekoppeld, 'ab1', 'handmatig')] });
+  assert.deepEqual(r2.signalen.filter((s) => s.soort === 'dubbel_betaald'), []);
+});
+test('wv3912 H1: een kenmerk dat maar één keer voorkomt telt binnen het venster wel; vóór de factuurdatum − 7 of > 60 dagen van de betaling niet', () => {
+  const f = fac({ id: 'kw1', leverancier: 'la', nummer: 'X-9001', kenmerk: '7730045519', incl: 45000, iban: LEV.A, betaalspoor: 'betaald_gezien', factuurdatum: '2026-10-01', vervaldatum: '2026-10-15' });
+  const eerste = tx({ boekdatum: '2026-10-05', bedrag_centen: -45000, tegenpartij_iban: LEV.A, omschrijving: 'betaling 7730045519' });
+  const k = [kop(eerste, 'kw1', 'kenmerk')];
+  const tweede = tx({ boekdatum: '2026-11-20', bedrag_centen: -45000, tegenpartij_iban: LEV.A, omschrijving: 'ref 7730045519' });   // 46 dagen: alleen de kenmerk-route
+  assert.deepEqual(soorten(controle({ transacties: [eerste, tweede], facturen: [f], koppelingen: k })), ['dubbel_betaald']);
+  const vooraf = tx({ boekdatum: '2026-09-10', bedrag_centen: -45000, tegenpartij_iban: LEV.A, omschrijving: 'ref 7730045519' });
+  assert.deepEqual(controle({ transacties: [vooraf, eerste], facturen: [f], koppelingen: k }).signalen.filter((s) => s.soort === 'dubbel_betaald'), []);
+  const laat = tx({ boekdatum: '2026-12-20', bedrag_centen: -45000, tegenpartij_iban: LEV.A, omschrijving: 'ref 7730045519' });
+  assert.deepEqual(controle({ transacties: [eerste, laat], facturen: [f], koppelingen: k }).signalen.filter((s) => s.soort === 'dubbel_betaald'), []);
+  // hetzelfde kenmerk op een andere factuur van die leverancier = vast kenmerk
+  const g = fac({ id: 'kw2', leverancier: 'la', nummer: 'X-9002', kenmerk: '7730045519', incl: 12000, iban: LEV.A, betaalspoor: 'betaald_gezien', factuurdatum: '2026-09-01' });
+  assert.deepEqual(controle({ transacties: [eerste, tweede], facturen: [f, g], koppelingen: k }).signalen.filter((s) => s.soort === 'dubbel_betaald'), []);
+});
+test('wv3912 H2 proef P2/P2b: dezelfde factuur twee keer overgemaakt, de tweede zonder nummer → "dubbel betaald"; met nummer blijft het werken', () => {
+  const f = fac({ id: 'p2', leverancier: 'lb', nummer: 'B-2026-118', incl: 31250, iban: LEV.B, betaalspoor: 'betaald_gezien', factuurdatum: '2026-10-10', vervaldatum: '2026-10-24' });
+  const eerste = tx({ boekdatum: '2026-10-20', bedrag_centen: -31250, tegenpartij_iban: LEV.B, omschrijving: 'factuur B-2026-118' });
+  const k = [kop(eerste, 'p2', 'kenmerk')];
+  const zonder = tx({ boekdatum: '2026-10-27', bedrag_centen: -31250, tegenpartij_iban: LEV.B, omschrijving: 'betaling' });
+  const r = controle({ transacties: [eerste, zonder], facturen: [f], koppelingen: k });
+  assert.deepEqual(soorten(r), ['dubbel_betaald']);
+  assert.deepEqual(r.signalen[0].transacties, [eerste.id, zonder.id]);
+  const met = tx({ boekdatum: '2026-10-27', bedrag_centen: -31250, tegenpartij_iban: LEV.B, omschrijving: 'factuur B-2026-118' });
+  assert.deepEqual(soorten(controle({ transacties: [eerste, met], facturen: [f], koppelingen: k })), ['dubbel_betaald']);   // P2b
+  // ook als de eerste in een SEPA-batch zat (geen tegenpartij op de batchpost)
+  const batch = tx({ boekdatum: '2026-10-20', bedrag_centen: -80000, kenmerk: 'BATCH-1' });
+  assert.deepEqual(soorten(controle({ transacties: [batch, zonder], facturen: [f], koppelingen: [kop(batch, 'p2', 'sepa_batch')] })), ['dubbel_betaald']);
+  // niet: er staat nog een open factuur met dat bedrag (dan is het die), buiten 30 dagen, een ander factuurnummer, of een incasso
+  const open = fac({ id: 'p2o', leverancier: 'lb', nummer: 'B-2026-131', incl: 31250, iban: LEV.B, factuurdatum: '2026-10-25', vervaldatum: '2026-11-08' });
+  assert.ok(!controle({ transacties: [eerste, zonder], facturen: [f, open], koppelingen: k }).signalen.some((s) => s.soort === 'dubbel_betaald'));
+  const laat = tx({ boekdatum: '2026-11-25', bedrag_centen: -31250, tegenpartij_iban: LEV.B, omschrijving: 'betaling' });
+  assert.deepEqual(controle({ transacties: [eerste, laat], facturen: [f], koppelingen: k }).signalen.filter((s) => s.soort === 'dubbel_betaald'), []);
+  const ander = tx({ boekdatum: '2026-10-27', bedrag_centen: -31250, tegenpartij_iban: LEV.B, omschrijving: 'factuur B-2026-140' });
+  assert.deepEqual(controle({ transacties: [eerste, ander], facturen: [f], koppelingen: k }).signalen.filter((s) => s.soort === 'dubbel_betaald'), []);
+});
+test('wv3912 H2: vast maandbedrag met de hand (≥ 3 keer hetzelfde bedrag) → 28 dagen later geen "dubbel betaald", binnen 20 dagen wel', () => {
+  const f = fac({ id: 'hu1', leverancier: 'lb', nummer: 'H-02', incl: 150000, iban: LEV.B, betaalspoor: 'betaald_gezien', factuurdatum: '2026-01-25', vervaldatum: '2026-02-01' });
+  const jan = tx({ boekdatum: '2026-01-01', bedrag_centen: -150000, tegenpartij_iban: LEV.B, omschrijving: 'huur' });
+  const feb = tx({ boekdatum: '2026-02-01', bedrag_centen: -150000, tegenpartij_iban: LEV.B, omschrijving: 'huur' });
+  const mrt = tx({ boekdatum: '2026-03-01', bedrag_centen: -150000, tegenpartij_iban: LEV.B, omschrijving: 'huur' });
+  const k = [kop(feb, 'hu1', 'iban_bedrag')];
+  assert.deepEqual(controle({ transacties: [jan, feb, mrt], facturen: [f], koppelingen: k }).signalen.filter((s) => s.soort === 'dubbel_betaald'), []);
+  const nogEens = tx({ boekdatum: '2026-02-04', bedrag_centen: -150000, tegenpartij_iban: LEV.B, omschrijving: 'huur' });
+  assert.deepEqual(controle({ transacties: [jan, feb, nogEens, mrt], facturen: [f], koppelingen: k }).signalen.filter((s) => s.soort === 'dubbel_betaald').map((s) => s.transacties[1]), [nogEens.id]);
+});
+test('wv3912 M3 proef P3: teruggeboekte incasso → koppeling opgeheven (sepa_terug), factuur weer te betalen, één signaal; her-incasso koppelt zonder "dubbel betaald"', () => {
+  const f = fac({ id: 'p3', leverancier: 'le', nummer: 'E-5501', incl: 8800, betaalwijze: 'incasso', betaalspoor: 'betaald_gezien', factuurdatum: '2026-10-01', vervaldatum: '2026-10-15' });
+  const inc = tx({ boekdatum: '2026-10-10', bedrag_centen: -8800, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000501', tegenpartij_iban: LEV.E, omschrijving: 'E-5501' });
+  const terug = tx({ boekdatum: '2026-10-12', bedrag_centen: 8800, tegenpartij_iban: LEV.E, transactietype: 'ABN:SEPA Incasso storno', omschrijving: 'storno E-5501' });
+  const k = [kop(inc, 'p3', 'incasso')];
+  const r = controle({ transacties: [inc, terug], facturen: [f], koppelingen: k });
+  assert.deepEqual(r.koppelingen.map((x) => [x.transactie, x.factuur, x.methode]), [[terug.id, 'p3', 'sepa_terug']]);
+  assert.deepEqual(r.betaalspoor.map((b) => [b.factuur, b.gebeurtenis, b.naar]), [['p3', 'teruggeboekt', 'te_betalen']]);
+  assert.deepEqual(soorten(r), ['teruggeboekt']);
+  assert.deepEqual(r.signalen[0].details.storno, { incasso: inc.id, incasso_datum: '2026-10-10' });
+  assert.ok(/terug/i.test(B.signaalUitleg(r.signalen[0]) || ''), 'uitleg noemt de terugboeking');
+  // volgende ronde: de storno staat vast; een her-incasso koppelt gewoon, geen "dubbel betaald", geen tweede signaal
+  const her = tx({ boekdatum: '2026-10-24', bedrag_centen: -8800, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000501', tegenpartij_iban: LEV.E, omschrijving: 'E-5501' });
+  const k2 = k.concat([{ transactie: terug.id, factuur: 'p3', bron: 'auto', methode: 'sepa_terug' }]);
+  const r2 = controle({ transacties: [inc, terug, her], facturen: [Object.assign({}, f, { betaalspoor: 'te_betalen' })], koppelingen: k2,
+    bestaandeSignalen: r.signalen.map((s) => ({ sleutel: s.sleutel, status: 'open' })) });
+  assert.deepEqual(r2.koppelingen.map((x) => [x.transactie, x.factuur]), [[her.id, 'p3']]);
+  assert.deepEqual(r2.betaalspoor.map((b) => b.naar), ['betaald_gezien']);
+  assert.deepEqual(r2.signalen, []);
+  // alles in één upload: incasso, storno en her-incasso → netto betaald, geen signaal, geen dubbel
+  const r3 = controle({ transacties: [inc, terug, her], facturen: [Object.assign({}, f, { betaalspoor: 'incasso_verwacht' })] });
+  assert.ok(r3.koppelingen.some((x) => x.transactie === terug.id && x.methode === 'sepa_terug') && r3.koppelingen.some((x) => x.transactie === her.id));
+  assert.deepEqual(r3.signalen.filter((s) => s.soort === 'dubbel_betaald'), []);
+  assert.deepEqual(r3.betaalspoor.map((b) => b.naar), ['betaald_gezien']);
+  // Codex MOET 4: incasso → storno → her-incasso → tweede storno in één upload: niet betaald, geen dubbel
+  const terug2 = tx({ boekdatum: '2026-10-27', bedrag_centen: 8800, tegenpartij_iban: LEV.E, omschrijving: 'storno E-5501' });
+  const r4 = controle({ transacties: [inc, terug, her, terug2], facturen: [f] });
+  assert.equal(r4.koppelingen.filter((x) => x.methode === 'sepa_terug').length, 2);
+  assert.deepEqual(r4.betaalspoor.map((b) => [b.gebeurtenis, b.naar]), [['teruggeboekt', 'te_betalen']]);
+  assert.deepEqual(r4.signalen.filter((s) => s.soort === 'dubbel_betaald'), []);
+  assert.ok(r4.signalen.some((s) => s.soort === 'teruggeboekt'));
+});
+test('wv3912 M3: geen storno bij een andere tegenpartij, ander bedrag, > 10 dagen, een handbetaling, een open creditnota met dat bedrag of een losgemaakt paar', () => {
+  const f = fac({ id: 's1', leverancier: 'le', nummer: 'E-5600', incl: 8800, betaalwijze: 'incasso', betaalspoor: 'betaald_gezien', factuurdatum: '2026-10-01', vervaldatum: '2026-10-15' });
+  const inc = tx({ boekdatum: '2026-10-10', bedrag_centen: -8800, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000501', tegenpartij_iban: LEV.E });
+  const k = [kop(inc, 's1', 'incasso')];
+  const geen = (bij, extra) => {
+    const r = controle(Object.assign({ transacties: [inc, bij], facturen: [f], koppelingen: k }, extra || {}));
+    assert.ok(!r.koppelingen.some((x) => x.methode === 'sepa_terug') && !r.signalen.some((s) => s.soort === 'teruggeboekt'), JSON.stringify(bij));
+  };
+  geen(tx({ boekdatum: '2026-10-12', bedrag_centen: 8800, tegenpartij_iban: LEV.F }));
+  geen(tx({ boekdatum: '2026-10-12', bedrag_centen: 8700, tegenpartij_iban: LEV.E }));
+  geen(tx({ boekdatum: '2026-10-21', bedrag_centen: 8800, tegenpartij_iban: LEV.E }));
+  const terug = tx({ boekdatum: '2026-10-12', bedrag_centen: 8800, tegenpartij_iban: LEV.E });
+  geen(terug, { ontkoppeld: [{ transactie: terug.id, factuur: 's1', wanneer: '2026-10-13T10:00:00Z' }] });
+  const cn = fac({ id: 's1c', leverancier: 'le', nummer: 'CN-56', soort: 'creditnota', incl: -8800, betaalspoor: 'betaald_vooraf', factuurdatum: '2026-10-11' });
+  const rc = controle({ transacties: [inc, terug], facturen: [f, cn], koppelingen: k });
+  assert.ok(!rc.koppelingen.some((x) => x.methode === 'sepa_terug') && !rc.signalen.some((s) => s.soort === 'teruggeboekt'));
+  const hand = Object.assign({}, inc, { id: 'thand', is_incasso: false });
+  const rh = controle({ transacties: [hand, terug], facturen: [f], koppelingen: [kop(hand, 's1', 'iban_bedrag')] });
+  assert.ok(!rh.koppelingen.some((x) => x.methode === 'sepa_terug'));
+  // Codex MOET (ronde 2): twee facturen met hetzelfde bedrag, beide geïncasseerd → zonder onderscheidend nummer geen storno; noemt de terugboeking
+  // één factuurnummer, dan die
+  const f2 = fac({ id: 's2', leverancier: 'le', nummer: 'E-5601', incl: 8800, betaalwijze: 'incasso', betaalspoor: 'betaald_gezien', factuurdatum: '2026-10-02', vervaldatum: '2026-10-16' });
+  const inc2 = tx({ boekdatum: '2026-10-11', bedrag_centen: -8800, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000501', tegenpartij_iban: LEV.E });
+  const k2 = k.concat([kop(inc2, 's2', 'incasso')]);
+  const rt = controle({ transacties: [inc, inc2, terug], facturen: [f, f2], koppelingen: k2 });
+  assert.ok(!rt.koppelingen.some((x) => x.methode === 'sepa_terug') && !rt.signalen.some((s) => s.soort === 'teruggeboekt'));
+  const terugNr = tx({ boekdatum: '2026-10-12', bedrag_centen: 8800, tegenpartij_iban: LEV.E, omschrijving: 'storno E-5600' });
+  const rn = controle({ transacties: [inc, inc2, terugNr], facturen: [f, f2], koppelingen: k2 });
+  assert.deepEqual(rn.koppelingen.filter((x) => x.methode === 'sepa_terug').map((x) => x.factuur), ['s1']);
+  // Codex ronde 3: alleen een kenmerk (klantnummer) onderscheidt niet
+  const fk = Object.assign({}, f, { kenmerk: 'KL55001' }), terugKm = tx({ boekdatum: '2026-10-12', bedrag_centen: 8800, tegenpartij_iban: LEV.E, omschrijving: 'storno KL55001' });
+  assert.ok(!controle({ transacties: [inc, inc2, terugKm], facturen: [fk, f2], koppelingen: k2 }).koppelingen.some((x) => x.methode === 'sepa_terug'));
+  // zonder IBAN op de bijschrijving: zelfde incassant-id telt
+  const terugInc = tx({ boekdatum: '2026-10-12', bedrag_centen: 8800, incassant_id: 'NL00ZZZTEST0000000501' });
+  assert.deepEqual(soorten(controle({ transacties: [inc, terugInc], facturen: [f], koppelingen: k })), ['teruggeboekt']);
 });
