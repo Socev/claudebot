@@ -384,7 +384,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('8b open apparaat: personeel erin, bronnen alleen met alles', pv(o2).indexOf('10_Zakelijk/Personeel/dossier.md') >= 0 && pv(o2).indexOf('10_Zakelijk/Bronnen/bron.md') < 0 && pv(o1).indexOf('10_Zakelijk/Bronnen/bron.md') >= 0 && !o2.j.vaste_plek, [pv(o1), pv(o2)]);
     const kj = JSON.parse(fs.readFileSync(path.join(W, 'staat10', 'kaart.json'), 'utf8'));
     toets('8b ctime en linkcache niet in kaart.json, de kaart (vers) of het antwoord', kj.bestanden.every((b) => !('c' in b) && !('doelen' in b)) && s10.vers(false).bestanden.every((b) => !('c' in b) && !('doelen' in b))
-      && [o1, o2, v1, v2].every((r) => r.j.knopen.every((k) => k.length === 5) && Object.keys(r.j).sort().join() === 'alles,bijgewerkt,domeinen,knopen,lijnen,ok,verborgen_n'), kj.bestanden[0]);
+      && [o1, o2, v1, v2].every((r) => r.j.knopen.every((k) => k.length === 5) && Object.keys(r.j).sort().join() === 'alles,bijgewerkt,domeinen,knopen,lijnen,ok,verborgen_n,verkeer,verkeer_week'), kj.bestanden[0]);
   }
 
   // ── 8c. wv3003: linkcache op schijf, zodat de eerste bouw na een herstart niet alles opnieuw leest; even streng als in het geheugen ──
@@ -642,7 +642,21 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     const sw3 = S.maak({ vault: VW, dir: path.join(W, 'staat-w3'), nu: () => klokW + 86400000 });   // zondag: geen logboek van za 21-11
     const w4 = await sw3.app('POST /app/secondbrain/vandaag', {}, {});
     toets('15 geen dagverslag van gisteren: geen nacht (niet terugvallen op eergisteren), geen deadlinebron', w4.status === 200 && w4.j.tel.nacht === 0 && w4.j.bronnen.logboek === null &&
-      w4.j.bronnen.deadlines === 'niet beschikbaar', w4.j); }
+      w4.j.bronnen.deadlines === 'niet beschikbaar', w4.j);
+    // wv3751 (3C179): hetzelfde bronverkeer als getal per knoop op de kaart (grootte), ook onder de drempel van Wat speelt; dag in Amsterdam
+    const kw = await sw.app('GET /app/secondbrain', {}, {});
+    const vk = new Map((kw.j.verkeer || []).map((x) => [kw.j.knopen[x[0]][0], x[1]]));
+    toets('15 wv3751 kaart: verkeer per knoop (3 Proefoverleg, 1 Proefrooster), niet oud, niet 00/01, alleen > 0, week erbij',
+      vk.get('10_Zakelijk/HAGRO/Proefoverleg.md') === 3 && vk.get('10_Zakelijk/Tolgaarde/Proefrooster.md') === 1 && !vk.has('10_Zakelijk/Groenhouten/Proefpand.md') &&
+      !vk.has('01_Ontwikkeling/Proefplan.md') && !vk.has('00_Systeem/Deadlines.md') && kw.j.verkeer.every((x) => Number.isInteger(x[0]) && x[0] >= 0 && x[0] < kw.j.knopen.length && x[1] > 0) &&
+      kw.j.verkeer_week.van === '2026-11-15' && kw.j.verkeer_week.tot === '2026-11-21', [kw.j.verkeer, kw.j.verkeer_week]);
+    const ka = await sw.app('POST /app/secondbrain/kaart', { alles: true }, {});
+    const vka = new Map((ka.j.verkeer || []).map((x) => [ka.j.knopen[x[0]][0], x[1]]));
+    toets('15 wv3751 kaart met alles: zelfde getallen op de juiste knoop (andere nummering)', vka.get('10_Zakelijk/HAGRO/Proefoverleg.md') === 3 && vka.size === vk.size, [...vka]);
+    const zDag = Date.UTC(2026, 10, 20, 23, 30);   // vr 20-11 23:30 UTC = za 21-11 00:30 Amsterdam
+    fs.utimesSync(path.join(VW, '20_Prive/Proefreis.md'), zDag / 1000, zDag / 1000);
+    const kw2 = await S.maak({ vault: VW, dir: path.join(W, 'staat-w4'), nu: () => klokW }).app('GET /app/secondbrain', {}, {});
+    toets('15 wv3751 dag per knoop in Amsterdam (00:30 op 21-11 is 21-11, niet de UTC-dag 20-11)', (kw2.j.knopen.find((k) => k[0] === '20_Prive/Proefreis.md') || [])[3] === '2026-11-21', kw2.j.knopen.find((k) => k[0] === '20_Prive/Proefreis.md')); }
   toets('15 server.js geeft de deadlines van Projecten mee', /deadlines: function \(\) \{ const p = appProjecten\(\); return p && Array\.isArray\(p\.deadlines\) \? p\.deadlines : null; \}/.test(fs.readFileSync('server.js', 'utf8')));
 
   // ── 16. wv3753 (3C208): de stamboom als waaier — POST /app/secondbrain/stamboom (verzonnen namen) ──

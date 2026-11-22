@@ -450,13 +450,13 @@ function maak(opt) {
 
   // De knopen en lijnen zoals de App ze krijgt (alles = met het verborgen deel); ook de invoer van de nachtschikking (wv3750).
   function zichtbaar(k, alles) {
-    const naar = new Map(), knopen = [];
+    const naar = new Map(), knopen = [], idx = [];
     const tel = {};
     let verborgen = 0;
     k.bestanden.forEach(function (b, i) {
       if (!alles && b.v) { verborgen++; return; }
       naar.set(i, knopen.length);
-      knopen.push(b);
+      knopen.push(b); idx.push(i);
     });
     const lijnen = [];
     const graad = new Array(knopen.length).fill(0);
@@ -468,7 +468,7 @@ function maak(opt) {
       }
     });
     knopen.forEach(function (b) { tel[b.d] = (tel[b.d] || 0) + 1; });
-    return { knopen: knopen, lijnen: lijnen, graad: graad, tel: tel, verborgen: verborgen };
+    return { knopen: knopen, lijnen: lijnen, graad: graad, tel: tel, verborgen: verborgen, idx: idx };
   }
 
   // wv3750 (besluitenpagina nr 483 = 3C183): de vaste landkaart. De nachtstap (schikNacht) rekent de plekken uit (brein-schik.js, in een
@@ -530,8 +530,14 @@ function maak(opt) {
     const knopen = z.knopen, graad = z.graad, tel = z.tel;
     const j = { ok: true, bijgewerkt: new Date(k.op).toISOString(), alles: !!alles,
       domeinen: DOMEINEN.map(function (n, i) { return { i: i, naam: n, n: tel[n] || 0 }; }),
-      knopen: knopen.map(function (b, li) { return [b.p, DOMEINEN.indexOf(b.d), b.s, new Date(b.m).toISOString().slice(0, 10), graad[li]]; }),
+      knopen: knopen.map(function (b, li) { return [b.p, DOMEINEN.indexOf(b.d), b.s, herkomstDag(b.m), graad[li]]; }),   // wv3751: dag in Amsterdam (was UTC)
       lijnen: z.lijnen, verborgen_n: z.verborgen };
+    // wv3751 (3C179): bronverkeer van deze week per knoop, ijl: [[knoopnummer, aantal], …] (alleen > 0), met de week erbij
+    try {
+      const dag = herkomstDag(nu()), tel = bronverkeer(k, dag), vk = [];
+      z.idx.forEach(function (i, li) { const n = tel.get(i); if (n) vk.push([li, n]); });
+      j.verkeer = vk; j.verkeer_week = { van: herkomstDagMin(dag, 6), tot: dag };
+    } catch (e) { fout('secondbrain-verkeer', e); }
     if (!alles) { let pl = null; try { pl = plekkenVoor(knopen); } catch (e) { pl = null; fout('secondbrain-plek', e); } if (pl) Object.assign(j, pl); }
     return { status: 200, j: j };
   }
@@ -1056,6 +1062,29 @@ function maak(opt) {
     });
     return { pad: rel, regels: uit };
   }
+  // wv3751 (besluitenpagina nr 479 = 3C179, David Ja 21-11-2026 13:21; Fable-review brein-graaf idee 10): bronverkeer per pagina, voor
+  // "Wat speelt" (stap 3 hierboven) en voor de grootte van de bolletjes op de kaart (kaartVoor, veld verkeer). Per zichtbare md-pagina
+  // buiten 00_Systeem/01_Ontwikkeling: hoeveel verschillende bronnen en gesprekken (het verborgen deel: Bronnen, raw_input, WhatsApp,
+  // Teams, Signal, mail die Intake als bron vastlegde) met een datum van de laatste 7 dagen (vandaag en 6 dagen terug, Amsterdam) in de
+  // bestandsnaam ernaar linken; elke bron telt één keer per pagina. De mtime van bronnen is door de herinrichting onbruikbaar (gemeten
+  // 22-11: bij 3.407 van 4.708 bronnen met een naamdatum ligt de mtime meer dan 7 dagen ernaast); het oude mailarchief (30_Conversaties/
+  // Mail, Takeout tot oktober) heeft geen dag in de naam en telt dus niet mee. Map pagina-index → aantal, in het geheugen per kaartbouw + dag.
+  let verkeerCache = null;   // { sleutel, tel }
+  function bronverkeer(k, dag) {
+    const sleutel = k.op + '|' + dag;
+    if (verkeerCache && verkeerCache.sleutel === sleutel) return verkeerCache.tel;
+    const van = herkomstDagMin(dag, 6), tel = new Map();
+    const telt = function (i) { const b = k.bestanden[i]; return b && !b.v && b.s === 'md' && !vandaagUit(b.p); };
+    k.bestanden.forEach(function (b) {
+      if (!b.v) return;
+      const m = BRONDATUM.exec(b.p.split('/').pop());
+      if (!m || m[0] < van || m[0] > dag) return;
+      const gezien = new Set();
+      for (const j of b.l) { if (gezien.has(j) || !telt(j)) continue; gezien.add(j); tel.set(j, (tel.get(j) || 0) + 1); }
+    });
+    verkeerCache = { sleutel: sleutel, tel: tel };
+    return tel;
+  }
   function vandaag(ctx) {
     const k = vers(false);
     if (!k) return { status: 503, j: { ok: false, fout: 'de kaart is nu niet te bouwen' } };
@@ -1094,15 +1123,8 @@ function maak(opt) {
       if (nNacht >= VANDAAG_NACHT_MAX || !telt(x.i) || (per.get(x.i) && per.get(x.i).redenen.some(function (r) { return r.soort === 'nacht'; }))) return;
       if (voeg(x.i, { soort: 'nacht', tekst: 'vannacht bijgewerkt' + (x.wat ? ': ' + x.wat : '') })) nNacht++;
     });
-    // 3. bronverkeer deze week
-    const van = herkomstDagMin(dag, 6), tel = new Map();
-    k.bestanden.forEach(function (b) {
-      if (!b.v) return;
-      const m = BRONDATUM.exec(b.p.split('/').pop());
-      if (!m || m[0] < van || m[0] > dag) return;
-      const gezien = new Set();
-      for (const j of b.l) { if (gezien.has(j) || !telt(j)) continue; gezien.add(j); tel.set(j, (tel.get(j) || 0) + 1); }
-    });
+    // 3. bronverkeer deze week (wv3751: dezelfde telling als de grootte op de kaart)
+    const tel = bronverkeer(k, dag);
     let nVerkeer = 0;
     Array.from(tel).filter(function (x) { return x[1] >= VANDAAG_VERKEER_MIN; })
       .sort(function (a, b) { return b[1] - a[1] || (k.bestanden[a[0]].p < k.bestanden[b[0]].p ? -1 : 1); })
