@@ -795,6 +795,37 @@ test('wv1983 inhaal maakt een draad niet bekend; gewone rondes en inhaal laten e
   assert.equal(mm.n8n('POST /mailman/inhaal', { postvak: 'gmail:onbekend' }).status, 400);
 });
 
+test('wv3872 GET /app/mailman/twijfel: per postvak de open Twijfel van gewone rondes (nieuwste eerst, met draad), zonder inhaal en zonder keuze', () => {
+  const { mm, dir } = nieuweKamer();
+  const SCHOOL = { factuur: 0.02, mens: 0.12, actie: 0.94, systeem: 0.04, waarde: 1.33 };
+  const oud = mail({ datum: klok - 5 * 3600000 }), nieuw = mail({ datum: klok - 3600000 }), gewoon = mail();
+  draai(mm, 'gmail:david', [oud, nieuw, gewoon], { jev: function (a) { return jevAntwoord(a.gmail_id === gewoon.id ? { systeem: 0.99, waarde: 0 } : SCHOOL); } });
+  inhaal(mm, [mail({ datum: klok - 4 * DAG })], { jev: function () { return jevAntwoord(SCHOOL); } });
+  let r = mm.app('GET /app/mailman/twijfel', {});
+  assert.equal(r.status, 200); assert.equal(r.j.ok, true); assert.equal(r.j.vangnet_dagen, 3);
+  let p = r.j.postvakken.find(function (q) { return q.id === 'gmail:david'; });
+  assert.deepEqual(p.rijen.map(function (x) { return x.id; }), [rij(mm, nieuw.id).id, rij(mm, oud.id).id], 'nieuwste eerst, geen inhaal, geen gewone mail');
+  assert.equal(p.open, 2); assert.equal(p.rijen[0].draad, nieuw.threadId); assert.equal(p.rijen[0].reden, 'score'); assert.equal(p.rijen[0].juist, null);
+  assert.equal(p.labels, false, 'schaduw zonder labelset 2: kiezen zet nog geen label');
+  assert.equal(typeof p.drempel_in, 'number'); assert.equal(typeof p.drempel_uit, 'number');
+  assert.deepEqual(r.j.postvakken.find(function (q) { return q.id === 'gmail:groenhouten'; }).rijen, []);
+  // Davids tik = de bestaande oordeel-route; daarna staat hij niet meer in het vlakje
+  assert.equal(mm.app('POST /app/mailman/oordeel', { id: rij(mm, nieuw.id).id, juist: 'factuur' }).status, 200);
+  p = mm.app('GET /app/mailman/twijfel', {}).j.postvakken.find(function (q) { return q.id === 'gmail:david'; });
+  assert.deepEqual(p.rijen.map(function (x) { return x.id; }), [rij(mm, oud.id).id]); assert.equal(p.open, 1);
+  // wat het vangnet al naar Intake zette, wacht niet meer op David
+  mm._db.prepare('UPDATE besluit SET vangnet_tijd = ? WHERE id = ?').run(new Date(klok).toISOString(), rij(mm, oud.id).id);
+  p = mm.app('GET /app/mailman/twijfel', {}).j.postvakken.find(function (q) { return q.id === 'gmail:david'; });
+  assert.deepEqual(p.rijen, []); assert.equal(p.open, 0);
+  // live met labelset 2: labels = true
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  assert.equal(mm.app('GET /app/mailman/twijfel', {}).j.postvakken.find(function (q) { return q.id === 'gmail:david'; }).labels, true);
+  // na 14 dagen weg (afzender en onderwerp zijn dan gewist)
+  klok += 15 * DAG;
+  assert.deepEqual(mm.app('GET /app/mailman/twijfel', {}).j.postvakken.find(function (q) { return q.id === 'gmail:david'; }).rijen, []);
+  klok -= 15 * DAG;
+});
+
 test('wv1983 Twijfel-lijst (gewoon én inhaal, nieuwste bovenaan) en "had naar … gemoeten" (juist)', () => {
   const { mm } = nieuweKamer();
   const SCHOOL = { factuur: 0.02, mens: 0.12, actie: 0.94, systeem: 0.04, waarde: 1.33 };

@@ -176,7 +176,7 @@ const RONDE_MS = 30 * 60 * 1000;
 const WACHTRIJ_MAX = 12, WACHTRIJ_MS = 3 * 3600 * 1000;   // AI/MailMan: hooguit 12 berichten per 3 uur (Mail Processor: elke 3 uur één run)
 const LABEL_ACTIES_MAX = 40;                               // berichten met labels per ronde; de rest de volgende ronde
 const LIVE_INHAAL_MS = 24 * 3600 * 1000;                   // bij live zetten: alleen mail die hooguit 24 uur vóór live_sinds binnenkwam (review B5 #3)
-const INHAAL_LOG = 300, TWIJFEL_LIJST = 150, TWIJFEL_BEOORDEELD = 50;   // wv1983: inhaalbesluiten en de Twijfel-lijst in de App
+const INHAAL_LOG = 300, TWIJFEL_LIJST = 150, TWIJFEL_BEOORDEELD = 50, TWIJFEL_VLAK = 60;   // wv3872: vlakje in Mail   // wv1983: inhaalbesluiten en de Twijfel-lijst in de App
 const INHAAL_PLAFOND = 1500;                               // wv1983: meer inhaalbesluiten dan dit alleen na een eigen ja van David (opdracht)
 const INHAAL_RUST_MS = 12 * 3600 * 1000;                   // wv1983: na een inhaalronde die "klaar" meldde weigert /mailman/inhaal 12 uur (wegwerp stopt vanzelf)
 const ID_RE = /^[0-9a-f]{12,24}$/;
@@ -2835,6 +2835,19 @@ function maak(o) {
     const van = new Date(nu() - NAMEN_MS).toISOString();
     return db.prepare(q.replace('{X}', '')).all(pv, van, TWIJFEL_LIJST).concat(db.prepare(q.replace('{X}', 'NOT')).all(pv, van, TWIJFEL_BEOORDEELD)).map(logRij);
   }
+  // wv3872 (MailMan in Mail, fase B; David 22-11-2026 "Bouw maar"): GET /app/mailman/twijfel voor het vlakje "Socev twijfelt" bovenaan in
+  // Mail. Alleen lezen en klein (niet het hele overzicht): per postvak de open Twijfel van de gewone rondes (14 dagen, nog geen keuze en nog
+  // niet door het vangnet naar Intake gezet, nieuwste eerst, ≤ TWIJFEL_VLAK) met de velden van het logboek plus de draad (om het gesprek in Mail te openen). Davids tik gaat via de bestaande
+  // POST /app/mailman/oordeel (juist), zoals in het Twijfel-paneel; het vangnet blijft ongewijzigd. labels = kiezen zet een label in Gmail.
+  function twijfelVlak() {
+    const van = new Date(nu() - NAMEN_MS).toISOString();
+    const w = "postvak = ? AND inhaal = 0 AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? AND juist IS NULL AND vangnet_tijd IS NULL";
+    return { ok: true, vangnet_dagen: VANGNET_MS / 86400000, postvakken: postvakken().map(function (p) {
+      return { id: p.id, naam: p.naam, stand: p.stand, labels: p.stand === 'live' && !!l2(p), drempel_in: p.drempel_in, drempel_uit: p.drempel_uit, open: db.prepare('SELECT count(*) n FROM besluit WHERE ' + w).get(p.id, van).n,
+        rijen: db.prepare('SELECT * FROM besluit WHERE ' + w + ' ORDER BY COALESCE(ontvangen, aangemaakt) DESC, id DESC LIMIT ?').all(p.id, van, TWIJFEL_VLAK)
+          .map(function (b) { return Object.assign(logRij(b), { draad: ID_RE.test(String(b.thread_id || '')) ? b.thread_id : null }); }) };
+    }) };
+  }
   function twijfelOpen(pv) {
     return db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? AND juist IS NULL").get(pv, new Date(nu() - NAMEN_MS).toISOString()).n;
   }
@@ -3390,6 +3403,7 @@ function maak(o) {
     const door = ctx && ctx.apparaat ? 'app:' + String(ctx.apparaat).slice(0, 40) : 'app';
     if (route === 'GET /app/mailman') return { status: 200, j: overzicht() };
     if (route === 'GET /app/mailman/verkoop') return { status: 200, j: verkoopTab() };   // wv1998: tab Verkoop in de Facturen-app (alleen lezen)
+    if (route === 'GET /app/mailman/twijfel') return { status: 200, j: twijfelVlak() };   // wv3872: vlakje "Socev twijfelt" in Mail (alleen lezen)
     const schrijft = route !== 'POST /app/mailman/toets';
     if (schrijft && typeof o.primair === 'function' && !o.primair()) return { status: 503, j: { ok: false, fout: 'niet de actieve kant' } };
     if (route === 'POST /app/mailman/toets') return toets(d);
