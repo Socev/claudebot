@@ -56,6 +56,8 @@ if [ "$(id -u)" = "0" ]; then
   wacht_pg_uit
   mkdir -p "$BASIS/17" "$BASIS/wal-archief" "$BASIS/log" "$SOCK" "$STOPMAP"
   chown pg:pgsock "$BASIS" "$BASIS/wal-archief" "$BASIS/log"; chmod 0750 "$BASIS" "$BASIS/wal-archief" "$BASIS/log"
+  # wv3869: archiefbestanden leesbaar voor groep pgsock (claude meet met pg_waldump); bestanden van vóór wv3869 waren pg:pg
+  find "$BASIS/wal-archief" -maxdepth 1 -type f -name '*.zst' ! -group pgsock -exec chgrp pgsock {} + 2>/dev/null || true
   chown pg:pg "$BASIS/17"; chmod 0700 "$BASIS/17"
   [ -d "$DATA" ] && { chown -R pg:pg "$DATA"; chmod 0700 "$DATA"; }
   # verse container: er draait hier nog geen postmaster; een achtergebleven pid-bestand (na SIGKILL) kan een PID noemen die nu van een

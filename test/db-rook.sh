@@ -8,7 +8,7 @@ rood=0; ok(){ if [ "$1" = 0 ]; then echo "  OK    $2"; else echo "  ROOD  $2"; r
 docker rm -f $C >/dev/null 2>&1 || true
 # wv3187: met een (wegwerp)replicatiewachtwoord, zodat init-reserve.sql de rol reserve en het slot r230 aanmaakt
 RW="rookreserve$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-docker run -d --name $C -e RW="$RW" --entrypoint /bin/bash "$IMAGE" -c 'mkdir -p /opt/data/bin /opt/data/.pg && printf "%s" "$RW" > /opt/data/.pg/reserve.wachtwoord && chmod 600 /opt/data/.pg/reserve.wachtwoord && chown -R claude:claude /opt/data/.pg && chown claude:claude /opt/data /opt/data/bin && /app/db/db-wacht.sh & exec sleep 600' >/dev/null
+docker run -d --name $C -e RW="$RW" --entrypoint /bin/bash "$IMAGE" -c 'mkdir -p /opt/data/bin /opt/data/.pg && printf "%s" "$RW" > /opt/data/.pg/reserve.wachtwoord && chmod 600 /opt/data/.pg/reserve.wachtwoord && chown -R claude:claude /opt/data/.pg && chown claude:claude /opt/data /opt/data/bin && mkdir -p /opt/data/pg/wal-archief && printf oud | zstd -q > /opt/data/pg/wal-archief/0000000100000000000000AA.zst && chown pg:pg /opt/data/pg/wal-archief/0000000100000000000000AA.zst && chmod 0640 /opt/data/pg/wal-archief/0000000100000000000000AA.zst && /app/db/db-wacht.sh & exec sleep 600' >/dev/null
 for i in $(seq 1 60); do docker exec $C grep -q "init-SQL toegepast" /opt/data/pg/db-wacht.log 2>/dev/null && break; sleep 1; done
 docker exec $C cat /opt/data/pg/db-wacht.log 2>/dev/null | tail -5
 docker exec $C grep -q "init-SQL toegepast" /opt/data/pg/db-wacht.log; ok $? "db-wacht: initdb, postgres op, init-SQL toegepast"
@@ -54,6 +54,16 @@ docker exec $C curl -fsS -m 3 http://127.0.0.1:8091/health; echo
 docker exec $C curl -fsS -m 3 http://127.0.0.1:8091/health >/dev/null 2>&1; ok $? "luik /health: postgres + PostgREST op"
 S=$(docker exec $C curl -s -o /dev/null -w '%{http_code}' -m 3 http://127.0.0.1:8091/rest/v1/); [ "$S" = 401 ]; ok $? "zonder sleutel 401 ($S)"
 S=$(docker exec -u claude $C sh -c 'curl -s -o /dev/null -w "%{http_code}" -m 5 -H "apikey: $(cat /tmp/k)" http://127.0.0.1:8091/rest/v1/'); [ "$S" = 200 ]; ok $? "met sleutel 200 via PostgREST ($S)"
+# wv3869: WAL-archief leesbaar voor claude (groep pgsock): een oud pg:pg-bestand krijgt bij de start groep pgsock (root-deel
+# db-wacht), en een vers gearchiveerd segment (pg_switch_wal als pgbaas) staat er niet leeg, 0640 pg:pgsock en leesbaar als claude
+P=$(docker exec $C stat -c '%U:%G %a' /opt/data/pg/wal-archief/0000000100000000000000AA.zst)
+[ "$P" = "pg:pgsock 640" ]; ok $? "wv3869: oud archiefbestand na de start pg:pgsock 640 ($P)"
+docker exec -u pg $C /usr/lib/postgresql/17/bin/psql -X -At -h /run/pg -U pgbaas -d postgres -c "create table rook_wal(x int); insert into rook_wal values (1); select pg_switch_wal(); drop table rook_wal" >/dev/null 2>&1
+for i in $(seq 1 30); do [ -n "$(docker exec $C find /opt/data/pg/wal-archief -maxdepth 1 -name '0*.zst' ! -name '*AA.zst' -size +0 2>/dev/null)" ] && break; sleep 1; done
+P=$(docker exec -u claude $C sh -c 'for f in $(find /opt/data/pg/wal-archief -maxdepth 1 -name "0*.zst" ! -name "*AA.zst"); do printf "%s " "$(stat -c "%U:%G %a" "$f")"; zstd -q -t "$f" && printf "leesbaar "; done')
+echo "  archief: $P"
+case "$P" in "pg:pgsock 640 leesbaar"*) r=0;; *) r=1;; esac; ok $r "wv3869: vers WAL-segment 0640 pg:pgsock, als claude leesbaar"
+docker run --rm -u claude -v "$PWD:/src:ro" --entrypoint bash "$IMAGE" /src/test/wal-archief.sh /app/db/wal-archief.sh; ok $? "wv3869: test/wal-archief.sh in het image als claude"
 [ $rood -gt 0 ] && { echo "-- pgrst.log"; docker exec $C tail -20 /tmp/pgrst.log; echo "-- db-wacht.log"; docker exec $C tail -30 /opt/data/pg/db-wacht.log; }
 docker rm -f $C >/dev/null 2>&1 || true
 echo "db-rook: $rood rood"; [ $rood = 0 ]
