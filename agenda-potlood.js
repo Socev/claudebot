@@ -15,6 +15,17 @@
  * Grenzen: alleen de Socev-kalender (het luik kent alleen die calendarId voor socev_*); verwijderen alleen eigen event_ids uit het register
  * met de potloodmarkering in de titel; plafond per dag en per ronde (de luikrem is 10 mutaties per rollend uur, ook voor Socev zelf);
  * geen titels of zinnen in register, log of info.
+ *
+ * v2 (wv3813, vervolg op besluit nr 486 "data, vertrektijden en voorbereiding"; Codex-ontwerpreview NO-GO → MOET 1, 2 en ZOU 1 verwerkt):
+ *  a. ❌ = klopt niet: het luik geeft bij een kaart het correlatie_id ("ag-" + execution-id van het voorstel) terug; dat bewaart het register
+ *     (kc). Een ❌ (Niet doen) schrijft in n8n-tabel socev_agenda_log een rij david_afgewezen met datzelfde correlatie_id. De ronde zoekt
+ *     gericht op de open kc's (alleen lezen, o.afwijzingen) en haalt het potlood dan weg + klopt_niet (komt nooit terug). Leesfout = overslaan.
+ *  b. blokken zonder kaart (eigen toestemmingsrij agenda-socev-blokken; zonder die rij op aan doet dit deel niets, ook niet opruimen):
+ *     "Vertrek naar <plaats>" vóór een afspraak met tijd in Davids eigen, Werk- of HAGRO-agenda op een bekende plaats (reistijd en plaatsen uit
+ *     agenda-narekenen.js; vanaf de vorige afspraak ≤ 3 uur ervoor met bekende plaats, anders thuis); "Voorbereiden" als hele-dag-item op de
+ *     werkdag vóór een HAGRO-afspraak, een afspraak met app-stuklink of een vergader-potlood met stuk onder 10_Zakelijk/. Werk/David-titels
+ *     nooit in een blok (MOET 1). Lezen via het lees-luik (o.agenda), morgen t/m +14 d, fail-closed. Weggehaald = komt nooit terug; niet meer
+ *     gewenst = weg (vervallen, mag later opnieuw). Zelfde plafond (5 nieuw per dag, 30 actief) en rem (4 schrijfacties per ronde).
  */
 const fs = require('fs');
 const path = require('path');
@@ -25,14 +36,23 @@ const MARK = '✏️ ';
 const PROEF = 'SOCEV PROEF ';
 // mutatiesRonde 4: de luikrem (10 per rollend uur) geldt ook voor Davids eigen agendakaarten; zo houdt hij er altijd 6 over (gemeten 21-11:
 // een proefreeks vulde de rem in 20 minuten)
-const STANDAARD = { plafondDag: 5, mutatiesRonde: 4, maxActief: 30, dagen: 45, kaartPogingen: 2 };
+const STANDAARD = { plafondDag: 5, mutatiesRonde: 4, maxActief: 30, dagen: 45, kaartPogingen: 2, blokDagen: 14, minReis: 15, vorigeMaxMin: 180, thuis: 'blaricum' };
+const BLOK_KAL = ['David', 'Werk', 'HAGRO'];   // Gezin niet: kan voor een gezinslid zijn
+const VERGADER = /(vergader|overleg|\balv\b|bestuur|hagro|beraad|\bmt\b|maatschap)/i;
+const WD = ['zo', 'ma', 'di', 'wo', 'do', 'vr', 'za'];
+const CORR = /^ag-\d{1,15}$/;
 // Grondwet, alinea TOESTEMMINGEN: alleen het register telt. Zonder rij agenda-socev-potlood op status aan doet de ronde niets
 // (ook niet opruimen); onleesbaar = uit. Proefmodus (alleen SOCEV PROEF in de Socev-kalender, proefkaart) heeft de rij niet nodig.
 const REGISTER_RIJ = 'agenda-socev-potlood';
-function registerAan(pad) {
-  try { const r = JSON.parse(fs.readFileSync(pad, 'utf8')); return !!(r && Array.isArray(r.rijen) && r.rijen.find((x) => x && x.id === REGISTER_RIJ && x.status === 'aan')); }
+const BLOK_RIJ = 'agenda-socev-blokken';   // wv3813: vertrek- en voorbereidblokken (eigen rij, eigen Ja)
+function registerAan(pad, rij) {
+  rij = rij || REGISTER_RIJ;
+  try { const r = JSON.parse(fs.readFileSync(pad, 'utf8')); return !!(r && Array.isArray(r.rijen) && r.rijen.find((x) => x && x.id === rij && x.status === 'aan')); }
   catch (e) { return false; }
 }
+// reistijd en plaatsen: dezelfde rekenkern als het narekenen van een agendavoorstel (wv3704); geen tweede bron. Ontbreekt hij: geen blokken.
+let N = null;
+try { N = require(path.join(__dirname, 'agenda-narekenen.js')); } catch (e) { N = null; }
 
 function dagAms(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: TZ }); }
 function plusDagen(s, n) { const d = new Date(s + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
@@ -98,6 +118,99 @@ function verzoeken(k, proef) {
   return { potlood, kaart };
 }
 
+// ── wv3813: blokken ──────────────────────────────────────────────────────────────────────────────────────────
+function klokAms(ms) { return new Date(ms).toLocaleTimeString('nl-NL', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); }
+function wd(dag) { return WD[new Date(dag + 'T12:00:00Z').getUTCDay()]; }
+function vorigeWerkdag(dag) { let d = plusDagen(dag, -1); while (new Date(d + 'T12:00:00Z').getUTCDay() % 6 === 0) d = plusDagen(d, -1); return d; }
+function hoofd(p) { return String(p).replace(/(^|\s)\S/g, (c) => c.toUpperCase()); }
+// eerste app-stuklink in een omschrijving, alleen als hij weer een geldige stukLink oplevert (gecontroleerde verwijzing, MOET 1)
+function linkUit(t) {
+  const m = /https:\/\/app\.socev\.dev\/([^\s"'<>)\]]+)/.exec(String(t || ''));
+  if (!m) return null;
+  let pad;
+  try { pad = m[1].split('/').map(decodeURIComponent).join('/'); } catch (e) { return null; }
+  return stukLink(pad);
+}
+
+/* afspraken(events, van, tot, o) → [{ kal, a, b, dag, begin, plaats, link, titel }] — puur; alleen met tijd, David/Werk/HAGRO, geen eigen ✏️. */
+function afspraken(events, van, tot, o) {
+  const uit = [];
+  for (const e of Array.isArray(events) ? events : []) {
+    if (!e || e.status === 'cancelled' || BLOK_KAL.indexOf(e.kalender) < 0 || e.hele_dag === true) continue;
+    if (typeof e.start !== 'string' || e.start.indexOf('T') < 0) continue;
+    const t = String(e.titel || '');
+    if (t.indexOf(MARK) >= 0) continue;
+    const a = Date.parse(e.start), b = Date.parse(e.einde || e.start);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+    const dag = dagAms(a);
+    if (dag < van || dag > tot) continue;
+    uit.push({ kal: e.kalender, a, b: b > a ? b : a, dag, begin: klokAms(a), plaats: N ? N.plaatsVan(e.locatie || '') : null, link: linkUit(e.omschrijving), titel: kort(t, 80) });
+  }
+  return uit.sort((x, y) => x.a - y.a);
+}
+
+/*
+ * blokken(afs, potloden, vandaag, o) → Map(sleutel → { t, dag, adag, start, eind, titel, omschrijving }) — puur.
+ * potloden: kandidaten() van de actieve potloden (onderwerp, begin, stuk_pad, soort).
+ */
+function blokken(afs, potloden, vandaag, o) {
+  o = Object.assign({}, STANDAARD, o || {});
+  const pre = (o.proef ? PROEF : '') + MARK;
+  const van = plusDagen(vandaag, 1), tot = plusDagen(vandaag, o.blokDagen);
+  const uit = new Map();
+  const weg = 'Klopt niet: haal dit blok hier weg; dan komt het niet terug.';
+  // vertrek
+  for (const x of N ? afs : []) {
+    if (!x.plaats || x.dag < van || x.dag > tot) continue;
+    const vorige = afs.filter((y) => y !== x && y.dag === x.dag && y.b <= x.a && x.a - y.b <= o.vorigeMaxMin * 60000 && y.plaats).sort((p, q) => q.b - p.b)[0];
+    const vanaf = vorige ? vorige.plaats : o.thuis;
+    if (!vanaf || vanaf === x.plaats) continue;
+    const rm = N.reisMin(vanaf, x.plaats);
+    if (!(rm >= o.minReis)) continue;
+    const v = Math.floor((x.a - rm * 60000) / 300000) * 300000;
+    if (dagAms(v) !== x.dag) continue;
+    const sl = sha('v|' + x.dag + '|' + x.begin + '|' + x.plaats + '|' + vanaf + '|' + rm);
+    uit.set(sl, { t: 'v', dag: x.dag, adag: x.dag, start: x.dag + 'T' + klokAms(v), eind: x.dag + 'T' + x.begin,
+      titel: kort(pre + 'Vertrek naar ' + hoofd(x.plaats) + ' (± ' + rm + ' min)', 200),
+      omschrijving: ['Potlood van Socev: vertrektijd voor je afspraak van ' + x.begin + ' in ' + hoofd(x.plaats) + '.',
+        'Reistijd geschat (hemelsbreed, zonder verkeer) vanaf ' + (vorige ? 'je vorige afspraak in ' + hoofd(vanaf) : 'thuis (' + hoofd(vanaf) + ')') + '.', weg].join('\n') });
+  }
+  // voorbereiden: HAGRO-afspraak, afspraak met app-stuklink, of vergader-potlood met stuk onder 10_Zakelijk/
+  const voor = [];
+  for (const x of afs) {
+    if (x.kal === 'HAGRO') voor.push({ adag: x.dag, begin: x.begin, titel: x.titel, link: x.link });
+    else if (x.link) voor.push({ adag: x.dag, begin: x.begin, titel: null, link: x.link });   // MOET 1: geen David/Werk-titel in een blok
+  }
+  for (const k of Array.isArray(potloden) ? potloden : []) {
+    if (!k || k.soort !== 'afspraak' || !k.begin || typeof k.stuk_pad !== 'string' || k.stuk_pad.indexOf('10_Zakelijk/') !== 0 || !VERGADER.test(k.onderwerp || '')) continue;
+    voor.push({ adag: k.dag, begin: k.begin, titel: kort(k.onderwerp, 80), link: stukLink(k.stuk_pad) });
+  }
+  for (const x of voor) {
+    if (x.adag < van || x.adag > tot) continue;
+    const dag = vorigeWerkdag(x.adag);
+    if (dag < vandaag) continue;
+    const sl = sha('b|' + x.adag + '|' + x.begin);
+    if (uit.has(sl)) { const y = uit.get(sl); if (!y.link && x.link) { y.link = x.link; } continue; }
+    const wanneer = wd(x.adag) + ' ' + x.adag.slice(8, 10) + '-' + x.adag.slice(5, 7) + ' ' + x.begin;
+    uit.set(sl, { t: 'b', dag, adag: x.adag, start: dag, eind: plusDagen(dag, 1), link: x.link,
+      titel: kort(pre + 'Voorbereiden: ' + (x.titel ? x.titel + ' (' + wd(x.adag) + ' ' + x.begin + ')' : 'afspraak van ' + wanneer), 200), wanneer });
+  }
+  for (const y of uit.values()) {
+    if (y.t !== 'b') continue;
+    y.omschrijving = ['Potlood van Socev: voorbereiden voor je afspraak van ' + y.wanneer + '.'].concat(y.link ? ['Stuk: ' + y.link] : [], [weg]).join('\n');
+    delete y.wanneer; delete y.link;
+  }
+  return uit;
+}
+
+/* afwijsFilters(ids) → n8n-filters (type or, ≤ 20 per filter) voor socev_agenda_log op correlatie_id (ZOU 1: gericht zoeken). */
+function afwijsFilters(ids) {
+  const u = Array.from(new Set((Array.isArray(ids) ? ids : []).filter((c) => CORR.test(String(c)))));
+  const f = [];
+  for (let i = 0; i < u.length; i += 20) f.push({ type: 'or', filters: u.slice(i, i + 20).map((c) => ({ columnName: 'correlatie_id', condition: 'eq', value: c })) });
+  return f;
+}
+
 function leesStaat(p) {
   try { const s = JSON.parse(fs.readFileSync(p, 'utf8')); if (s && typeof s === 'object' && s.items && typeof s.items === 'object') return s; } catch (e) { /* nieuw */ }
   return { versie: 1, items: {}, dagen: {} };
@@ -134,7 +247,7 @@ function maak(o) {
     const s = leesStaat(o.staatPad);
     s.dagen = s.dagen && typeof s.dagen === 'object' ? s.dagen : {};
     for (const d of Object.keys(s.dagen)) if (d < plusDagen(vandaag, -14)) delete s.dagen[d];
-    const tel = { nieuw: 0, weg: 0, overgenomen: 0, verlopen: 0, kaart: 0, kaart_fout: 0, fout: 0, mutaties: 0 };
+    const tel = { nieuw: 0, weg: 0, overgenomen: 0, verlopen: 0, kaart: 0, kaart_fout: 0, fout: 0, mutaties: 0, afgewezen: 0, blok_nieuw: 0, blok_weg: 0, blok_vervallen: 0 };
     const uit = (x) => { laatste = Object.assign({ op: new Date(nu).toISOString() }, x); log(laatste); return laatste; };
 
     // 1. lezen, fail-closed
@@ -146,6 +259,36 @@ function maak(o) {
     const inKal = new Map(lijst.events.map((e) => [String(e.event_id), e]));
     const perId = new Map(g.regels.map((r) => [Number(r.id), r]));
     const magMuteren = () => tel.mutaties < o.mutatiesRonde;
+    const regPad = o.registerPad || '/opt/data/mk-scripts/toestemmingen.json';
+    // wv3813: Davids agenda (alleen lezen) voor de blokken; fail-closed: zonder geslaagde lezing geen enkele blokactie
+    let afs = null;
+    const blokAan = !!(N && typeof o.agenda === 'function' && (o.proef || registerAan(regPad, BLOK_RIJ)));
+    if (blokAan) {
+      let a = null;
+      try { a = await o.agenda({ actie: 'agenda', start: vandaag, end: plusDagen(vandaag, o.blokDagen + 1), met_hagro: true }); } catch (e) { a = null; }
+      if (a && Array.isArray(a.events) && !a.fout && !(Array.isArray(a.fouten) && a.fouten.length)) afs = afspraken(a.events, plusDagen(vandaag, 1), plusDagen(vandaag, o.blokDagen), o);
+      else tel.agenda_fout = 1;
+    }
+
+    // 1b. wv3813: ❌ op de kaart = klopt niet (gericht op de open correlatie-id's; leesfout = overslaan, geen conclusie)
+    const open = Object.values(s.items).filter((it) => it.s === 'potlood' && Array.isArray(it.kc) && it.kc.length);
+    if (open.length && typeof o.afwijzingen === 'function') {
+      let set = null;
+      try { set = await o.afwijzingen(afwijsFilters([].concat.apply([], open.map((it) => it.kc)))); } catch (e) { set = null; }
+      if (!(set instanceof Set)) tel.afwijs_fout = 1;
+      else for (const it of open) {
+        if (!it.kc.some((c) => set.has(c))) continue;
+        const ev = inKal.get(String(it.ev));
+        if (!ev || String(ev.titel || '').indexOf(mark) !== 0) continue;   // niet meer in de kalender: het opruimen hieronder doet weg + klopt_niet
+        if (!magMuteren()) break;
+        tel.mutaties++;
+        let a = null;
+        try { a = await o.luik({ actie: 'socev_verwijderen', event_id: String(it.ev), aanleiding: 'potlood wv3813: David koos Niet doen (klopt niet)' }); } catch (e) { a = null; }
+        if (!a || a.ok !== true) { tel.fout++; continue; }
+        it.s = 'weg'; it.r = 'afgewezen'; it.op = vandaag; tel.afgewezen++;
+        for (const id of it.ids || []) { try { await o.oordeel(id, 'klopt_niet'); } catch (e) { tel.fout++; } }
+      }
+    }
 
     // 2. opruimen
     for (const [sl, it] of Object.entries(s.items)) {
@@ -178,13 +321,13 @@ function maak(o) {
           tel.mutaties++; it.kp = (it.kp || 0) + 1;
           let a = null;
           try { a = await o.luik(verzoeken(k, o.proef).kaart); } catch (e) { a = null; }
-          if (a && a.knop_verstuurd === true) { it.kaart = true; tel.kaart++; } else tel.kaart_fout++;
+          if (a && a.knop_verstuurd === true) { it.kaart = true; tel.kaart++; if (CORR.test(String(a.correlatie_id || ''))) it.kc = (it.kc || []).concat([String(a.correlatie_id)]); } else tel.kaart_fout++;
         }
       }
     }
 
     // 3. nieuw
-    const actief = Object.values(s.items).filter((x) => x.s === 'potlood').length;
+    const actief = Object.values(s.items).filter((x) => x.s === 'potlood' || x.s === 'blok').length;
     let ruimte = Math.min(o.plafondDag - (s.dagen[vandaag] || 0), o.maxActief - actief);
     for (const k of kandidaten(g.regels, vandaag, o)) {
       if (ruimte <= 0 || tel.mutaties + 2 > o.mutatiesRonde) break;
@@ -202,20 +345,63 @@ function maak(o) {
       tel.mutaties++;
       let b = null;
       try { b = await o.luik(v.kaart); } catch (e) { b = null; }
-      if (b && b.knop_verstuurd === true) { s.items[k.sleutel].kaart = true; tel.kaart++; } else tel.kaart_fout++;
+      if (b && b.knop_verstuurd === true) {
+        s.items[k.sleutel].kaart = true; tel.kaart++;
+        if (CORR.test(String(b.correlatie_id || ''))) s.items[k.sleutel].kc = [String(b.correlatie_id)];   // wv3813: voor ❌ = klopt niet
+      } else tel.kaart_fout++;
+    }
+
+    // 4. wv3813: blokken (alleen na een geslaagde agendalezing)
+    if (afs) {
+      const pot = [];
+      for (const it of Object.values(s.items)) {
+        if (it.s !== 'potlood') continue;
+        const rs = (it.ids || []).map((id) => perId.get(Number(id))).filter(Boolean);
+        const k = rs.length ? kandidaten(rs.map((r) => Object.assign({}, r, { nu_in: null })), plusDagen(it.dag, -1), { dagen: 1 })[0] : null;
+        if (k) pot.push(k);
+      }
+      const gewenst = blokken(afs, pot, vandaag, o);
+      for (const [sl, it] of Object.entries(s.items)) {
+        if (it.s !== 'blok') continue;
+        if (it.adag < vandaag || it.dag < vandaag) { it.s = 'verlopen'; it.op = vandaag; tel.verlopen++; continue; }
+        if (it.adag === vandaag) continue;                         // buiten het venster van de wens: laten staan
+        const ev = inKal.get(String(it.ev));
+        if (!ev) { it.s = 'weg'; it.op = vandaag; tel.blok_weg++; continue; }   // David haalde het weg: komt nooit terug
+        if (gewenst.has(sl) || !magMuteren() || String(ev.titel || '').indexOf(mark) !== 0) continue;
+        tel.mutaties++;
+        let a = null;
+        try { a = await o.luik({ actie: 'socev_verwijderen', event_id: String(it.ev), aanleiding: 'potlood wv3813: afspraak weg of verplaatst' }); } catch (e) { a = null; }
+        if (a && a.ok === true) { it.s = 'vervallen'; it.op = vandaag; tel.blok_vervallen++; } else tel.fout++;
+      }
+      const lijstB = Array.from(gewenst.entries()).sort((x, y) => (x[1].start < y[1].start ? -1 : x[1].start > y[1].start ? 1 : 0));
+      const actiefB = Object.values(s.items).filter((x) => x.s === 'potlood' || x.s === 'blok').length;
+      ruimte = Math.min(o.plafondDag - (s.dagen[vandaag] || 0), o.maxActief - actiefB);
+      for (const [sl, b] of lijstB) {
+        if (ruimte <= 0 || !magMuteren()) break;
+        if (s.items[sl] && s.items[sl].s !== 'vervallen') continue;   // staat al, of weggehaald/verlopen: nooit opnieuw
+        tel.mutaties++;
+        let a = null;
+        try { a = await o.luik({ actie: 'socev_plaatsen', titel: b.titel, start: b.start, eind: b.eind, omschrijving: b.omschrijving.slice(0, 800),
+          aanleiding: 'potlood wv3813 (' + (b.t === 'v' ? 'vertrek' : 'voorbereiden') + ')', sta_overlap_toe: true }); } catch (e) { a = null; }
+        if (!a || a.ok !== true || !a.event_id || a.dubbel === true) { tel.fout++; continue; }
+        s.items[sl] = { s: 'blok', t: b.t, ev: String(a.event_id), dag: b.dag, adag: b.adag, op: vandaag };
+        s.dagen[vandaag] = (s.dagen[vandaag] || 0) + 1;
+        ruimte--; tel.blok_nieuw++;
+        schrijfStaat(o.staatPad, s);
+      }
     }
     s.laatste = { op: new Date(nu).toISOString(), tel };
     schrijfStaat(o.staatPad, s);
-    const st = { potlood: 0, weg: 0, overgenomen: 0, verlopen: 0 };
-    for (const x of Object.values(s.items)) if (st[x.s] !== undefined) st[x.s]++;
+    const st = { potlood: 0, weg: 0, overgenomen: 0, verlopen: 0, blok: 0, vervallen: 0, afgewezen: 0 };
+    for (const x of Object.values(s.items)) { if (st[x.s] !== undefined) st[x.s]++; if (x.r === 'afgewezen') st.afgewezen++; }
     return uit(Object.assign({ ok: tel.fout === 0, vandaag: s.dagen[vandaag] || 0, plafond: o.plafondDag }, tel, { stand: st }));
   }
   function vandaagVol(nu) {
     const s = leesStaat(o.staatPad);
     return ((s.dagen || {})[dagAms(nu)] || 0) >= o.plafondDag;
   }
-  function info() { return Object.assign({ aan: true, proef: !!o.proef }, laatste ? { laatste } : {}); }
+  function info() { return Object.assign({ aan: true, proef: !!o.proef, blokken: !!(N && typeof o.agenda === 'function' && (o.proef || registerAan(o.registerPad || '/opt/data/mk-scripts/toestemmingen.json', BLOK_RIJ))) }, laatste ? { laatste } : {}); }
   return { ronde, info, vandaagVol };
 }
 
-module.exports = { maak, kandidaten, verzoeken, stukLink, registerAan, MARK, PROEF, STANDAARD, REGISTER_RIJ };
+module.exports = { maak, kandidaten, verzoeken, stukLink, registerAan, afspraken, blokken, afwijsFilters, linkUit, MARK, PROEF, STANDAARD, REGISTER_RIJ, BLOK_RIJ };

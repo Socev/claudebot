@@ -3,6 +3,9 @@
 #   Nieuw (samenvoegen, filters, bron verplicht), nooit dubbel, plafond per dag en per ronde, weggehaald = klopt niet en komt niet
 #   terug, overgenomen alleen bij nu_in agenda (review MOET 2), fail-closed, kaart-herkansing, verlopen, proefmodus, grenzen.
 # Kruisproef: AP_MOD=<kopie zonder registercontrole> bash test/agenda-potlood.sh moet rood zijn.
+# wv3813 (v2): ❌ = klopt niet via correlatie_id (verzonnen logrij), vertrek- en voorbereidblokken uit een nep-agenda (verzonnen afspraken):
+#   juiste tijd, geen dubbel, weg als de afspraak weg/verplaatst is, weggehaald komt niet terug, geen David/Werk-titel in een blok,
+#   fail-closed, eigen registerrij, gedeeld plafond. Kruisproef: AP_MOD=<kopie zonder ❌-stap of zonder blokregister> → rood.
 set -u
 HIER="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -24,7 +27,7 @@ function nepLuik() {
     if (b.actie === 'socev_lijst') { if (L.faalLijst) throw new Error('weg'); return { ok: true, events: Array.from(L.events.values()) }; }
     if (b.actie === 'socev_plaatsen') { const id = 'ev' + (++L.n); L.events.set(id, { event_id: id, titel: b.titel, start: b.start }); return { ok: true, event_id: id }; }
     if (b.actie === 'socev_verwijderen') { const had = L.events.delete(b.event_id); return { ok: had }; }
-    if (b.actie === 'david_plaatsen') { if (L.faalKaart > 0) { L.faalKaart--; return { ok: false, knop_verstuurd: false, fout: 'kaart kon niet' }; } return { ok: false, oordeel: 'oranje', kaart: true, knop_verstuurd: true, knop_in: 'app' }; }
+    if (b.actie === 'david_plaatsen') { if (L.faalKaart > 0) { L.faalKaart--; return { ok: false, knop_verstuurd: false, fout: 'kaart kon niet' }; } L.kn = (L.kn || 900) + 1; return { ok: false, oordeel: 'oranje', kaart: true, knop_verstuurd: true, knop_in: 'app', correlatie_id: 'ag-' + L.kn }; }
     return { ok: false };
   };
   return L;
@@ -148,6 +151,138 @@ fs.writeFileSync(REG, JSON.stringify({ rijen: [{ id: 'agenda-socev-potlood', sta
   R = [r(1, '2026-11-25', { nu_in: 'agenda' })]; m = maak(() => R, L, { naam: 'mark' });
   u = await m.ronde({ nu: NU + 24 * UUR });
   toets('zonder markering nooit verwijderen', acties(L, 'socev_verwijderen').length === 0, u);
+
+  // ── wv3813: ❌ = klopt niet ──
+  const REG2 = path.join(TMP, 'register2.json');
+  fs.writeFileSync(REG2, JSON.stringify({ rijen: [{ id: 'agenda-socev-potlood', status: 'aan' }, { id: 'agenda-socev-blokken', status: 'aan' }] }));
+  {
+    const L = nepLuik(); let afw = new Set(); let gevraagd = [];
+    const RR = [r(1, '2026-11-25'), r(2, '2026-11-26')];
+    const m = maak(() => RR, L, { naam: 'afw', mutatiesRonde: 6, afwijzingen: async (f) => { gevraagd.push(f); if (afw === 'faal') throw new Error('n8n weg'); return afw; } });
+    let u = await m.ronde({ nu: NU });
+    const st = JSON.parse(fs.readFileSync(path.join(TMP, 'afw.json'), 'utf8'));
+    const kcs = Object.values(st.items).map((x) => (x.kc || [])[0]);
+    toets('❌: correlatie_id van de kaart in het register', kcs.length === 2 && kcs.every((c) => /^ag-\d+$/.test(c)), st.items);
+    afw = 'faal'; u = await m.ronde({ nu: NU + UUR });
+    toets('❌: leesfout → niets weg, afwijs_fout', u.afwijs_fout === 1 && acties(L, 'socev_verwijderen').length === 0 && u.stand.potlood === 2, u);
+    const ev2 = Object.values(st.items).find((x) => x.ids[0] === 2);
+    afw = new Set([ev2.kc[0], 'ag-12345']); gevraagd = [];
+    u = await m.ronde({ nu: NU + 2 * UUR });
+    toets('❌: gericht gezocht op de open correlatie-id\'s', gevraagd.length === 1 && gevraagd[0][0].type === 'or' && gevraagd[0][0].filters.length === 2 && gevraagd[0][0].filters.every((x) => x.columnName === 'correlatie_id'), gevraagd);
+    toets('❌: potlood weg + klopt_niet', u.afgewezen === 1 && acties(L, 'socev_verwijderen').length === 1 && acties(L, 'socev_verwijderen')[0].event_id === ev2.ev
+      && JSON.stringify(m.oordelen) === JSON.stringify([[2, 'klopt_niet']]) && u.stand.afgewezen === 1, [u, m.oordelen]);
+    u = await m.ronde({ nu: NU + 24 * UUR });
+    toets('❌: komt niet terug, geen dubbel klopt_niet', u.nieuw === 0 && m.oordelen.length === 1 && acties(L, 'socev_verwijderen').length === 1 && u.stand.potlood === 1, [u, m.oordelen]);
+    toets('❌: zonder afwijzing blijft het andere potlood', Array.from(L.events.values()).some((e) => /Proefoverleg 1$/.test(e.titel)));
+    // filters: hooguit 20 per filter, alleen geldige id's
+    const F = M.afwijsFilters(Array.from({ length: 45 }, (_, i) => 'ag-' + i).concat(['x', 'ag-1']));
+    toets('❌: filters per 20, dubbel en ongeldig eruit', F.length === 3 && F[0].filters.length === 20 && F[2].filters.length === 5, F.map((f) => f.filters.length));
+  }
+
+  // ── wv3813: blokken ──
+  const N = require(path.join(process.argv[2], 'agenda-narekenen.js'));
+  const e = (id, kal, start, eind, extra) => Object.assign({ event_id: id, kalender: kal, start, einde: eind, hele_dag: false, status: 'confirmed', titel: 'Geheim ' + id, locatie: '', omschrijving: '' }, extra || {});
+  // verzonnen afspraken (geen echte agenda); NU = ma 23-11-2026
+  const AG = () => [
+    e('h1', 'HAGRO', '2026-11-25T19:30:00+01:00', '2026-11-25T21:00:00+01:00', { titel: 'HAGRO proefvergadering', locatie: 'Proefplein 1, Amersfoort' }),
+    e('w0', 'Werk', '2026-11-27T08:00:00+01:00', '2026-11-27T09:00:00+01:00', { locatie: 'Proefweg 2, Leusden' }),
+    e('w1', 'Werk', '2026-11-27T10:00:00+01:00', '2026-11-27T11:00:00+01:00', { titel: 'Geheim werkoverleg Jansen', locatie: 'Utrecht' }),
+    e('d1', 'David', '2026-11-30T14:00:00+01:00', '2026-11-30T15:00:00+01:00', { titel: 'Geheim met stuk', omschrijving: 'Stuk: https://app.socev.dev/10_Zakelijk/Proef/stuk%20a.md' }),
+    e('g1', 'Gezin', '2026-11-26T10:00:00+01:00', '2026-11-26T11:00:00+01:00', { locatie: 'Rotterdam' }),
+    e('d2', 'David', '2026-11-26T10:00:00+01:00', '2026-11-26T11:00:00+01:00', { locatie: 'Blaricum' }),
+    e('d3', 'David', '2026-11-26T13:00:00+01:00', '2026-11-26T14:00:00+01:00', { locatie: 'Kerkstraat 5' }),
+    e('d4', 'David', '2026-12-20T13:00:00+01:00', '2026-12-20T14:00:00+01:00', { locatie: 'Utrecht' }),
+    e('d5', 'David', '2026-11-26T16:00:00+01:00', '2026-11-26T17:00:00+01:00', { locatie: 'Utrecht', status: 'cancelled' }),
+    e('d6', 'David', '2026-11-28', '2026-11-29', { hele_dag: true, locatie: 'Utrecht' }),
+  ];
+  const blokAct = (L, a) => acties(L, a).filter((x) => /wv3813/.test(x.aanleiding || ''));
+  {
+    let agenda = AG(); let faal = false; let vraag = [];
+    const L = nepLuik();
+    const m = maak(() => [], L, { naam: 'blok', registerPad: REG2, mutatiesRonde: 10, plafondDag: 10, agenda: async (b) => { vraag.push(b); if (faal) throw new Error('x'); return { events: agenda }; } });
+    let u = await m.ronde({ nu: NU });
+    const pl = blokAct(L, 'socev_plaatsen');
+    const rmA = N.reisMin('blaricum', 'amersfoort'), rmU = N.reisMin('leusden', 'utrecht');
+    const hhmm = (min) => String(Math.floor(min / 60)).padStart(2, '0') + ':' + String(min % 60).padStart(2, '0');
+    const vA = Math.floor((19 * 60 + 30 - rmA) / 5) * 5, vU = Math.floor((10 * 60 - rmU) / 5) * 5;
+    toets('blok: agenda gelezen morgen t/m +14 d met HAGRO', vraag.length === 1 && vraag[0].actie === 'agenda' && vraag[0].met_hagro === true && vraag[0].start === '2026-11-23', vraag);
+    toets('blok: 5 blokken (3 vertrek, 2 voorbereiden)', u.blok_nieuw === 5 && pl.length === 5 && pl.some((x) => x.titel === '✏️ Vertrek naar Leusden (± ' + N.reisMin('blaricum', 'leusden') + ' min)' && x.eind === '2026-11-27T08:00'), pl.map((x) => x.titel));
+    toets('vertrek Amersfoort vanaf thuis op de juiste tijd', pl.some((x) => x.titel === '✏️ Vertrek naar Amersfoort (± ' + rmA + ' min)' && x.start === '2026-11-25T' + hhmm(vA) && x.eind === '2026-11-25T19:30' && /thuis \(Blaricum\)/.test(x.omschrijving)), [rmA, pl]);
+    toets('vertrek Utrecht vanaf de vorige afspraak (Leusden)', pl.some((x) => x.titel === '✏️ Vertrek naar Utrecht (± ' + rmU + ' min)' && x.start === '2026-11-27T' + hhmm(vU) && /vorige afspraak in Leusden/.test(x.omschrijving)), [rmU, pl]);
+    toets('voorbereiden HAGRO: hele dag op de werkdag ervoor, met titel', pl.some((x) => x.start === '2026-11-24' && x.eind === '2026-11-25' && x.titel === '✏️ Voorbereiden: HAGRO proefvergadering (wo 19:30)'), pl);
+    toets('voorbereiden met stuk: vrijdag vóór maandag, neutrale titel, stuklink', pl.some((x) => x.start === '2026-11-27' && x.titel === '✏️ Voorbereiden: afspraak van ma 30-11 14:00' && /\nStuk: https:\/\/app\.socev\.dev\/10_Zakelijk\/Proef\/stuk%20a\.md\n/.test(x.omschrijving)), pl);
+    toets('MOET 1: geen David/Werk-titel in een blok', L.log.every((x) => !/Geheim/.test(JSON.stringify(x))), pl);
+    toets('geen blok: Gezin, thuisplaats, onbekende plaats, > 14 d, geannuleerd, hele dag', !pl.some((x) => /Rotterdam|Blaricum\b.*min|2026-12-20|2026-11-26T1[0-6]|2026-11-28/.test(x.titel + x.start)), pl);
+    toets('blokken zonder kaart, nooit deelnemers', acties(L, 'david_plaatsen').length === 0 && L.log.every((x) => x.attendees === undefined && x.recurrence === undefined));
+    u = await m.ronde({ nu: NU + UUR });
+    toets('blok: tweede ronde niets dubbel', u.blok_nieuw === 0 && blokAct(L, 'socev_plaatsen').length === 5 && blokAct(L, 'socev_verwijderen').length === 0, u);
+    // afspraak weg → vertrekblok weg
+    agenda = AG().filter((x) => x.event_id !== 'w1');
+    u = await m.ronde({ nu: NU + 2 * UUR });
+    const wegU = blokAct(L, 'socev_verwijderen');
+    toets('afspraak weg → vertrekblok weg (vervallen)', u.blok_vervallen === 1 && wegU.length === 1 && !Array.from(L.events.values()).some((x) => /Utrecht/.test(x.titel)), u);
+    // afspraak verplaatst → oud blok weg, nieuw blok
+    agenda = AG().filter((x) => x.event_id !== 'w1').map((x) => (x.event_id === 'h1' ? Object.assign({}, x, { start: '2026-11-25T20:00:00+01:00' }) : x));
+    u = await m.ronde({ nu: NU + 3 * UUR });
+    const ams = Array.from(L.events.values()).filter((x) => /Amersfoort/.test(x.titel));
+    toets('afspraak verplaatst → één vertrekblok op de nieuwe tijd', ams.length === 1 && ams[0].start === '2026-11-25T' + hhmm(Math.floor((20 * 60 - rmA) / 5) * 5), [u, ams]);
+    // David haalt een blok weg → komt niet terug
+    const vb = Array.from(L.events.values()).find((x) => /afspraak van ma 30-11/.test(x.titel));
+    L.events.delete(vb.event_id);
+    u = await m.ronde({ nu: NU + 4 * UUR });
+    const u2 = await m.ronde({ nu: NU + 5 * UUR });
+    toets('weggehaald blok → weg, komt niet terug', u.blok_weg === 1 && u2.blok_nieuw === 0 && !Array.from(L.events.values()).some((x) => /afspraak van ma 30-11/.test(x.titel)), [u, u2]);
+    // fail-closed: agenda onleesbaar of met fouten → geen blokactie
+    const voorN = blokAct(L, 'socev_plaatsen').length + blokAct(L, 'socev_verwijderen').length;
+    faal = true; agenda = [];
+    u = await m.ronde({ nu: NU + 6 * UUR });
+    toets('agenda onleesbaar → geen blokactie', u.agenda_fout === 1 && blokAct(L, 'socev_plaatsen').length + blokAct(L, 'socev_verwijderen').length === voorN, u);
+    faal = false;
+    const m2 = maak(() => [], L, { naam: 'blok', registerPad: REG2, agenda: async () => ({ events: [], fouten: ['HAGRO'] }) });
+    u = await m2.ronde({ nu: NU + 7 * UUR });
+    toets('agenda met fouten → geen blokactie (niets weg)', u.agenda_fout === 1 && blokAct(L, 'socev_plaatsen').length + blokAct(L, 'socev_verwijderen').length === voorN, u);
+    // verlopen
+    agenda = AG();
+    u = await m.ronde({ nu: Date.UTC(2026, 11, 2, 8, 0) });
+    toets('blok na de afspraakdag → verlopen, geen schrijfactie', u.verlopen >= 2 && u.mutaties === 0, u);
+    const stB = fs.readFileSync(path.join(TMP, 'blok.json'), 'utf8');
+    toets('blokregister zonder titels of plaatsen', !/Geheim|HAGRO|Amersfoort|Utrecht/.test(stB));
+  }
+  {
+    // registerpoort: zonder rij agenda-socev-blokken wordt de agenda niet eens gelezen
+    const L = nepLuik(); let gelezen = 0;
+    const m = maak(() => [], L, { naam: 'blokreg', agenda: async () => { gelezen++; return { events: AG() }; } });
+    const u = await m.ronde({ nu: NU });
+    toets('blokken zonder eigen registerrij → agenda niet gelezen, niets', gelezen === 0 && u.blok_nieuw === 0 && L.log.every((x) => x.actie === 'socev_lijst'), u);
+    toets('info: blokken uit', m.info().blokken === false);
+  }
+  {
+    // vergader-potlood met stuk onder 10_Zakelijk → voorbereidblok; ander potlood niet; gedeeld plafond en rem
+    const L = nepLuik();
+    const RR = [r(201, '2026-11-26', { hele_dag: false, begin: '19:30', precisie: 'minuut', onderwerp: 'Proef-ALV praktijk', stuk_pad: '10_Zakelijk/Proef/agenda alv.md' }),
+      r(202, '2026-11-27', { hele_dag: false, begin: '12:00', precisie: 'minuut', onderwerp: 'Proeflunch', stuk_pad: '10_Zakelijk/Proef/lunch.md' }),
+      r(203, '2026-11-30', { hele_dag: false, begin: '09:00', precisie: 'minuut', onderwerp: 'Proefoverleg prive', stuk_pad: '20_Prive/Proef/x.md' })];
+    const m = maak(() => RR, L, { naam: 'blokpot', registerPad: REG2, agenda: async () => ({ events: AG() }) });
+    const u1 = await m.ronde({ nu: NU });
+    toets('gedeelde rem: 2 potloden (4 schrijfacties), nog geen blok', u1.nieuw === 2 && u1.blok_nieuw === 0 && u1.mutaties === 4, u1);
+    const u2 = await m.ronde({ nu: NU + UUR });
+    const u3 = await m.ronde({ nu: NU + 2 * UUR });
+    const vandaagTotaal = acties(L, 'socev_plaatsen').length;
+    toets('gedeeld dagplafond 5 (potloden + blokken)', vandaagTotaal === 5 && m.vandaagVol(NU), [u1, u2, u3, vandaagTotaal]);
+    const u4 = await m.ronde({ nu: NU + 24 * UUR });
+    const pl = acties(L, 'socev_plaatsen').map((x) => x.titel);
+    toets('vergader-potlood met stuk → voorbereidblok met onderwerp', pl.indexOf('✏️ Voorbereiden: Proef-ALV praktijk (do 19:30)') >= 0, pl);
+    toets('geen voorbereidblok voor lunch of privé-overleg', !pl.some((x) => /Voorbereiden: (Proeflunch|Proefoverleg prive)/.test(x)), pl);
+  }
+  {
+    // proefmodus: blokken met SOCEV PROEF, ook zonder registerrij
+    const L = nepLuik();
+    const m = M.maak({ proef: true, registerPad: path.join(TMP, 'bestaat-niet.json'), gevonden: async () => ({ ok: true, regels: [] }), luik: L.f, oordeel: async () => ({}),
+      staatPad: path.join(TMP, 'blokproef.json'), agenda: async () => ({ events: AG().filter((x) => x.event_id === 'h1') }) });
+    const u = await m.ronde({ nu: NU });
+    const pl = acties(L, 'socev_plaatsen');
+    toets('proef: blokken SOCEV PROEF ✏️', u.blok_nieuw === 2 && pl.every((x) => x.titel.indexOf('SOCEV PROEF ✏️ ') === 0), pl.map((x) => x.titel));
+  }
   // geen titels in de staat
   const st = fs.readFileSync(path.join(TMP, 'p.json'), 'utf8');
   toets('register zonder titels', !/Proefoverleg/.test(st));

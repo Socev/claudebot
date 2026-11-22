@@ -26170,6 +26170,9 @@ async function appKalender(req, res, a, route, d) {
 // weggehaald in Google = klopt niet. Tik elke 5 min, werkt alleen 07:05–10:59 (kaarten niet in de stille uren), hooguit eens per uur en
 // tot het dagplafond (5). Uit: bestand KLOKKEN_DIR/agenda-potlood.uit of AGENDA_POTLOOD=uit. Register (0600, geen titels):
 // KLOKKEN_DIR/agenda-potlood.json. Toestemmingsrij agenda-socev-potlood. /health.agenda_potlood = laatste ronde (alleen aantallen).
+// wv3813 (v2): ❌ op de kaart = klopt niet (leest socev_agenda_log alleen-lezend, gericht op de correlatie-id's van de eigen kaarten) en
+// vertrek-/voorbereidblokken uit Davids agenda (lees-luik, alleen lezen; toestemmingsrij agenda-socev-blokken, tot dan doet dat deel niets).
+const AGENDA_LOG_TABEL = 'e44op6x4bAuOAm7N';   // n8n Data Table socev_agenda_log (AI - Socev Agenda / Agenda-knoppen)
 const SOCEV_AGENDA_WF = process.env.SOCEV_AGENDA_WF || '3oiAigcCz6LNmeBd';   // AI - Socev Agenda (schrijfluik)
 async function socevAgendaLuik(body) {
   const geheim = process.env.N8N_WEBHOOK_SOCEV_AGENDA;
@@ -26194,8 +26197,18 @@ const agendaPotlood = (function () {
       gevonden: async function (nu) { const u = await kalenderApp.app({ methode: 'GET', pad: '/app/kalender/gevonden', nu: nu }); return u && u.status === 200 ? u.body : null; },
       oordeel: function (id, oordeel) { return kalenderApp.app({ methode: 'POST', pad: '/app/kalender/gevonden', nu: Date.now(), body: { id: id, oordeel: oordeel } }); },
       luik: socevAgendaLuik,
+      agenda: function (body) { return appAgendaApi(body, { timeoutMs: 60000 }); },
+      afwijzingen: async function (filters) {
+        const set = new Set();
+        for (const f of filters) {
+          const rijen = await appN8nRijen(AGENDA_LOG_TABEL, f, 100);
+          for (const r of rijen) if (r && r.actie === 'david_afgewezen' && typeof r.correlatie_id === 'string') set.add(r.correlatie_id);
+        }
+        return set;
+      },
       staatPad: path.join(KLOKKEN_DIR, 'agenda-potlood.json'),
-      log: function (x) { schrijfLog(nu() + ' agenda-potlood ' + velden({ ok: x.ok, nieuw: x.nieuw, weg: x.weg, overgenomen: x.overgenomen, verlopen: x.verlopen, kaart: x.kaart, kaart_fout: x.kaart_fout, fout: x.fout || 0, mutaties: x.mutaties })); },
+      log: function (x) { schrijfLog(nu() + ' agenda-potlood ' + velden({ ok: x.ok, nieuw: x.nieuw, weg: x.weg, overgenomen: x.overgenomen, verlopen: x.verlopen, kaart: x.kaart, kaart_fout: x.kaart_fout, fout: x.fout || 0, mutaties: x.mutaties,
+        afgewezen: x.afgewezen || 0, blok_nieuw: x.blok_nieuw || 0, blok_weg: x.blok_weg || 0, blok_vervallen: x.blok_vervallen || 0, agenda_fout: x.agenda_fout || 0, afwijs_fout: x.afwijs_fout || 0 })); },
     });
   } catch (e) { logError('agenda-potlood', e); return null; }
 })();
