@@ -399,7 +399,15 @@ function detail(fdb, r, id, nu, nogBetalen) {
     feiten: ip.iban_nieuw && f.status === 'te_beoordelen' ? feitKaarten(fdb, r, nu).filter((k) => k.facturen.some((x) => x.id === f.id)) : [],
     // wv3372: staat "naar Cynthia" aan (keuze "Laat Cynthia kiezen" in Beoordelen) en waar staat het betaalverzoek van deze factuur
     nogbetalen: isEig(r) && r.ingang === 'app' ? { aan: nogBetalen === 'auto', stand: nbStand(fdb, f, nogBetalen) } : undefined,
+    // wv3914 (nr 195 = 2C95): de knop "Bevestig en verstuur" (alleen David in zijn app, schakelaar aan) en het bewijs voor "al betaald"
+    knop_verstuur: isEig(r) && r.ingang === 'app' && f.status === 'te_beoordelen' ? { aan: knopVerstuurAan(fdb) } : undefined,
+    al_betaald: isEig(r) && f.status === 'te_beoordelen' ? alBetaaldBewijs(fdb, f) : undefined,
   };
+}
+// wv3914: schakelaar "Bevestig en verstuur" (meta versturen_per_factuur = '1', aan pas na de registerrij inkoop-direct-knop) en de algemene
+// vrijgave van direct verzenden; directBesluit leest beide opnieuw op het verzendmoment.
+function knopVerstuurAan(fdb) {
+  return D.metaLees(fdb, 'versturen_per_factuur') === '1' && D.metaLees(fdb, 'versturen_vrijgegeven') === '1';
 }
 // wv1317: gebruikelijke bandbreedte van de betalingen aan het IBAN van deze factuur (laatste 12 maanden, eigen entiteit), met het oordeel
 // over het factuurbedrag. Alleen over bankregels die deze rol mag zien; zonder IBAN of met < 3 betalingen: null.
@@ -833,6 +841,17 @@ function instellingen(fdb, r) {
 function bevestig(fdb, r, d, nu, o) {
   const id = vraagId(d, 'id');
   if (r.mag_bevestigen === false) weiger(403, 'bevestigen staat voor jou uit; vraag het David');   // wv856: gebruiker.mag_bevestigen
+  // wv3914 (nr 195 = 2C95): "Bevestig en verstuur" — deze ene factuur gaat na de bedenktijd zelf naar de boekhouding, ook als de leverancier op
+  // concept staat. Alleen David in zijn eigen app, met een verse vingerafdruk, alleen met de schakelaar versturen_per_factuur aan (registerrij
+  // inkoop-direct-knop) en alleen zonder twijfel (dezelfde poort als direct per leverancier, hieronder in dezelfde transactie).
+  if (d.verstuur !== undefined && typeof d.verstuur !== 'boolean') weiger(400, 'verstuur is ja of nee');
+  const verstuur = d.verstuur === true;
+  if (verstuur) {
+    if (o && o.zeker) weiger(400, 'de groep verstuurt niet zelf');
+    if (!isEig(r) || r.ingang !== 'app') weiger(403, '"Bevestig en verstuur" kiest David in zijn eigen app');
+    if (!knopVerstuurAan(fdb)) weiger(409, '"Bevestig en verstuur" staat nog uit; kies Bevestigen', { code: 'knop_uit' });
+    if (!o || typeof o.versOk !== 'function' || !o.versOk()) weiger(403, 'bevestig met je vingerafdruk', { vers_nodig: true });
+  }
   return D.transactie(fdb, function () {
     let f = factuurOf404(fdb, r, id);
     if (d.versie !== undefined && d.versie !== f.versie) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw', { versie: f.versie });
@@ -851,6 +870,9 @@ function bevestig(fdb, r, d, nu, o) {
     if (!magEntiteit(r, e.sleutel)) weiger(403, 'deze entiteit mag je niet kiezen');
     if (e.actief !== 1) weiger(409, 'entiteit staat niet actief');
     if (!['zelf', 'incasso', 'betaald'].includes(betaalwijze)) weiger(400, 'kies een betaalwijze');
+    if (verstuur && e.sleutel === 'prive') weiger(400, 'Privé gaat nooit naar de boekhouding');
+    // wv3914 (b): het bewijs voor "al betaald" (kaart- of PayPal-regel) vóór de wijziging, voor het besluitspoor
+    const alBetaald = betaalwijze === 'betaald' && isEig(r) ? alBetaaldBewijs(fdb, f) : null;
     // wv3372 (ontwerp § 1): bij betaalwijze onbekend de keuze "Laat Cynthia kiezen" = zelf + LET OP "is misschien via incasso"; de leverancier
     // leert dan géén standaard betaalwijze (anders verdwijnt de twijfel bij de volgende factuur). Alleen David, alleen met de schakelaar aan.
     const cynthiaKiest = d.cynthia_kiest === true;
@@ -912,18 +934,26 @@ function bevestig(fdb, r, d, nu, o) {
       const lv = f.leverancier_id && !koppel ? fdb.db.prepare('SELECT verzendwijze, verzendwijze_versie FROM leverancier WHERE id = ?').get(f.leverancier_id) : null;
       D.voegToe(fdb, 'opdracht', { id: op.id, soort: op.soort, factuur: f.id, entiteit: op.entiteit, doeladres: op.doeladres, bijlagen: op.bijlagen, vingerafdruk: op.vingerafdruk,
         verstuur_na: op.verstuur_na, idempotentiesleutel: op.idempotentiesleutel, status: 'wacht', poging: 0, aangemaakt_door: r.wie, aangemaakt_op: wanneer, bijgewerkt_op: wanneer,
-        verzendwijze_bij_bevestigen: lv ? lv.verzendwijze : null, verzendwijze_versie: lv ? lv.verzendwijze_versie : null });
-      opdracht = { id: op.id, verstuur_na: op.verstuur_na, verzendwijze: lv ? lv.verzendwijze : null };
-    }
+        verzendwijze_bij_bevestigen: lv ? lv.verzendwijze : null, verzendwijze_versie: lv ? lv.verzendwijze_versie : null, direct_knop: verstuur ? 1 : null });
+      opdracht = { id: op.id, verstuur_na: op.verstuur_na, verzendwijze: verstuur ? 'direct' : lv ? lv.verzendwijze : null, direct_knop: verstuur || undefined };
+      // wv3914: dezelfde poort als op het verzendmoment (directBesluit op de verse rijen); twijfel = niets bevestigd, David kiest dan Bevestigen
+      if (verstuur) {
+        let k = D.directBesluit(fdb, fdb.db.prepare('SELECT * FROM opdracht WHERE id = ?').get(op.id), { voorbeeld: true });
+        if (k.direct && D.directVandaag(fdb, nu) >= D.DIRECT_PER_DAG) k = { direct: false, reden: 'dagplafond van ' + D.DIRECT_PER_DAG + ' directe verzendingen bereikt' };
+        if (!k.direct) weiger(409, 'niet zelf te versturen: ' + k.reden + '. Kies Bevestigen; dan wordt het een concept in Gmail', { code: 'direct', redenen: [k.reden] });
+      }
+    } else if (verstuur) weiger(409, 'deze factuur gaat niet naar de boekhouding');
     // wv3369: zelf te betalen → in dezelfde transactie een betaalverzoek naar Cynthia (nogbetalen@), op het tijdstip van de opdracht
     // wv3372: "Laat Cynthia kiezen" legt de twijfel vast in een besluit (nbFeiten leest hem als LET OP "is misschien via incasso"), vóór de rij
     if (cynthiaKiest) besluitRij(fdb, f.id, K.besluit('betaalwijze', 'betaalwijze', 'zelf', 'mens', 'Laat Cynthia kiezen: is misschien via incasso'), r.wie, wanneer);
+    if (alBetaald) besluitRij(fdb, f.id, K.besluit('betaalwijze', 'betaalwijze', 'betaald', 'mens', kort('al betaald, bewijs: ' + alBetaald.regel + (alBetaald.gekoppeld ? '' : ' (nog niet gekoppeld)'), 300)), r.wie, wanneer);
     const nogbetalen = opdracht && spoor === 'te_betalen' && o && o.nogBetalen === 'auto' ? nbReserveer(fdb, r, f.id, 'bevestigen', opdracht.verstuur_na, nu, wanneer) : null;
     if (cynthiaKiest && (!nogbetalen || nogbetalen.niet)) weiger(409, '"Laat Cynthia kiezen" kan hier niet' + (nogbetalen && nogbetalen.niet ? ': ' + nogbetalen.niet : spoor !== 'te_betalen' ? ': staat al ' + spoor : '') + '; kies zelf een betaalwijze');
     besluitRij(fdb, f.id, K.besluit('bevestigen', 'status', ov.naar, 'mens', (f.entiteit !== e.sleutel ? 'entiteit ' + (f.entiteit || '—') + ' → ' + e.sleutel + '; ' : '') +
-      (f.betaalwijze !== betaalwijze ? 'betaalwijze ' + f.betaalwijze + ' → ' + betaalwijze : 'voorstel overgenomen')), r.wie, wanneer);
+      (f.betaalwijze !== betaalwijze ? 'betaalwijze ' + f.betaalwijze + ' → ' + betaalwijze : 'voorstel overgenomen') + (verstuur ? '; Bevestig en verstuur' : '')), r.wie, wanneer);
     D.audit(fdb, { wie: r.wie, wat: 'bevestigen', object_soort: 'factuur', object_id: f.id, entiteit: e.sleutel,
-      voor: { status: f.status, entiteit: f.entiteit, betaalwijze: f.betaalwijze }, na: { status: ov.naar, entiteit: e.sleutel, betaalwijze, betaalspoor: spoor, opdracht: opdracht && opdracht.id }, wanneer });
+      voor: { status: f.status, entiteit: f.entiteit, betaalwijze: f.betaalwijze }, na: { status: ov.naar, entiteit: e.sleutel, betaalwijze, betaalspoor: spoor, opdracht: opdracht && opdracht.id, direct_knop: verstuur || undefined }, wanneer });
+    if (verstuur) o.versVerbruik();
     const zussen = koppel ? zussenKoppelen(fdb, f, koppel, r.wie, wanneer) : 0;
     const kmelding = !koppel ? null : (koppel.nieuw ? 'Nieuwe leverancier ' + koppel.naam + ' onthouden: volgende facturen krijgen deze entiteit' + (cynthiaKiest ? '' : ' en betaalwijze') +
       (koppel.ibans ? ' en het nagebelde rekeningnummer' : '') + '.' : 'Gekoppeld aan leverancier ' + koppel.naam + '.') +
@@ -2054,6 +2084,51 @@ function kaartPaypalBetaald(fdb, factuurId) {
   const bedrag = (p && p.valuta && p.valuta !== 'EUR' ? p.valuta + ' ' : '€ ') + String(Math.floor(n / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + String(n % 100).padStart(2, '0');
   const delen = [k ? 'creditcard' : 'PayPal', m ? Number(m[3]) + '-' + Number(m[2]) + '-' + m[1] : null, kort(String(x.wie || '').replace(/\s+/g, ' ').trim(), 40) || null, bedrag].filter(Boolean);
   return { bron: k ? 'kaart' : 'paypal', reden: 'al betaald via kaart/PayPal (' + delen.join(', ') + ')' };
+}
+/*
+ * wv3914 (nr 195 = 2C95 b): bewijs voor "al betaald" bij Beoordelen. 1) een gekoppelde kaart- of PayPal-regel (kaartPaypalBetaald); 2) een nog
+ * losse regel (de koppeling loopt pas bij het volgende kaartoverzicht of de PayPal-ronde) met hetzelfde bedrag rond de factuurdatum, die met
+ * de koppelregel van de kaart (CC.zoekFactuur: zelfde bedrag, -5..+10 dagen, leverancier of naam, precies één factuur) precies déze factuur
+ * vindt — en er moet precies één zo'n regel zijn. Twee gelijke bedragen (twee facturen of twee regels) = geen voorstel. Alleen lezen.
+ * → { bron: 'kaart'|'paypal', regel, gekoppeld } of null.
+ */
+function alBetaaldBewijs(fdb, f) {
+  if (!f || !f.id || K.isCreditnota(f) || !Number.isSafeInteger(f.incl) || f.incl <= 0) return null;
+  const kp = kaartPaypalBetaald(fdb, f.id);
+  if (kp) return { bron: kp.bron, regel: kp.reden.replace(/^al betaald via kaart\/PayPal \((.*)\)$/, '$1'), gekoppeld: true };
+  const fd = /^\d{4}-\d{2}-\d{2}$/.test(String(f.factuurdatum || '')) ? f.factuurdatum : null;
+  if (!CC || !fd) return null;
+  const van = K.plusDagen(fd, -6), tot = K.plusDagen(fd, 11);
+  const kaart = fdb.db.prepare("SELECT * FROM kaart_regel WHERE soort = 'transactie' AND factuur IS NULL AND factuur_archief IS NULL AND (bedrag_centen = ? OR bedrag_orig_centen = ?) " +
+    'AND substr(transactiedatum, 1, 10) BETWEEN ? AND ?').all(f.incl, f.incl, van, tot).map((x) => ({ bron: 'kaart', r: x, wie: x.handelaar || x.omschrijving, datum: x.transactiedatum, c: x.bedrag_orig_centen && x.valuta_orig && x.valuta_orig !== 'EUR' ? x.bedrag_orig_centen : x.bedrag_centen, valuta: x.valuta_orig && x.valuta_orig !== 'EUR' ? x.valuta_orig : 'EUR' }));
+  const pp = fdb.db.prepare("SELECT * FROM paypal_regel WHERE status = 'S' AND bedrag_centen = ? AND valuta = 'EUR' AND factuur IS NULL AND factuur_archief IS NULL AND substr(datum, 1, 10) BETWEEN ? AND ?")
+    .all(-f.incl, van, tot).filter((x) => /^T00\d\d$/.test(String(x.event_code || '')))
+    .map((x) => ({ bron: 'paypal', r: { soort: 'transactie', omschrijving: x.tegenpartij || '', handelaar: x.tegenpartij || '', land: null, transactiedatum: String(x.datum).slice(0, 10),
+      bedrag_centen: -x.bedrag_centen, valuta_orig: null, bedrag_orig_centen: -x.bedrag_centen, leverancier: x.leverancier }, wie: x.tegenpartij, datum: x.datum, c: -x.bedrag_centen, valuta: 'EUR' }));
+  const regels = kaart.concat(pp);
+  if (!regels.length) return null;
+  const levs = fdb.db.prepare('SELECT id, naam FROM leverancier').all();
+  const bezet = new Set(fdb.db.prepare('SELECT factuur AS f FROM kaart_regel WHERE factuur IS NOT NULL UNION SELECT factuur_archief FROM kaart_regel WHERE factuur_archief IS NOT NULL ' +
+    'UNION SELECT factuur FROM paypal_regel WHERE factuur IS NOT NULL UNION SELECT factuur_archief FROM paypal_regel WHERE factuur_archief IS NOT NULL').all().map((x) => x.f));
+  const treffers = [];
+  for (const x of regels) {
+    const bedragen = [x.r.bedrag_centen, x.r.bedrag_orig_centen].filter((b) => Number.isSafeInteger(b));
+    const ph = bedragen.map(() => '?').join(', ');
+    const kand = fdb.db.prepare("SELECT id, 'factuur' AS bron, leverancier, leverancier_naam, factuurdatum, incl, valuta FROM factuur WHERE soort = 'factuur' AND incl IN (" + ph + ')').all(...bedragen)
+      .concat(fdb.db.prepare("SELECT id, 'archief' AS bron, NULL AS leverancier, leverancier_naam, factuurdatum, incl, valuta FROM factuur_archief WHERE incl IN (" + ph + ')').all(...bedragen))
+      .filter((k) => !bezet.has(k.id));
+    let lev = x.r.leverancier || null;
+    if (!lev) { const z = CC.zoekLeverancier(x.r, levs); if (z.leverancier) lev = z.leverancier.id; }
+    const hit = CC.zoekFactuur(x.r, lev, kand);
+    if (hit && hit.bron === 'factuur' && hit.id === f.id) treffers.push(x);
+  }
+  if (treffers.length !== 1) return null;
+  const x = treffers[0];
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(x.datum || ''));
+  const n = Math.abs(Number(x.c) || 0);
+  const bedrag = (x.valuta !== 'EUR' ? x.valuta + ' ' : '€ ') + String(Math.floor(n / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + String(n % 100).padStart(2, '0');
+  const regel = [x.bron === 'kaart' ? 'creditcard' : 'PayPal', m ? Number(m[3]) + '-' + Number(m[2]) + '-' + m[1] : null, kort(String(x.wie || '').replace(/\s+/g, ' ').trim(), 40) || null, bedrag].filter(Boolean).join(', ');
+  return { bron: x.bron, regel, gekoppeld: false };
 }
 /*
  * wv3911: POST kaart-toch-betalen { id, versie? }: de kaart- of PayPal-koppeling klopt niet, de factuur moet toch betaald worden. Alleen David in
@@ -4705,7 +4780,7 @@ function maak(opties) {
         ocrTekst: typeof v.ocrTekst === 'string' ? v.ocrTekst : undefined,   // wv3701: lokale OCR van server.js (knop Opnieuw lezen), nooit uit het verzoek
         modelKandidaat: v.modelKandidaat && typeof v.modelKandidaat === 'object' ? v.modelKandidaat : undefined };   // wv3738: kandidaat van de PDF-lezer (server.js), nooit uit het verzoek
       switch (rest) {
-        case 'bevestig': return ok(bevestig(fdb, r, d, nu, { nogBetalen: vo.nogBetalen }), 'bevestig ' + kort(d.id, 16));
+        case 'bevestig': return ok(bevestig(fdb, r, d, nu, { nogBetalen: vo.nogBetalen, versOk: vo.versOk, versVerbruik: vo.versVerbruik }), 'bevestig ' + kort(d.id, 16) + (d.verstuur === true ? ' verstuur' : ''));
         case 'bevestig-groep': { const j = bevestigGroep(fdb, r, d, nu, vo); return ok(j, 'bevestig-groep ' + j.bevestigd.length + '/' + (j.bevestigd.length + j.geweigerd.length)); }   // wv2661
         case 'koppel-zeker': { const j = koppelZeker(fdb, r, d, nu, vo); return ok(j, 'koppel-zeker ' + j.gekoppeld.length + '/' + (j.gekoppeld.length + j.geweigerd.length)); }   // wv2661
         case 'terugdraaien': return ok(terugdraaien(fdb, r, d, nu), 'terugdraaien ' + kort(d.id, 16));

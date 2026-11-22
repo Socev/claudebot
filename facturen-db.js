@@ -1182,6 +1182,22 @@ CREATE TRIGGER IF NOT EXISTS opdracht_verzendwijze_vast BEFORE UPDATE ON opdrach
 `;
 
 /*
+ * wv3914 (besluitenpagina nr 195 = 2C95, David Ja 22-11-2026 18:19): "Bevestig en verstuur" per factuur. De opdracht draagt direct_knop = 1 als
+ * David zelf op die knop drukte (in zijn app, verse vingerafdruk); dat ligt vast vanaf het aanmaken (trigger). directBesluit laat zo'n opdracht
+ * direct gaan zonder de keuze van de leverancier, alleen zolang meta versturen_per_factuur = '1' (schakelaar; aan pas na de registerrij
+ * inkoop-direct-knop) en verder met precies dezelfde eisen. Terugrol: `DELETE FROM schema_migratie WHERE versie = 29` (oude code kijkt niet
+ * naar de kolom) en meta versturen_per_factuur weghalen. Herhaalbaar.
+ */
+function M29(db) {
+  if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get('opdracht', 'direct_knop')) {
+    db.exec('ALTER TABLE opdracht ADD COLUMN direct_knop INTEGER CHECK (direct_knop IS NULL OR direct_knop = 1)');
+  }
+  db.exec(`CREATE TRIGGER IF NOT EXISTS opdracht_direct_knop_vast BEFORE UPDATE ON opdracht
+  WHEN NEW.direct_knop IS NOT OLD.direct_knop
+  BEGIN SELECT RAISE(ABORT, 'opdracht: Bevestig en verstuur ligt vast vanaf het aanmaken'); END;`);
+}
+
+/*
  * wv2842 (David 9-11-2026 15:32: "Mag wel ook batch voor gemaakt, we hebben tegenwoordig de Batch-extensie die batches invoert voor ons"):
  * de POT mag een SEPA-batch. ABN neemt op de POT-rekening (particulier) geen batchbestand aan; David zet het bestand met de Chrome-extensie
  * POT-invoer als losse overboekingen in de ABN-takenlijst en ondertekent daar zelf. Privé blijft uitgesloten. Twee stappen in één transactie:
@@ -1416,6 +1432,7 @@ const MIGRATIES = [
   { versie: 26, naam: 'betaalverzoek naar Cynthia (nogbetalen@): betaal_verzending (wv3369)', sql: M26 },
   { versie: 27, naam: 'koppeling bankregel ↔ factuur los maken: ontkoppeling (spoor + afwijsrij voor de bankcontrole, wv3452)', sql: M27 },
   { versie: 28, naam: 'herinnering aan Cynthia bij een niet betaald gezien betaalverzoek: herinnering_mail, betaal_herinnering (wv3455)', sql: M28 },
+  { versie: 29, naam: 'Bevestig en verstuur per factuur: opdracht.direct_knop, vast na het aanmaken (wv3914)', fn: (db) => M29(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -1769,11 +1786,17 @@ function directBesluit(fdb, op, o) {
   const nee = (reden) => ({ direct: false, reden });
   if (metaLees(fdb, 'versturen_vrijgegeven') !== '1') return nee('direct verzenden is (nog) niet vrijgegeven');
   if (!op || op.soort !== 'boekhouder_factuur' || !op.factuur) return nee('geen inkoopfactuur');
-  if (op.verzendwijze_bij_bevestigen !== 'direct') return nee(op.verzendwijze_bij_bevestigen === 'concept' ? 'leverancier stond bij Bevestigen op concept' : 'geen gekoppelde leverancier met direct');
+  // wv3914: Davids eigen knop "Bevestig en verstuur" op deze factuur vervangt de keuze van de leverancier, zolang de schakelaar aan staat
+  const knop = op.direct_knop === 1;
+  if (knop) {
+    if (metaLees(fdb, 'versturen_per_factuur') !== '1') return nee('Bevestig en verstuur staat (nu) uit');
+  } else if (op.verzendwijze_bij_bevestigen !== 'direct') return nee(op.verzendwijze_bij_bevestigen === 'concept' ? 'leverancier stond bij Bevestigen op concept' : 'geen gekoppelde leverancier met direct');
   const f = fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(op.factuur);
   if (!f) return nee('factuur ontbreekt');
-  const l = f.leverancier ? fdb.db.prepare('SELECT verzendwijze, verzendwijze_versie FROM leverancier WHERE id = ?').get(f.leverancier) : null;
-  if (!l || l.verzendwijze !== 'direct' || l.verzendwijze_versie !== op.verzendwijze_versie) return nee('keuze bij de leverancier gewijzigd na Bevestigen');
+  if (!knop) {
+    const l = f.leverancier ? fdb.db.prepare('SELECT verzendwijze, verzendwijze_versie FROM leverancier WHERE id = ?').get(f.leverancier) : null;
+    if (!l || l.verzendwijze !== 'direct' || l.verzendwijze_versie !== op.verzendwijze_versie) return nee('keuze bij de leverancier gewijzigd na Bevestigen');
+  }
   if (!(o.voorbeeld ? ['in_wachtrij', 'wordt_verstuurd'] : ['wordt_verstuurd']).includes(f.status)) return nee('factuur staat niet onderweg (' + f.status + ')');
   if (!f.entiteit || f.entiteit === 'prive' || f.entiteit !== op.entiteit) return nee('entiteit klopt niet');
   const e = fdb.db.prepare('SELECT boekhoud_doel FROM entiteit WHERE sleutel = ?').get(f.entiteit);
@@ -1842,7 +1865,7 @@ function reserveerKies(fdb, opId, o) {
     if (k.direct && directVandaag(fdb, o.nu) >= DIRECT_PER_DAG) k = { direct: false, reden: 'dagplafond van ' + DIRECT_PER_DAG + ' directe verzendingen bereikt' };
     const modus = k.direct ? 'versturen' : 'concept';
     const r = reserveer(fdb, opId, { sleutel: o.sleutel, modus, nu: o.nu, wie: o.wie });
-    if (op.factuur && (op.verzendwijze_bij_bevestigen === 'direct' || k.direct)) {
+    if (op.factuur && (op.verzendwijze_bij_bevestigen === 'direct' || op.direct_knop === 1 || k.direct)) {
       fdb.db.prepare('INSERT INTO besluit (factuur, stap, veld, waarde, bron, toelichting, wie, wanneer) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(op.factuur, 'verzendwijze', 'modus', k.direct ? 'direct' : 'concept', 'regel', String(k.reden).slice(0, 500), o.wie || 'koerier', tijd);
     }
