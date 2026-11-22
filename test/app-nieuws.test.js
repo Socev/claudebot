@@ -158,9 +158,14 @@ function laadBlok(o) {
     appStuur: function (res, c, j) { antwoorden.push([c, JSON.parse(JSON.stringify(j))]); },   // andere vm-realm: prototypes gelijk trekken
     facturenRoutes: o.facturenRoutes, facturenOpen: function () { return {}; }, rolPrimair: function () { return true; },
     pakjes: o.pakjes, pakjesGekocht: function () { return []; }, pakjesOnderwerpen: function () { return {}; },
+    beleggenApp: o.beleggenApp || null, SERVER_ECHT: false, setInterval: setInterval,   // wv3815
+    ovisAms: o.ovisAms || function () { return { datum: '2026-11-22', uur: 6, min: 50, klok: '2026-11-22 06:50' }; },
+    schrijfLog: function (r) { (o.log || []).push(r); }, nu: function () { return 'NU'; },
+    appN8nZend: o.zend || function () { throw new Error('geen n8n in de toets'); }, APP_MELD_TABEL: 'TABEL',
+    berichtIntern: o.stuur || function () { throw new Error('geen bericht in de toets'); },
   };
   vm.createContext(ctx);
-  vm.runInContext(SRV.slice(i, j) + '\nthis.__x = { loketSchaduw, loketMeld, loketTellersVerversen, appNieuwsRoute, appNieuwsTellersRoute, appNieuwsGezienRoute, appNieuwsSchaduwRoute, appNieuwsInfo, keten: function () { return appNieuwsKeten; } };', ctx);
+  vm.runInContext(SRV.slice(i, j) + '\nthis.__x = { loketSchaduw, loketMeld, loketTellersVerversen, appNieuwsRoute, appNieuwsTellersRoute, appNieuwsGezienRoute, appNieuwsSchaduwRoute, appNieuwsInfo, appNieuwsInstelRoute, loketOchtendEditie, loketAvondTik, keten: function () { return appNieuwsKeten; } };', ctx);
   return { x: ctx.__x, dir: dir, fouten: fouten, antwoorden: antwoorden };
 }
 const nepRes = function () { return { _app: {} }; };
@@ -168,6 +173,7 @@ test('serverblok: schaduw schrijft de regel, routes tonen hem, gezien haalt hem 
   const b = laadBlok({
     facturenRoutes: { rolVoor: function () { return { soort: 'eigenaar' }; }, app: function (fdb, v) { assert.strictEqual(v.pad, '/app/facturen'); return { status: 200, j: { ok: true, tellers: { beoordelen: 3, signalen: 2, wachtrij: 9 } } }; } },
     pakjes: { lijst: function () { return { status: 200, body: { ok: true, lopend: [{ stand: 'vandaag' }, { stand: 'onderweg' }] } }; } },
+    beleggenApp: { app: function (v) { assert.strictEqual(v.pad, '/app/beleggen/teller'); return { status: 200, body: { ok: true, totaal: 4 } }; } },
   });
   b.x.loketSchaduw('geld', '2026-11-22', 'Verzonnen geldregel.');
   b.x.loketSchaduw('onbekend', '2026-11-22', 'x');   // onbekende bron: gelogd, niets geschreven, geen gooi
@@ -179,11 +185,11 @@ test('serverblok: schaduw schrijft de regel, routes tonen hem, gezien haalt hem 
   assert.strictEqual((fs.statSync(path.join(b.dir, 'app-nieuws.json')).mode & 0o777).toString(8), '600');
   assert.strictEqual(b.fouten.length, 1);
   await b.x.appNieuwsTellersRoute({ url: '/app/nieuws/tellers' }, nepRes(), { id: 'a1' });
-  assert.deepStrictEqual(b.antwoorden.pop(), [200, { ok: true, tellers: { facturen: 5, pakjes: 1 }, fout: null }]);
+  assert.deepStrictEqual(b.antwoorden.pop(), [200, { ok: true, tellers: { facturen: 5, pakjes: 1, beleggen: 4 }, fout: null }]);
   await b.x.appNieuwsRoute({ url: '/app/nieuws' }, nepRes(), { id: 'a1' });
   let a = b.antwoorden.pop();
   assert.strictEqual(a[0], 200);
-  assert.deepStrictEqual(a[1].regels.map(function (r) { return r.sleutel; }).sort(), ['facturen/te-doen', 'financien/geld', 'pakjes/vandaag']);
+  assert.deepStrictEqual(a[1].regels.map(function (r) { return r.sleutel; }).sort(), ['beleggen/open', 'facturen/te-doen', 'financien/geld', 'pakjes/vandaag']);
   await b.x.appNieuwsGezienRoute({}, nepRes(), { id: 'a1' }, { sleutels: [{ sleutel: 'financien/geld', versie: 1 }] });
   assert.deepStrictEqual(b.antwoorden.pop(), [200, { ok: true, gezet: 1 }]);
   await b.x.appNieuwsRoute({ url: '/app/nieuws' }, nepRes(), { id: 'a1' });
@@ -204,4 +210,117 @@ test('serverblok: bron niet leesbaar = oude regel blijft, fout gemeld, geen verz
   n = null;
   await b.x.appNieuwsTellersRoute({ url: '/' }, nepRes(), { id: 'a' });   // binnen 60 s: geen nieuwe telling
   assert.deepStrictEqual(b.antwoorden.pop()[1].tellers, { pakjes: 2 });
+});
+
+// ── wv3815 fase 2: edities, schuif ──
+const DAG22 = Date.parse('2026-11-22T05:00:00Z');   // 06:00 Amsterdam
+function metRegels() {
+  let s = AN.leeg();
+  s = AN.meld(s, { app: 'proef', onderwerp: 'a', laan: 'editie', datum: '2026-11-22', tekst: 'Verzonnen regel A.' }, DAG22).staat;
+  s = AN.meld(s, { app: 'pakjes', onderwerp: 'b', laan: 'editie', datum: '2026-11-22', editie: 'ochtend', tekst: 'Verzonnen pakje.' }, DAG22).staat;
+  s = AN.meld(s, { app: 'facturen', onderwerp: 'c', laan: 'editie', datum: '2026-11-22', editie: 'avond', tekst: 'Verzonnen factuurregel.' }, DAG22).staat;
+  s = AN.meld(s, { app: 'socev', onderwerp: 'weer', laan: 'editie', datum: '2026-11-22', editie: 'ochtend', tekst: 'Verzonnen weer.', buffer: 'weer' }, DAG22).staat;
+  s = AN.meld(s, { app: 'proef', onderwerp: 'morgen', laan: 'editie', datum: '2026-11-23', tekst: 'Pas morgen.' }, DAG22).staat;
+  return s;
+}
+test('editieRegels: geen bufferbronnen, editie past, datum ≤ dag, schuif uit = niet, na markeren niet opnieuw tot de inhoud verandert', function () {
+  let s = metRegels();
+  const sl = function (l) { return l.map(function (r) { return r.sleutel; }); };
+  assert.deepStrictEqual(sl(AN.editieRegels(s, 'ochtend', '2026-11-22', DAG22 + 1)), ['pakjes/b', 'proef/a']);
+  assert.deepStrictEqual(sl(AN.editieRegels(s, 'avond', '2026-11-22', DAG22 + 1)), ['facturen/c', 'proef/a']);
+  s = AN.instelZet(s, 'pakjes', { editie: false }).staat;
+  assert.deepStrictEqual(sl(AN.editieRegels(s, 'ochtend', '2026-11-22', DAG22 + 1)), ['proef/a']);
+  s = AN.editieMarkeer(s, 'ochtend', '2026-11-22', AN.editieRegels(s, 'ochtend', '2026-11-22', DAG22 + 1), DAG22 + 2).staat;
+  assert.deepStrictEqual(sl(AN.editieRegels(s, 'avond', '2026-11-22', DAG22 + 3)), ['facturen/c'], 'proef/a stond al in de ochtend');
+  s = AN.meld(s, { app: 'proef', onderwerp: 'a', laan: 'editie', datum: '2026-11-22', tekst: 'Verzonnen regel A, bijgewerkt.' }, DAG22 + 4).staat;
+  assert.deepStrictEqual(sl(AN.editieRegels(s, 'avond', '2026-11-22', DAG22 + 5)), ['facturen/c', 'proef/a'], 'nieuwe inhoud komt opnieuw');
+  s = AN.gezien(s, [{ sleutel: 'facturen/c', versie: 1 }], DAG22 + 6).staat;
+  assert.deepStrictEqual(sl(AN.editieRegels(s, 'avond', '2026-11-22', DAG22 + 7)), ['proef/a'], 'gezien = uit de editie');
+  assert.strictEqual(s.edities.ochtend.dag, '2026-11-22');
+  assert.throws(function () { AN.editieRegels(s, 'middag', '2026-11-22', DAG22); });
+});
+test('editieTekst: één regel per App-regel; te veel = slotregel met het aantal in het paneel, de rest niet gemarkeerd', function () {
+  const r = function (i) { return { sleutel: 'proef/r' + i, versie: 1, app: 'proef', tekst: 'Regel ' + i + ' ' + 'x'.repeat(90) }; };
+  const e1 = AN.editieTekst([r(1), r(2)]);
+  assert.strictEqual(e1.tekst.split('\n').length, 2); assert.ok(e1.tekst.indexOf('• Proef: Regel 1') === 0); assert.strictEqual(e1.over, 0);
+  const veel = []; for (let i = 0; i < 60; i++) veel.push(r(i));
+  const e2 = AN.editieTekst(veel);
+  assert.ok(e2.tekst.length <= AN.EDITIE_MAX, 'binnen de grens');
+  assert.ok(e2.over > 0 && e2.mee.length + e2.over === 60);
+  assert.ok(/en nog \d+ in Overzicht › Nieuw in je Apps$/.test(e2.tekst));
+});
+test('avondMoment: alleen 20:30–22:29, nooit in de stille uren, één keer per dag', function () {
+  const s = AN.leeg();
+  assert.strictEqual(AN.avondMoment('20:29', '2026-11-22', s), false);
+  assert.strictEqual(AN.avondMoment('20:30', '2026-11-22', s), true);
+  assert.strictEqual(AN.avondMoment('22:29', '2026-11-22', s), true);
+  assert.strictEqual(AN.avondMoment('22:30', '2026-11-22', s), false);
+  assert.strictEqual(AN.avondMoment('23:15', '2026-11-22', s), false);
+  assert.strictEqual(AN.avondMoment('06:50', '2026-11-22', s), false);
+  const m = AN.editieMarkeer(s, 'avond', '2026-11-22', [], DAG22).staat;
+  assert.strictEqual(AN.avondMoment('21:00', '2026-11-22', m), false);
+  assert.strictEqual(AN.avondMoment('21:00', '2026-11-23', m), true);
+});
+test('instelZet: alleen aan/uit, onbekend veld telt niet, ongeldige app gooit', function () {
+  let u = AN.instelZet(AN.leeg(), 'beleggen', { teller: false });
+  assert.deepStrictEqual(u.instel, { teller: false });
+  u = AN.instelZet(u.staat, 'beleggen', { bundel: false });
+  assert.deepStrictEqual(u.instel, { teller: false, bundel: false });
+  assert.throws(function () { AN.instelZet(u.staat, 'beleggen', { teller: 'nee' }); });
+  assert.throws(function () { AN.instelZet(u.staat, 'Kapot/pad', { teller: true }); });
+  assert.throws(function () { AN.instelZet(u.staat, 'beleggen', { iets: true }); });
+});
+const klok = function (d, u, m) { return { datum: d, uur: u, min: m, klok: d + ' ' + u + ':' + m }; };
+test('serverblok: ochtendeditie zet één rij bron apps (teruggelezen) en markeert; geen regels = geen rij; na 07:00 niets', async function () {
+  const aanroepen = [];
+  let rij = null;
+  const zend = function (m, p, body) {
+    aanroepen.push([m, p]);
+    if (m === 'POST') { rij = body.data; return Promise.resolve({}); }
+    return Promise.resolve({ data: rij ? [rij] : [] });
+  };
+  const b = laadBlok({ zend: zend, ovisAms: function () { return klok('2026-11-22', 6, 50); } });
+  let u = await b.x.loketOchtendEditie({ datum: '2026-11-22' });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(u)), { ok: true, detail: { regels: 0 } }); assert.strictEqual(aanroepen.length, 0, 'geen regels = geen rij');
+  await b.x.loketMeld({ app: 'proef', onderwerp: 'a', laan: 'editie', datum: '2026-11-22', tekst: 'Verzonnen ochtendregel.' });
+  await b.x.loketMeld({ app: 'socev', onderwerp: 'weer', laan: 'editie', datum: '2026-11-22', editie: 'ochtend', tekst: 'Verzonnen weer.', buffer: 'weer' });
+  u = await b.x.loketOchtendEditie({ datum: '2026-11-22' });
+  assert.strictEqual(u.detail.regels, 1);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(rij)), { bron: 'apps', datum: '2026-11-22', tekst: '• Proef: Verzonnen ochtendregel.' });
+  const s = JSON.parse(fs.readFileSync(path.join(b.dir, 'app-nieuws.json'), 'utf8'));
+  assert.deepStrictEqual(s.edities.verschenen, { 'proef/a': 1 });
+  const b2 = laadBlok({ zend: zend, ovisAms: function () { return klok('2026-11-22', 7, 5); } });
+  u = await b2.x.loketOchtendEditie({ datum: '2026-11-22' });
+  assert.strictEqual(u.al_gedaan, true); assert.strictEqual(u.detail.te_laat, true);
+});
+test('serverblok: avondeditie met nepklok — dag zonder nieuws = geen bericht; met nieuws één bericht, daarna niet nog eens; buiten het venster niets', async function () {
+  const berichten = [], log = [];
+  const stuur = function (d) { berichten.push(d); return Promise.resolve({ status: 200, j: { ok: true } }); };
+  const b = laadBlok({ stuur: stuur, log: log });
+  let u = await b.x.loketAvondTik({ proef: true, ams: klok('2026-11-22', 20, 35), stuur: stuur });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(u)), { regels: 0, bericht: false }); assert.strictEqual(berichten.length, 0, 'dag zonder nieuws: geen avondeditie');
+  u = await b.x.loketAvondTik({ proef: true, ams: klok('2026-11-22', 21, 0), stuur: stuur });
+  assert.strictEqual(u, null, 'die avond al gedaan');
+  await b.x.loketMeld({ app: 'facturen', onderwerp: 'c', laan: 'editie', datum: '2026-11-23', editie: 'avond', tekst: 'Verzonnen avondregel.' });
+  u = await b.x.loketAvondTik({ proef: true, ams: klok('2026-11-23', 23, 10), stuur: stuur });
+  assert.strictEqual(u, null, 'stille uren: niets'); assert.strictEqual(berichten.length, 0);
+  u = await b.x.loketAvondTik({ proef: true, ams: klok('2026-11-23', 20, 30), stuur: stuur });
+  assert.strictEqual(u.bericht, true); assert.strictEqual(berichten.length, 1);
+  assert.strictEqual(berichten[0].bron, 'apps-avond'); assert.strictEqual(berichten[0].kanaal, 'hoofd'); assert.strictEqual(berichten[0].soort, 'dag');
+  assert.strictEqual(berichten[0].tekst, '📬 Uit je Apps (avond)\n\n• Facturen: Verzonnen avondregel.');
+  u = await b.x.loketAvondTik({ proef: true, ams: klok('2026-11-23', 20, 35), stuur: stuur });
+  assert.strictEqual(u, null); assert.strictEqual(berichten.length, 1, 'niet twee keer');
+  const n = await b.x.loketAvondTik({ ams: klok('2026-11-24', 20, 35), stuur: stuur });
+  assert.strictEqual(n, null, 'zonder proef en niet echt: niets');
+});
+test('serverblok: schuif-route zet instel, schuif teller uit = geen getal', async function () {
+  const b = laadBlok({});
+  await b.x.loketMeld({ app: 'pakjes', onderwerp: 'vandaag', laan: 'teller', aantal: 2 });
+  await b.x.appNieuwsInstelRoute({}, nepRes(), { id: 'a' }, { app: 'pakjes', teller: false });
+  assert.deepStrictEqual(b.antwoorden.pop(), [200, { ok: true, app: 'pakjes', instel: { teller: false } }]);
+  await b.x.appNieuwsRoute({ url: '/app/nieuws' }, nepRes(), { id: 'a' });
+  const a = b.antwoorden.pop()[1];
+  assert.deepStrictEqual(a.tellers, {}); assert.deepStrictEqual(a.instel, { pakjes: { teller: false } });
+  await b.x.appNieuwsInstelRoute({}, nepRes(), { id: 'a' }, { app: 'pakjes', teller: 'x' });
+  assert.strictEqual(b.antwoorden.pop()[0], 400);
 });

@@ -10085,6 +10085,15 @@ async function loketTellersVerversen(a) {
       else fouten.push('pakjes');
     }
   } catch (e) { fouten.push('pakjes'); logError('app-nieuws-teller', e); }
+  // wv3815 (fase 2, punt d): Beleggen erbij, zelfde getal als GET /app/beleggen/teller (open signalen + nieuwe weekkaarten)
+  try {
+    if (!beleggenApp) fouten.push('beleggen');
+    else {
+      const u = beleggenApp.app({ pad: '/app/beleggen/teller', methode: 'GET' });
+      if (u && u.status === 200 && u.body && Number.isInteger(u.body.totaal)) zet.push({ app: 'beleggen', onderwerp: 'open', laan: 'teller', aantal: u.body.totaal, doel: { scherm: 'beleggen' } });
+      else fouten.push('beleggen');
+    }
+  } catch (e) { fouten.push('beleggen'); logError('app-nieuws-teller', new Error('beleggen-teller faalde')); }
   appNieuwsStand.tellersFout = fouten.length ? fouten : null;
   for (const m of zet) { try { await loketMeld(m); } catch (e) { logError('app-nieuws-teller', e); } }
 }
@@ -10125,19 +10134,84 @@ async function appNieuwsSchaduwRoute(req, res, a, d) {
   res._app.stil = true;
   if (!appTeller('nieuws_schaduw', 300, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens nieuws schaduw');
   const app = String((d && d.app) || '');
-  if (app !== 'facturen' && app !== 'pakjes') return appWeiger(res, 400, 'onbekende app', 'nieuws schaduw app');
+  if (app !== 'facturen' && app !== 'pakjes' && app !== 'beleggen') return appWeiger(res, 400, 'onbekende app', 'nieuws schaduw app');   // wv3815: beleggen erbij
   const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
   let u;
   try { u = await appNieuwsWijzig(function (s, nu) { return AN.schaduwTel(s, dag, app, d.oud, d.nieuw, nu); }); }
   catch (e) { if (e && e.loket) return appWeiger(res, 400, 'ongeldig verzoek', 'nieuws schaduw velden'); logError('app-nieuws', e); return appWeiger(res, 500, 'opslaan lukte niet', 'app-nieuws.json schrijven'); }
   appStuur(res, 200, { ok: true, gelijk: u.gelijk });
 }
+// wv3815 (fase 2, punt g): schuif per App onder ⚙ — { app, editie?, teller?, bundel? } (aan/uit); alleen Davids eigen instelling.
+appStaat.tellers.nieuws_instel = [];
+async function appNieuwsInstelRoute(req, res, a, d) {
+  if (!appNieuwsAan(res)) return;
+  if (typeof AN.instelZet !== 'function') return appWeiger(res, 404, 'de schuif zit niet in deze versie van de pod', 'app-nieuws instel ontbreekt');
+  if (!appTeller('nieuws_instel', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens nieuws instel');
+  const w = d && typeof d === 'object' ? { editie: d.editie, teller: d.teller, bundel: d.bundel } : null;
+  let u;
+  try { u = await appNieuwsWijzig(function (s) { return AN.instelZet(s, d && d.app, w); }); }
+  catch (e) { if (e && e.loket) return appWeiger(res, 400, 'ongeldig verzoek', 'nieuws instel velden'); logError('app-nieuws', e); return appWeiger(res, 500, 'opslaan lukte niet', 'app-nieuws.json schrijven'); }
+  res._app.reden = 'nieuws schuif ' + String(d.app).slice(0, 30);
+  appStuur(res, 200, { ok: true, app: String(d.app), instel: u.instel });
+}
+// wv3815 (fase 2, punt a): ochtendeditie. Nachtketenstap apps-editie (06:50, primaire kant, vóór de briefing van 07:00): de levende,
+// ongeziene editie-regels zonder eigen bufferbron (AN.editieRegels) als één rij bron 'apps' in ochtend_buffer (AN.bufferZet, teruggelezen).
+// De n8n-knoop Opmaak zet die rij letterlijk als blok "Uit je Apps" (nooit via het taalmodel; Bouw prompt slaat bron apps over).
+// Geen regels = geen rij (Opmaak toont alleen een rij met de datum van vandaag). Pas na een gelukte rij markeert het loket welke versies erin stonden.
+async function loketOchtendEditie(ctx) {
+  if (!AN || typeof AN.editieRegels !== 'function') return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+  const t = ovisAms(), dag = ctx && ctx.datum ? ctx.datum : t.datum;
+  // na 07:00 (keten liep achter) geen rij meer: de briefing is dan al gemaakt; de regels blijven voor de avond of morgen (niet gemarkeerd)
+  if (dag === t.datum && t.uur * 60 + t.min >= 7 * 60) return { ok: true, al_gedaan: true, detail: { te_laat: true } };
+  await appNieuwsKeten.catch(function () {});
+  const regels = AN.editieRegels(appNieuwsLees(), 'ochtend', dag, Date.now());
+  if (!regels.length) {
+    await appNieuwsWijzig(function (s, nu) { return AN.editieMarkeer(s, 'ochtend', dag, [], nu); });
+    return { ok: true, detail: { regels: 0 } };
+  }
+  const e = AN.editieTekst(regels);
+  await AN.bufferZet(appN8nZend, APP_MELD_TABEL, 'apps', dag, e.tekst);
+  await appNieuwsWijzig(function (s, nu) { return AN.editieMarkeer(s, 'ochtend', dag, e.mee, nu); });
+  return { ok: true, detail: { regels: e.mee.length, over: e.over } };
+}
+// wv3815 (fase 2, punt b): avondeditie. Elke 5 min (echte pod, primaire kant); werk alleen 20:30–22:29 en één keer per avond
+// (AN.avondMoment; nooit in de stille uren). Deterministisch, geen taalmodel: alleen als er ongeziene editie-regels zijn die nog in geen
+// editie stonden; een dag zonder nieuws = geen bericht. Via de gewone app-meldweg (berichtIntern, hoofdkanaal, soort dag, één sleutel per avond).
+let loketAvondBezig = false;
+async function loketAvondTik(opt) {
+  const o = opt || {};
+  if (!AN || typeof AN.avondMoment !== 'function' || loketAvondBezig) return null;
+  if (!o.proef && (!SERVER_ECHT || !rolPrimair())) return null;
+  const t = o.ams || ovisAms();
+  const klok = String(t.uur).padStart(2, '0') + ':' + String(t.min).padStart(2, '0');
+  loketAvondBezig = true;
+  try {
+    await appNieuwsKeten.catch(function () {});
+    if (!AN.avondMoment(klok, t.datum, appNieuwsLees())) return null;
+    const regels = AN.editieRegels(appNieuwsLees(), 'avond', t.datum, o.nu || Date.now());
+    if (!regels.length) {
+      await appNieuwsWijzig(function (s, nu) { return AN.editieMarkeer(s, 'avond', t.datum, [], nu); });
+      schrijfLog(nu() + ' app-nieuws avond=' + t.datum + ' regels=0 bericht=nee');
+      return { regels: 0, bericht: false };
+    }
+    const e = AN.editieTekst(regels);
+    const r = await (o.stuur || berichtIntern)({ kanaal: 'hoofd', bron: 'apps-avond', klasse: 'normaal', soort: 'dag', tekst: '📬 Uit je Apps (avond)\n\n' + e.tekst, sleutel: 'apps-avond:' + t.datum });
+    if (!r || r.status !== 200) throw new Error('bericht niet bezorgd (' + (r && r.status) + ')');
+    await appNieuwsWijzig(function (s, nu) { return AN.editieMarkeer(s, 'avond', t.datum, e.mee, nu); });
+    schrijfLog(nu() + ' app-nieuws avond=' + t.datum + ' regels=' + e.mee.length + ' over=' + e.over + ' bericht=ja');
+    return { regels: e.mee.length, bericht: true };
+  } catch (e) { logError('app-nieuws-avond', e); return { fout: true }; }
+  finally { loketAvondBezig = false; }
+}
+if (AN && SERVER_ECHT) { setInterval(function () { loketAvondTik(); }, 5 * 60000).unref(); }
 function appNieuwsInfo() {
   if (!AN) return { aan: false };
   try {
     const s = appNieuwsLees(), nu = Date.now(), l = AN.lijst(s, {}, nu);
     const per = {}; l.forEach(function (r) { per[r.laan] = (per[r.laan] || 0) + 1; });
-    return { aan: true, regels: per, ongezien: l.filter(function (r) { return !r.gezien_op; }).length, schaduw_fout: appNieuwsStand.schaduwFout, teller_fout: appNieuwsStand.tellersFout };
+    const ed = s.edities || {};
+    return { aan: true, regels: per, ongezien: l.filter(function (r) { return !r.gezien_op; }).length, schaduw_fout: appNieuwsStand.schaduwFout, teller_fout: appNieuwsStand.tellersFout,
+      ochtend: ed.ochtend || null, avond: ed.avond || null };   // wv3815: laatste editie (dag, op, aantal; geen tekst)
   } catch (e) { return { aan: true, fout: true }; }
 }
 
@@ -16260,6 +16334,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/nieuws/tellers') return appNieuwsTellersRoute(req, res, a);   // wv3689
         if (route === 'POST /app/nieuws/gezien') return appNieuwsGezienRoute(req, res, a, d);   // wv3689
         if (route === 'POST /app/nieuws/schaduw') return appNieuwsSchaduwRoute(req, res, a, d);   // wv3689 fase 1
+        if (route === 'POST /app/nieuws/instel') return appNieuwsInstelRoute(req, res, a, d);   // wv3815 fase 2: schuif per App
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
         if (route === 'POST /app/broedstoof/knop') return appBroedstoofKnop(req, res, reg, a, s, d);   // wv3731
         if (route === 'GET /app/agents') return appAgents(req, res, a);
@@ -17317,6 +17392,7 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'onderhoud',            // wv1271: onderhoudsstand vault > 2 uur, één alarm; machinekamer, archief
   'facturen-sepa-door',   // wv2465: SEPA-batch Tolgaarde zelf naar nogbetalen@; hoofdkanaal, soort dag (zet de aanroep zelf)
   'facturen-nogbetalen',  // wv3369: betaalverzoek naar Cynthia (nogbetalen@) niet of onzeker verstuurd, dagplafond; hoofdkanaal, soort dag
+  'apps-avond',           // wv3815: avondeditie "Uit je Apps" van het redactie-loket (20:30–22:29, alleen bij nieuws); hoofdkanaal, soort dag
   'pot-antwoord']);       // wv3677/wv3765: herstelbericht na een mislukte Ja op de POT-aantalkaart; hoofdkanaal, soort dag (mislukte handeling op Davids knop)
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
@@ -17325,7 +17401,7 @@ const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
 // in Telegram tikte David 17 van 18 regels aan (mediaan 7 min), in de app 28 van 80 (mediaan 289 min).
 // wv3719 (3C04, David Ja 21-11 13:22): heartbeat = dag. 11 van de 19 heartbeat-berichten (afval, "morgen laatste dag") kwamen
 // als archief binnen, zonder seintje. Een stille ronde (NIETS) komt hier nooit: de n8n-Heartbeat stuurt dan niets.
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'beleggen-waarom': 'dag', 'pot-antwoord': 'dag', 'pot-loonrun': 'dag' };
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'beleggen-waarom': 'dag', 'pot-antwoord': 'dag', 'apps-avond': 'dag', 'pot-loonrun': 'dag' };
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
@@ -24204,6 +24280,8 @@ const nachtketen = (function () {
         if (!weerOchtend) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
         return weerOchtend.doe({ ams: ctx.ams });
       } },
+      // wv3815 (2C59 fase 2): ochtendeditie "Uit je Apps" als bufferrij bron 'apps' vóór de briefing van 07:00; een fout meldt de keten (box-rij)
+      { naam: 'apps-editie', start_na: [6, 50], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return loketOchtendEditie(ctx); } },
       // wv2894 (idee 19d): zondag één regel over de binnenste kring voor de briefing van 07:00; stil bij een fout (box-rij), anders al_gedaan
       { naam: 'contactringen', start_na: [6, 40], na: ['weer-ochtend'], limiet_min: 5, pogingen: 2, inProces: true, doe: async function (ctx) {
         if (!contactringen) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
