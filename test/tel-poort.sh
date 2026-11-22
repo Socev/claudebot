@@ -104,7 +104,7 @@ const ctxGlobals = () => ({ require, fs, path, crypto, Buffer, console, URL, set
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-const EXPORT = '\n;globalThis.__h = { handleApp, appIsPad, handleTel, telIsPad, telStaat, appStaat, appNoodstop, appAan, appOntmasker, telAfsluiten, telSpreektekst, telOpname, telInfo, appInfo, telOpruim, TEL_ROUTE_RE, telMerkAgent, telZelfStart, telZelfNaRun, telAanwezig, telBelletje, agentsReg, TEL_ZELF_AANKONDIGING, telOnderwegVelden, telVraagzin, appBriefingLaad, telRij, telRitLaad: typeof telRitLaad === "function" ? telRitLaad : function () { return { open: {}, ritten: [] }; }, telRitNu: typeof telRitNu === "function" ? telRitNu : function () { return {}; }, telRitten: typeof telRitten === "function" ? telRitten : function () { return []; }, __zet: function (n, f) { globalThis[n] = f; } };';
+const EXPORT = '\n;globalThis.__h = { handleApp, appIsPad, handleTel, telIsPad, telStaat, appStaat, appNoodstop, appAan, appOntmasker, telAfsluiten, telSpreektekst, telOpname, telInfo, appInfo, telOpruim, TEL_ROUTE_RE, telMerkAgent, telZelfStart, telZelfNaRun, telAanwezig, telBelletje, agentsReg, TEL_ZELF_AANKONDIGING, telOnderwegVelden, telVraagzin, appBriefingLaad, telRij, telRitLaad: typeof telRitLaad === "function" ? telRitLaad : function () { return { open: {}, ritten: [] }; }, telRitNu: typeof telRitNu === "function" ? telRitNu : function () { return {}; }, telRitten: typeof telRitten === "function" ? telRitten : function () { return []; }, __zet: function (n, f) { globalThis[n] = f; }, __haal: function (n) { return globalThis[n]; } };';
 function laad() { const c = vm.createContext(ctxGlobals()); vm.runInContext(blok + EXPORT, c, { filename: 'server.js#app' }); return c.__h; }
 let H = laad();
 let srv = http.createServer((q, s) => { if (H.telIsPad(q)) return H.handleTel(q, s); if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
@@ -1228,6 +1228,149 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('8v na intrekken: uitdaging 409 "koppel opnieuw"', r.status === 409 && /koppel Onderweg opnieuw/.test(r.j.fout), r.j);
     toets('8v tel-audit zonder handtekening of sleutel', !audit().includes(vPub.slice(20, 60)) && /vingerja/.test(audit()));
     toets('8v geen onverwachte fouten (vingerja)', !logs.some((l) => /tel-vinger|app-register|app-vragen/.test(l)), logs.filter((l) => /tel-vinger|app-register|app-vragen/.test(l)));
+    // ── 8w. wv3878 (opzet Fable stap 2): agendaregel (lijst=agenda/agendastem) en één microfoon (X-Tel-Kies) ──
+    H.appStaat.tellers['tel-alles'] = []; H.appStaat.tellers['tel-beurt'] = []; H.appStaat.tellers['tel-beurtdag'] = [];
+    await rond();
+    sessie(PIXEL, 'credP', false);
+    const Ag = { items: H.__haal('telAgendaItems'), zin: H.__haal('telAgendaZin'), ms: H.__haal('telLokaalMs') };
+    toets('8w functies aanwezig', typeof Ag.items === 'function' && typeof Ag.zin === 'function' && typeof Ag.ms === 'function');
+    if (typeof Ag.ms === 'function') {
+      toets('8w lokale tijd winter en zomer', Ag.ms('2026-11-23', '10:15') === Date.parse('2026-11-23T10:15:00+01:00') && Ag.ms('2026-07-01', '10:15') === Date.parse('2026-07-01T10:15:00+02:00'),
+        [Ag.ms('2026-11-23', '10:15'), Ag.ms('2026-07-01', '10:15')]);
+      const kw = [['2026-03-29', '01:30', '+01:00'], ['2026-03-29', '10:00', '+02:00'], ['2026-03-30', '00:00', '+02:00'], ['2026-10-25', '01:30', '+02:00'],
+        ['2026-10-25', '10:00', '+01:00'], ['2026-10-26', '00:00', '+01:00']].filter(([d, k, o]) => Ag.ms(d, k) !== Date.parse(d + 'T' + k + ':00' + o));
+      toets('8w lokale tijd op beide klokwisseldagen, ook vroeg in de nacht (Codex MOET 2)', kw.length === 0, kw.map(([d, k]) => d + ' ' + k + ' -> ' + new Date(Ag.ms(d, k)).toISOString()));
+      const dA = { vandaag: '2026-11-23', morgen: '2026-11-24', fouten: [], op: Date.now(), agenda: { vandaag: [
+        { hele_dag: true, titel: 'Proefverjaardag', start: '2026-11-23', van: null, tot: null },
+        { hele_dag: false, titel: 'Vroeg proefoverleg', start: '2026-11-23T08:00:00+01:00', van: '08:00', tot: '09:00' },
+        { hele_dag: false, titel: 'Lopend proefblok', start: '2026-11-23T10:00:00+01:00', van: '10:00', tot: '11:00' },
+        { hele_dag: false, titel: 'Proeftandarts **zuid**', start: '2026-11-23T14:30:00+01:00', van: '14:30', tot: '15:00' },
+        { hele_dag: false, titel: 'Proefnachtdienst', start: '2026-11-23T22:00:00+01:00', van: '22:00', tot: null },
+        { hele_dag: false, titel: 'Proef tot middernacht', start: '2026-11-23T23:00:00+01:00', van: '23:00', tot: '00:00' }],
+        morgen: [{ hele_dag: false, titel: 'Proefwerkoverleg', start: '2026-11-24T08:30:00+01:00', van: '08:30', tot: '09:30' }] } };
+      const nuA = Ag.ms('2026-11-23', '10:15');
+      const aA = Ag.items(dA, nuA);
+      const titels = aA.nog.map((x) => x.titel);
+      toets('8w voorbije afspraak weg, de rest op volgorde', JSON.stringify(titels) === JSON.stringify(['Proefverjaardag', 'Lopend proefblok', 'Proeftandarts **zuid**', 'Proefnachtdienst', 'Proef tot middernacht']), titels);
+      const lop = aA.nog[1], mid = aA.nog[4], nacht = aA.nog[3];
+      toets('8w begin/eind in ms; tot middernacht en doorlopend eindigen om middernacht', lop.begin === Date.parse('2026-11-23T10:00:00+01:00') && lop.eind === Ag.ms('2026-11-23', '11:00') &&
+        mid.eind === Ag.ms('2026-11-24', '00:00') && mid.tot === null && nacht.eind === Ag.ms('2026-11-24', '00:00') && aA.morgen.length === 1, { lop, mid, nacht });
+      const zA = Ag.zin(aA, nuA, false);
+      toets('8w voorleeszin: nu, straks, hele dag; geen opmaak, niet het voorbije', /^Vandaag nog in je agenda\./.test(zA) && /Nu: Lopend proefblok, tot 11:00\./.test(zA) && /Om 14:30: Proeftandarts zuid\./.test(zA) &&
+        /Hele dag: Proefverjaardag\./.test(zA) && !/Vroeg|\*\*/.test(zA), zA);
+      const zL = Ag.zin(Ag.items(dA, Ag.ms('2026-11-24', '00:00') + 1), Ag.ms('2026-11-24', '00:00') + 1, true);
+      toets('8w niets meer vandaag: morgen eerste afspraak + onvolledig', /^Vandaag staat er niets meer in je agenda\.\nMorgen om 08:30: Proefwerkoverleg\.\nNiet alle agenda's waren te lezen\.$/.test(zL), zL);
+      toets('8w zin gelijk zolang er niets begint of eindigt (stem blijft bewaard)', Ag.zin(Ag.items(dA, nuA + 60000), nuA + 60000, false) === zA);
+    }
+    // de route
+    const ymdNu = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    const ymdMo = new Date(Date.now() + 86400000).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    let agD = { vandaag: ymdNu, morgen: ymdMo, fouten: [], op: Date.now(), agenda: { vandaag: [{ hele_dag: true, titel: 'Proefdag met Socev', start: ymdNu, van: null, tot: null }], morgen: [] } };
+    let agFout = null, agN = 0;
+    H.__zet('appVandaag', async () => { agN++; if (agFout) throw agFout; return agD; });
+    const gestartW = gestart.length, chatW = st.chatlog.length;
+    r = await tel('GET', '/tel/uit?lijst=agenda', { sleutel: TKV });
+    toets('8w agenda met een Tasker-sleutel: 404', r.status === 404, r.j);
+    Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
+    r = await tel('GET', '/tel/uit?lijst=agenda', { sleutel: OWV });
+    toets('8w agenda zonder app-sessie: 423, agenda niet gelezen', r.status === 423 && agN === 0, { r: r.j, agN });
+    sessie(PIXEL, 'credP', false);
+    st.ttsTraag = 200;
+    const ttsW = st.tts.length;
+    r = await tel('GET', '/tel/uit?lijst=agenda', { sleutel: OWV });
+    toets('8w agenda: 200, items met begin/eind, zin, stem bezig (vooruit)', r.status === 200 && r.j.ok === true && r.j.items.length === 1 && r.j.items[0].titel === 'Proefdag met Socev' &&
+      Number.isFinite(r.j.items[0].begin) && Number.isFinite(r.j.items[0].eind) && /Hele dag: Proefdag met/.test(r.j.zin) && r.j.stem === 'bezig' && r.j.vandaag === ymdNu, r.j);
+    await tik();
+    toets('8w vooruit: één stemaanroep met de zin', st.tts.length === ttsW + 1 && /Hele dag: Proefdag/.test(st.tts[st.tts.length - 1]), st.tts.slice(ttsW));
+    r = await tel('GET', '/tel/uit?lijst=agendastem', { sleutel: OWV });
+    toets('8w agendastem terwijl de stem nog gemaakt wordt: wacht erop, geen tweede aanroep', r.status === 200 && /audio\/wav/.test(r.ct) && st.tts.length === ttsW + 1, { status: r.status, n: st.tts.length - ttsW });
+    st.ttsTraag = 0;
+    r = await tel('GET', '/tel/uit?lijst=agendastem', { sleutel: OWV });
+    toets('8w agendastem nog een keer: bewaard, geen aanroep', r.status === 200 && st.tts.length === ttsW + 1, st.tts.length - ttsW);
+    r = await tel('GET', '/tel/uit?lijst=agenda', { sleutel: OWV });
+    toets('8w agenda daarna: stem klaar', r.status === 200 && r.j.stem === 'klaar', r.j.stem);
+    agD = Object.assign({}, agD, { agenda: { vandaag: [], morgen: [] }, fouten: ['niet alle agenda\'s waren te lezen'] });
+    H.appStaat.tellers['tel-agendastem'] = Array.from({ length: 40 }, () => Date.now());
+    r = await tel('GET', '/tel/uit?lijst=agenda', { sleutel: OWV });
+    toets('8w nieuwe zin, dagplafond vol: stem nee, onvolledig, geen aanroep', r.status === 200 && r.j.stem === 'nee' && r.j.onvolledig === true && r.j.items.length === 0 &&
+      /Morgen ook nog niets\./.test(r.j.zin) && st.tts.length === ttsW + 1, r.j);
+    r = await tel('GET', '/tel/uit?lijst=agendastem', { sleutel: OWV });
+    toets('8w agendastem met vol plafond: 429 met zin', r.status === 429 && /genoeg voorgelezen/.test(r.j.fout), r.j);
+    H.appStaat.tellers['tel-agendastem'] = [];
+    agD = Object.assign({}, agD, { agenda: null, fouten: ['je agenda is nu niet te lezen'] });
+    r = await tel('GET', '/tel/uit?lijst=agenda', { sleutel: OWV });
+    toets('8w agenda onleesbaar: 503 met zin', r.status === 503 && /agenda is nu niet te lezen/.test(r.j.fout), r.j);
+    agFout = new Error('luik weg');
+    r = await tel('GET', '/tel/uit?lijst=agendastem', { sleutel: OWV });
+    toets('8w agendastem als het luik faalt: 503', r.status === 503, r.j);
+    agFout = null;
+    toets('8w agenda start geen beurt en geen chat_log', gestart.length === gestartW && st.chatlog.length === chatW, { b: gestart.length - gestartW, c: st.chatlog.length - chatW });
+    toets('8w tel-audit: geen titels, agendastem wel, lijst=agenda 200 stil', !/Proefdag|Proefverjaardag/.test(audit()) && /agendastem/.test(audit()) &&
+      !audit().split('\n').some((l) => /"reden":"agenda /.test(l) && /"status":200/.test(l)));
+    // één microfoon
+    const telK = (o) => { const k = { 'cf-access-jwt-assertion': jwt(), authorization: 'Bearer ' + (o.sleutel || OWV), 'content-type': o.ct || 'audio/mp4', 'x-tel-kies': o.kop === undefined ? '1' : o.kop };
+      if (o.snel) k['x-tel-snel'] = '1';
+      const b = o.body || mp4Maak(2); k['content-length'] = String(Buffer.byteLength(b)); return verzoek('POST', '/tel/beurt', k, b); };
+    const kiesAanroep = [];
+    let kiesUit = null;
+    zsAan = true;
+    H.__zet('zoekSnelVoer', async (a, id, vraag, toon, opt) => { kiesAanroep.push({ a: a.id, id, vraag, toon, opt }); if (kiesUit instanceof Error) throw kiesUit; return kiesUit; });
+    delete (H.appStaat.zoekSnel || { bezig: {} }).bezig[PIXEL];
+    r = await telK({ sleutel: TKV });
+    toets('8w kies met een Tasker-sleutel: 404', r.status === 404, r.j);
+    r = await telK({ kop: 'ja' });
+    toets('8w kies met een rare kopwaarde: 404', r.status === 404, r.j);
+    r = await telK({ snel: true });
+    toets('8w kies samen met snel: 404', r.status === 404, r.j);
+    // Zoek snel vindt het: snel antwoord, geen beurt
+    st.sttTekst = 'Wat is mijn proefkenteken';
+    kiesUit = { status: 200, j: { ok: true, soort: 'antwoord', tekst: 'Je proefkenteken is ZZ-99-ZZ.', waarden: [] } };
+    let gB = gestart.length, cB = st.chatlog.length;
+    r = await telK({});
+    const idK1 = r.j.id;
+    toets('8w kies: 202 met id en verstaan', r.status === 202 && /^[0-9a-f]{16}$/.test(String(idK1)) && r.j.verstaan === 'Wat is mijn proefkenteken', r.j);
+    await tik(); await tik();
+    toets('8w kies: Zoek snel eerst, stil bij een misser, met toon_dekking', kiesAanroep.length === 1 && kiesAanroep[0].a === PIXEL && kiesAanroep[0].vraag === 'Wat is mijn proefkenteken' &&
+      kiesAanroep[0].toon === true && kiesAanroep[0].opt && kiesAanroep[0].opt.stilBijMis === true, kiesAanroep);
+    r = await tel('GET', '/tel/uit', { sleutel: OWV });
+    toets('8w kies gevonden: snel antwoord, geen Socev-beurt of chat_log', r.j.id === idK1 && r.j.soort === 'antwoord' && r.j.snel === 'ja' && /ZZ-99-ZZ/.test(r.j.tekst) &&
+      gestart.length === gB && st.chatlog.length === cB, { j: r.j, b: gestart.length - gB });
+    await tel('POST', '/tel/gespeeld/' + idK1, { sleutel: OWV });
+    // niets gevonden, een handeling of een fout: door naar Socev, zelfde item
+    for (const [naam, uit] of [['geen', { status: 200, j: { ok: true, soort: 'geen', melding: 'Niet gevonden in je Brain.', tekst: '' } }],
+                               ['handeling', { status: 200, j: { ok: true, soort: 'handeling', melding: 'Dat kan in het gesprek met Socev.', tekst: '' } }],
+                               ['fout', new Error('stuk')], ['500', { status: 500, j: { ok: false, fout: 'fout op de pod' } }]]) {
+      kiesUit = uit; gB = gestart.length; cB = st.chatlog.length;
+      st.sttTekst = 'Proefvraag ' + naam + ' voor Socev';
+      r = await telK({});
+      const idK = r.j.id;
+      await tik(); await tik();
+      const nieuw = gestart.slice(gB);
+      const job = nieuw[0] && nieuw[0].jobId;
+      toets('8w kies ' + naam + ': gewone Socev-beurt met [AUTO] en chat_log', r.status === 202 && nieuw.length === 1 && /\[AUTO\] Proefvraag /.test(nieuw[0].prompt) && st.chatlog.length === cB + 1, { r: r.j, n: nieuw.length });
+      const it = H.telRij().find((x) => x.id === job);
+      toets('8w kies ' + naam + ': het wachtende item heeft nu de job-id (niet meer snel)', it && it.soort === 'bezig' && it.snel === false && !H.telRij().some((x) => x.id === idK) && it.k.kies === 'socev', it);
+      if (job && afmaken[job]) { afmaken[job]('Proefantwoord ' + naam + '.'); await tik(); }
+      r = await tel('GET', '/tel/uit', { sleutel: OWV });
+      toets('8w kies ' + naam + ': antwoord van Socev als gewoon item (snel nee)', r.j.id === job && r.j.soort === 'antwoord' && r.j.snel === 'nee' && /Proefantwoord/.test(r.j.tekst), r.j);
+      if (r.j.id) await tel('POST', '/tel/gespeeld/' + r.j.id, { sleutel: OWV });
+    }
+    // Zoek snel niet te proberen: meteen de gewone beurt, Zoek snel niet aangeroepen
+    for (const [naam, voor, na] of [['Zoek snel uit', () => { zsAan = false; }, () => { zsAan = true; }],
+                                     ['vraag > 200 tekens', () => { st.sttTekst = 'Lange proefvraag ' + 'x'.repeat(220); }, () => {}],
+                                     ['Zoek snel bezig', () => { H.appStaat.zoekSnel.bezig[PIXEL] = true; }, () => { delete H.appStaat.zoekSnel.bezig[PIXEL]; }]]) {
+      st.sttTekst = 'Proefvraag zonder zoeken'; voor();
+      const kA = kiesAanroep.length; gB = gestart.length;
+      r = await telK({});
+      toets('8w kies, ' + naam + ': meteen een gewone beurt (202, job-id), Zoek snel niet', r.status === 202 && gestart.length === gB + 1 && gestart[gB].jobId === r.j.id && kiesAanroep.length === kA, { r: r.j, z: kiesAanroep.length - kA });
+      na();
+      await tik(); if (afmaken[r.j.id]) afmaken[r.j.id]('Goed.'); await tik();
+      const u = await tel('GET', '/tel/uit', { sleutel: OWV }); if (u.j.id) await tel('POST', '/tel/gespeeld/' + u.j.id, { sleutel: OWV });
+    }
+    toets('8w zoekSnelVoer kent stilBijMis (geen zoekregel en geen systeemregel bij een misser)', /async function zoekSnelVoer\(a, id, vraag, toonDekking, opt\)/.test(src) &&
+      /const gelogd = stil \? false : await appLogSchrijf\('hoofd'/.test(src) && /if \(!stil\) zoekSnelRegelZet\(r\);/.test(src));
+    toets('8w tel-audit zonder vraag of antwoord (kies)', !/proefkenteken|ZZ-99-ZZ|Proefvraag/.test(audit()) && /kies /.test(audit()));
+    toets('8w geen onverwachte fouten (agenda, kies)', !logs.some((l) => /tel-agenda|tel-kies/.test(l) && !/luik weg|: stuk/.test(l)), logs.filter((l) => /tel-agenda|tel-kies/.test(l)));
     toets('8 geen onverwachte fouten (wv3700)', !logs.some((l) => /tel-voorjou/.test(l) && !/databank weg/.test(l)), logs.filter((l) => /tel-voorjou/.test(l)));
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }
   srv.close();

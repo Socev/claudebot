@@ -18699,6 +18699,9 @@ function telBeurt(req, res, t) {
   // wv3826 (434): kop X-Tel-Snel: 1 = snelle vraag via Zoek snel (geen Socev-beurt); alleen Onderweg
   const snel = req.headers['x-tel-snel'] !== undefined;
   if (snel && (String(req.headers['x-tel-snel']).trim() !== '1' || telSoort(t) !== 'onderweg')) return weg(404, 'onbekend', 'snel: ' + (telSoort(t) !== 'onderweg' ? 'geen onderweg-sleutel' : 'kop'));
+  // wv3878 (één microfoon): kop X-Tel-Kies: 1 = de pod kiest: eerst Zoek snel, niets gevonden = gewone Socev-beurt. Alleen Onderweg.
+  const kies = req.headers['x-tel-kies'] !== undefined;
+  if (kies && (String(req.headers['x-tel-kies']).trim() !== '1' || telSoort(t) !== 'onderweg' || snel)) return weg(404, 'onbekend', 'kies: ' + (telSoort(t) !== 'onderweg' ? 'geen onderweg-sleutel' : 'kop'));
   if (!telSessieOk(t)) return weg(423, 'open eerst even de Socev-app', 'geen app-sessie');
   const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   const tekstSoort = ct === 'text/plain';
@@ -18763,10 +18766,9 @@ function telBeurt(req, res, t) {
       if (telUit()) return telWeiger(res, 503, 'de telefoonkoppeling staat uit (noodstop)', 'uit (tijdens het verzoek)');
       if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve, gebruik Telegram', 'rol passief (tijdens)');
       if (snel) return telSnelStart(res, t, tekst, k);   // wv3826
-      const veilig = appOntmasker(tekst, 'gesproken');
-      const gelogd = await appChatLogStart('hoofd', [{ rol: 'david', ts: Date.now(), bevestiging: 'gesproken', tekst: '[AUTO] ' + veilig }]);
-      const st = appStartBeurt({ id: t.app_apparaat || t.id }, 'hoofd', '[AUTO] ' + veilig + (gelogd ? '' : APP_CHATLOG_NIET),
-        { beurt_id: null, soort: 'tel', tekst: '[AUTO] ' + tekst, tel: t.id });
+      if (kies && telKiesSnelMag(t, tekst)) return telKiesStart(res, t, tekst, k);   // wv3878; anders meteen een gewone beurt
+      if (kies) k.kies = 'socev';
+      const st = await telBeurtStart(t, tekst);
       if (!st.job_id) return telWeiger(res, 503, 'Socev kan nu geen beurt starten; gebruik Telegram', 'start ' + st.fout);
       k.tekens_in = tekst.length;
       telRij().push({ id: st.job_id, apparaat: t.id, soort: 'bezig', t_start: Date.now(), tot: Date.now() + TEL_TTL_MS, k: k });
@@ -18775,6 +18777,14 @@ function telBeurt(req, res, t) {
       telStuur(res, 202, Object.assign({ ok: true, id: st.job_id }, telSoort(t) === 'onderweg' ? { verstaan: tekst.slice(0, 600) } : {}));   // wv3700
     })().catch(function (e) { logError('tel-beurt', e); telWeiger(res, 500, 'fout op de pod', 'uitzondering beurt'); }).finally(klaar);
   });
+}
+
+// De gewone Socev-beurt uit de auto: chat_log-rij met [AUTO] en de beurt in het hoofdkanaal (ook de terugval van de keuze-microfoon, wv3878).
+async function telBeurtStart(t, tekst) {
+  const veilig = appOntmasker(tekst, 'gesproken');
+  const gelogd = await appChatLogStart('hoofd', [{ rol: 'david', ts: Date.now(), bevestiging: 'gesproken', tekst: '[AUTO] ' + veilig }]);
+  return appStartBeurt({ id: t.app_apparaat || t.id }, 'hoofd', '[AUTO] ' + veilig + (gelogd ? '' : APP_CHATLOG_NIET),
+    { beurt_id: null, soort: 'tel', tekst: '[AUTO] ' + tekst, tel: t.id });
 }
 
 function telUitRoute(req, res, t) {
@@ -18791,6 +18801,8 @@ function telUitRoute(req, res, t) {
     if (q.get('lijst') === 'telezengezien') return telTeLezenGezien(req, res, t, String(q.get('sleutel') || ''));
     if (q.get('lijst') === 'uitdaging') return telUitdagingRoute(req, res, t);   // wv3862: echte JA met vingerafdruk
     if (q.get('lijst') === 'vingerja') return telVingerJa(req, res, t, q);
+    if (q.get('lijst') === 'agenda') return telAgendaLijst(req, res, t);   // wv3878: de regel "Straks 9:00 …" en "lees mijn dag voor"
+    if (q.get('lijst') === 'agendastem') return telAgendaStem(req, res, t);
     return telWeiger(res, 400, 'onbekende lijst', 'lijst');
   }
   res._tel.stil = true;   // de hartslag (± 1 per minuut) niet in het auditlog; alleen weigeringen
@@ -19252,6 +19264,176 @@ async function telKaartStem(req, res, t, idTekst) {
   res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, 'Cache-Control': 'no-store' });
   res.end(wav);
 }
+
+// ── wv3878 (opzet Fable "Onderweg — opzet door Fable" § 6 stap 2, David Ja 22-11 14:35; ontwerp + review: bouwplan Onderweg
+// § "Onderweg 6.2 — stap 2"). Toets: test/tel-poort.sh § 8w. Geen nieuw /tel-pad (tunnel en Access laten er maar vijf door).
+//
+// 1. Agendaregel: GET /tel/uit?lijst=agenda = wat er vandaag nog in je agenda staat, uit dezelfde bron als Vandaag in de app (appVandaag:
+//    het lees-luik van AI - Agenda-Wachter API, live, 3 min bewaard; gemeten 22-11 ± 1 s). Niet de spiegel in de databank: die wordt maar
+//    één keer per nacht bijgewerkt (gemeten 22-11 18:20: laatst gezien 21-11 02:30, één afspraak minder dan live). Geen Socev-beurt.
+//    Onderweg rekent de regel "Straks 9:00 … · daarna …" zelf uit begin/eind (blijft kloppen tussen twee keer lezen); de pod geeft de
+//    voorleeszin. lijst=agendastem = die zin met de pod-stem; bij lijst=agenda alvast gemaakt (vooruit), zodat "lees mijn dag voor"
+//    meteen speelt. 40 echte stemaanroepen per dag (ook vooruit), in het geheugen per zin (sha). Titels alleen in het antwoord, nooit
+//    in een log. Alleen lezen: geen vragen.json, kaart, chat_log of beurt.
+// 2. Eén microfoon: POST /tel/beurt met X-Tel-Kies: 1 (alleen Onderweg; zie telBeurt). Na Whisper eerst Zoek snel; alleen een echt
+//    antwoord (soort antwoord, dus met bron en natoets) komt als snel item terug. Niets gevonden, een handeling, een fout, Zoek snel uit/bezig/vol of
+//    een vraag > 200 tekens = dezelfde gewone Socev-beurt als zonder kop (het item houdt zijn plek en krijgt de job-id). Een misser komt
+//    niet in het app-log en niet als systeemregel bij Socev (zoekSnelVoer stilBijMis). Telt als gewone vraag (tel-beurt), plus de
+//    Zoek snel-tellers als Zoek snel geprobeerd wordt.
+const TEL_AGENDA_PER_UUR = 120;
+const TEL_AGENDA_MAX = 8;
+const TEL_AGENDA_TITEL = 80;
+const TEL_AGENDASTEM_PER_DAG = 40;   // een dagzin ± 300 tekens ± 20 s ± $0,005: hooguit ± $0,20 per dag
+appStaat.tellers['tel-agenda'] = []; appStaat.tellers['tel-agendastem'] = [];
+telStaat.agendastem = { wav: {}, bezig: {} };
+// Lokale tijd (Europe/Amsterdam) op dag ymd om klok HH:MM, als ms. Twee stappen: de verschuiving op het eerste antwoord opnieuw meten,
+// anders rekent hij op de dag van de klokwissel vroege tijden een uur verkeerd (Codex MOET 2; toets 29-3 en 25-10).
+function telLokaalMs(ymd, hhmm) {
+  const gok = Date.parse(ymd + 'T' + hhmm + ':00Z');
+  if (!Number.isFinite(gok)) return null;
+  const verschil = function (t) { const d = Date.parse(new Date(t).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).replace(' ', 'T') + 'Z'); return Number.isFinite(d) ? d - t : null; };
+  const v1 = verschil(gok);
+  if (v1 === null) return null;
+  const v2 = verschil(gok - v1);
+  return v2 === null ? null : gok - v2;
+}
+// De afspraken van vandaag die nog niet voorbij zijn, en de eerste drie van morgen. begin/eind in ms (eind null = onbekend: blijft staan).
+function telAgendaItems(d, nu) {
+  const morgen = d.morgen, middernacht = telLokaalMs(morgen, '00:00'), overmorgen = telLokaalMs(appYmdPlus(morgen, 1), '00:00');
+  const vorm = function (x, dag, eindDag) {
+    const titel = appKort(String(x.titel || '(zonder titel)').replace(/\s+/g, ' ').trim(), TEL_AGENDA_TITEL);
+    if (x.hele_dag) return { titel: titel, hele_dag: true, begin: telLokaalMs(dag, '00:00'), eind: eindDag, van: null, tot: null };
+    const b = Date.parse(x.start);
+    // tot "00:00" = eindigt om middernacht (appAfspraken rekent de dag van einde − 1 ms); tot null = loopt door na vandaag
+    const e = x.tot && x.tot !== '00:00' ? telLokaalMs(dag, x.tot) : eindDag;
+    return { titel: titel, hele_dag: false, begin: Number.isFinite(b) ? b : null, eind: e, van: x.van || null, tot: x.tot && x.tot !== '00:00' ? x.tot : null };
+  };
+  const ag = d.agenda || {};
+  const nog = (Array.isArray(ag.vandaag) ? ag.vandaag : []).map(function (x) { return vorm(x, d.vandaag, middernacht); })
+    .filter(function (x) { return x.eind === null || x.eind > nu; }).slice(0, TEL_AGENDA_MAX);
+  const mo = (Array.isArray(ag.morgen) ? ag.morgen : []).map(function (x) { return vorm(x, morgen, overmorgen); }).slice(0, 3);
+  return { nog: nog, morgen: mo };
+}
+// De voorleeszin ("lees mijn dag voor"). Hangt alleen van nu af via wat er al begonnen of voorbij is: dezelfde zin tot de volgende
+// afspraak begint of eindigt (dan blijft de stem bewaard).
+function telAgendaZin(a, nu, onvolledig) {
+  const delen = [];
+  a.nog.filter(function (x) { return !x.hele_dag; }).forEach(function (x) {
+    if (x.begin !== null && x.begin <= nu) delen.push('Nu: ' + x.titel + (x.tot ? ', tot ' + x.tot : '') + '.');
+    else delen.push('Om ' + (x.van || '') + ': ' + x.titel + '.');
+  });
+  const hele = a.nog.filter(function (x) { return x.hele_dag; });
+  if (hele.length) delen.push('Hele dag: ' + hele.map(function (x) { return x.titel; }).join(', ') + '.');
+  let s;
+  if (delen.length) s = 'Vandaag nog in je agenda.\n' + delen.join('\n');
+  else {
+    s = 'Vandaag staat er niets meer in je agenda.';
+    const m = a.morgen.find(function (x) { return !x.hele_dag && x.van; }), mh = a.morgen.find(function (x) { return x.hele_dag; });
+    s += m ? '\nMorgen om ' + m.van + ': ' + m.titel + '.' : mh ? '\nMorgen hele dag: ' + mh.titel + '.' : '\nMorgen ook nog niets.';
+  }
+  if (onvolledig) s += '\nNiet alle agenda\'s waren te lezen.';
+  return appSpreektekst(s);
+}
+async function telAgendaSloten(res, t, naam) {
+  if (telSoort(t) !== 'onderweg') { telWeiger(res, 404, 'onbekend', naam + ': geen onderweg-sleutel'); return false; }
+  if (!telSessieOk(t)) { telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (' + naam + ')'); return false; }
+  if (!appTeller('tel-agenda', TEL_AGENDA_PER_UUR, 3600000)) { telWeiger(res, 429, 'te vaak dit uur', 'grens ' + naam); return false; }
+  if (!(await appRolOk())) { telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (' + naam + ')'); return false; }
+  return true;
+}
+async function telAgendaNu() {
+  const d = await appVandaag();
+  if (!d || !d.agenda) throw Object.assign(new Error('agenda niet te lezen'), { leeg: true });   // appVandaag logde de oorzaak al
+  const nu = Date.now(), a = telAgendaItems(d, nu);
+  const onvolledig = (Array.isArray(d.fouten) ? d.fouten : []).some(function (f) { return /agenda/i.test(String(f)); });
+  const zin = telAgendaZin(a, nu, onvolledig);
+  return { d: d, a: a, zin: zin, sha: crypto.createHash('sha256').update(zin).digest('hex').slice(0, 16), onvolledig: onvolledig };
+}
+// De stem van één zin: bewaard (hooguit 6), of één aanroep tegelijk per zin; elke echte aanroep telt (ook vooruit).
+function telAgendaStemMaak(zin, sha) {
+  const S = telStaat.agendastem;
+  if (S.wav[sha]) return Promise.resolve(S.wav[sha]);
+  if (S.bezig[sha]) return S.bezig[sha];
+  if (!process.env.GEMINI_API_KEY_AUTO) return Promise.reject(Object.assign(new Error('geen gemini-sleutel'), { status: 503, zin: 'voorlezen staat nu niet aan op de pod' }));
+  if (!appTeller('tel-agendastem', TEL_AGENDASTEM_PER_DAG, 86400000)) return Promise.reject(Object.assign(new Error('grens dag'), { status: 429, zin: 'genoeg voorgelezen voor vandaag' }));
+  let tm = null;
+  const p = Promise.race([appGeminiStem(zin, {}), new Promise(function (_, nee) { tm = setTimeout(function () { nee(Object.assign(new Error('duurde te lang'), { traag: true })); }, TEL_WACHT_MAX_S * 1000); })])
+    .then(function (wav) {
+      const ks = Object.keys(S.wav);
+      if (ks.length >= 6) delete S.wav[ks[0]];
+      S.wav[sha] = wav;
+      return wav;
+    })
+    .finally(function () { clearTimeout(tm); delete S.bezig[sha]; });
+  S.bezig[sha] = p;
+  return p;
+}
+async function telAgendaLijst(req, res, t) {
+  if (!(await telAgendaSloten(res, t, 'agenda'))) return;
+  let x;
+  try { x = await telAgendaNu(); } catch (e) { if (!(e && e.leeg)) logError('tel-agenda', e); return telWeiger(res, 503, 'je agenda is nu niet te lezen', 'agenda lezen'); }
+  const S = telStaat.agendastem;
+  if (!S.wav[x.sha]) telAgendaStemMaak(x.zin, x.sha).catch(function (e) { if (!(e && (e.traag || e.status))) logError('tel-agendastem', e); });   // vooruit
+  const stem = S.wav[x.sha] ? 'klaar' : S.bezig[x.sha] ? 'bezig' : 'nee';
+  res._tel.stil = true;   // Onderweg leest hem bij openen en elke paar minuten; alleen weigeringen in het auditlog (titels nooit)
+  telStuur(res, 200, { ok: true, vandaag: x.d.vandaag, nu: Date.now(), items: x.a.nog, morgen: x.a.morgen, zin: x.zin, stem: stem,
+    onvolledig: x.onvolledig, bijgewerkt: new Date(x.d.op).toISOString() });
+}
+async function telAgendaStem(req, res, t) {
+  if (!(await telAgendaSloten(res, t, 'agendastem'))) return;
+  let x, wav;
+  try { x = await telAgendaNu(); } catch (e) { if (!(e && e.leeg)) logError('tel-agenda', e); return telWeiger(res, 503, 'je agenda is nu niet te lezen', 'agendastem lezen'); }
+  try { wav = await telAgendaStemMaak(x.zin, x.sha); } catch (e) {
+    if (e && e.status) return telWeiger(res, e.status, e.zin, 'agendastem ' + e.message);
+    if (!(e && e.traag)) logError('tel-agendastem', e);
+    return telWeiger(res, 503, 'inspreken lukte niet', 'agendastem gemini');
+  }
+  res._tel.reden = 'agendastem ' + x.a.nog.length;
+  if (res.headersSent) return;
+  res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, 'Cache-Control': 'no-store' });
+  res.end(wav);
+}
+// Eén microfoon: mag Zoek snel het eerst proberen? Nee = meteen de gewone beurt (geen fout voor David).
+function telKiesSnelMag(t, tekst) {
+  const vraag = String(tekst).replace(/\s+/g, ' ').trim();
+  if (vraag.length > TEL_SNEL_VRAAG_MAX || telSnelKan(t)) return false;
+  return appTeller('tel-snel', TEL_SNEL_PER_UUR, 3600000) && appTeller('tel-sneldag', TEL_SNEL_PER_DAG, 86400000);
+}
+function telKiesStart(res, t, tekst, k) {
+  const vraag = String(tekst).replace(/\s+/g, ' ').trim();
+  const a = telSnelApparaat(t), zs = appStaat.zoekSnel = appStaat.zoekSnel || { ids: {}, bezig: {} };
+  let id;
+  do { id = crypto.randomBytes(8).toString('hex'); } while ((typeof jobs !== 'undefined' && jobs[id]) || telRij().some(function (y) { return y.id === id; }));
+  zs.bezig[a.id] = true;
+  k.kies = 'snel'; k.tekens_in = vraag.length;
+  // snel: true zolang Zoek snel loopt (geen job: telOpruim geeft hem 90 s, Uit je rit telt hem niet)
+  telRij().push({ id: id, apparaat: t.id, soort: 'bezig', snel: true, t_start: Date.now(), tot: Date.now() + TEL_TTL_MS, k: k });
+  telRijBewaar();
+  res._tel.reden = 'kies ' + id;
+  telStuur(res, 202, { ok: true, id: id, verstaan: String(tekst).slice(0, 600) });
+  Promise.resolve().then(function () { return zoekSnelVoer(a, id, vraag, true, { stilBijMis: true }); })
+    .then(function (r) {
+      const j = r && r.status === 200 && r.j && r.j.ok ? r.j : null;
+      if (j && j.soort === 'antwoord') return telNaSnel(id, j);
+      return telKiesDoor(id, t, tekst, j ? String(j.soort || 'geen') : 'fout');
+    }, function (e) { logError('tel-kies', e); return telKiesDoor(id, t, tekst, 'fout'); })
+    .catch(function (e) { logError('tel-kies', e); telNaSnel(id, null); })
+    .finally(function () { delete zs.bezig[a.id]; });
+}
+// Zoek snel had niets: dezelfde vraag als gewone Socev-beurt; het wachtende item krijgt de job-id (Onderweg merkt niets).
+async function telKiesDoor(id, t, tekst, waarom) {
+  const x = telRij().find(function (y) { return y.id === id; });
+  if (!x || x.soort !== 'bezig') return;   // al opgeruimd (90 s)
+  if (telUit() || !(await appRolOk())) return telNaSnel(id, null);
+  const st = await telBeurtStart(t, tekst);
+  const y = telRij().find(function (z) { return z.id === id; });
+  if (!st.job_id) { logError('tel-kies', new Error('start ' + st.fout)); return telNaSnel(id, null); }
+  if (!y || y.soort !== 'bezig') return;   // intussen opgeruimd; het antwoord staat dan alleen in de app
+  y.id = st.job_id; y.snel = false;
+  y.k = y.k || {}; y.k.kies = 'socev'; y.k.zoek = String(waarom).slice(0, 12);
+  telRijBewaar();
+}
+// ── einde wv3878 ──
 
 // ── wv3826 (Onderweg fase 2b-b/c; besluitenpagina 434 + 484, David 21-11: "daar brengen we alles in onder", toestanden van het
 // autodashboard). Ontwerp + Codex-review: mk-scripts/wv3826/ontwerp.md. Toets: test/tel-poort.sh § 8s. Geen nieuw /tel-pad (tunnel en
@@ -28827,7 +29009,7 @@ function zoekSnelStaart() {
       (x.bron ? ' (bron ' + x.bron + ')' : '') + '. Dat staat ook in de geschiedenis van dit gesprek.]';
   }).join('');
 }
-async function zoekSnelVoer(a, id, vraag, toonDekking) {
+async function zoekSnelVoer(a, id, vraag, toonDekking, opt) {
   const t0 = Date.now();
   let r;
   try { r = await zoekSnel.zoek(vraag, {}); }
@@ -28836,14 +29018,17 @@ async function zoekSnelVoer(a, id, vraag, toonDekking) {
   const ms = Date.now() - t0;
   const v = r.verbruik || {};
   appStaat.zoekSnelLaatst = { t: new Date().toISOString(), uitkomst: r.soort, ms: ms, laag: r.laag || null };
-  const gelogd = await appLogSchrijf('hoofd', { t: new Date().toISOString(), getypt: new Date(t0).toISOString(), job_id: id, soort: 'zoek', apparaat: a.id, tekst: vraag,
+  // wv3878: een misser van de keuze-microfoon in Onderweg gaat door naar een gewone Socev-beurt; dan geen zoekregel in het gesprek
+  // en geen systeemregel voor Socev (anders staat de vraag er twee keer).
+  const stil = !!(opt && opt.stilBijMis && r.soort !== 'antwoord');
+  const gelogd = stil ? false : await appLogSchrijf('hoofd', { t: new Date().toISOString(), getypt: new Date(t0).toISOString(), job_id: id, soort: 'zoek', apparaat: a.id, tekst: vraag,
     antwoord: zoekSnelTekst(r), ok: r.soort !== 'fout', fout: r.soort === 'fout' ? String(r.reden || 'fout').slice(0, 200) : undefined, bestanden: [],
     zoek: { uitkomst: r.soort, reden: r.reden || undefined, ms: ms, zoek_ms: r.ms.zoek, model_ms: r.ms.model, account: v.account, kosten: v.kosten, tokens_uit: v.uit,
       bronnen: (r.bronnen || []).map(function (b) { return b.pad; }), weggelaten: r.weggelaten || undefined, natoets_mis: r.natoets_mis || undefined,
       dekking: r.dekking || undefined, laag: r.laag || undefined, feiten_ms: r.ms.feiten, index_ms: r.ms.index,
       register_ms: r.ms.contacten != null ? r.ms.contacten : r.ms.agenda, betekenis_ms: r.ms.betekenis, mogelijk: Array.isArray(r.mogelijk) ? r.mogelijk.length : undefined,   // wv3733
       lagen: zoekSnelLagenTelling(r.lagen) } });   // wv1289: alleen tellingen (pagina's/regels, grens), geen inhoud; wv1788: per laag idem
-  zoekSnelRegelZet(r);
+  if (!stil) zoekSnelRegelZet(r);
   zoekSnelQueryRun(r);   // wv1788: antwoordcontract, na het antwoord; nooit blokkerend
   // wv1818: een app die de dekkingsregel zelf apart toont (toon_dekking) krijgt tekst en melding zonder die regel ("Kopieer alles" neemt hem dan
   // niet mee); de oude app en het app-log hierboven houden hem in de tekst. dekking_regel is dan precies wat anders geplakt was (of null).
