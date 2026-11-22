@@ -25584,6 +25584,39 @@ const secondbrain = (function () {
       },
       hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
       inhoud: brainTekst,   // wv3734: pdf en docx op inhoud
+      // wv3752 (3C195) Losse eindjes: Oogst dit onderwerp / Leg de links = één achtergrondklus van Socev (label socev:, rapport naar Socev,
+      // zoals Shopper opnieuw). Alleen de vaste opdracht uit secondbrain.js + het grondwet-blok uit de release; stand uit het agentregister.
+      klus: {
+        start: function (prompt, label, min) {
+          return new Promise(function (klaar) {
+            if (!/^socev: (Oogst|Leg de links) — /.test(String(label))) return klaar({ ok: false, status: 400 });
+            const body = JSON.stringify({ secret: SECRET, prompt: prompt, label: String(label).slice(0, 120), chat_id: '40687', max_minuten: Math.min(60, Math.max(10, Number(min) || 30)) });
+            const r = http.request({ host: '127.0.0.1', port: PORT, method: 'POST', path: '/agent', timeout: 15000,
+              headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, function (res) {
+              let t = '';
+              res.on('data', function (x) { if (t.length < 4096) t += x; });
+              res.on('end', function () { let j = null; try { j = JSON.parse(t); } catch (e) { j = null; } klaar(res.statusCode === 200 && j && j.ok ? { ok: true, job_id: j.job_id } : { ok: false, status: res.statusCode }); });
+            });
+            r.on('timeout', function () { r.destroy(new Error('timeout')); });
+            r.on('error', function () { klaar({ ok: false, status: 0 }); });
+            r.end(body);
+          });
+        },
+        stand: function (job) {
+          const a = typeof agentsReg === 'object' && agentsReg ? agentsReg[job] : null;
+          if (!a) return null;
+          if (a.status === 'pending' || a.status === 'running') return 'loopt';
+          return a.ok === true ? 'klaar' : a.ok === false ? 'mislukt' : (a.ended ? 'klaar' : 'loopt');
+        },
+        // Codex MOET 2: na een time-out de job terugvinden (zelfde label, gestart vanaf de reservering), zodat er nooit een tweede start
+        zoek: function (label, sinds) {
+          if (typeof agentsReg !== 'object' || !agentsReg) return null;
+          let beste = null;
+          Object.keys(agentsReg).forEach(function (id) { const a = agentsReg[id]; if (a && a.label === label && a.started >= sinds - 2000 && (!beste || a.started > beste.started)) beste = a; });
+          return beste ? beste.job_id : null;
+        },
+        grondwet: function () { return typeof autoGrondwet === 'function' ? autoGrondwet() : null; }
+      },
       // wv3717 "Wat speelt": de deadlines zoals Projecten ze leest (Deadlines.md, gesloten rijen eruit, dagen vanaf vandaag); null = niet te lezen
       deadlines: function () { const p = appProjecten(); return p && Array.isArray(p.deadlines) ? p.deadlines : null; },
       // wv3735 (3C122): typfouten vergeven via de tekstindex van Zoek snel (zoekindex.py, met de Woordenlijst); zoekSnel staat verderop in

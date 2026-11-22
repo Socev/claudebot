@@ -695,6 +695,136 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   }
   toets('16 server.js: de route valt onder appSecondBrain (POST /app/secondbrain/…)', /route\.indexOf\('POST \/app\/secondbrain\/'\) === 0\) return typeof appSecondBrain/.test(fs.readFileSync('server.js', 'utf8')));
 
+  // wv3752 (3C195): Losse eindjes — twee lijsten en de klusknoppen (start/stand nep; nooit een echte agent)
+  {
+    const VE = path.join(W, 'vault-eindjes');
+    const ze = (p, t) => { fs.mkdirSync(path.dirname(path.join(VE, p)), { recursive: true }); fs.writeFileSync(path.join(VE, p), t); };
+    const klokE = Date.UTC(2026, 10, 22, 12, 0);   // zo 22-11 13:00 Amsterdam
+    ze('10_Zakelijk/_Gedeeld/Relaties/Proefpartij.md', '---\ntype: entiteit\n---\n# Proefpartij\nkort\n');                 // dun: 6 bronnen in 30 d
+    ze('10_Zakelijk/_Gedeeld/Relaties/Grootpartij.md', '# Groot\n' + 'x'.repeat(3000) + '\n');                               // veel verkeer, maar groot
+    ze('10_Zakelijk/_Gedeeld/Relaties/Weinigpartij.md', '# Weinig\n');                                                     // 4 bronnen: onder de drempel
+    ze('20_Prive/Financien/Rekeningen/Proefrekening.md', '---\ntype: rekening\n---\n# rek\n');                              // type rekening: nooit
+    ze('20_Prive/Herinneringen/Proefherinnering.md', '# herinnering\n');                                                   // Herinneringen: nooit
+    ze('00_Systeem/Proefsysteem.md', '# sys\n');
+    ze('10_Zakelijk/AGENTS.md', '# agents\n');
+    ze('10_Zakelijk/Tolgaarde/Losse notitie.md', '# Losse notitie\n' + 'y'.repeat(900) + '\n[[Proefpartij]]\n');           // los, groot
+    ze('10_Zakelijk/Tolgaarde/Kleine los.md', '# Klein\n');                                                               // los, klein
+    ze('10_Zakelijk/Tolgaarde/Gelinkt.md', '# Gelinkt\n[[Kleine los]]\n'.replace('Kleine los', 'Losse notitie') + '');      // linkt naar Losse notitie
+    ze('10_Zakelijk/Tolgaarde/Bron achtig.md', '---\ntype: bron\n---\n# bron\n');                                          // type bron: nooit
+    for (let i = 0; i < 6; i++) ze('10_Zakelijk/Tolgaarde/Bronnen/TG - 2026-11-' + String(10 + i) + ' - mail ' + i + '.md', '[[Proefpartij]] [[Grootpartij]]\n');
+    for (let i = 0; i < 4; i++) ze('30_Conversaties/WhatsApp/Groep - 2026-11-0' + (i + 1) + '.md', '[[Weinigpartij]] [[Grootpartij]]\n');
+    ze('30_Conversaties/WhatsApp/Groep - 2026-10-01.md', '[[Weinigpartij]]\n');   // buiten de 30 dagen
+    ze('10_Zakelijk/Tolgaarde/Bronnen/TG - 2026-11-16 - mail rek.md', '[[Proefrekening]] [[Proefherinnering]]\n'.repeat(1));
+    let gestart = [], antwoord = { ok: true, job_id: 'a'.repeat(16) }, standen = {}, register = [];
+    const klusNep = { start: async (prompt, label, min) => { gestart.push({ prompt, label, min }); const a = typeof antwoord === 'function' ? antwoord() : antwoord; return a; },
+      stand: (job) => standen[job] || null, grondwet: () => 'GRONDWET-KERN v1 — proef',
+      zoek: (label, sinds) => { const x = register.filter((r) => r.label === label && r.started >= sinds - 2000).pop(); return x ? x.job : null; } };
+    const DE = path.join(W, 'staat-eindjes');
+    let klok = klokE;
+    const se = S.maak({ vault: VE, dir: DE, nu: () => klok, klus: klusNep });
+    const e1 = await se.app('POST /app/secondbrain/eindjes', {}, {});
+    const dunP = (e1.j.dun || []).map((x) => x[0]), losP = (e1.j.los || []).map((x) => x[0]);
+    toets('17 eindjes: status 200, maat 30 d / ≥ 5 / < 2 kB, klus aan', e1.status === 200 && e1.j.maat.dagen === 30 && e1.j.maat.min === 5 && e1.j.maat.max_kb === 2 && e1.j.klus_aan === true, e1.j.maat);
+    toets('17 dun: alleen de kleine pagina met ≥ 5 bronnen in 30 dagen (niet groot, niet 4, niet rekening/herinnering)',
+      JSON.stringify(dunP) === JSON.stringify(['10_Zakelijk/_Gedeeld/Relaties/Proefpartij.md']) && e1.j.dun[0][3] === 6 && e1.j.dun_n === 1, e1.j.dun);
+    toets('17 los: niemand linkt ernaar, grootste eerst; niet Systeem, AGENTS, Herinneringen, type bron/rekening, niet als er een link heen gaat',
+      losP.indexOf('10_Zakelijk/Tolgaarde/Kleine los.md') >= 0 && losP.indexOf('10_Zakelijk/Tolgaarde/Gelinkt.md') >= 0 && losP.indexOf('10_Zakelijk/Tolgaarde/Losse notitie.md') < 0 &&
+      !losP.some((p) => /Proefsysteem|AGENTS|Herinneringen|Bron achtig|Proefrekening|Bronnen\//.test(p)) &&
+      e1.j.los.every((x, i, a) => !i || a[i - 1][2] >= x[2]), e1.j.los);
+    // klus: niet in de lijst, onbekende soort
+    const kNiet = await se.app('POST /app/secondbrain/klus', { pad: '00_Systeem/Proefsysteem.md', soort: 'oogst' }, {});
+    const kSoort = await se.app('POST /app/secondbrain/klus', { pad: dunP[0], soort: 'wis' }, {});
+    toets('17 klus: pagina buiten de lijsten start niets; onbekende soort = 400', kNiet.j.stand === 'niet-in-lijst' && kSoort.status === 400 && gestart.length === 0, [kNiet.j, kSoort.status]);
+    const k1 = await se.app('POST /app/secondbrain/klus', { pad: dunP[0], soort: 'oogst' }, {});
+    const g1 = gestart[0] || {};
+    toets('17 klus: eerste tik start precies één klus (label socev: Oogst — naam, grondwet vooraan, pad in de opdracht, 45 min)',
+      k1.j.stand === 'gestart' && gestart.length === 1 && g1.label === 'socev: Oogst — Proefpartij' && g1.prompt.indexOf('GRONDWET-KERN v1') === 0 &&
+      g1.prompt.indexOf('10_Zakelijk/_Gedeeld/Relaties/Proefpartij.md') > 0 && /onderwerp-oogsten/.test(g1.prompt) && /second-brain-verwerk-raw-input/.test(g1.prompt) && g1.min === 45, [k1.j, g1.label]);
+    const k2 = await se.app('POST /app/secondbrain/klus', { pad: dunP[0], soort: 'links' }, {});
+    toets('17 klus: tweede tik (ook de andere knop) terwijl die loopt start niets', k2.j.stand === 'loopt' && gestart.length === 1, k2.j);
+    standen['a'.repeat(16)] = 'loopt';
+    const e2 = await se.app('POST /app/secondbrain/eindjes', {}, {});
+    toets('17 eindjes toont de lopende klus (pad, soort, loopt)', JSON.stringify((e2.j.klussen || [])[0] && e2.j.klussen[0].slice(0, 3)) === JSON.stringify([dunP[0], 'oogst', 'loopt']), e2.j.klussen);
+    const opSchijf = JSON.parse(fs.readFileSync(path.join(DE, 'klussen.json'), 'utf8'));
+    toets('17 klussen.json 0600 met job; overleeft een herstart (nieuwe module ziet hem lopen)', (fs.statSync(path.join(DE, 'klussen.json')).mode & 0o777) === 0o600 &&
+      opSchijf.k[dunP[0]].job === 'a'.repeat(16) && opSchijf.s.length === 1, opSchijf);
+    const se2 = S.maak({ vault: VE, dir: DE, nu: () => klok, klus: klusNep });
+    const k3 = await se2.app('POST /app/secondbrain/klus', { pad: dunP[0], soort: 'oogst' }, {});
+    toets('17 na herstart: zelfde pagina nog steeds niet dubbel', k3.j.stand === 'loopt' && gestart.length === 1, k3.j);
+    // tweede pagina: Leg de links; derde: vol (2 tegelijk)
+    antwoord = { ok: true, job_id: 'b'.repeat(16) };
+    const k4 = await se.app('POST /app/secondbrain/klus', { pad: '10_Zakelijk/Tolgaarde/Kleine los.md', soort: 'links' }, {});
+    const g2 = gestart[1] || {};
+    toets('17 Leg de links: eigen opdracht (linkcheck, alleen dit doel, hooguit 40, geen aliassen), 30 min', k4.j.stand === 'gestart' && g2.label === 'socev: Leg de links — Kleine los' &&
+      /second-brain-linkcheck/.test(g2.prompt) && /Hooguit 40/.test(g2.prompt) && /Geen aliassen/.test(g2.prompt) && g2.min === 30, [k4.j, g2.label]);
+    const k5 = await se.app('POST /app/secondbrain/klus', { pad: '10_Zakelijk/Tolgaarde/Gelinkt.md', soort: 'links' }, {});
+    toets('17 hooguit 2 klussen tegelijk', k5.j.stand === 'vol' && gestart.length === 2, k5.j);
+    // klaar: de plek komt vrij, de klus blijft zichtbaar als klaar
+    standen['a'.repeat(16)] = 'klaar';
+    const e3 = await se.app('POST /app/secondbrain/eindjes', {}, {});
+    const kl = (e3.j.klussen || []).find((x) => x[0] === dunP[0]) || [];
+    toets('17 klaar: stand klaar met eindtijd', kl[2] === 'klaar' && typeof kl[4] === 'string', kl);
+    // weigering geeft de plek vrij; time-out houdt hem vast
+    antwoord = { ok: false, status: 429 };
+    const k6 = await se.app('POST /app/secondbrain/klus', { pad: '10_Zakelijk/Tolgaarde/Gelinkt.md', soort: 'links' }, {});
+    const naW = JSON.parse(fs.readFileSync(path.join(DE, 'klussen.json'), 'utf8'));
+    toets('17 pod weigert (429): stand plekken-bezet, niets vastgehouden, start telt niet', k6.j.stand === 'plekken-bezet' && !naW.k['10_Zakelijk/Tolgaarde/Gelinkt.md'] && naW.s.length === 2, [k6.j, Object.keys(naW.k), naW.s.length]);
+    antwoord = { ok: false, status: 0 };
+    const k7 = await se.app('POST /app/secondbrain/klus', { pad: '10_Zakelijk/Tolgaarde/Gelinkt.md', soort: 'links' }, {});
+    const k8 = await se.app('POST /app/secondbrain/klus', { pad: '10_Zakelijk/Tolgaarde/Gelinkt.md', soort: 'oogst' }, {});
+    toets('17 time-out: niet-gestart, maar de pagina blijft vast (nooit twee agents)', k7.j.stand === 'niet-gestart' && k8.j.stand === 'loopt', [k7.j, k8.j]);
+    klok += 46 * 60000;
+    const nVoor8b = gestart.length;
+    const k8b = await se.app('POST /app/secondbrain/klus', { pad: '10_Zakelijk/Tolgaarde/Gelinkt.md', soort: 'links' }, {});
+    toets('17 Codex MOET 2: na 46 min (langer dan een oogst mag) nog steeds vast', k8b.j.stand === 'loopt' && gestart.length === nVoor8b, k8b.j);
+    klok += 30 * 60000;
+    antwoord = { ok: true, job_id: 'c'.repeat(16) };
+    const k9 = await se.app('POST /app/secondbrain/klus', { pad: '10_Zakelijk/Tolgaarde/Gelinkt.md', soort: 'links' }, {});
+    toets('17 na 75 min zonder job: weer vrij', k9.j.stand === 'gestart', k9.j);
+    // time-out terwijl de agent wél startte: de pod vindt hem terug in het register en houdt de stand bij
+    antwoord = () => { register.push({ label: 'socev: Oogst — Weinigpartij', started: klok, job: 'd'.repeat(16) }); return { ok: false, status: 0 }; };
+    standen['b'.repeat(16)] = 'klaar';
+    const kT = await se.app('POST /app/secondbrain/klus', { pad: '10_Zakelijk/Tolgaarde/Kleine los.md', soort: 'oogst' }, {});
+    register[register.length - 1].label = 'socev: Oogst — Kleine los';
+    standen['d'.repeat(16)] = 'loopt';
+    const eT = await se.app('POST /app/secondbrain/eindjes', {}, {});
+    const rT = JSON.parse(fs.readFileSync(path.join(DE, 'klussen.json'), 'utf8')).k['10_Zakelijk/Tolgaarde/Kleine los.md'] || {};
+    standen['d'.repeat(16)] = 'klaar';
+    const eT2 = await se.app('POST /app/secondbrain/eindjes', {}, {});
+    toets('17 Codex MOET 2: time-out maar de agent liep wel = job teruggevonden (loopt, daarna klaar)', kT.j.stand === 'niet-gestart' && rT.job === 'd'.repeat(16) &&
+      (eT.j.klussen.find((x) => x[0] === '10_Zakelijk/Tolgaarde/Kleine los.md') || [])[2] === 'loopt' && (eT2.j.klussen.find((x) => x[0] === '10_Zakelijk/Tolgaarde/Kleine los.md') || [])[2] === 'klaar', [kT.j, rT]);
+    // daggrens (Codex MOET 1): elke start telt, ook steeds dezelfde pagina na klaar
+    standen['c'.repeat(16)] = 'klaar';
+    let job = 0, kGrens = null;
+    antwoord = () => ({ ok: true, job_id: (0xe0 + job++).toString(16).padStart(16, '0') });
+    const sTel = () => JSON.parse(fs.readFileSync(path.join(DE, 'klussen.json'), 'utf8')).s.filter((x) => new Date(x).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }) === new Date(klok).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' })).length;
+    for (let i = 0; i < 12; i++) {
+      kGrens = await se.app('POST /app/secondbrain/klus', { pad: '10_Zakelijk/Tolgaarde/Gelinkt.md', soort: 'links' }, {});
+      if (kGrens.j.stand !== 'gestart') break;
+      standen[kGrens.j.job] = 'klaar';
+    }
+    toets('17 Codex MOET 1: hooguit 10 starts per dag, ook als het steeds dezelfde pagina is', kGrens.j.stand === 'grens' && sTel() === 10, [kGrens.j, sTel()]);
+    const se3 = S.maak({ vault: VE, dir: DE, nu: () => klok, klus: klusNep });
+    const k10 = await se3.app('POST /app/secondbrain/klus', { pad: '10_Zakelijk/Tolgaarde/Kleine los.md', soort: 'oogst' }, {});
+    toets('17 daggrens overleeft een herstart', k10.j.stand === 'grens', k10.j);
+    klok += 8 * 86400000;
+    const e4 = await se3.app('POST /app/secondbrain/eindjes', {}, {});
+    toets('17 afgeronde klussen na 7 dagen weg', (e4.j.klussen || []).length === 0, e4.j.klussen);
+    // zonder klus-koppeling of grondwet
+    const se4 = S.maak({ vault: VE, dir: path.join(W, 'staat-eindjes4'), nu: () => klok });
+    const k11 = await se4.app('POST /app/secondbrain/klus', { pad: dunP[0], soort: 'oogst' }, {});
+    const e5 = await se4.app('POST /app/secondbrain/eindjes', {}, {});
+    const se5 = S.maak({ vault: VE, dir: path.join(W, 'staat-eindjes5'), nu: () => klok, klus: Object.assign({}, klusNep, { grondwet: () => null }) });
+    const n0 = gestart.length;
+    const k12 = await se5.app('POST /app/secondbrain/klus', { pad: '10_Zakelijk/Tolgaarde/Kleine los.md', soort: 'oogst' }, {});
+    toets('17 zonder koppeling: stand uit, lijsten wel; zonder grondwet-blok start niets', k11.j.stand === 'uit' && e5.j.klus_aan === false && e5.j.los.length > 0 &&
+      k12.status === 503 && gestart.length === n0, [k11.j, k12.j]);
+  }
+  {
+    const src = fs.readFileSync('server.js', 'utf8');
+    toets('17 server.js: klus-koppeling alleen met de twee vaste labels, route socev (chat 40687), stand uit agentsReg, grondwet uit de release',
+      /klus: \{\s*start: function \(prompt, label, min\)/.test(src) && /\^socev: \(Oogst\|Leg de links\) — /.test(src) && /grondwet: function \(\) \{ return typeof autoGrondwet === 'function' \? autoGrondwet\(\) : null; \}/.test(src));
+  }
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
