@@ -295,6 +295,8 @@ function lees(dir) {
 function schrijf(dir, j) {
   const doel = path.join(dir, 'schikking.json'), tmp = doel + '.tmp' + process.pid;
   fs.writeFileSync(tmp, JSON.stringify(j), { mode: 0o600 });
+  // de vorige nacht bewaren (meetbaar: ligt Tolgaarde twee nachten op dezelfde plek?); niet kunnen kopiëren houdt de nieuwe niet tegen
+  try { const vorig = path.join(dir, 'schikking-vorige.json'); fs.copyFileSync(doel, vorig); fs.chmodSync(vorig, 0o600); } catch (e) { /* eerste nacht */ }
   fs.renameSync(tmp, doel);
 }
 

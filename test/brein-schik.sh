@@ -84,6 +84,9 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const sn = await sb.schikNacht('2026-11-21');
   const bestand = path.join(D, 'schikking.json');
   toets('15 schikNacht schrijft schikking.json (0600) met dag', sn.ok && fs.existsSync(bestand) && (fs.statSync(bestand).mode & 0o777) === 0o600 && JSON.parse(fs.readFileSync(bestand, 'utf8')).dag === '2026-11-21', sn);
+  { const eerst = fs.readFileSync(bestand, 'utf8'); const sn2 = await sb.schikNacht('2026-11-21b'); const vg = path.join(D, 'schikking-vorige.json');
+    toets('15b tweede nacht: de vorige schikking staat in schikking-vorige.json (0600)', sn2.ok && fs.existsSync(vg) && fs.readFileSync(vg, 'utf8') === eerst && (fs.statSync(vg).mode & 0o777) === 0o600);
+    await sb.schikNacht('2026-11-21'); }
   k = await sb.app('GET /app/secondbrain', {}, {});
   toets('16 kaart: plek3/plek2 per knoop, dag erbij, niets mist', Array.isArray(k.j.plek3) && k.j.plek3.length === k.j.knopen.length * 3 && k.j.plek2.length === k.j.knopen.length * 2 && k.j.plek_dag === '2026-11-21' && k.j.plek_mis === 0 && k.j.plek3.every(Number.isInteger), k.j);
   const ka = await sb.app('POST /app/secondbrain/kaart', { alles: true }, {});
