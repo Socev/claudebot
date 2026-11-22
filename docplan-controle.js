@@ -14,6 +14,13 @@
  *  (c) roosternaam_zonder_koppeling  een roosternaam met dagen in het jaar (2026 t/m dit jaar) zonder alias of met status nieuw. Eén per
  *                               (praktijk, naam, jaar).
  *
+ *  (r) rekening_onbekend       (wv3898, besluit 2C26; Fable-review M1) een afschrijving van de praktijk (vanaf 2026) aan, of een factuur in de
+ *                               Facturen-app (vanaf 2026, niet geen_factuur/dubbel) met, een IBAN dat NIET in docplan.sqlite staat, terwijl de naam op de
+ *                               bank precies een bekende naam van één persoon is (naam op zijn bekende rekeningen, persoon.naam, NAW-bedrijfsnaam;
+ *                               docplan-rekeningen.js bekendeNamen) of de leverancier van de factuur alleen IBAN's van die ene persoon kent. Zo'n
+ *                               betaling telt stil niet mee in totaal en jaaropgaaf. Eén signaal per (persoon, IBAN); gaat vanzelf dicht zodra het IBAN
+ *                               in docplan.sqlite staat (DocPlan › Rekeningen › Toevoegen). Ambigu (twee personen) = overslaan.
+ *
  *  (f) factuur_dagen_afwijkend  (wv2297, meetpunt 5; ontwerp § 4.2) een factuur in de Facturen-app (vanaf 2026, niet geen_factuur/dubbel, geen
  *                               creditnota) met een IBAN dat docplan.sqlite aan een persoon koppelt: de werkdagen uit de factuurtekst (pdftotext, regels
  *                               met een datum en een bedrag, reiskosten niet) moeten elk in het rooster van die persoon bij die praktijk staan
@@ -31,9 +38,11 @@
  */
 const crypto = require('crypto');
 const B = require('./facturen-bank');
+// wv3898: zelfde naamregel als het scherm Rekeningen; ontbreekt de module (terugrol), dan draait alleen regel (r) niet
+const R = (function () { try { return require('./docplan-rekeningen'); } catch (e) { return null; } })();
 
 const PRAKTIJK = { TG: { entiteit: 'tolgaarde', naam: 'Tolgaarde' }, GH: { entiteit: 'groenhouten', naam: 'Groenhouten' } };
-const SOORTEN = ['dienst_zonder_betaling', 'betaling_zonder_dienst', 'roosternaam_zonder_koppeling', 'factuur_dagen_afwijkend'];
+const SOORTEN = ['dienst_zonder_betaling', 'betaling_zonder_dienst', 'roosternaam_zonder_koppeling', 'factuur_dagen_afwijkend', 'rekening_onbekend'];
 const FACTUUR_SOORT = 'factuur_dagen_afwijkend';
 const FACTUUR_MAX = 300;      // hooguit zoveel waarnemersfacturen per ronde (pdftotext per stuk)
 const VAN_JAAR = 2026;        // de controle begint bij 1-1-2026 (ontwerp § 8.1; 2025 is de leesproef)
@@ -141,6 +150,57 @@ function factuurKandidaten(fac, dp) {
 }
 
 /*
+ * rekeningOnbekend(dp, fac, ibanVan, naam) → signalen rekening_onbekend (regel r, wv3898). Eén per (persoon, IBAN), het vroegste spoor telt (bank vóór
+ * factuur bij gelijke datum). Alleen personen met een waarneemrol. Codex-review ZOU 1: een leverancier telt alleen als ál zijn bekende IBAN's bij dezelfde ene persoon horen.
+ */
+function rekeningOnbekend(dp, fac, ibanVan, naam) {
+  if (!R) return [];
+  const namen = R.bekendeNamen(dp, fac, ibanVan);
+  const codeVan = (ent) => (ent === 'tolgaarde' ? 'TG' : 'GH');
+  const spoor = new Map();   // obj|iban → { obj, iban, pr, datum, soort, tx, factuur, naam_bank, n }
+  const zet = (obj, iban, x) => {
+    const k = obj + '|' + iban;
+    const o = spoor.get(k);
+    if (!o) { spoor.set(k, Object.assign({ obj, iban, n: 1 }, x)); return; }
+    o.n++;
+    if (x.datum < o.datum) Object.assign(o, x);
+  };
+  for (const t of fac.prepare("SELECT id, entiteit, tegenpartij_iban AS iban, tegenpartij_naam AS tnaam, boekdatum, bedrag_centen FROM bank_transactie WHERE verwijderd_op IS NULL" +
+    " AND bedrag_centen < 0 AND entiteit IN ('tolgaarde', 'groenhouten') AND boekdatum >= ? AND tegenpartij_iban IS NOT NULL AND tegenpartij_naam IS NOT NULL ORDER BY boekdatum, id")
+    .all(VAN_JAAR + '-01-01')) {
+    if (ibanVan.has(t.iban)) continue;
+    const s = namen.get(R.naamSleutel(t.tnaam));
+    if (!s || s.size !== 1) continue;
+    zet([...s][0], t.iban, { pr: codeVan(t.entiteit), datum: t.boekdatum, soort: 'bank', tx: t.id, factuur: null, bedrag_centen: Number(t.bedrag_centen), naam_bank: String(t.tnaam).slice(0, 120) });
+  }
+  const levVan = new Map();   // leverancier → Set obj van zijn bekende IBAN's (meer dan één persoon = ambigu, overslaan)
+  for (const r of fac.prepare('SELECT leverancier, iban FROM leverancier_iban').all()) {
+    if (!ibanVan.has(r.iban)) continue;
+    if (!levVan.has(r.leverancier)) levVan.set(r.leverancier, new Set());
+    levVan.get(r.leverancier).add(ibanVan.get(r.iban));
+  }
+  for (const f of fac.prepare("SELECT id, entiteit, leverancier, iban, factuurdatum, incl FROM factuur WHERE entiteit IN ('tolgaarde', 'groenhouten') AND status NOT IN ('geen_factuur', 'dubbel')" +
+    " AND soort = 'factuur' AND factuurdatum >= ? AND iban IS NOT NULL AND leverancier IS NOT NULL ORDER BY factuurdatum, id").all(VAN_JAAR + '-01-01')) {
+    if (ibanVan.has(f.iban)) continue;
+    const s = levVan.get(f.leverancier);
+    if (!s || s.size !== 1) continue;
+    zet([...s][0], f.iban, { pr: codeVan(f.entiteit), datum: String(f.factuurdatum).slice(0, 10), soort: 'factuur', tx: null, factuur: f.id, bedrag_centen: f.incl == null ? null : Number(f.incl), naam_bank: null });
+  }
+  // alleen waarnemers (een waarneemrol bij TG of GH): een maat of David zelf heeft een persoon zonder rol en hoort hier niet (gemeten 22-11)
+  const metRol = new Set(dp.prepare('SELECT DISTINCT object_id FROM rol').all().map((r) => r.object_id));
+  const uit = [];
+  for (const x of spoor.values()) {
+    if (!naam.has(x.obj) || !metRol.has(x.obj)) continue;
+    uit.push(B.maakSignaal('rekening_onbekend', { entiteit: PRAKTIJK[x.pr].entiteit, naam: naam.get(x.obj), alleen_eigenaar: true,
+      transacties: x.tx ? [x.tx] : [], facturen: x.factuur ? [x.factuur] : [], bedrag_centen: x.bedrag_centen == null ? null : x.bedrag_centen,
+      sleutel_vast: x.obj + '|' + hash(x.iban),
+      details: { regel: 'r', persoon: x.obj, praktijk: x.pr, praktijk_naam: PRAKTIJK[x.pr].naam, spoor: x.soort, datum: x.datum, iban_eind: x.iban.slice(-4),
+        naam_bank: x.naam_bank, aantal: x.n } }));
+  }
+  return uit;
+}
+
+/*
  * controle({ maanden, lijsten, dp, fac, nu[, dagen, facturen] }) → { signalen, tel, behoud }. Gooit bij ontbrekende invoer (dan schrijft de ronde niets en sluit niets).
  * maanden: [{pr, obj, maand, dagen}]; lijsten: [{jaar, praktijken:[{code, namen:[{naam, dagen, status}]}]}].
  * dagen (f): [{pr, obj, datum, dagen}] uit sb_dienst_dagen, of null (RPC ontbreekt: dan geen factuurtoets en blijven open f-signalen staan).
@@ -181,8 +241,8 @@ function controle(o) {
     }
   }
   const signalen = [];
-  const tel = { TG: { a: 0, b: 0, c: 0, beoordeeld: 0, f_klopt: 0, f_afwijkend: 0, f_onbekend: 0, f_overgeslagen: 0 },
-    GH: { a: 0, b: 0, c: 0, beoordeeld: 0, f_klopt: 0, f_afwijkend: 0, f_onbekend: 0, f_overgeslagen: 0 } };
+  const tel = { TG: { a: 0, b: 0, c: 0, r: 0, beoordeeld: 0, f_klopt: 0, f_afwijkend: 0, f_onbekend: 0, f_overgeslagen: 0 },
+    GH: { a: 0, b: 0, c: 0, r: 0, beoordeeld: 0, f_klopt: 0, f_afwijkend: 0, f_onbekend: 0, f_overgeslagen: 0 } };
   const behoud = [];   // sleutels van f-signalen die deze ronde niet beoordeeld konden worden: niet sluiten
   // (a) dienst zonder betaling of factuur
   for (const [k, n] of dagen) {
@@ -231,6 +291,8 @@ function controle(o) {
       }
     }
   }
+  // (r) bekende waarnemer op een onbekende rekening (wv3898)
+  for (const s of rekeningOnbekend(dp, fac, ibanVan, naam)) { tel[s.details.praktijk].r++; signalen.push(s); }
   // (f) factuurtoets: werkdagen op een waarnemersfactuur ↔ rooster van die persoon bij die praktijk
   // review MOET 1/2: f-signalen sluiten alleen als de toets echt draaide (dagen én facturenlijst aanwezig) en de factuur beoordeeld is of
   // de lijst compleet was; anders blijven open f-signalen staan (schrijf kijkt naar f.klaar, f.afgekapt en f.beoordeeld)
@@ -309,4 +371,4 @@ function schrijf(fdb, D, u, wanneer) {
 /* jaren(nu) → de jaren waarvoor (c) de roosternamenlijst vraagt: 2026 t/m dit jaar. */
 function jaren(nu) { const j = []; for (let x = VAN_JAAR; x <= Number(dagAmsterdam(nu).slice(0, 4)); x++) j.push(x); return j; }
 
-module.exports = { controle, schrijf, jaren, maandenVanaf, factuurKandidaten, dagenUitTekst, factuurOordeel, SOORTEN, FACTUUR_SOORT, VAN_JAAR, NA_DAGEN, TERUG_DAGEN };
+module.exports = { controle, schrijf, jaren, maandenVanaf, factuurKandidaten, dagenUitTekst, factuurOordeel, rekeningOnbekend, SOORTEN, FACTUUR_SOORT, VAN_JAAR, NA_DAGEN, TERUG_DAGEN };

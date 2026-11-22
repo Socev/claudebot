@@ -1079,7 +1079,7 @@ function signaalUitleg(s) {
     (Number.isSafeInteger(d.aantal) ? ' Gerekend over ' + d.aantal + ' eerdere incasso\'s' + (d.sinds ? ' sinds ' + dagNL(d.sinds) : '') + '.' : '');
 }
 
-const DOCPLAN_SOORTEN = ['dienst_zonder_betaling', 'betaling_zonder_dienst', 'roosternaam_zonder_koppeling', 'factuur_dagen_afwijkend'];
+const DOCPLAN_SOORTEN = ['dienst_zonder_betaling', 'betaling_zonder_dienst', 'roosternaam_zonder_koppeling', 'factuur_dagen_afwijkend', 'rekening_onbekend'];
 const MAANDEN_NL = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
 function maandNL(m) { return /^\d{4}-\d{2}$/.test(String(m || '')) ? MAANDEN_NL[Number(m.slice(5, 7)) - 1] + ' ' + m.slice(0, 4) : '?'; }
 function dagenTekst(n) { const x = Number(n) || 0; return String(x).replace('.', ',') + (x === 1 ? ' dag' : ' dagen'); }
@@ -1091,6 +1091,11 @@ function docplanUitleg(s) {
   if (s.soort === 'betaling_zonder_dienst') return 'Betaald op ' + dagNL(d.datum) + '; in de vier maanden ervoor (vanaf ' + dagNL(d.venster_van) +
     ') staat deze persoon niet in het rooster van ' + pr + '.';
   if (s.soort === 'factuur_dagen_afwijkend') return factuurDagenUitleg(d, pr);
+  // wv3898: bekende waarnemer op een rekening die DocPlan niet kent (alleen de laatste 4 cijfers in de uitleg; het volledige IBAN staat in DocPlan › Rekeningen)
+  if (s.soort === 'rekening_onbekend') return (d.spoor === 'factuur' ? 'Factuur van ' + dagNL(d.datum) + ' met rekening' : 'Betaald door ' + pr + ' op ' + dagNL(d.datum) + ' aan rekening') +
+    ' …' + String(d.iban_eind || '????') + (d.naam_bank ? ' (naam op de bank: ' + String(d.naam_bank).slice(0, 80) + ')' : '') + (Number(d.aantal) > 1 ? ', ' + d.aantal + ' keer' : '') +
+    '. Die ' + (d.spoor === 'factuur' ? 'leverancier' : 'naam') + ' hoort bij deze waarnemer, maar de rekening staat niet bij hem: betalingen erop tellen niet mee in het totaal en de jaaropgaaf.' +
+    ' Voeg hem toe in DocPlan › Rekeningen; daarna gaat dit signaal vanzelf dicht.';
   return '"' + String(d.roosternaam || '').slice(0, 80) + '" staat ' + dagenTekst(d.dagen) + ' in het rooster van ' + pr + ' (' + (d.jaar || '?') + ') en hangt aan niemand' +
     (d.status === 'nieuw' ? ' (je vroeg een nieuwe persoon; de machinekamer maakt die)' : '') + '. Koppel in Waarnemers › Roosternamen koppelen; daarna gaat dit signaal vanzelf dicht.';
 }
@@ -1269,6 +1274,11 @@ const SIGNALEN = {
   factuur_dagen_afwijkend: {
     titel: 'Factuur wijkt af van het rooster',
     knoppen: { wegzetten: docplanWeg((s) => 'Factuur van ' + naamVan(s) + ' die afwijkt van het rooster') },
+  },
+  // wv3898 (besluit 2C26): bekende waarnemer op een onbekende rekening. Gaat vanzelf dicht als het IBAN in DocPlan › Rekeningen staat.
+  rekening_onbekend: {
+    titel: 'Waarnemer op een onbekende rekening',
+    knoppen: { wegzetten: docplanWeg((s) => 'Onbekende rekening …' + String((s.details || {}).iban_eind || '') + ' bij ' + naamVan(s)) },
   },
 };
 const SIGNAAL_SOORTEN = Object.keys(SIGNALEN);

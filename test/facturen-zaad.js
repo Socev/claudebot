@@ -374,6 +374,9 @@ function zaai(fdb, o) {
     signaal(B.maakSignaal('factuur_dagen_afwijkend', { entiteit: 'tolgaarde', naam: 'Bram Proefsen', alleen_eigenaar: true, sleutel_vast: 'proef-factuur', bedrag_centen: 74700,
       details: { regel: 'f', persoon: 'oid-proef', praktijk: 'TG', praktijk_naam: 'Tolgaarde', factuurdatum: dag(-5), nummer: 'P-1', vorm: 'dagen', aantal: 2, mis: [dag(-12)],
         maanden: [dag(-12).slice(0, 7)], dagen_rooster: null, naam: 'Bram Proefsen' } }), tijd(0, 6));
+    // wv3898: bekende waarnemer op een onbekende rekening (verzonnen; laatste 4 cijfers)
+    signaal(B.maakSignaal('rekening_onbekend', { entiteit: 'tolgaarde', naam: 'Bram Proefsen', alleen_eigenaar: true, sleutel_vast: 'oid-proef|proefrekening', bedrag_centen: -50000,
+      details: { regel: 'r', persoon: 'oid-proef', praktijk: 'TG', praktijk_naam: 'Tolgaarde', spoor: 'bank', datum: dag(-8), iban_eind: '0099', naam_bank: 'B. Proefsen', aantal: 1, naam: 'Bram Proefsen' } }), tijd(0, 6));
     if (teBetalen) signaal(B.maakSignaal('te_betalen_niet_betaald', { entiteit: teBetalen.entiteit, leverancier: teBetalen.l.id, facturen: [teBetalen.id], bedrag_centen: teBetalen.incl }), tijd(0, 6));
     if (ingevoerd) signaal(B.maakSignaal('ingevoerd_niet_gezien', { entiteit: ingevoerd.entiteit, leverancier: ingevoerd.l.id, facturen: [ingevoerd.id], bedrag_centen: ingevoerd.incl }), tijd(-10, 6),
       { afhandeling: 'opnieuw_kijken', les: 'Betaling aan ' + ingevoerd.l.naam + ' nog niet op de bank; over drie dagen opnieuw kijken.', sluimer_tot: dag(-7), wanneer: tijd(-10, 9) });

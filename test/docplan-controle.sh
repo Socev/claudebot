@@ -5,9 +5,9 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 C=$(grep -vE '^\s*(\*|//)' docplan-controle.js)
-if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|\./facturen-bank)'\)$"; then echo "ROOD  CI-poort: docplan-controle.js laadt een andere module"; exit 1; fi
+if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|\./facturen-bank|\./docplan-rekeningen)'\)$"; then echo "ROOD  CI-poort: docplan-controle.js laadt een andere module"; exit 1; fi
 if echo "$C" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new Function"; then echo "ROOD  CI-poort: docplan-controle.js raakt netwerk, proces of log"; exit 1; fi
-echo "GROEN CI-poort: docplan-controle.js laadt alleen crypto en facturen-bank.js"
+echo "GROEN CI-poort: docplan-controle.js laadt alleen crypto, facturen-bank.js en docplan-rekeningen.js (wv3898; eigen CI-poort in test/docplan-rekeningen.sh)"
 f=0
 grep -q "const dc = await docplanControleRonde();" server.js || { echo "ROOD  server.js: controle niet in de bank-ronde"; f=1; }
 grep -q "await appSbRpc('sb_dienst_maanden'" server.js || { echo "ROOD  server.js: sb_dienst_maanden niet gelezen"; f=1; }

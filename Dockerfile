@@ -272,6 +272,7 @@ COPY mailman.js /app/release-bootstrap/mailman.js
 COPY werkstroom.js /app/release-bootstrap/werkstroom.js
 COPY docplan-totaal.js /app/release-bootstrap/docplan-totaal.js
 COPY docplan-koppel.js /app/release-bootstrap/docplan-koppel.js
+COPY docplan-rekeningen.js /app/release-bootstrap/docplan-rekeningen.js
 COPY docplan-controle.js /app/release-bootstrap/docplan-controle.js
 COPY docplan-jaaropgaaf.js /app/release-bootstrap/docplan-jaaropgaaf.js
 COPY docplan-bezetting.js /app/release-bootstrap/docplan-bezetting.js

@@ -20522,6 +20522,16 @@ async function docplanNieuwZetNu(items, nuMs) {
   try { schrijfLog(nu() + ' docplan-nieuw ' + velden({ rij: z.id, namen: items.length, bestond: z.bestond ? 'ja' : 'nee' })); } catch (e) { /* log is bijzaak */ }
   return { ok: true, id: z.id, bestond: !!z.bestond };
 }
+// wv3898 (besluit 2C26): DocPlan › Rekeningen — per waarnemer zijn rekening(en) in docplan.sqlite bevestigen, toevoegen of weghalen
+// (docplan-rekeningen.js). GET leest docplan.sqlite readOnly + facturen.sqlite alleenLezen; POST schrijft alleen (iban, object_id) in tabel rekening
+// via docplanOpenRw (hieronder; function-hoisting) met een rij in de docplan-tabel log. Alleen de eigenaar op de primaire kant; geen IBAN of naam in
+// een log. Ontbreekt docplan-rekeningen.js (terugrol), dan 404 en draait de rest door.
+const docplanRekeningen = (function () {
+  const p = path.join(__dirname, 'docplan-rekeningen.js');
+  if (!facturenMod || !fs.existsSync(p)) return null;
+  try { return require(p).maak({ fout: logError, openDocplan: docplanOpenRo, openDocplanRw: function () { return docplanOpenRw(); }, openFacturen: facturenOpenRo }); }
+  catch (e) { logError('rekeningen', e); return null; }
+})();
 // wv2293: DocPlan § 8.1 vaste controle rooster ↔ betaling (docplan-controle.js; idee 25 meetpunt 4). Na de bank-ronde: dagen per waarnemer per
 // maand (public.sb_dienst_maanden, 0021) en de roosternamen (sb_dienst_alias_lijst) naast docplan.sqlite (readOnly) en de bank in Facturen;
 // uitkomst = signalen in Facturen (alleen de eigenaar, migratie 17). Alleen aantallen naar n8n en in het log; nooit een naam, IBAN of bedrag.
@@ -20565,7 +20575,7 @@ async function docplanControleRonde() {
     const u = docplanControle.controle({ maanden, lijsten, dp, fac: fdb.db, nu: nuMs, dagen, facturen });
     const t = docplanControle.schrijf(fdb, facturenMod, u, new Date(nuMs).toISOString());
     const som = (k) => (u.tel.TG[k] || 0) + (u.tel.GH[k] || 0);
-    schrijfLog(nu() + ' docplan-controle ' + velden({ a: som('a'), b: som('b'), c: som('c'), f_klopt: som('f_klopt'), f_afwijkend: som('f_afwijkend'), f_onbekend: som('f_onbekend'),
+    schrijfLog(nu() + ' docplan-controle ' + velden({ a: som('a'), b: som('b'), c: som('c'), r: som('r') || undefined, f_klopt: som('f_klopt'), f_afwijkend: som('f_afwijkend'), f_onbekend: som('f_onbekend'),
       f_overgeslagen: som('f_overgeslagen') || undefined, nieuw: t.nieuw, dicht: t.vanzelf_dicht, heropend: t.heropend || undefined, bijgewerkt: t.bijgewerkt || undefined }));
     return { ok: true, tel: u.tel, nieuw: t.nieuw, vanzelf_dicht: t.vanzelf_dicht, heropend: t.heropend, open: t.open };
   } finally { try { dp.close(); } catch (e) { /* al dicht */ } }
@@ -20704,7 +20714,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), boekstuk: typeof bsInfo === 'function' ? bsInfo() : undefined, sepa_door: typeof sdInfo === 'function' ? sdInfo() : undefined, nogbetalen: typeof nbInfo === 'function' ? nbInfo() : undefined, nogbetalen_herinnering: typeof nhInfo === 'function' ? nhInfo() : undefined, waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel, jaaropgaaf: !!docplanJaaropgaaf } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo(), boekstuk: typeof bsInfo === 'function' ? bsInfo() : undefined, sepa_door: typeof sdInfo === 'function' ? sdInfo() : undefined, nogbetalen: typeof nbInfo === 'function' ? nbInfo() : undefined, nogbetalen_herinnering: typeof nhInfo === 'function' ? nhInfo() : undefined, waarnemers: !!docplanTotaal, roosternamen: !!docplanKoppel, jaaropgaaf: !!docplanJaaropgaaf, rekeningen: !!docplanRekeningen } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -20909,6 +20919,13 @@ async function appFacturen(req, res, a, s, d, route) {
   if (padW === '/app/facturen/roosternamen' || padW.indexOf('/app/facturen/roosternamen/') === 0) {
     if (!docplanKoppel) return appWeiger(res, 404, 'Roosternamen zit niet in deze versie van de pod', 'facturen roosternamen ontbreekt');
     const x = await docplanKoppel.app({ methode: req.method, pad: padW, d: d, rol: facturenRoutes.rolVoor(null, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' }), primair: rolPrimair() });
+    if (x.status === 200 && req.method === 'GET') res._app.stil = true;
+    res._app.reden = 'facturen ' + x.reden;
+    return appStuur(res, x.status, x.j);
+  }
+  if (padW === '/app/facturen/rekeningen') {   // wv3898: DocPlan › Rekeningen
+    if (!docplanRekeningen) return appWeiger(res, 404, 'Rekeningen zit niet in deze versie van de pod', 'facturen rekeningen ontbreekt');
+    const x = docplanRekeningen.app({ methode: req.method, pad: padW, d: d, rol: facturenRoutes.rolVoor(null, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' }), primair: rolPrimair() });
     if (x.status === 200 && req.method === 'GET') res._app.stil = true;
     res._app.reden = 'facturen ' + x.reden;
     return appStuur(res, x.status, x.j);

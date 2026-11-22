@@ -27,15 +27,18 @@ function facturen() {
   db.exec(`create table bank_transactie (id text primary key, entiteit text, boekdatum text, bedrag_centen integer, tegenpartij_iban text, verwijderd_op text);
     create table factuur (entiteit text, iban text, factuurdatum text, status text);
     create table factuur_archief (entiteit text, iban text, factuurdatum text, status text);`);
-  const t = db.prepare('insert into bank_transactie values (?, ?, ?, ?, ?, ?)');
+  // wv3898: regel (r) leest ook de naam op de bank, de leverancier van een factuur en leverancier_iban (zoals de echte facturendatabase)
+  db.exec(`alter table bank_transactie add column tegenpartij_naam text; alter table factuur add column id text; alter table factuur add column leverancier text;
+    alter table factuur add column soort text; alter table factuur add column incl integer; create table leverancier_iban (leverancier text, iban text);`);
+  const t = db.prepare('insert into bank_transactie (id, entiteit, boekdatum, bedrag_centen, tegenpartij_iban, verwijderd_op) values (?, ?, ?, ?, ?, ?)');
   t.run('t1', 'tolgaarde', '2026-03-10', -100000, 'NL00TEST0000000011', null);   // betaalt A's februari (binnen 75 d) en maart
   t.run('t2', 'tolgaarde', '2026-10-30', -5000, 'NL00TEST0000000099', null);     // onbekende rekening: bank t/m 30-10
   t.run('t3', 'groenhouten', '2026-10-30', -5000, 'NL00TEST0000000099', null);
   t.run('t4', 'groenhouten', '2026-06-15', -40000, 'NL00TEST0000000021', null);  // B bij GH: geen dienst bij GH in de 4 maanden ervoor → (b)
   t.run('t5', 'tolgaarde', '2026-05-20', -40000, 'NL00TEST0000000021', '2026-05-21T00:00:00Z');   // verwijderd: telt niet
   t.run('t6', 'tolgaarde', '2026-02-02', 7000, 'NL00TEST0000000011', null);      // bijschrijving: geen betaling
-  db.exec("insert into factuur values ('tolgaarde', 'NL00TEST0000000021', '2026-10-01', 'te_beoordelen')");   // B's juli: factuur dekt (niet juni: na 13-9)
-  db.exec("insert into factuur values ('tolgaarde', 'NL00TEST0000000021', '2026-06-30', 'geen_factuur')");   // telt niet
+  db.exec("insert into factuur (entiteit, iban, factuurdatum, status) values ('tolgaarde', 'NL00TEST0000000021', '2026-10-01', 'te_beoordelen')");   // B's juli: factuur dekt (niet juni: na 13-9)
+  db.exec("insert into factuur (entiteit, iban, factuurdatum, status) values ('tolgaarde', 'NL00TEST0000000021', '2026-06-30', 'geen_factuur')");   // telt niet
   db.exec("insert into factuur_archief values ('tolgaarde', 'NL00TEST0000000021', '2026-06-20', 'genegeerd'), ('groenhouten', 'NL00TEST0000000021', '2026-01-20', 'geen_factuur')");   // tellen niet (review MOET 2)
   return db;
 }
@@ -61,7 +64,7 @@ test('regels (a), (b), (c) op verzonnen gegevens', () => {
   assert.deepEqual(a, ['oid-a TG 2026-07', 'oid-b GH 2026-01', 'oid-b TG 2026-06']);
   assert.deepEqual(per('betaling_zonder_dienst').map((s) => s.transacties[0]), ['t4']);
   assert.deepEqual(per('roosternaam_zonder_koppeling').map((s) => s.naam).sort(), ['2e Paasdag', 'Nieuw Iemand']);
-  assert.deepEqual(u.tel, { TG: { a: 2, b: 0, c: 0, beoordeeld: 5, f_klopt: 0, f_afwijkend: 0, f_onbekend: 0, f_overgeslagen: 0 }, GH: { a: 1, b: 1, c: 2, beoordeeld: 1, f_klopt: 0, f_afwijkend: 0, f_onbekend: 0, f_overgeslagen: 0 } });
+  assert.deepEqual(u.tel, { TG: { a: 2, b: 0, c: 0, r: 0, beoordeeld: 5, f_klopt: 0, f_afwijkend: 0, f_onbekend: 0, f_overgeslagen: 0 }, GH: { a: 1, b: 1, c: 2, r: 0, beoordeeld: 1, f_klopt: 0, f_afwijkend: 0, f_onbekend: 0, f_overgeslagen: 0 } });
   assert.deepEqual(u.behoud, []);
   for (const s of u.signalen) {
     assert.equal(s.alleen_eigenaar, true);
