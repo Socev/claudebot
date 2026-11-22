@@ -162,14 +162,25 @@ const rood = gevallen.filter((g) => !g[3] && zonder(g[1], g[2].workspace, g[2]) 
 toets('C kruisproef: zonder bewaking worden ≥ 5 weigergevallen machinekamer-klasse (toets bijt)', rood >= 5, rood);
 
 // ── D. 2 tegelijk ──
-const plekCode = SRC.match(/const CODE_MAX_TEGELIJK = \d+;/)[0] + '\nconst codeBezig = new Set();\n' + knip('codePlekNeem') + '\n' + knip('codePlekLos');
+// wv3883: codePlekNeem/codePlekLos staan sinds de verhuizing in code-apps.js pod(S). Toets = de echte export; kruisproef = knipsel uit die bron.
+const CA = fs.readFileSync('code-apps.js', 'utf8');
+function knipPod(naam) {
+  const i = CA.indexOf('\n  function ' + naam + '(');
+  if (i < 0) return '';
+  const e1 = CA.indexOf('\n', i + 1), eerste = CA.slice(i, e1).replace(/\/\/.*$/, '').trim();
+  return eerste.endsWith('}') ? CA.slice(i, e1) : CA.slice(i, CA.indexOf('\n  }\n', i + 1) + 4);
+}
+const plekCode = CA.match(/const CODE_MAX_TEGELIJK = \d+;/)[0] + '\nconst codeBezig = new Set();\n' + knipPod('codePlekNeem') + '\n' + knipPod('codePlekLos');
+function plekNep(jobs) { return { get jobs() { return jobs; }, schrijfLog: function () {}, nu: function () { return ''; }, velden: function () { return ''; } }; }
 function plekken(code) {
   const jobs = {};
-  const ctx = { jobs: jobs, schrijfLog: function () {}, nu: function () { return ''; }, velden: function () { return ''; }, setTimeout: setTimeout };
+  if (!code) { const p = C.pod(plekNep(jobs)); return { jobs: jobs, neem: p.codePlekNeem, los: p.codePlekLos }; }
+  const ctx = { S: plekNep(jobs), setTimeout: setTimeout };
   vm.createContext(ctx); vm.runInContext(code + '\nthis.neem = codePlekNeem; this.los = codePlekLos;', ctx);
   return { jobs: jobs, neem: ctx.neem, los: ctx.los };
 }
-let P = plekken(plekCode);
+toets('D knipsel codePlekNeem/codePlekLos gevonden in code-apps.js', /function codePlekNeem\(/.test(plekCode) && /function codePlekLos\(/.test(plekCode));
+let P = plekken(null);
 ['j1', 'j2', 'j3'].forEach((id) => { P.jobs[id] = { status: 'pending', app: { kanaal: 'code-texere' } }; });
 const nee = () => false;
 const k1 = await P.neem('j1', nee), k2 = await P.neem('j2', nee);

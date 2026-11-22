@@ -183,7 +183,9 @@ function serverOmgeving(dir, extra) {
     CODE_APPS: { app: (id) => ({ facturen: { id: 'facturen', naam: 'Facturen', voorvoegsels: ['facturen', 'boekstuk'] }, imagine: { id: 'imagine', naam: 'Imagine', voorvoegsels: ['imagine'] } })[id] || null },
     Promise };
   vm.createContext(ctx);
-  vm.runInContext(SRC.slice(begin, eind) + '\n;this.appBesluiten = appBesluiten; this.besluitenTik = besluitenTik; this.besluitenStand = besluitenStand; this.appCodeCijfer = appCodeCijfer;', ctx);
+  vm.runInContext(SRC.slice(begin, eind) + '\n;this.appBesluiten = appBesluiten; this.besluitenTik = besluitenTik; this.besluitenStand = besluitenStand;', ctx);
+  // wv3883: appCodeCijfer staat sinds de verhuizing in code-apps.js pod(S); S leest dezelfde nepdeps uit ctx (BESLUITEN_DIR = de proefmap)
+  ctx.appCodeCijfer = require('../code-apps.js').pod(new Proxy({}, { get: (t, k) => (k === 'BESLUITEN_DIR' ? dir : ctx[k]) })).appCodeCijfer;
   return { ctx, rpc, box };
 }
 const res = () => ({ _app: {} });
