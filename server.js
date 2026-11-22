@@ -9237,7 +9237,10 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   const tijd = appKlok();
   const kanaalNaam = ({ hoofd: 'het hoofdkanaal', machinekamer: 'de machinekamer', 'cijfer-meester': 'de Cijfer-Meester', 'ovis-nza': 'OVIS NZa' })[rij.kanaal] ||
     (codeIdVanKanaal(rij.kanaal) ? 'OVIS Code › ' + CODE_APPS.app(codeIdVanKanaal(rij.kanaal)).naam : rij.kanaal);   // wv3227   // Fable-review wv200 K1
-  const waarIn = kaart ? 'op de Voor jou-kaart in de app (Overzicht, ' + kanaalNaam + ')' : 'in de app (' + kanaalNaam + ')';
+  // wv3862: een JA met vingerafdruk uit Onderweg (s.onderweg = tel-apparaat) loopt door deze zelfde code; alleen de plaatsnaam verschilt
+  const viaOw = !!(s && s.onderweg);
+  const waarIn = viaOw ? (kaart ? 'op de Voor jou-kaart in Onderweg (auto, stilstaand, vingerafdruk op de telefoon; ' + kanaalNaam + ')' : 'in Onderweg (auto, stilstaand, vingerafdruk op de telefoon; ' + kanaalNaam + ')')
+    : kaart ? 'op de Voor jou-kaart in de app (Overzicht, ' + kanaalNaam + ')' : 'in de app (' + kanaalNaam + ')';
   const tekst = (keuze === 'anders'
     ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
     : '[KNOP] David drukte ' + (keuze === 'nee' ? (kaart && kaart.stop ? 'STOP (knop Stop = Nee)' : 'NEE') : doorbouw ? 'JA, EN BOUW DOOR (knop "' + DOORBOUW_KNOP + '")' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)') + (kaart && kaart.context ? '\n' + kaart.context : '');
@@ -9246,6 +9249,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   const inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
   const drukT = Date.now();
   const antwoord = { keuze: keuze, t: new Date(drukT).toISOString(), apparaat: a.id, vingerafdruk: gevoeligJa || undefined, doorbouw: doorbouw || undefined, stop: (keuze === 'nee' && kaart && kaart.stop) || undefined,   // wv3692
+    via: viaOw ? 'onderweg' : undefined,   // wv3862
     kaart_hash: kaart && /^[a-f0-9]{64}$/.test(String(kaart.inhoudHash || '')) ? kaart.inhoudHash : undefined };   // wv3010
   const jobId2 = crypto.randomBytes(8).toString('hex');   // vooraf, zodat de druk in één schrijfactie aan zijn beurt vastzit
   v[sleutel].antwoord = Object.assign({ job: jobId2, gestart: false }, antwoord);
@@ -9268,7 +9272,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
     return appChatLogVoor(rij.kanaal, [
       { rol: 'socev', tekst: vb ? vb.bericht : vz, ts: nu - 1 },
       { rol: 'david', ts: nu, bevestiging: appKnopBevestiging(keuze, gevoeligJa, a, !!kaart),
-        tekst: (keuze === 'anders' ? 'Anders' : keuze === 'nee' ? (kaart && kaart.stop ? 'Stop' : 'Nee') : doorbouw ? 'Ja, en bouw door' : 'Ja') + ' (knop ' + (kaart ? 'op een Voor jou-kaart ' : '') + 'in de app' + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
+        tekst: (keuze === 'anders' ? 'Anders' : keuze === 'nee' ? (kaart && kaart.stop ? 'Stop' : 'Nee') : doorbouw ? 'Ja, en bouw door' : 'Ja') + ' (knop ' + (kaart ? 'op een Voor jou-kaart ' : '') + (viaOw ? 'in Onderweg, stilstaand' : 'in de app') + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
           (keuze === 'anders' ? ' — toelichting: ' + appOntmasker(toel) : '') + '\n(vraag-id ' + hash + ')' }])
       .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); })
       .then(function (st) {
@@ -16462,7 +16466,7 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/pot-afschriften/bestand/') === 0) return appPotBestand(req, res, a, route.slice('GET /app/pot-afschriften/bestand/'.length));
         if (route === 'GET /app/tel') return telAppStand(req, res, a);                       // wv264: ⚙ → Telefoon
         if (route === 'POST /app/tel/koppelcode') return telAppKoppelcode(req, res, reg, a, s);
-        if (route === 'POST /app/tel/ontkoppel') return telAppOntkoppel(req, res, a, s);
+        if (route === 'POST /app/tel/ontkoppel') return telAppOntkoppel(req, res, a, s, d);   // wv3862: {alleen: 'vingerja'}
         return appWeiger(res, 404, 'onbekend', 'route');
       };
       Promise.resolve().then(function () { return verder(false); }).catch(function (e) {
@@ -18689,7 +18693,8 @@ function telOnderwegVelden(x) {
   const knop = /(^|\n)Ik heb een vraag voor je in [^\n]*\.$/.test(s);
   const kern = s.replace(/(^|\n)Ik heb een vraag voor je in [^\n]*\.$/, '').trim();
   return { tekst: s.slice(0, 2000), wedervraag: !x.snel && (x.soort === 'antwoord' || x.soort === 'zelf') && /\?["'”’)]*$/.test(kern) ? 'ja' : 'nee', snel: x.snel ? 'ja' : 'nee',
-    knopvraag: knop ? 'ja' : 'nee', rest: x.rest ? 'ja' : 'nee', vraagzin: knop && x.vraag ? String(x.vraag).slice(0, TEL_VRAAGZIN_MAX) : '' };
+    knopvraag: knop ? 'ja' : 'nee', rest: x.rest ? 'ja' : 'nee', vraagzin: knop && x.vraag ? String(x.vraag).slice(0, TEL_VRAAGZIN_MAX) : '',
+    vraag_job: knop && x.vraag && x.vraag_hash ? x.id : '', vraag_hash: knop && x.vraag && x.vraag_hash ? x.vraag_hash : '' };   // wv3862
 }
 // wv3770: de zin van de VRAAG AAN DAVID-regel (zelfde knip als telSpreektekst: alleen vóór "Verder in de app:"), zonder opmaak.
 const TEL_VRAAGZIN_MAX = 300;
@@ -18821,6 +18826,8 @@ function telNaBeurt(jobId, antwoord, ok) {
   x.spreek = x.soort === 'fout' ? TEL_AFZEGGEN : telSpreektekst(antwoord);
   x.rest = x.soort !== 'fout' && /^[^\S\n]*[*_]*Verder in (de app|Telegram)\s*:/im.test(String(antwoord || ''));   // wv3700: Onderweg toont "Lees de rest"
   x.vraag = x.soort !== 'fout' ? telVraagzin(antwoord) : null;   // wv3770: het autodashboard toont de Ja/Nee-vraag met JA / NEE
+  const jv = typeof jobs !== 'undefined' && jobs[jobId] && jobs[jobId].app ? jobs[jobId].app.vraag : null;   // wv3862: vraag-id voor de vingerafdruk-JA
+  x.vraag_hash = x.vraag && jv && /^[a-f0-9]{8}$/.test(String(jv.hash)) ? jv.hash : null;
   x.t_klaar = nu; x.tot = nu + TEL_TTL_MS; delete telStaat.delen[x.id]; delete telStaat.audio[x.id];
   const jr = typeof jobs !== 'undefined' && jobs[jobId] && jobs[jobId].result;
   x.k = x.k || {};
@@ -18918,9 +18925,10 @@ function handleTel(req, res) {
 }
 
 // Klein lichaam (koppel): hooguit 256 bytes, elk Content-Type (Tasker stuurt de body zoals hij is).
-function telKlein(req, cb) {
+function telKlein(req, cb, max) {
+  max = max || 256;
   const d = []; let n = 0, af = false;
-  req.on('data', function (c) { if (af) return; n += c.length; if (n > 256) { af = true; req.resume(); return cb('groot'); } d.push(c); });
+  req.on('data', function (c) { if (af) return; n += c.length; if (n > max) { af = true; req.resume(); return cb('groot'); } d.push(c); });
   req.on('error', function () { if (!af) { af = true; cb('lezen'); } });
   req.on('end', function () { if (af) return; af = true; cb(null, Buffer.concat(d).toString('utf8')); });
 }
@@ -18931,10 +18939,11 @@ function telKoppel(req, res) {
   if (!appTeller('tel-koppel', TEL_KOPPEL_PER_UUR, 3600000)) { req.resume(); return telWeiger(res, 429, 'te veel pogingen dit uur', 'grens koppel'); }
   telKlein(req, function (fout, tekst) {
     if (fout) return telWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
-    let code = '', soort = 'tasker';
+    let code = '', soort = 'tasker', pub = null, bewijs = null;
     try {
       const j = JSON.parse(tekst); code = String(j && typeof j === 'object' ? j.code : j);
       if (j && typeof j === 'object' && j.app === 'onderweg') soort = 'onderweg';   // wv3700; zonder app = Tasker (Codex MOET 2)
+      if (soort === 'onderweg' && typeof j.pub === 'string' && typeof j.bewijs === 'string') { pub = j.pub; bewijs = j.bewijs; }   // wv3862
     } catch (e) { code = String(tekst); }
     code = code.replace(/[\s"'-]/g, '');
     const k = telStaat.code;
@@ -18953,14 +18962,17 @@ function telKoppel(req, res) {
     const weg = [];
     reg.apparaten.forEach(function (x) { if (x.actief && telSoort(x) === soort) { x.actief = false; x.sleutel_hash = null; x.ingetrokken_op = nu.toISOString(); x.ingetrokken_door = 'opnieuw gekoppeld'; weg.push(x.id); } });
     reg.apparaten = reg.apparaten.filter(function (x) { return Date.now() - Date.parse(x.ingetrokken_op || x.gekoppeld || 0) < 90 * 86400000; });
-    reg.apparaten.push({ id: id, naam: soort === 'onderweg' ? 'Pixel (Onderweg)' : 'Pixel (Tasker)', soort: soort, sleutel_hash: appSha(sleutel), app_apparaat: k.app_apparaat, gekoppeld: nu.toISOString(),
-      verloopt: new Date(nu.getTime() + TEL_SLEUTEL_MS).toISOString(), actief: true });
+    const vinger = pub ? telVingerPubOk(pub, bewijs, code) : null;   // wv3862: fout bewijs = koppelen zonder vingerafdruk-JA
+    reg.apparaten.push(Object.assign({ id: id, naam: soort === 'onderweg' ? 'Pixel (Onderweg)' : 'Pixel (Tasker)', soort: soort, sleutel_hash: appSha(sleutel), app_apparaat: k.app_apparaat, gekoppeld: nu.toISOString(),
+      verloopt: new Date(nu.getTime() + TEL_SLEUTEL_MS).toISOString(), actief: true },
+      vinger ? { vinger_pub: vinger.pub, vinger_id: vinger.id, vinger_sinds: nu.toISOString() } : {}));
     try { appSchrijfJson(TEL_REGISTER, reg); } catch (e) { logError('tel-register-schrijf', e); return telWeiger(res, 503, 'opslaan op de pod mislukte; probeer het opnieuw', 'register schrijven'); }
     weg.forEach(function (a) { telAntwoordPoll(a, { ok: true, bezig: 'nee', reden: 'opnieuw gekoppeld' }); });
-    res._tel.voorAuth = false; res._tel.apparaat = id; res._tel.reden = 'gekoppeld (' + soort + ')';
-    appTelegram('Socev-app: ' + (soort === 'onderweg' ? 'de app Onderweg' : 'Tasker') + ' op de telefoon is gekoppeld (spraak in de auto). Niet jij? /app-noodstop en meld het de machinekamer.');
-    telStuur(res, 200, { ok: true, sleutel: sleutel, cf_id: tok.client_id, cf_geheim: tok.client_secret, apparaat: id, verloopt: reg.apparaten[reg.apparaten.length - 1].verloopt });
-  });
+    res._tel.voorAuth = false; res._tel.apparaat = id; res._tel.reden = 'gekoppeld (' + soort + ')' + (vinger ? ' met vingerafdruk-JA ' + vinger.id : pub ? ' (vingerafdruk-bewijs klopt niet)' : '');
+    appTelegram('Socev-app: ' + (soort === 'onderweg' ? 'de app Onderweg' : 'Tasker') + ' op de telefoon is gekoppeld (spraak in de auto' + (vinger ? ', met JA via vingerafdruk' : '') + '). Niet jij? /app-noodstop en meld het de machinekamer.');
+    telStuur(res, 200, Object.assign({ ok: true, sleutel: sleutel, cf_id: tok.client_id, cf_geheim: tok.client_secret, apparaat: id, verloopt: reg.apparaten[reg.apparaten.length - 1].verloopt },
+      soort === 'onderweg' ? { vingerja: vinger ? 'ja' : 'nee' } : {}));
+  }, 1024);
 }
 
 function telBeurt(req, res, t) {
@@ -19058,6 +19070,8 @@ function telUitRoute(req, res, t) {
     if (q.get('lijst') === 'telezen') return telTeLezenLijst(req, res, t);   // wv3826 (484)
     if (q.get('lijst') === 'telezenstem') return telTeLezenStem(req, res, t, String(q.get('sleutel') || ''), String(q.get('deel') || ''));
     if (q.get('lijst') === 'telezengezien') return telTeLezenGezien(req, res, t, String(q.get('sleutel') || ''));
+    if (q.get('lijst') === 'uitdaging') return telUitdagingRoute(req, res, t);   // wv3862: echte JA met vingerafdruk
+    if (q.get('lijst') === 'vingerja') return telVingerJa(req, res, t, q);
     return telWeiger(res, 400, 'onbekende lijst', 'lijst');
   }
   res._tel.stil = true;   // de hartslag (± 1 per minuut) niet in het auditlog; alleen weigeringen
@@ -19367,6 +19381,123 @@ async function telVoorstelRoute(req, res, t, idTekst, keuze, tid) {
   res._tel.reden = 'voorstel ' + keuze + ' #' + id;
   telStuur(res, 200, { ok: true, auto: keuze });
 }
+// ── wv3862 (besluitenpagina 2b-d, David Ja 22-11 14:35): een echte JA met vingerafdruk in Onderweg ─────────────────────────────────
+// Ontwerp: vault 01_Ontwikkeling/Onderweg - native app in plaats van Tasker (bouwplan 21-11-2026).md § Echte JA met vingerafdruk (Codex
+// NO-GO, 2 MOET verwerkt: stilstand alleen met verse GPS-snelheid; van de gevoelige Ja's alleen agenda). Onderweg maakt bij het koppelen
+// een EC P-256-sleutel in de beveiligde chip van de telefoon (elke handtekening = één verse vingerafdruk, BiometricPrompt klasse 3) en
+// stuurt de publieke sleutel mee met de koppelcode (pub + bewijs = handtekening over de code). Per JA: eenmalige uitdaging
+// (lijst=uitdaging), dan lijst=vingerja met de handtekening over een vaste tekst (TEL_VINGER_KOP … stil). Is alles goed, dan loopt de JA
+// door precies dezelfde code als een knopdruk in de Socev-app (appKnop / appVoorJouKnop) met het app-apparaat waarmee Onderweg gekoppeld
+// is; voor een vraag in een antwoord geldt de handtekening als verse vingerafdruk (één JA), in de ronde niet (zoals Bevestig alles: een
+// gevoelige Ja gaat niet mee). Toets: test/tel-poort.sh § 8v.
+const TEL_VINGER_KOP = 'socev-onderweg-ja-v1';
+const TEL_VINGER_KOPPEL_KOP = 'socev-onderweg-koppel-v1';
+const TEL_UITDAGING_MS = 2 * 60 * 1000;
+const TEL_VINGER_KLOK_MS = 2 * 60 * 1000;
+const TEL_VINGER_PER_UUR = 30;
+const TEL_VINGER_KAARTEN_MAX = 10;
+const TEL_VINGER_GEVOELIG_MAG = ['agenda'];   // Codex MOET 2: geld, versturen, verwijderen, grondwet en onleesbaar alleen in de Socev-app
+appStaat.tellers['tel-vingerja'] = [];
+appStaat.tellers['tel-uitdaging'] = [];
+telStaat.uitdaging = {};
+// Publieke sleutel (SPKI, base64) + bewijs (handtekening over de koppelcode). null = niet bruikbaar (dan koppelen zonder vingerafdruk-JA).
+function telVingerPubOk(pub, bewijs, code) {
+  try {
+    if (!/^[A-Za-z0-9+/=]{80,400}$/.test(String(pub)) || !/^[A-Za-z0-9_\-+/=]{40,200}$/.test(String(bewijs))) return null;
+    const der = Buffer.from(pub, 'base64');
+    const k = crypto.createPublicKey({ key: der, format: 'der', type: 'spki' });
+    if (k.asymmetricKeyType !== 'ec' || !k.asymmetricKeyDetails || k.asymmetricKeyDetails.namedCurve !== 'prime256v1') return null;
+    const sig = Buffer.from(String(bewijs).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''), 'base64url');
+    if (!crypto.verify('sha256', Buffer.from(TEL_VINGER_KOPPEL_KOP + '\n' + code, 'utf8'), k, sig)) return null;
+    return { pub: der.toString('base64'), id: appSha(der.toString('base64')).slice(0, 16) };
+  } catch (e) { return null; }
+}
+function telVingerTekst(apparaat, soort, doel, t, u, stil) { return [TEL_VINGER_KOP, apparaat, soort, doel, t, u, stil].join('\n'); }
+// De lopende app-sessie van het app-apparaat waarmee deze telefoon gekoppeld is (zelfde eis als telSessieOk).
+function telAppSessieVan(t) {
+  const nu = Date.now();
+  const h = Object.keys(appStaat.sessies).find(function (k) { const s = appStaat.sessies[k]; return s && s.apparaat === t.app_apparaat && nu <= s.tot; });
+  return h ? appStaat.sessies[h] : null;
+}
+async function telUitdagingRoute(req, res, t) {
+  if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'uitdaging: geen onderweg-sleutel');
+  if (!telSessieOk(t)) return telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (uitdaging)');
+  if (!appTeller('tel-uitdaging', TEL_VINGER_PER_UUR * 2, 3600000)) return telWeiger(res, 429, 'te vaak dit uur', 'grens uitdaging');
+  if (!t.vinger_pub) return telWeiger(res, 409, 'koppel Onderweg opnieuw om met je vingerafdruk te bevestigen', 'uitdaging: geen vingersleutel');
+  const u = crypto.randomBytes(16).toString('hex');
+  telStaat.uitdaging[t.id] = { u: u, tot: Date.now() + TEL_UITDAGING_MS };   // één per apparaat; een nieuwe vervangt de oude
+  res._tel.reden = 'uitdaging';
+  telStuur(res, 200, { ok: true, uitdaging: u, geldig_s: TEL_UITDAGING_MS / 1000 });
+}
+// Een app-route intern aanroepen met een opvang-res: zelfde code, zelfde grenzen, het antwoord komt hier terug.
+async function telViaApp(fn, args) {
+  let klaar; const p = new Promise(function (r) { klaar = r; });
+  const res = { _app: { reden: null, status: 0 }, headersSent: false, statusCode: 0,
+    writeHead: function (st) { this.statusCode = st; this.headersSent = true; return this; }, setHeader: function () {}, on: function () { return this; },
+    end: function (b) { let j = {}; try { j = JSON.parse(String(b || '{}')); } catch (e) {} klaar({ status: this.statusCode, j: j, reden: this._app.reden }); } };
+  await fn.apply(null, [args[0], res].concat(args.slice(1)));
+  return res.headersSent ? p : { status: 500, j: { ok: false, fout: 'geen antwoord' }, reden: 'geen antwoord' };
+}
+async function telVingerJa(req, res, t, q) {
+  if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'vingerja: geen onderweg-sleutel');
+  if (!telSessieOk(t)) return telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (vingerja)');
+  if (!appTeller('tel-vingerja', TEL_VINGER_PER_UUR, 3600000)) return telWeiger(res, 429, 'te vaak dit uur', 'grens vingerja');
+  const soort = String(q.get('soort') || ''), doel = String(q.get('doel') || ''), tTekst = String(q.get('t') || ''), u = String(q.get('u') || ''),
+    stil = String(q.get('stil') || ''), sigT = String(q.get('sig') || '');
+  let items = null;
+  if (soort === 'vraag') { if (!/^[a-f0-9]{16}:[a-f0-9]{8}$/.test(doel)) return telWeiger(res, 400, 'ongeldige JA', 'vingerja doel'); }
+  else if (soort === 'kaarten') {
+    items = doel.split(',').map(function (x) { const m = /^([1-9]\d{0,8})\.(ja|nee)\.([a-f0-9]{8})$/.exec(x); return m ? { id: Number(m[1]), keuze: m[2], tekst_id: m[3] } : null; });
+    if (!items.length || items.length > TEL_VINGER_KAARTEN_MAX || items.some(function (x) { return !x; }) ||
+      new Set(items.map(function (x) { return x.id; })).size !== items.length) return telWeiger(res, 400, 'ongeldige JA', 'vingerja kaarten');
+  } else return telWeiger(res, 400, 'ongeldige JA', 'vingerja soort');
+  if (!/^\d{13}$/.test(tTekst) || !/^[a-f0-9]{32}$/.test(u) || !/^[a-z]{2,8}$/.test(stil) || !/^[A-Za-z0-9_-]{40,200}$/.test(sigT)) return telWeiger(res, 400, 'ongeldige JA', 'vingerja velden');
+  if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (vingerja)');
+  if (!t.vinger_pub) return telWeiger(res, 409, 'koppel Onderweg opnieuw om met je vingerafdruk te bevestigen', 'vingerja: geen vingersleutel');
+  // de uitdaging is eenmalig: vanaf hier verbruikt, ook als er hierna iets niet klopt
+  const ud = telStaat.uitdaging[t.id];
+  delete telStaat.uitdaging[t.id];
+  if (!ud || ud.tot < Date.now() || !appGelijk(ud.u, u)) return telWeiger(res, 409, 'verlopen; probeer het opnieuw', 'vingerja: uitdaging ' + (!ud ? 'geen' : ud.tot < Date.now() ? 'verlopen' : 'anders'));
+  if (Math.abs(Number(tTekst) - Date.now()) > TEL_VINGER_KLOK_MS) return telWeiger(res, 409, 'de klok van de telefoon loopt anders; probeer het opnieuw', 'vingerja: tijd');
+  let echt = false;
+  try {
+    const k = crypto.createPublicKey({ key: Buffer.from(t.vinger_pub, 'base64'), format: 'der', type: 'spki' });
+    echt = crypto.verify('sha256', Buffer.from(telVingerTekst(t.id, soort, doel, tTekst, u, stil), 'utf8'), k, Buffer.from(sigT, 'base64url'));
+  } catch (e) { echt = false; }
+  if (!echt) return telWeiger(res, 403, 'de vingerafdruk-handtekening klopt niet; koppel Onderweg opnieuw', 'vingerja: handtekening');
+  if (stil !== 'gps') return telWeiger(res, 403, 'alleen als je stilstaat', 'vingerja: niet stil (' + stil + ')');   // Codex MOET 1
+  let reg, a;
+  try { reg = appRegister(); } catch (e) { logError('app-register', e); return telWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'vingerja register'); }
+  a = reg.apparaten.find(function (x) { return x && x.id === t.app_apparaat && x.actief && x.credential && x.credential.id; });
+  const sEcht = a ? telAppSessieVan(t) : null;
+  if (!a || !sEcht) return telWeiger(res, 409, 'je telefoon is in de Socev-app niet meer gekoppeld; bevestig in de app', 'vingerja: app-apparaat');
+  const sKopie = function (vers) { return Object.assign({}, sEcht, { credential: a.credential.id, vers_tot: vers ? Date.now() + 30000 : 0, onderweg: t.id }); };
+  const regel = function (route, u2) { appAudit({ route: route, m: 'ONDERWEG', status: u2.status, apparaat: a.id, reden: 'via onderweg ' + t.id + ': ' + (u2.reden || '') }); };
+  if (soort === 'vraag') {
+    const sl = doel, jobId = doel.split(':')[0], hash = doel.split(':')[1];
+    let rij;
+    try { rij = appVragen()[sl]; } catch (e) { logError('app-vragen', e); return telWeiger(res, 503, 'vragenregister onleesbaar; vraag de machinekamer', 'vingerja vragen'); }
+    if (!rij) return telWeiger(res, 404, 'deze vraag ken ik niet (meer)', 'vingerja: onbekende vraag');
+    if (rij.kanaal !== 'hoofd') return telWeiger(res, 409, 'deze vraag bevestig je in de Socev-app', 'vingerja: kanaal ' + rij.kanaal);
+    if (rij.gevoelig !== false && TEL_VINGER_GEVOELIG_MAG.indexOf(rij.gevoelig_reden) < 0)
+      return telWeiger(res, 409, 'dit bevestig je in de Socev-app' + (rij.gevoelig_reden ? ' (' + rij.gevoelig_reden + ')' : ''), 'vingerja: gevoelig ' + (rij.gevoelig_reden || '?'));
+    const u2 = await telViaApp(appKnop, [req, reg, a, sKopie(true), { job_id: jobId, vraag_hash: hash, keuze: 'ja' }]);
+    regel('/app/knop', u2);
+    res._tel.reden = 'vingerja vraag ' + hash + ' -> ' + u2.status;
+    return telStuur(res, u2.status, { ok: u2.status === 200 && u2.j.ok === true, fout: u2.j.fout || undefined, in_rij: u2.j.in_rij || undefined, bevestigd: u2.status === 200 ? 1 : 0 });
+  }
+  const uitslag = [];
+  for (const it of items) {
+    const u2 = await telViaApp(appVoorJouKnop, [req, reg, a, sKopie(false), { id: it.id, keuze: it.keuze, tekst_id: it.tekst_id }]);
+    regel('/app/voor-jou/knop', u2);
+    const zin = u2.status === 200 ? null : u2.j.vers_nodig ? 'bevestig deze met de knop in de Socev-app' : u2.j.tekst_gewijzigd ? 'de vraag is veranderd; lees hem opnieuw' : String(u2.j.fout || 'lukte niet').slice(0, 160);
+    uitslag.push({ id: it.id, keuze: it.keuze, ok: u2.status === 200, fout: zin || undefined });
+  }
+  const n = uitslag.filter(function (x) { return x.ok; }).length;
+  res._tel.reden = 'vingerja kaarten ' + n + '/' + uitslag.length;
+  telStuur(res, 200, { ok: true, bevestigd: n, uitslag: uitslag });
+}
+// ── einde wv3862 ──
 // GET /tel/uit?lijst=kaartstem&id=<kaart>: de kaart (titel, vraag, voorstel) ingesproken met de pod-stem, alleen na een tik in Onderweg
 // (passagiers). Zelfde sloten als Voor jou; 40 per dag; in het geheugen per (kaart, tekst_id).
 telStaat.kaartstem = {};
@@ -19650,7 +19781,8 @@ function telAppStand(req, res, a) {
     laatst_gezien: t && telStaat.hartslag[t.id] ? new Date(telStaat.hartslag[t.id]).toISOString() : null, luistert: t ? telLuistert(t.id) : false,
     code_open: !!k && k.app_apparaat === a.id, code_tot: k && k.app_apparaat === a.id ? new Date(k.tot).toISOString() : null,
     mag_koppelen: a.goedkeurder === true && appSysteem(req) === 'Android',
-    apparaten: lijst.map(function (x) { return { naam: x.naam, soort: telSoort(x), gekoppeld: x.gekoppeld, verloopt: x.verloopt, luistert: telLuistert(x.id) }; }) });   // wv3700
+    apparaten: lijst.map(function (x) { return { naam: x.naam, soort: telSoort(x), gekoppeld: x.gekoppeld, verloopt: x.verloopt, luistert: telLuistert(x.id),
+      vingerja: !!x.vinger_pub, vinger_sinds: x.vinger_pub ? x.vinger_sinds || null : null, vinger_id: x.vinger_pub ? x.vinger_id || null : null }; }) });   // wv3700; wv3862
 }
 function telAppKoppelcode(req, res, reg, a, s) {
   if (!telIngericht()) return appWeiger(res, 503, 'de telefoonkoppeling is op de pod nog niet ingericht', 'tel niet ingericht');
@@ -19680,9 +19812,22 @@ function telIntrekken(door) {
   telStaat.rij = []; telStaat.audio = {}; telStaat.delen = {}; telStaat.hartslag = {}; telRijBewaar();   // hartslag: Fable #6
   return uit;
 }
-function telAppOntkoppel(req, res, a, s) {
+function telAppOntkoppel(req, res, a, s, d) {
   if (s && !appVastVersEis(res, a, s, 'tel ontkoppel')) return;   // wv2547: vanaf een vaste plek met de vingerafdruk van dat apparaat
   if (s && a && a.soort === 'vast') s.vers_tot = 0;
+  // wv3862: alleen de vingerafdruk-JA van Onderweg uit; de spraakkoppeling blijft
+  if (d && d.alleen === 'vingerja') {
+    let n = 0;
+    try {
+      const reg = telRegister();
+      reg.apparaten.forEach(function (x) { if (x.actief && x.vinger_pub) { delete x.vinger_pub; delete x.vinger_id; x.vinger_uit = new Date().toISOString(); n++; } });
+      if (n) appSchrijfJson(TEL_REGISTER, reg);
+    } catch (e) { logError('tel-register', e); return appWeiger(res, 503, 'intrekken lukte niet: telefoonregister onleesbaar', 'tel vingerja uit fout'); }
+    Object.keys(telStaat.uitdaging).forEach(function (k) { delete telStaat.uitdaging[k]; });
+    res._app.reden = 'tel vingerja uit (' + n + ')';
+    if (n) appTelegram('Socev-app: de JA met vingerafdruk in Onderweg is uitgezet vanuit de app ("' + a.naam + '"). De spraakkoppeling blijft.');
+    return appStuur(res, 200, { ok: true, ingetrokken: n, alleen: 'vingerja' });
+  }
   const u = telIntrekken('app (' + a.naam + ')');
   if (u.fout) return appWeiger(res, 503, 'ontkoppelen lukte niet helemaal: ' + u.fout, 'tel ontkoppel fout');
   res._app.reden = 'tel ontkoppeld (' + u.ingetrokken + ')';
@@ -19699,7 +19844,7 @@ function telInfo() {
   return { ingericht: telIngericht(), uit: telUit(), register: kapot ? 'kapot' : 'ok', gekoppeld: !!t, verloopt: t ? t.verloopt : null,
     luistert: t ? telLuistert(t.id) : false, lange_vragen: Object.keys(telStaat.polls).length,
     tasker_versie: t && telSoort(t) === 'tasker' && telStaat.telefoon[t.id] ? telStaat.telefoon[t.id].versie : null,   // wv622: &v= van de lus (null = v6 of ouder)
-    onderweg: ow ? Object.assign({ verloopt: ow.verloopt, luistert: telLuistert(ow.id), versie: telStaat.telefoon[ow.id] ? telStaat.telefoon[ow.id].versie : null }, telRitNu()) : null,   // wv3700; wv3779: rijdt/sinds
+    onderweg: ow ? Object.assign({ verloopt: ow.verloopt, luistert: telLuistert(ow.id), versie: telStaat.telefoon[ow.id] ? telStaat.telefoon[ow.id].versie : null, vingerja: !!ow.vinger_pub }, telRitNu()) : null,   // wv3700; wv3779: rijdt/sinds; wv3862
     beurten_lopend: rij.filter(function (x) { return x.soort === 'bezig'; }).length, items_klaar: rij.filter(function (x) { return x.soort !== 'bezig' && !x.gespeeld; }).length,
     zelf: Object.assign({ aanwezig: (function () { try { const w = telAanwezig(); return w.ok ? 'ja' : w.reden; } catch (e) { return 'fout'; } })() }, telStaat.zelf) };
 }

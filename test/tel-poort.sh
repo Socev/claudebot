@@ -1084,6 +1084,150 @@ srv.listen(0, '127.0.0.1', async () => {
     tlFout = null;
     toets('8s tel-audit zonder inhoud (Te lezen)', !/bandje|Uitkomst|tandarts|Planning|Zin nummer/.test(audit()) && /telezen /.test(audit()));
     toets('8s geen onverwachte fouten (snel/telezen)', !logs.some((l) => /tel-snel|tel-telezen/.test(l) && !/stuk|log weg/.test(l)), logs.filter((l) => /tel-snel|tel-telezen/.test(l)));
+    // ── 8v. wv3862: echte JA met vingerafdruk in Onderweg (handtekening van een sleutel in de chip; hier een nagebootste P-256-sleutel) ──
+    H.appStaat.tellers['tel-alles'] = []; H.appStaat.tellers['tel-koppel'] = []; H.appStaat.tellers['tel-codes'] = [];
+    for (const k of Object.keys(ketens)) delete ketens[k];
+    const vk = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const vPub = vk.publicKey.export({ format: 'der', type: 'spki' }).toString('base64');
+    const vTeken = (tekst, sleutel) => crypto.sign('sha256', Buffer.from(tekst, 'utf8'), sleutel || vk.privateKey).toString('base64url');
+    const regLees = () => JSON.parse(fs.readFileSync(path.join(DATA, 'tel-apparaten.json'), 'utf8'));
+    // koppelen: fout bewijs = gekoppeld zonder vingerafdruk-JA; goed bewijs = met
+    let kV = await koppel((c) => JSON.stringify({ code: c, app: 'onderweg', pub: vPub, bewijs: vTeken('socev-onderweg-koppel-v1\n00000000') }), 'application/json');
+    toets('8v koppel met fout bewijs: gekoppeld, vingerja nee, geen sleutel in het register', kV.status === 200 && kV.j.vingerja === 'nee' && !regLees().apparaten.some((x) => x.actief && x.vinger_pub), kV.j);
+    const tgVoor = st.telegram.length;
+    kV = await koppel((c) => JSON.stringify({ code: c, app: 'onderweg', pub: vPub, bewijs: vTeken('socev-onderweg-koppel-v1\n' + c) }), 'application/json');
+    const OWV = kV.j.sleutel, OWVid = kV.j.apparaat;
+    const rowV = regLees().apparaten.find((x) => x.actief && x.soort === 'onderweg');
+    toets('8v koppel met goed bewijs: vingerja ja, publieke sleutel + id in het register (geen geheim)', kV.status === 200 && kV.j.vingerja === 'ja' && rowV && rowV.vinger_pub === vPub && /^[a-f0-9]{16}$/.test(rowV.vinger_id) && rowV.vinger_sinds, { j: kV.j, rowV });
+    toets('8v Telegram noemt de JA via vingerafdruk', st.telegram.slice(tgVoor).some((t) => /JA via vingerafdruk/.test(t)), st.telegram.slice(tgVoor));
+    r = await koppel((c) => JSON.stringify({ code: c, app: 'onderweg', pub: 'A'.repeat(1100) }), 'application/json');
+    toets('8v koppel-body boven 1024 bytes: 400', r.status === 400, r.j);
+    const kOud = await koppel((c) => JSON.stringify({ code: c, app: 'tasker' }), 'application/json');   // Tasker (onbekende app): Onderweg blijft
+    const TKV = kOud.j.sleutel;
+    toets('8v Tasker-koppeling krijgt geen vingerja-veld', kOud.status === 200 && kOud.j.vingerja === undefined, kOud.j);
+    // uitdaging
+    Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
+    r = await tel('GET', '/tel/uit?lijst=uitdaging', { sleutel: TKV });
+    toets('8v uitdaging met een Tasker-sleutel: 404', r.status === 404, r.j);
+    r = await tel('GET', '/tel/uit?lijst=uitdaging', { sleutel: OWV });
+    toets('8v uitdaging zonder app-sessie: 423', r.status === 423, r.j);
+    sessie(PIXEL, 'credP', false);
+    const uitd = async () => (await tel('GET', '/tel/uit?lijst=uitdaging', { sleutel: OWV })).j.uitdaging;
+    let U = await uitd();
+    toets('8v uitdaging: 32 hex, 2 minuten', /^[a-f0-9]{32}$/.test(String(U)) && Math.abs(H.telStaat.uitdaging[OWVid].tot - Date.now() - 120000) < 2000, H.telStaat.uitdaging);
+    // een vraag in een antwoord (hoofdkanaal), via een autobeurt
+    const rond = async () => { for (const id of Object.keys(afmaken)) if (jobs[id] && jobs[id].status === 'running') afmaken[id]('Goed.'); await tik(); await tik(); };
+    const vraagBeurt = async (zin) => {
+      await rond();
+      const rb = await tel('POST', '/tel/beurt', { sleutel: OWV, ct: 'text/plain', body: 'Wat moet ik nog doen?' });
+      const id = rb.j.id; await tik();
+      afmaken[id]('Eén ding.\n\nVRAAG AAN DAVID: ' + zin); await tik();
+      const ru = await tel('GET', '/tel/uit', { sleutel: OWV });
+      await tel('POST', '/tel/gespeeld/' + id, { sleutel: OWV });
+      return ru.j;
+    };
+    const it1 = await vraagBeurt('Zal ik het rapport in de map Werk bewaren?');
+    toets('8v uitgifte: vraag_job en vraag_hash bij een knopvraag (zelfde id als vragen.json)', it1.knopvraag === 'ja' && /^[a-f0-9]{16}$/.test(it1.vraag_job) && /^[a-f0-9]{8}$/.test(it1.vraag_hash) &&
+      !!JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[it1.vraag_job + ':' + it1.vraag_hash], it1);
+    const vja = (o) => {
+      const t = String(o.t || Date.now()), doel = o.doel, soort = o.soort || 'vraag', stil = o.stil || 'gps', u = o.u;
+      const sig = o.sig || vTeken(['socev-onderweg-ja-v1', o.app || OWVid, soort, o.tekenDoel || doel, t, u, stil].join('\n'), o.sleutel);
+      return tel('GET', '/tel/uit?lijst=vingerja&soort=' + soort + '&doel=' + encodeURIComponent(doel) + '&t=' + t + '&u=' + u + '&stil=' + stil + '&sig=' + sig, { sleutel: o.ow || OWV });
+    };
+    const D1 = it1.vraag_job + ':' + it1.vraag_hash;
+    r = await vja({ doel: D1, u: U, tekenDoel: D1.replace(/.$/, D1.endsWith('0') ? '1' : '0') });
+    toets('8v handtekening over iets anders: 403', r.status === 403 && /handtekening/.test(r.j.fout), r.j);
+    r = await vja({ doel: D1, u: U });
+    toets('8v uitdaging is na een fout verbruikt: 409', r.status === 409 && /verlopen/.test(r.j.fout), r.j);
+    U = await uitd();
+    r = await vja({ doel: D1, u: U, sleutel: crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey });
+    toets('8v andere sleutel (niet gekoppeld): 403', r.status === 403, r.j);
+    U = await uitd();
+    r = await vja({ doel: D1, u: U, t: Date.now() - 5 * 60000 });
+    toets('8v tijd 5 min ernaast: 409', r.status === 409 && /klok/.test(r.j.fout), r.j);
+    U = await uitd();
+    r = await vja({ doel: D1, u: U, stil: 'geenrit' });
+    toets('8v zonder GPS-stilstand (ook zonder rit): 403 "alleen als je stilstaat" (Codex MOET 1)', r.status === 403 && /stilstaat/.test(r.j.fout), r.j);
+    U = await uitd(); const Uoud = U; U = await uitd();
+    r = await vja({ doel: D1, u: Uoud });
+    toets('8v een nieuwe uitdaging vervangt de oude', r.status === 409, r.j);
+    U = await uitd();
+    const gestartV = gestart.length, chatV = st.chatlog.length;
+    r = await vja({ doel: D1, u: U });
+    await tik(); await tik();
+    toets('8v JA op een gewone vraag: 200, bevestigd 1', r.status === 200 && r.j.ok === true && r.j.bevestigd === 1, r.j);
+    const kb = gestart.slice(gestartV).find((g) => /\[KNOP\] David drukte JA/.test(g.prompt));
+    toets('8v ZELFDE ALS EEN KNOPDRUK: [KNOP]-beurt in het hoofdkanaal, "in Onderweg", vraag-id erin', !!kb && /in Onderweg \(auto, stilstaand/.test(kb.prompt) && kb.prompt.includes(it1.vraag_hash) && !/verse vingerafdruk/.test(kb.prompt), gestart.slice(gestartV).map((g) => g.prompt.slice(0, 200)));
+    const vrV = JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[D1];
+    toets('8v vragen.json: antwoord ja van het app-apparaat (Pixel), via onderweg', vrV.antwoord && vrV.antwoord.keuze === 'ja' && vrV.antwoord.apparaat === PIXEL && vrV.antwoord.via === 'onderweg', vrV);
+    const crV = st.chatlog.slice(chatV).find((c) => c.rol === 'david');
+    toets('8v chat_log: bevestiging knop-ja, tekst "in Onderweg, stilstaand"', crV && crV.bevestiging === 'knop-ja' && /in Onderweg, stilstaand/.test(crV.tekst), st.chatlog.slice(chatV));
+    toets('8v app-audit: regel /app/knop via onderweg', /"route":"\/app\/knop","m":"ONDERWEG","status":200/.test(fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8')));
+    U = await uitd();
+    r = await vja({ doel: D1, u: U });
+    toets('8v dezelfde vraag nog eens: 409 al beantwoord', r.status === 409 && /al beantwoord/.test(r.j.fout), r.j);
+    r = await vja({ doel: D1, u: U });
+    toets('8v dezelfde uitdaging tweemaal: 409 (eenmalig)', r.status === 409 && /verlopen/.test(r.j.fout), r.j);
+    // gevoelig: agenda mag (verse vingerafdruk), geld en versturen niet (Codex MOET 2)
+    const it2 = await vraagBeurt('Zal ik de afspraak om 10 uur in je agenda zetten?');
+    const vr2 = JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[it2.vraag_job + ':' + it2.vraag_hash];
+    U = await uitd();
+    const gestartA = gestart.length, chatA = st.chatlog.length;
+    r = await vja({ doel: it2.vraag_job + ':' + it2.vraag_hash, u: U });
+    await tik(); await tik();
+    const kbA = gestart.slice(gestartA).find((g) => /\[KNOP\] David drukte JA/.test(g.prompt));
+    const crA = st.chatlog.slice(chatA).find((c) => c.rol === 'david');
+    toets('8v agenda-vraag (gevoelig): 200, knop-ja-vers, "met verse vingerafdruk bevestigd"', vr2 && vr2.gevoelig_reden === 'agenda' && r.status === 200 && kbA && /met verse vingerafdruk bevestigd/.test(kbA.prompt) && crA && crA.bevestiging === 'knop-ja-vers', { vr2, r: r.j, crA });
+    for (const [zin, reden] of [['Zal ik de factuur van 200 euro betalen?', 'geld'], ['Zal ik de mail aan de leverancier versturen?', 'versturen']]) {
+      const itG = await vraagBeurt(zin);
+      U = await uitd();
+      const gG = gestart.length;
+      r = await vja({ doel: itG.vraag_job + ':' + itG.vraag_hash, u: U });
+      toets('8v ' + reden + '-vraag: 409 "bevestig je in de Socev-app", geen beurt, onbeantwoord', r.status === 409 && /Socev-app/.test(r.j.fout) && gestart.length === gG &&
+        !JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[itG.vraag_job + ':' + itG.vraag_hash].antwoord, r.j);
+    }
+    // de rit-ronde: Bevestig (n) met één vingerafdruk = per kaart de gewone knop (zoals Bevestig alles); gevoelig gaat niet mee
+    H.__zet('appVjPunten', async () => [
+      { id: 21, sleutel: 'k21', soort: 'besluit', status: 'open', prive: true, titel: 'Zal ik het rapport bewaren?', herkomst: {} },
+      { id: 22, sleutel: 'k22', soort: 'besluit', status: 'open', prive: true, titel: 'Zal ik de factuur betalen?', herkomst: {} },
+      { id: 23, sleutel: 'k23', soort: 'besluit', status: 'open', prive: true, titel: 'Zal ik het overleg plannen?', herkomst: {} }]);
+    H.appStaat.vjCache = null;
+    r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: OWV });
+    const tidV = {}; (r.j.voorjou || []).forEach((k) => { tidV[k.id] = k.tekst_id; });
+    toets('8v ronde: drie kaarten met tekst_id', tidV[21] && tidV[22] && tidV[23], r.j);
+    const DK = '21.ja.' + tidV[21] + ',22.ja.' + tidV[22] + ',23.nee.' + (tidV[23] === 'deadbeef' ? 'feedbeef' : 'deadbeef');
+    U = await uitd();
+    const gestartK = gestart.length;
+    r = await vja({ soort: 'kaarten', doel: DK, u: U });
+    await tik(); await tik();
+    const u21 = (r.j.uitslag || []).find((x) => x.id === 21), u22 = (r.j.uitslag || []).find((x) => x.id === 22), u23 = (r.j.uitslag || []).find((x) => x.id === 23);
+    toets('8v ronde: gewone Ja bevestigd, gevoelige Ja "met de knop in de Socev-app", gewijzigde kaart "lees hem opnieuw"', r.status === 200 && r.j.bevestigd === 1 && u21 && u21.ok && u22 && !u22.ok && /Socev-app/.test(u22.fout) && u23 && !u23.ok && /opnieuw/.test(u23.fout), r.j);
+    const kbK = gestart.slice(gestartK).find((g) => /\[KNOP\] David drukte JA/.test(g.prompt));
+    toets('8v ronde: [KNOP]-beurt "op de Voor jou-kaart in Onderweg", zonder verse vingerafdruk', !!kbK && /op de Voor jou-kaart in Onderweg/.test(kbK.prompt) && !/verse vingerafdruk/.test(kbK.prompt), gestart.slice(gestartK).map((g) => g.prompt.slice(0, 160)));
+    U = await uitd();
+    r = await vja({ soort: 'kaarten', doel: '21.ja.' + tidV[21] + ',21.nee.' + tidV[21], u: U });
+    toets('8v ronde: dubbele kaart in één JA: 400', r.status === 400, r.j);
+    // velden, grens
+    r = await vja({ soort: 'iets', doel: D1, u: await uitd() });
+    toets('8v onbekende soort: 400', r.status === 400, r.j);
+    H.appStaat.tellers['tel-vingerja'] = Array(31).fill(Date.now());
+    r = await vja({ doel: D1, u: await uitd() });
+    toets('8v grens per uur: 429', r.status === 429, r.j);
+    H.appStaat.tellers['tel-vingerja'] = [];
+    // stand in de app, intrekken alleen de vingerafdruk-JA
+    const sPV = sessie(PIXEL, 'credP', false);
+    r = await app('GET', '/app/tel', undefined, { apparaat: PIXEL, sessie: sPV });
+    const owA = (r.j.apparaten || []).find((x) => x.soort === 'onderweg');
+    toets('8v app-stand: Onderweg met vingerja, sinds en id (geen sleutel)', owA && owA.vingerja === true && owA.vinger_id === rowV.vinger_id && !JSON.stringify(r.j).includes(vPub.slice(10, 40)), r.j);
+    toets('8v /health: onderweg.vingerja', H.telInfo().onderweg && H.telInfo().onderweg.vingerja === true, H.telInfo().onderweg);
+    r = await app('POST', '/app/tel/ontkoppel', { alleen: 'vingerja' }, { apparaat: PIXEL, sessie: sPV });
+    toets('8v intrekken alleen vingerja: 200, spraakkoppeling blijft', r.status === 200 && r.j.alleen === 'vingerja' && r.j.ingetrokken === 1 && (await tel('GET', '/tel/uit', { sleutel: OWV })).status === 200 &&
+      !regLees().apparaten.some((x) => x.actief && x.vinger_pub), r.j);
+    sessie(PIXEL, 'credP', false);
+    r = await tel('GET', '/tel/uit?lijst=uitdaging', { sleutel: OWV });
+    toets('8v na intrekken: uitdaging 409 "koppel opnieuw"', r.status === 409 && /koppel Onderweg opnieuw/.test(r.j.fout), r.j);
+    toets('8v tel-audit zonder handtekening of sleutel', !audit().includes(vPub.slice(20, 60)) && /vingerja/.test(audit()));
+    toets('8v geen onverwachte fouten (vingerja)', !logs.some((l) => /tel-vinger|app-register|app-vragen/.test(l)), logs.filter((l) => /tel-vinger|app-register|app-vragen/.test(l)));
     toets('8 geen onverwachte fouten (wv3700)', !logs.some((l) => /tel-voorjou/.test(l) && !/databank weg/.test(l)), logs.filter((l) => /tel-voorjou/.test(l)));
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }
   srv.close();
