@@ -336,7 +336,7 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
   }
   toets('server.js: geen nieuwe stap tijdens een wachtende uitrol', /magStarten: function \(\) \{ return !uitrolWacht\(\)\.wacht; \}/.test(sv));
   toets('server.js: /health.nachtketen', /nachtketen: typeof nachtketenInfo === 'function' \? nachtketenInfo\(\)/.test(sv));
-  toets('server.js: R6-staatbestand voor veeg en de zeven dagrondes (wv1430: + sb2-steekwoorden; wv1963: + sb2-proefloper; wv2016: + maandklok herstelproef; wv2041: + uitwijk-cred; wv2273: + shopper-proactief, buiten de keten; wv3113: + ovis-nza-wachter, buiten de keten; wv3295: + vaultzoek, buiten de keten)', (sv.match(/staatBestand: path\.join\(KLOKKEN_DIR/g) || []).length === 12);
+  toets('server.js: R6-staatbestand voor veeg en de zeven dagrondes (wv1430: + sb2-steekwoorden; wv1963: + sb2-proefloper; wv2016: + maandklok herstelproef; wv2041: + uitwijk-cred; wv2273: + shopper-proactief, buiten de keten; wv3113: + ovis-nza-wachter, buiten de keten; wv3295: + vaultzoek, buiten de keten; wv3893: + uitwijk-sleutelkopie)', (sv.match(/staatBestand: path\.join\(KLOKKEN_DIR/g) || []).length === 13);
   toets('server.js: sb2-proefloper alleen met de schakelaar, ná intake-publicatie, meldt zelf (socev-run + script) (wv1963)', /naam: 'sb2-proefloper', start_na: \[2, 45\], na: \['intake-publicatie', 'sb2-synapsen'\], limiet_min: 7, pogingen: 2, meldtZelf: true/.test(sv) && /if \(!sb2ProefloperAan\(\)\) return \{ ok: true, al_gedaan: true/.test(sv) && /\/proefloper\.py', 'ronde'\]/.test(sv) && /sb2_proeven: typeof sb2ProevenInfo === 'function'/.test(sv));
   toets('server.js: sb2-steekwoorden alleen met de schakelaar, ná deadlines en zoekleer, vangnet 06:40, sw.py nacht onder --grendel', /naam: 'sb2-steekwoorden', start_na: \[5, 0\], na: \['ovis-deadlines', 'sb2-zoekleer'\]/.test(sv) && /if \(!sb2SteekwoordenAan\(\)\) return \{ ok: true, al_gedaan: true/.test(sv) && /\/sw\.py', 'nacht', '--vault', VAULT, '--grendel', OVIS_LOCK\]/.test(sv));
   toets('server.js: OVIS-nacht in de keten met --buiten-venster', /buitenVenster: true, opSpawn: ctx\.opSpawn/.test(sv) && /opt\.buitenVenster \? \['--buiten-venster'\]/.test(sv));
@@ -443,6 +443,7 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
       intakeVoorstelMaak: () => ({ ronde: async () => { roep.push('voorstel'); return { uit: true }; } }),   // wv1945: schakelaar uit = al_gedaan
       herstelReferentie: { ronde: async (c) => { roep.push('herstelref:' + c.datum + ':' + typeof c.ams); return { ok: true }; } },   // wv1962
       uitwijkCred: { ronde: async (c) => { roep.push('uitwijkcred:' + c.datum); return { ok: true, detail: { uitkomst: 'ongewijzigd' } }; } },   // wv2041
+      uitwijkSleutelkopie: { ronde: async (c) => { roep.push('sleutelkopie:' + c.datum); return { ok: true, detail: {} }; } },   // wv3893
       ovisAgenda: dag('agenda'), ovisDeadlines: dag('deadlines'), scriptsVeeg: dag('veeg'), sb2Feitenlijst: dag('feitenlijst'), sb2Zoekindex: dag('zoekindex'), sb2Zoekleer: dag('zoekleer'), sb2Datumcontrole: dag('datumcontrole'), ovisKalender: dag('kalender'), sb2Steekwoorden: dag('steekwoorden'), sb2SteekwoordenAan: () => swAan, sb2Proefloper: dag('proefloper'), sb2ProefloperAan: () => plAan,
       sb2SynapsenAan: () => plAan, sb2SynapsenRonde: async () => { roep.push('synapsen'); return { ok: true, detail: { synapsen: 2 } }; },   // wv2022
       sb2BerichtenAan: () => plAan, sb2BerichtenRonde: async () => { roep.push('berichten'); return { ok: true, detail: {} }; },   // wv2383
@@ -473,6 +474,9 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     toets('vm: uitwijk-cred niet vóór 03:10 (wv2041)', roep.filter(x => x !== 'publicatie' && x !== 'voorstel').length === 0, roep);
     await zetT(3, 10, 2);
     toets('vm: uitwijk-cred om 03:10 (wv2041)', roep.indexOf('uitwijkcred:2026-11-11') >= 0, roep);
+    toets('vm: uitwijk-sleutelkopie niet vóór 03:15 (wv3893)', roep.indexOf('sleutelkopie:2026-11-11') < 0, roep);
+    await zetT(3, 15, 2);
+    toets('vm: uitwijk-sleutelkopie om 03:15, ná uitwijk-cred (wv3893)', roep.indexOf('sleutelkopie:2026-11-11') > roep.indexOf('uitwijkcred:2026-11-11'), roep);
     roep.length = 0; await zetT(3, 30, 2); await zetT(3, 34, 2);   // wv3145
     toets('vm: promedico-botsingen niet vóór 03:35 (wv3145)', roep.filter(x => /^botsingen/.test(x)).length === 0, roep);
     await zetT(3, 45, 4);   // wv3145: één tik meer voor promedico-botsingen
@@ -500,9 +504,9 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     roep.length = 0; await zetT(6, 40, 4);   // wv2894: één tik meer voor contactringen
     toets('vm: weer-ochtend om 06:40, dan contactringen; apps-editie nog niet vóór 06:50 (wv3815)', roep.join('|') === 'weer:2026-11-11:6:40|contactringen:2026-11-11:6:40', roep);
     roep.length = 0; await zetT(6, 50, 3);   // wv3815: apps-editie om 06:50
-    toets('vm: apps-editie om 06:50 (wv3815), daarna afgesloten met één hartslag sb2_nachtketen (29 klaar, 0 bevindingen; wv3715 entiteit-nu, wv3750 secondbrain-schik erbij), geen box', roep.join('|') === 'apps:2026-11-11|rpc:mk_hartslag_stempel:sb2_nachtketen:29:0', roep);
+    toets('vm: apps-editie om 06:50 (wv3815), daarna afgesloten met één hartslag sb2_nachtketen (30 klaar, 0 bevindingen; wv3715 entiteit-nu, wv3750 secondbrain-schik, wv3893 uitwijk-sleutelkopie erbij), geen box', roep.join('|') === 'apps:2026-11-11|rpc:mk_hartslag_stempel:sb2_nachtketen:30:0', roep);
     const inf = K2.nachtketenInfo();
-    toets('vm: /health-info zonder inhoud: stand per stap, lopend 0, afgesloten', inf.lopend === 0 && !!inf.afgesloten && Object.keys(inf.stappen).length === 29 && inf.stappen['entiteit-nu'] === 'klaar:al_gedaan' && inf.stappen['sb2-steekwoorden'] === 'klaar:al_gedaan' && inf.stappen['intake-publicatie'] === 'klaar:al_gedaan' && inf.stappen['intake-voorstel'] === 'klaar:al_gedaan' && inf.stappen['sb2-berichten'] === 'klaar:al_gedaan' && inf.stappen['sb2-synapsen'] === 'klaar:al_gedaan' && inf.stappen['sb2-proefloper'] === 'klaar:al_gedaan' && Object.entries(inf.stappen).every(([k, x]) => x === 'klaar' || k === 'entiteit-nu' || k === 'sb2-steekwoorden' || k === 'intake-publicatie' || k === 'intake-voorstel' || k === 'sb2-berichten' || k === 'sb2-synapsen' || k === 'sb2-proefloper' || k === 'secondbrain-schik'), inf);   // wv3750: de nep-secondbrain kent geen schikNacht = al_gedaan (eigen toets: test/brein-schik.sh)
+    toets('vm: /health-info zonder inhoud: stand per stap, lopend 0, afgesloten', inf.lopend === 0 && !!inf.afgesloten && Object.keys(inf.stappen).length === 30 && inf.stappen['entiteit-nu'] === 'klaar:al_gedaan' && inf.stappen['sb2-steekwoorden'] === 'klaar:al_gedaan' && inf.stappen['intake-publicatie'] === 'klaar:al_gedaan' && inf.stappen['intake-voorstel'] === 'klaar:al_gedaan' && inf.stappen['sb2-berichten'] === 'klaar:al_gedaan' && inf.stappen['sb2-synapsen'] === 'klaar:al_gedaan' && inf.stappen['sb2-proefloper'] === 'klaar:al_gedaan' && Object.entries(inf.stappen).every(([k, x]) => x === 'klaar' || k === 'entiteit-nu' || k === 'sb2-steekwoorden' || k === 'intake-publicatie' || k === 'intake-voorstel' || k === 'sb2-berichten' || k === 'sb2-synapsen' || k === 'sb2-proefloper' || k === 'secondbrain-schik'), inf);   // wv3750: de nep-secondbrain kent geen schikNacht = al_gedaan (eigen toets: test/brein-schik.sh)
     // wv1430: tweede nacht met de schakelaar aan — sb2-steekwoorden loopt na zoekleer, vóór de kalender van 06:35
     swAan = true; plAan = true; roep.length = 0;
     const zetT2 = async (u, m, n) => { tijd = { datum: '2026-11-12', uur: u, min: m }; for (let i = 0; i < (n || 4); i++) await tikk(); };
@@ -515,7 +519,7 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     toets('vm: schakelaar aan — feitenlijst → zoekindex → zoekleer → steekwoorden (via socev-run-object)', roep.filter(x => !/^n8n:/.test(x)).join('|') === 'feitenlijst:2026-11-12:function|zoekindex:2026-11-12:function|zoekleer:2026-11-12:function|datumcontrole:2026-11-12:function|steekwoorden:2026-11-12:function', roep);
     toets('vm: steekwoorden wacht op de n8n-run van de nachtconsolidatie', roep.indexOf('n8n:/workflows/lKcF3Oxt8WVeELPJ') >= 0 && roep.indexOf('n8n:/workflows/lKcF3Oxt8WVeELPJ') < roep.indexOf('steekwoorden:2026-11-12:function'), roep);
     roep.length = 0; await zetT2(6, 35, 3); await zetT2(6, 40, 4); await zetT2(6, 50, 3);
-    toets('vm: tweede nacht: kalender, weer-ochtend, contactringen, apps-editie, daarna hartslag (29 klaar)', roep.join('|') === 'kalender:2026-11-12:function|weer:2026-11-12:6:40|contactringen:2026-11-12:6:40|apps:2026-11-12|rpc:mk_hartslag_stempel:sb2_nachtketen:29:0', roep);
+    toets('vm: tweede nacht: kalender, weer-ochtend, contactringen, apps-editie, daarna hartslag (30 klaar)', roep.join('|') === 'kalender:2026-11-12:function|weer:2026-11-12:6:40|contactringen:2026-11-12:6:40|apps:2026-11-12|rpc:mk_hartslag_stempel:sb2_nachtketen:30:0', roep);
     toets('vm: nachtAmsVan zet UTC om naar Nederlandse tijd (winter +1)', JSON.stringify(K2.nachtAmsVan('2026-11-11T04:00:31Z')) === '{"datum":"2026-11-11","uur":5,"min":0}');
     ctx.jobs.x = { status: 'running', chat_id: '40687' };
     toets('vm: lopende /run-beurt in 40687 = nachtrij bezig', K2.nachtrijPodBezig() === true);

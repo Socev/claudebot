@@ -23936,6 +23936,21 @@ const uitwijkCred = (function () {
       klok: function () { return ovisAms().klok; } });
   } catch (e) { logError('uitwijk-cred', e); return null; }
 })();
+// wv3893 (besluitenpagina nr 2 = C03): de al versleutelde uitwijksleutels (bundel, identiteit, herstelsleutel health-pod, n8n-export) van de
+// R230 ook naar Drive en de NAS thuis (logica en waarom in uitwijk-sleutelkopie.js). Alleen de Olares-kant; staat in KLOKKEN_DIR.
+const uitwijkSleutelkopie = (function () {
+  const p = path.join(__dirname, 'uitwijk-sleutelkopie.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ hpBron: '/opt/data/.health-pod/backup-herstel.agekey', staatBestand: path.join(KLOKKEN_DIR, 'uitwijk-sleutelkopie.json'),
+      kant: function () { try { return ROL_KANT; } catch (e) { return 'onbekend'; } },
+      nasApparaat: function () { const n = stCfg().namen; return Object.keys(n).find(function (id) { return n[id] === 'ds920-thuis'; }) || null; },
+      stGet: function (pad) { return stGet(stCfg(), pad); },
+      boxRij: function (t) { return ovisBoxRij(t); },
+      hartslag: function (h) { return appSbRpc('mk_hartslag_stempel', { p_component: 'uitwijk_sleutelkopie', p_gemeten_rijen: h.n, p_bevindingen: h.bevindingen }); },
+      klok: function () { return ovisAms().klok; } });
+  } catch (e) { logError('uitwijk-sleutelkopie', e); return null; }
+})();
 // ── Weer in het ochtendbericht (wv2389, idee 28 meetpunt 3; ontwerp vault "01_Ontwikkeling/Weer in het ochtendbericht (ontwerp
 // 4-11-2026).md"; logica en waarom in weer-ochtend.js) ──
 // Nachtketenstap weer-ochtend (06:40): bij een drempel één rij bron 'weer' in ochtend_buffer; de briefing zet hem letterlijk onder de kop.
@@ -24310,6 +24325,11 @@ const nachtketen = (function () {
       { naam: 'uitwijk-cred', start_na: [3, 10], limiet_min: 20, pogingen: 2, inProces: true, meldtZelf: true, doe: async function (ctx) {
         if (!uitwijkCred) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
         return uitwijkCred.ronde(ctx);
+      } },
+      // wv3893: versleutelde uitwijksleutels van de R230 naar Drive + NAS thuis, ná uitwijk-cred (verse n8n-export); meldt zelf (box #uitwijk-sleutelkopie-auto)
+      { naam: 'uitwijk-sleutelkopie', start_na: [3, 15], na: ['uitwijk-cred'], limiet_min: 10, pogingen: 2, inProces: true, meldtZelf: true, doe: async function (ctx) {
+        if (!uitwijkSleutelkopie) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        return uitwijkSleutelkopie.ronde(ctx);
       } },
       { naam: 'ovis-agenda', start_na: [3, 30], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisAgenda) },
       // wv3145 (Promedico-agenda fase 2): ná de Google-spiegel (ook na een fout daarvan: dan niet-beoordeelbaar-pagina's en geen rij) de
