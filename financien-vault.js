@@ -164,7 +164,9 @@ function hypotheek(vault) {
     const m = /hypo\s*(\d)/i.exec(r['deel (model)']);
     if (m) einde['Hypo' + m[1]] = schoon(r['einde looptijd'], 30) || null;
   });
-  const bankDatum = datumIso((/(\d{1,2}-\d{1,2}-\d{4})/.exec(String(j.bron_bank || '')) || [])[1]) || bron.datum;
+  // wv3923 (C49 / review M2): de bankstand (datum en totale restschuld) via de gedeelde lezer, dezelfde als OVIS Vastgoed
+  const bst = require('./woning-bron.js').bankstandUit(j, bron.datum) || {};
+  const bankDatum = bst.op || null;
   const ruw = Array.isArray(j.leningdelen) ? j.leningdelen : [];
   const xv = datumVeld(ruw[0], 'excel_restschuld_'), excelOp = xv ? xv.datum : null;   // de Excel-stand waarmee vergeleken wordt
   const delen = ruw.slice(0, 20).map(function (d) {
@@ -200,7 +202,7 @@ function hypotheek(vault) {
     bron: { pagina: P_HYPO, data: bron.rel, bank: 'ABN AMRO-app (schermafdruk ' + (bankDatum ? bankDatum.split('-').reverse().map(Number).join('-') : '?') + ')', bank_op: bankDatum,
       excel: 'je eigen Excel "Hypotheek - Totaal"', excel_op: excelOp, rentevast: 'je Excel (groen gemarkeerd); de schermafdruk van de bank toont geen rentevaste data',
       pagina_bijgewerkt: pg.fm.updated || null },
-    bank: { restschuld: getal(j.bank_totaal_restschuld), oorspronkelijk: getal(j.bank_oorspronkelijk), afgelost: getal(j.bank_afgelost), maandbetaling: getal(j.bank_maandbetaling) },
+    bank: { restschuld: bst.totaal != null ? bst.totaal : null, oorspronkelijk: getal(j.bank_oorspronkelijk), afgelost: getal(j.bank_afgelost), maandbetaling: getal(j.bank_maandbetaling) },
     excel: { restschuld: som ? getal(j[som.sleutel]) : null, restschuld_op: som ? som.datum : null, maandlast_totaalkolom: getal(tk.bruto_last), aflossing_som_delen: getal(tk.som_delen_aflossing) },
     controle: { aflossing: getal(ctrl.aflossing_som_delen), rente_bankstand: getal(ctrl.rente_bij_bankstand_en_bankrente), totaal: getal(ctrl.totaal), bank_maandbetaling: getal(ctrl.bank_maandbetaling) },
     delen: delen,

@@ -27,6 +27,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const WB = require('./woning-bron.js');   // wv3923: gedeelde lezer voor taxaties en de bankstand van de hypotheek (ook Financiën)
 
 const SCHEMA_VERSIE = 3;   // 2 = fase 2 (wv3102): leningdeel, woz_eigen; reeksen lening/restschuld/verbouwing/servicekosten/stroom; 3 = object.weg_op (A15)
 const SCHEMA = `
@@ -149,15 +150,12 @@ function leesWoning(md) {
   if (lev && datumUit(lev[1])) u.gebeurtenissen.push({ datum: datumUit(lev[1]), titel: 'Akte van levering', soort: 'aankoop' });
   const strook = md.match(/^###\s+Extra strook grond[^,\n]*,\s*(\d{1,2}-\d{1,2}-\d{4})/m);
   if (strook && datumUit(strook[1])) u.gebeurtenissen.push({ datum: datumUit(strook[1]), titel: 'Extra strook grond geleverd', soort: 'aankoop' });
-  // taxaties: | Rapport | Peildatum | Taxateur / kantoor | Doel | Marktwaarde | Na verbouwing | Validatie |
-  const tax = sectie(md, 'Taxatiegeschiedenis');
-  for (const r of tax.split('\n').filter((l) => /^\|\s*\d/.test(l))) {
-    const c = r.split('|').slice(1, -1).map((x) => x.trim());
-    if (c.length < 6) continue;
-    const pd = datumUit(c[1]) || datumUit(c[0]); const mw = euroUit(c[4]); const nv = euroUit(c[5]);
-    const kantoor = kaal(c[2]).split(/[;(]/)[0].replace(/^[A-Z][\w.() -]*?,\s*/, '').slice(0, 80);
-    if (pd && mw) u.reeks.push({ reeks: 'taxatie', peildatum: pd, waarde: mw, eenheid: 'euro', toelichting: `marktwaarde · ${kantoor}` + (/desktop|calcasa/i.test(c[2]) ? ' · modelwaarde zonder bezichtiging' : '') });
-    if (pd && nv) u.reeks.push({ reeks: 'taxatie-na', peildatum: pd, waarde: nv, eenheid: 'euro', toelichting: `marktwaarde na verbouwing · ${kantoor}` });
+  // taxaties: | Rapport | Peildatum | Taxateur / kantoor | Doel | Marktwaarde | Na verbouwing | Validatie | — wv3923 (C49): dezelfde lezer als
+  // Financiën (woning-bron.js), kolommen op naam; de gewone marktwaarde is de basis, "na verbouwing" een aparte reeks
+  for (const r of WB.taxaties(md)) {
+    const kantoor = kaal(r.taxateur).split(/[;(]/)[0].replace(/^[A-Z][\w.() -]*?,\s*/, '').slice(0, 80);
+    if (r.marktwaarde) u.reeks.push({ reeks: 'taxatie', peildatum: r.datum, waarde: r.marktwaarde, eenheid: 'euro', toelichting: `marktwaarde · ${kantoor}` + (/desktop|calcasa/i.test(r.taxateur) ? ' · modelwaarde zonder bezichtiging' : '') });
+    if (r.na_verbouwing) u.reeks.push({ reeks: 'taxatie-na', peildatum: r.datum, waarde: r.na_verbouwing, eenheid: 'euro', toelichting: `marktwaarde na verbouwing · ${kantoor}` });
   }
   // WOZ: "## WOZ jjjj" met waardepeildatum en vastgestelde waarde; plus een losse zin "de WOZ-waarde voor jjjj is € …"
   const wozKop = /^##\s+WOZ (\d{4})[^\n]*$/gm;
@@ -286,7 +284,9 @@ function tabelOnder(md, kopRe) {   // de eerste tabel onder een kop (## of ###) 
 }
 // Hypotheekpagina (20_Prive/Financien/Hypotheek*.md): tabel onder "## Leningdelen" (kolommen op naam: Deel, Hoofdsom, Start, Rente, Rentevast,
 // Einde, "Restschuld <datum> (bank|model)") en, als die er is, de tabel onder "## Bankstand <d-m-jjjj>" (Deel model, Rente bank, Restschuld bank).
-function leesHypotheek(md) {
+// wv3923 (C49 / review M2): bank = de bankstand uit de gedeelde lezer (woning-bron.js bankstand, dezelfde als Financiën). Is die er, dan telt
+// alleen die als bankstand (koppeling op het modeldeel "HypoN"); de tabel "Bankstand" op de pagina is dan alleen nog de terugval zonder json.
+function leesHypotheek(md, bank) {
   const u = { delen: [] };
   const t = tabelOnder(md, /^Leningdelen\b/);
   if (!t) return u;
@@ -302,6 +302,24 @@ function leesHypotheek(md) {
       rente: tekst(c, iR), rente_bank: null, rentevast_tot: tekst(c, iV), einde: tekst(c, iE), restschulden: [] };
     for (const x of rest) { const w = euroOfNul(c[x.i]); if (w !== null) d.restschulden.push({ peildatum: x.peildatum, waarde: w, bron: x.bron }); }
     u.delen.push(d);
+  }
+  // Review MOET 1: alleen als de json heel is (elk deel met een stand hoort bij een leningdeel op de pagina, elk leningdeel heeft een stand en
+  // de som sluit aan op het banktotaal); anders de tabel van de pagina, met de reden erbij (Vastgoed kan dan van Financiën afwijken)
+  if (bank && bank.op && Array.isArray(bank.delen) && bank.delen.length) {
+    const kop = (d) => d.naam.split(/\s+/)[0];
+    const paar = bank.delen.map((b) => ({ b, d: b.model ? u.delen.find((x) => kop(x) === b.model) : null }));
+    const som = Math.round(bank.delen.reduce((s, b) => s + (b.restschuld || 0), 0) * 100) / 100;
+    const heel = paar.every((x) => x.d && x.b.restschuld !== null) && u.delen.every((d) => paar.some((x) => x.d === d)) && new Set(paar.map((x) => x.d)).size === paar.length &&
+      bank.totaal !== null && Math.abs(som - bank.totaal) < 0.01;
+    if (heel) {
+      for (const x of paar) {
+        x.d.restschulden.push({ peildatum: bank.op, waarde: x.b.restschuld, bron: 'bank' });
+        if (x.b.rente_pct !== null) x.d.rente_bank = String(x.b.rente_pct).replace('.', ',') + '%';
+      }
+      u.bank_bron = bank.bron || 'json';
+      return u;
+    }
+    u.bank_afwijking = 'de bankstand in de hypotheek-json past niet op de leningdelen van de pagina; hier de tabel Bankstand van de pagina';
   }
   const kb = md.match(/^##\s+Bankstand (\d{1,2}-\d{1,2}-\d{4})/m);
   const tb = kb ? tabelOnder(md, /^Bankstand\b/) : null;
@@ -489,7 +507,8 @@ function leesDossierMap(vault) {
   let hypotheek = null;
   try {
     const hn = fs.readdirSync(path.join(vault, FINANCIEN)).filter((n) => /^Hypotheek.*\.md$/i.test(n)).sort()[0];
-    if (hn) hypotheek = Object.assign(leesHypotheek(fs.readFileSync(path.join(vault, FINANCIEN, hn), 'utf8')), { pagina: `${FINANCIEN}/${hn}` });
+    let bank = null; try { bank = WB.bankstand(vault); } catch (e) { bank = null; }   // wv3923: dezelfde bankstand als Financiën
+    if (hn) hypotheek = Object.assign(leesHypotheek(fs.readFileSync(path.join(vault, FINANCIEN, hn), 'utf8'), bank), { pagina: `${FINANCIEN}/${hn}` });
   } catch (e) { hypotheek = null; }
   const stukken = [];
   let bestanden = [];
@@ -698,7 +717,7 @@ function maak(o) {
           }
           for (const r of hypotheekReeksen(delen)) rg.run(ids[sl], r.reeks, r.peildatum, r.waarde, r.eenheid, r.toelichting, 'dossier: ' + d.hypotheek.pagina, 'hypotheek', op);
         }
-        geld.hypotheek = { ok: true, op, delen: d.hypotheek.delen.length };
+        geld.hypotheek = { ok: true, op, delen: d.hypotheek.delen.length, reden: d.hypotheek.bank_afwijking || null };
       } else geld.hypotheek = { ok: false, op, reden: d.hypotheek ? 'geen tabel Leningdelen op de hypotheekpagina' : 'geen hypotheekpagina gevonden' };
       const oudGeld = (() => { try { return JSON.parse((db.prepare(`SELECT waarde FROM meta WHERE sleutel = 'geld'`).get() || {}).waarde || '{}') || {}; } catch (e) { return {}; } })();
       if (bank.ok) {

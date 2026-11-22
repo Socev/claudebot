@@ -12,7 +12,7 @@
 //               financien-app.js), dus € 0; andere rekeningen zijn daar onbekend → de maand is onvolledig (review MOET 1: geen aangenomen
 //               beginstand, geen drempel). Groepen zoals Saldi en het punt (eigenaar + van wie): vrij telt mee; kinderen, Gambia en overig
 //               apart. Vóór de eerste privéboeking in het archief ontbreekt de bank helemaal.
-//   woning      trap van de taxaties vanaf de peildatum (zelfde regel als het punt: na verbouwing als die er is); daarvóór ontbreekt hij.
+//   woning      trap van de taxaties vanaf de peildatum (zelfde regel als het punt: de gewone marktwaarde, wv3923); daarvóór ontbreekt hij.
 //   hypotheek   Davids Excel-model per maand (stand na de termijn); vanaf de maand van de bankstand de bankstand (zoals het punt).
 //   woninglening Holding: € 0 vóór de ingangsdatum, dan de hoofdsom tot de eerste jaarrekening, dan de jaarrekeningstand (trap).
 //   rekening-courant: € 0 vóór het eerste boekjaar (alleen als eind − mutatie van dat jaar 0 geeft), dan de jaarrekeningstand RC Holding

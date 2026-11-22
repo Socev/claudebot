@@ -136,7 +136,7 @@ if (O) {
   toets('buffer = vrij beschikbaar (David + gedeeld, EUR) ÷ leven zonder eenmalig; kinderen en Gambia apart', o.buffer.liquide === 12000 && Math.abs(o.buffer.maanden - Math.round(12000 / lz * 10) / 10) < 0.051 &&
     o.buffer.niet_meegeteld.some((x) => x.bedrag === 700) && o.buffer.niet_meegeteld.some((x) => x.bedrag === 400) && o.buffer.stand_van === '2026-11-07T05:00:00Z', o.buffer);
   const pv = o.vermogen.prive;
-  toets('vermogen privé = 12.000 + 520.000 (laatste taxatie, na verbouwing) − 300.000 − 20.000 − 10.000; WOZ apart', pv.bedrag === 202000 && pv.delen.length === 5 && pv.woz.waarde === 600000 &&
+  toets('vermogen privé = 12.000 + 500.000 (gewone marktwaarde laatste taxatie; de 520.000 na verbouwing telt niet, wv3923 C49) − 300.000 − 20.000 − 10.000; WOZ apart', pv.bedrag === 182000 && pv.delen.length === 5 && pv.woz.waarde === 600000 && pv.delen[1].bedrag === 500000 &&
     pv.delen[1].op === '2023-02-02', pv);
   // B14: het box 2-jaar is max(jaarrekening + 1, dit jaar); de toets loopt ook na 1-1-2027 (TOETS_NU), dan met het tarief van dat jaar of zonder
   const ho = o.vermogen.holding, J2 = Math.max(2026, Number(vandaag.slice(0, 4))), T2 = O.TARIEVEN.box2[J2];

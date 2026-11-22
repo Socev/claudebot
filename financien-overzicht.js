@@ -24,7 +24,7 @@
 //                     (review MOET 3/4; jaarposten tellen via het 12-maandsgemiddelde voor 1/12 per maand mee = de jaarreservering)
 //   buffer          = vrij beschikbaar op de rekeningen ÷ leven per maand zonder eenmalig (zonder kinder- en Gambia-rekeningen)
 //   spaarquote      = (inkomen − leven) ÷ inkomen, 12 maanden
-//   vermogen        = privé en Holding APART, nooit opgeteld (review MOET 2): privé = vrij beschikbaar + woning (laatste taxatie) −
+//   vermogen        = privé en Holding APART, nooit opgeteld (review MOET 2): privé = vrij beschikbaar + woning (gewone marktwaarde laatste taxatie, wv3923) −
 //                     hypotheek (bankstand) − woninglening Holding − rekening-courant met de Holding/Tolgaarde; Holding = eigen vermogen
 //                     laatste jaarrekening (boekwaarde) met indicatief "na box 2 bij uitkeren" (tarieven TARIEVEN hieronder, met bron).
 // Alles heet "zichtbare rekeningen" (review MOET 1): Cynthia's eigen rekeningen zijn niet gekoppeld.
@@ -121,9 +121,15 @@ function regelsLees(a) {
 function indelen(t, c) {
   const cat0 = t.categorie || null, sub = String(t.subcategorie || '').toLowerCase(), tp = String(t.tegenpartij || '');
   let r = c.regels.get(t._sleutel + '|' + richting(t.bedrag));
+  // wv3923 (besluit nr 120 = 2C20, David 22-11-2026): gaf David deze ene boeking zelf een categorie (financien-corrigeer, herkomst david met
+  // categorie in david_velden; leeg = alle velden), dan gaat die vóór zijn vaste keuze voor deze tegenpartij: de keuze telt hier niet, de
+  // boeking volgt zijn categorie zoals elke andere. Alleen een eigenaar per boeking verandert niets aan de stroom. Een overboeking met een eigen
+  // rekening blijft buiten deze regel (die volgt hieronder de regel van wv2696, met de keuze voor de kinderrekening).
+  // Bij een betaaldienst of eigen BV (sleutel g:, met de categorie erin) hoort de keuze al bij de categorie van de boeking: die blijft gelden.
+  let eigenCat = false;
   const isBel = /belastingdienst/i.test(tp) && cat0 === 'teruggave en terugbetaling';
   const cat = isBel ? 'belastingen' : CREDITCARD.test(String(t.omschrijving || '')) && t.bedrag < 0 && (!cat0 || cat0 === 'overig') ? 'creditcard (niet uitgesplitst)' : cat0;
-  const u = function (stroom, s, zeker, waarom) { return { stroom: stroom, sub: s || null, zeker: zeker, waarom: waarom, cat: cat }; };
+  const u = function (stroom, s, zeker, waarom) { return { stroom: stroom, sub: s || null, zeker: zeker, waarom: eigenCat ? waarom + ' (jouw categorie voor deze boeking gaat voor je keuze bij deze naam)' : waarom, cat: cat }; };
   // wv2696: naar of van een eigen zichtbare rekening is nooit uitgegeven of inkomen, ook niet via een keuze; behalve met een kinderrekening
   const eigen = eigenTegen(t, c);
   if (eigen) {
@@ -131,7 +137,7 @@ function indelen(t, c) {
     // hetzelfde kleedgeld twee keer (uit bij David, in bij het kind)
     const kind = eigen === 'kind' && String(t.r_eigenaar || '').toLowerCase() !== 'kind';
     if (!(kind && r)) return u('intern', null, true, r ? 'tussen twee eigen rekeningen (je keuze bij deze naam geldt hier niet)' : 'tussen twee eigen rekeningen');
-  }
+  } else if (r && String(t._sleutel).indexOf('g:') !== 0 && catDoorDavid(t)) { eigenCat = true; r = null; }
   if (r) return u(r.stroom, r.subsoort, true, 'jouw keuze');
   if (t.type === 'intern') {
     if (t.paar_rek && c.zichtbaar.has(t.paar_rek)) return u('intern', null, true, 'tussen twee eigen rekeningen');
@@ -163,6 +169,12 @@ function indelen(t, c) {
   return u('leven', null, true, cat);
 }
 
+// wv3923 (2C20): zette David de categorie van deze boeking zelf (per boeking, niet via een regel)?
+function catDoorDavid(t) {
+  if (t.v_herkomst !== 'david') return false;
+  const v = t.v_velden == null || String(t.v_velden).trim() === '' ? null : String(t.v_velden).split(',');
+  return !v || v.indexOf('categorie') >= 0;
+}
 // de eigenaar (kleine letters) van de eigen zichtbare rekening aan de andere kant, of null: eerst het intern paar, dan het tegen-IBAN
 function eigenTegen(t, c) {
   if (t.paar_rek && c.zichtbaar.has(t.paar_rek)) return c.rekEig.get(t.paar_rek) || 'eigen';
@@ -173,7 +185,7 @@ function eigenTegen(t, c) {
 function boekingen(a, van, tot, aflossing) {
   const rijen = a.db.prepare("SELECT t.nr, t.rek, t.datum, t.bedrag, t.valuta, t.tegenpartij, t.omschrijving, v.type, v.categorie, v.subcategorie, v.abonnement_id, v.eigenaar AS v_eigenaar, r.eigenaar AS r_eigenaar," +
     // wv2717: wie de indeling zette (David per boeking, een regel van David, of automatisch) voor de App
-    " v.herkomst AS v_herkomst, (SELECT g.herkomst FROM regels g WHERE g.id = v.regel_id) AS regel_door," +
+    " v.herkomst AS v_herkomst, v.david_velden AS v_velden, (SELECT g.herkomst FROM regels g WHERE g.id = v.regel_id) AS regel_door," +
     // wv2696: bij een deel van de ABN-boekingen is tegen_iban leeg en staat het IBAN alleen in de ruwe bankregel (creditor/debtor_account)
     " coalesce(nullif(trim(t.tegen_iban), ''), CASE WHEN json_valid(t.ruwe_json) THEN json_extract(t.ruwe_json, CASE WHEN t.bedrag < 0 THEN '$.creditor_account.iban' ELSE '$.debtor_account.iban' END) END) AS tegen_iban," +
     ' (SELECT p.rek FROM transacties p WHERE p.nr = v.intern_paar) AS paar_rek, r.label, r.naam, r.weergavenaam FROM transacties t JOIN verrijking v ON v.nr = t.nr JOIN rekeningen r ON r.rek = t.rek' +
@@ -356,13 +368,15 @@ function leesWoning(vault, FV) {
   }
   return null;
 }
-function woningUit(t, FV) {
-  const alle = (FV.tabel(FV.tabellen(t), ['peildatum', 'marktwaarde', 'na verbouwing']) || []).map(function (r) {
-    const d = FV.datumIso((/(\d{1,2}-\d{1,2}-\d{4})/.exec(r.peildatum) || [])[1]), nv = FV.nlGetal(r['na verbouwing']), mw = FV.nlGetal(r.marktwaarde);
-    return { datum: d, waarde: nv != null && nv > 10000 ? nv : mw };
-  }).filter(function (r) { return r.datum && r.waarde > 10000; }).sort(function (x, y) { return x.datum < y.datum ? -1 : 1; });
-  const rij = alle[alle.length - 1];   // wv2716: alle taxaties mee (trap in het vermogensverloop); het punt blijft de laatste
-  return rij ? { waarde: rij.waarde, peildatum: rij.datum, taxaties: alle } : null;
+// wv3923 (besluit nr 59 = C49, David 22-11-2026): de gewone marktwaarde telt, niet "na verbouwing"; dezelfde lezer als Vastgoed (woning-bron.js).
+// FV blijft als argument voor de oude aanroepen; het wordt niet meer gebruikt.
+function woningUit(t, FV) {   // eslint-disable-line no-unused-vars
+  const WB = require('./woning-bron.js');
+  const tax = WB.taxaties(t), w = WB.woningWaarde(tax);
+  if (!w) return null;
+  // alle taxaties met een gewone marktwaarde (trap in het vermogensverloop); het punt is de laatste
+  const alle = tax.filter(function (r) { return r.marktwaarde > 10000; }).map(function (r) { return { datum: r.datum, waarde: r.marktwaarde }; });
+  return { waarde: w.waarde, peildatum: w.peildatum, na_verbouwing: w.na_verbouwing, taxaties: alle };
 }
 function leesHolding(vault, FV) {
   const t = fs.readFileSync(path.join(vault, P_HOLD), 'utf8');
@@ -429,7 +443,7 @@ function vermogenPunt(o) {
   const schuld = hyp && hyp.bank && hyp.bank.restschuld != null ? hyp.bank.restschuld : null;
   const delen = [
     sal ? { tekst: 'Vrij beschikbaar op de rekeningen', bedrag: r2(liq.vrij), bron: 'bankstand', op: liq.stand_van ? liq.stand_van.slice(0, 10) : null } : null,
-    woning ? { tekst: 'Woning (laatste taxatie, schatting)', bedrag: woning.waarde, bron: woning.bron, op: woning.peildatum } : null,
+    woning ? { tekst: 'Woning (laatste taxatie, gewone marktwaarde)', bedrag: woning.waarde, bron: woning.bron, op: woning.peildatum } : null,
     schuld != null ? { tekst: 'Hypotheek (bankstand)', bedrag: -schuld, bron: hyp.bron.pagina, op: hyp.bron.bank_op } : null,
     wl ? { tekst: 'Woninglening van de Holding', bedrag: -wl.stand, bron: dga.bron.data || dga.bron.pagina, op: wl.jaar + '-12-31' } : null,
     rc != null ? { tekst: 'Rekening-courant met Holding en Tolgaarde (schuld)', bedrag: -rc, bron: dga.bron.pagina, op: dga.bron.pagina_bijgewerkt || null } : null,
@@ -443,7 +457,7 @@ function vermogenPunt(o) {
     prive: { bedrag: mist.length ? null : r2(delen.reduce(function (s, x) { return s + x.bedrag; }, 0)), delen: delen, ontbreekt: mist,
       woz: woz ? { jaar: woz.jaar, waarde: woz.woz } : null,
       niet_meegeteld: sal ? [{ tekst: 'Kinderrekeningen', bedrag: r2(liq.kinderen) }, { tekst: 'Gambia-rekeningen (geoormerkt)', bedrag: r2(liq.geoormerkt) }] : [],
-      uitleg: 'Woning op de laatste taxatie (een schatting, geen marktwaarde van nu); de Holding telt hier niet mee.' + (bel && bel.deel ? ' Beleggingen op de laatst bekende slotkoers (Beleggen).' : ''),
+      uitleg: 'Woning op de gewone marktwaarde uit de laatste taxatie (een schatting, geen marktwaarde van nu; een waarde "na verbouwing" telt niet mee, zoals in Vastgoed); de Holding telt hier niet mee.' + (bel && bel.deel ? ' Beleggingen op de laatst bekende slotkoers (Beleggen).' : ''),
       beleggen: bel ? bel.info : null },
     holding: hold ? holdingBlok(hold, rc, nu) : null,
   };

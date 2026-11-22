@@ -10,9 +10,13 @@ cd "$(dirname "$0")/.." || exit 1
 f=0
 VJS="${VASTGOED_JS:-$PWD/vastgoed.js}"; OPY="${OSINT_PY:-$PWD/osint.py}"
 C=$(grep -vE '^\s*(\*|//)' "$VJS")
-if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|node:sqlite)'\)$"; then echo "ROOD  CI-poort: vastgoed.js laadt een andere module"; f=1; fi
+if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|node:sqlite|\./woning-bron\.js)'\)$"; then echo "ROOD  CI-poort: vastgoed.js laadt een andere module"; f=1; fi
 if echo "$C" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new Function|child_process|https?://[a-z]|\bnet\b|XMLHttpRequest|WebSocket"; then echo "ROOD  CI-poort: vastgoed.js raakt netwerk, proces of log"; f=1; fi
 [ $f = 0 ] && echo "GROEN CI-poort: vastgoed.js heeft geen netwerk, proces of log"
+# wv3923: de gedeelde lezer (woning-bron.js, ook voor Financiën) valt onder dezelfde poort: alleen fs en path, geen netwerk
+WBJ="$(dirname "$VJS")/woning-bron.js"; W=$(grep -vE '^\s*(\*|//)' "$WBJ" 2>/dev/null || echo "require('ontbreekt')")
+if echo "$W" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path)'\)$"; then echo "ROOD  CI-poort: woning-bron.js laadt een andere module"; f=1; fi
+if echo "$W" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new Function|child_process|https?://[a-z]|\bnet\b|XMLHttpRequest|WebSocket"; then echo "ROOD  CI-poort: woning-bron.js raakt netwerk, proces of log"; f=1; fi
 g=0
 grep -q "const vastgoedApp = (function () {" server.js || { echo "ROOD  server.js: vastgoedApp ontbreekt"; g=1; }
 P=$(grep -oE "POST \\\\/app\\\\/vastgoed\\\\/\([a-z|-]+\)" server.js)
@@ -42,6 +46,8 @@ grep -qE "a\[0\] == 'vastgoed'" "$OPY" || { echo "ROOD  osint.py: opdracht vastg
 [ $g = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS, osint.py"
 [ $g = 0 ] || f=1
 VASTGOED_JS="$VJS" node --test test/vastgoed.test.js 2>&1 | grep -E "^# (pass|fail)"; VASTGOED_JS="$VJS" node --test test/vastgoed.test.js >/dev/null 2>&1 || { echo "ROOD  test/vastgoed.test.js"; f=1; }
+# wv3923 (C49): Financiën en Vastgoed lezen woningwaarde en restschuld met één lezer (woning-bron.js)
+node --test test/woning-bron.test.js >/dev/null 2>&1 && echo "GROEN test/woning-bron.test.js (C49: één woningwaarde en restschuld)" || { echo "ROOD  test/woning-bron.test.js"; f=1; }
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 python3 -I test/vastgoed-laag.py "$OPY" "$T" | tail -1; python3 -I test/vastgoed-laag.py "$OPY" "$T" >/dev/null 2>&1 || { echo "ROOD  test/vastgoed-laag.py"; f=1; }
 

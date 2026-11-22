@@ -182,6 +182,25 @@ if (C) {
     A5.corrigeer(a5, { nr: xs[0], categorie: 'wonen', regel: true }); const g = A5.corrigeer(a5, { nr: xs[1], eigenaar: 'David', regel: true });
     k4rood = a5.db.prepare('SELECT categorie FROM regels WHERE id = ?').get(g.regel).categorie !== 'wonen'; }
   toets('kruisproef: zonder samenvoegen verliest de tweede regel de categorie (het samenvoegen doet dus iets)', !!k4 && k4rood, null);
+  // wv3923 (besluit nr 120 = 2C20, David 22-11-2026): je correctie op één boeking gaat vóór je vaste keuze voor die tegenpartij, in de indeling
+  // waar potjes en geldstroom op rekenen (FO.boekingen). Tegenpartij AH op "verschuiven", één boeking op wonen: die telt bij leven (wonen), de
+  // andere AH-boeking blijft verschuiven; alleen een eigenaar per boeking verandert de stroom niet; terug naar automatisch = weer de keuze.
+    const ah2 = nrVan('ALBERT HEIJN 1430', '2026-10-08');
+    const deel = (nr) => FO.boekingen(a, '2026-09', '2026-10', null).delen.filter((x) => x.nr === nr);
+    FO.stroomZet(A, a, { id: FO.idVan(FO.sleutelVan({ tegenpartij: 'ALBERT HEIJN 1430' }), 'af'), stroom: 'verschuiven', subsoort: 'vrijwillig' });
+    const v0 = [deel(ah)[0], deel(ah2)[0]];
+    C.corrigeerApp(A, a, { nr: ah, categorie: 'wonen', altijd: false });
+    const v1 = [deel(ah)[0], deel(ah2)[0]];
+    toets('2C20: met een vaste keuze "verschuiven" voor AH telt een boeking die jij op wonen zette bij leven (wonen); de andere AH-boeking blijft verschuiven',
+      v0[0].stroom === 'verschuiven' && v0[1].stroom === 'verschuiven' && v1[0].stroom === 'leven' && v1[0].cat === 'wonen' && /gaat voor je keuze/.test(v1[0].waarom) && v1[1].stroom === 'verschuiven', [v0, v1]);
+    C.herstelApp(A, a, { nr: ah });
+    C.corrigeerApp(A, a, { nr: ah, eigenaar: 'samen', altijd: false });
+    const v2 = deel(ah)[0];
+    toets('2C20: alleen de eigenaar van die boeking aanpassen laat de vaste keuze staan (verschuiven)', v2.stroom === 'verschuiven' && v2.waarom === 'jouw keuze', v2);
+    C.herstelApp(A, a, { nr: ah });
+    const v3 = deel(ah)[0];
+    toets('2C20: terug naar automatisch = weer je vaste keuze voor AH', v3.stroom === 'verschuiven' && v3.waarom === 'jouw keuze', v3);
+    FO.stroomZet(A, a, { id: FO.idVan(FO.sleutelVan({ tegenpartij: 'ALBERT HEIJN 1430' }), 'af'), stroom: null });
   // 12. bank-lezer zoals de pod het aanroept
   a.db.close();
   const kind = (inv) => { const q = spawnSync(process.execPath, ['--no-warnings', 'bank-lezer.js', 'app-corrigeer'], { input: JSON.stringify(inv), env: { PATH: process.env.PATH, BANK_DIR: BD, TZ: 'Europe/Amsterdam' }, encoding: 'utf8', timeout: 60000 });
