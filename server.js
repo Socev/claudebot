@@ -14381,7 +14381,36 @@ function appFinVault(nu) {
 }
 // bankdeel + vaultdeel; fouten van beide samen
 function appFinSamen(basis, d, v) {
-  return Object.assign(basis, d, { hypotheek: v.hypotheek, belasting: v.belasting, dga: v.dga, fouten: (Array.isArray(d.fouten) ? d.fouten : []).concat(v.fouten) });
+  return Object.assign(basis, d, { overzicht: appFinNu(d.overzicht), hypotheek: v.hypotheek, belasting: v.belasting, dga: v.dga, fouten: (Array.isArray(d.fouten) ? d.fouten : []).concat(v.fouten) });
+}
+// wv3924 (besluitenpagina nr 151 = 2C51, David Ja 22-11-2026 18:22): "nieuw sinds je laatste bezoek" bovenaan Financiën › Overzicht. Per verzoek
+// (niet in het 60 s-geheugen): overzicht.nu.recent (financien-plan.js recentVan) tegen financien-bezoek.json; recent zelf gaat niet mee naar de App.
+// Het bezoek zet de App met POST /app/financien/gezien { tot } (de nieuwste eerste_gezien van het archief die ze toonde); nooit terug in de tijd.
+// Kopie van het overzicht: het geheugen (appFinCache) blijft onaangeroerd. Geen bedrag of naam in het bestand of in api.log.
+const APP_FIN_BEZOEK = path.join(APP_DATA, 'financien-bezoek.json'), APP_FIN_GEZIEN_PER_UUR = 120;
+function appFinBezoek() {
+  try { const b = appLeesStreng(APP_FIN_BEZOEK, {}); return { laatst: typeof b.laatst === 'string' ? b.laatst : null, op: typeof b.op === 'string' ? b.op : null }; }
+  catch (e) { logError('financien-bezoek', e); return { laatst: null, op: null }; }
+}
+function appFinNu(ov) {
+  if (!ov || !ov.nu || typeof ov.nu !== 'object') return ov;
+  const b = appFinBezoek();
+  let nieuw = null;
+  try { nieuw = require(path.join(__dirname, 'financien-plan.js')).nieuwSinds(ov.nu, b.laatst, Date.now(), b.op); } catch (e) { logError('financien-nu', new Error('nieuw niet te rekenen')); nieuw = null; }
+  const nu = Object.assign({}, ov.nu, { nieuw: nieuw });
+  delete nu.recent;
+  return Object.assign({}, ov, { nu: nu });
+}
+async function appFinGezien(req, res, a, d) {
+  res._app.reden = 'financien-gezien';
+  const tot = String((d && d.tot) || ''), t = Date.parse(tot);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(tot) || !Number.isFinite(t) || t > Date.now() + 5 * 60000) return appWeiger(res, 400, 'onbekend moment', 'fin-gezien tot');
+  if (!appTeller('fin-gezien', APP_FIN_GEZIEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens fin-gezien');
+  const b = appFinBezoek(), oud = Date.parse(b.laatst || '');
+  const laatst = Number.isFinite(oud) && oud >= t ? b.laatst : new Date(t).toISOString();
+  try { appSchrijfJson(APP_FIN_BEZOEK, { versie: 1, laatst: laatst, op: new Date().toISOString(), apparaat: (a && a.id) || null }); }
+  catch (e) { logError('financien-bezoek', e); return appWeiger(res, 503, 'bewaren lukte nu niet', 'fin-gezien schrijven'); }
+  return appStuur(res, 200, { ok: true, laatst: laatst });
 }
 async function appFinancien(req, res, a) {
   res._app.reden = 'financien';
@@ -16212,6 +16241,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/financien/reizen') return appFinReizen(req, res, a, d);   // wv2715: kosten per reis (lijst of één reis)
         if (route === 'POST /app/financien/reislabel') return appFinReislabel(req, res, a, d);   // wv2715: boeking bij een reis: erbij, eraf of terug
         if (route === 'POST /app/financien/vermogen') return appFinVermogen(req, res, a, d);   // wv2716: vermogensverloop per maand sinds 2016
+        if (route === 'POST /app/financien/gezien') return appFinGezien(req, res, a, d);   // wv3924 (2C51): bezoek aan Overzicht (voor "nieuw sinds je laatste bezoek")
         if (['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam', 'POST /app/financien/regels'].indexOf(route) >= 0) return appFinCorrigeer(req, res, a, d, route);   // wv2717: zelf corrigeren
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
         if (route.indexOf('GET /app/pot/') === 0) return typeof appPot === 'function' ? appPot(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1894: OVIS POT (P1: lezen)

@@ -330,8 +330,15 @@ function blokVasteLasten(A, a, nu, links, signalen, pp) {
   // wv2706 (idee 4 uit Sure): rekeningen deze maand afvinken (financien-plan.js); een fout maakt alleen dit lijstje leeg
   let afvink = null;
   try { afvink = require('./financien-plan.js').afvinken({ nu: nu, reeksen: reeksNu, rijen: rijen, lasten: p.lasten, naam: toonNaam, overslaan: paraplu }); } catch (e) { afvink = null; }
+  // wv3924 (2C51): wat er de komende 14 dagen van deze rekening afgaat en of het saldo (laatste saldo_na, zoals de dekking) het haalt; een fout = null
+  let komende = null;
+  try {
+    const sr = p.alle.filter(function (t) { return t.datum <= nu && t.saldo_na != null; }).pop();
+    komende = require('./financien-plan.js').komende({ nu: nu, reeksen: reeksNu, rijen: rijen, naam: toonNaam, overslaan: paraplu, rekening: 'de vaste-lastenrekening',
+      saldo: sr ? { saldo: sr.saldo_na, op: sr.datum } : null, stortingen: vl.vaste_storting || [], intern_in: p.intern_in });
+  } catch (e) { komende = null; }
   return { rekening: veilig(vl.rekening, 30) || 'Vaste lasten', vanaf: vl.vanaf || null, peildatum: vl.peildatum, totaal_per_maand: getal(vl.totaal_per_maand),
-    posten: uit.length, rijen: uit, deze_maand: afvink,
+    posten: uit.length, rijen: uit, deze_maand: afvink, komende: komende,
     steun: (vl.steun || []).map(function (s) { return { naam: veilig(s.naam, 30) || 'Steun (vast)', per_maand: getal(s.per_maand), dag: s.dag | 0 }; }),
     vaste_storting: (vl.vaste_storting || []).map(function (s) { return { van: veilig(s.van, 30) || 'eigen rekening', bedrag: getal(s.bedrag), dag: s.dag | 0 }; }) };
 }
@@ -451,6 +458,9 @@ function bereken(A, a, o) {
   uit.saldi = o.saldi ? blok('saldi', function () { return blokSaldi(a, o.saldi); }) : null;   // wv2258: alleen via bank-lezer (de bewaarde standen)
   // wv2596 (Financiën 8+, stap 1 en 2): stromen en de vier kerngetallen (financien-overzicht.js); een fout maakt alleen dit blok leeg
   uit.overzicht = blok('overzicht', function () { return require('./financien-overzicht.js').overzicht(A, a, { nu: nu, vanaf: vanaf, saldi: uit.saldi, vault: o.vault || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', beleggen: o.beleggen || null }); });
+  // wv3924 (2C51): komende (met saldo en de namen van de posten) alleen in het blok overzicht (Davids eigen App), niet in vaste_lasten (veld voor veld)
+  if (uit.overzicht && uit.overzicht.nu) uit.overzicht.nu.komende = (uit.vaste_lasten && uit.vaste_lasten.komende) || null;
+  if (uit.vaste_lasten) delete uit.vaste_lasten.komende;
   // één signaal per soort en post (een PayPal-dienst op zijn dienst, wv909: de titel van een onbekende dienst draagt de incassodag, die
   // in de bank en in de ontvangstbewijzen een dag kan verschillen); gedempt wat David al kent (Bewust-tabel)
   const gezien = new Set();

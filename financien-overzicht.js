@@ -65,6 +65,7 @@ const D_WONING = path.join('20_Prive', 'Huis');
 const P_HOLD = path.join('10_Zakelijk', 'Holding', 'Financieel', 'Kerncijfers - HOLD.md');
 
 function r2(n) { return Math.round(n * 100) / 100; }
+function plusDagenNu(d, n) { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }   // wv3924
 function veilig(s, n) { return String(s == null ? '' : s).normalize('NFC').replace(/[^\p{L}\p{N} .,&'()\-/+*—]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, n || 40).trim(); }
 // IBAN in een vrije tekst → "IBAN …1234" (review wv2596 MOET 2; zoals elders in de App alleen de laatste vier cijfers)
 function zonderIban(s) { return String(s == null ? '' : s).replace(/\b[A-Z]{2}\d{2}\s?(?:[A-Z0-9]{4}\s?){2,7}[A-Z0-9]{1,4}\b/g, function (m) { const k = m.replace(/\s+/g, ''); return 'IBAN …' + k.slice(-4); }); }
@@ -574,6 +575,16 @@ function overzicht(A, a, o) {
   // wv2706 (ideeën uit Sure, David 8-11-2026 "1 t/m 6"): potjes per post (vaultpagina Potjes) en de geldstroom voor het Sankey-plaatje (financien-plan.js); alleen dit blok leeg bij een fout
   if (uit.uitgaven) uit.uitgaven.potjes = blok('potjes', function () { return require('./financien-plan.js').potjes(b.delen, { mNu: mNu, twaalf: twaalf, nu: nu, vault: o.vault, fv: FV, vanafArchief: o.vanaf }); });
   uit.geldstroom = blok('geldstroom', function () { return require('./financien-plan.js').geldstroom(b.delen, { twaalf: twaalf }); });
+  // wv3924 (besluitenpagina nr 151 = 2C51): "Nu en straks" bovenaan Overzicht (financien-plan.js); komende vult financien-app.js aan (vaste lasten),
+  // nieuw sinds het laatste bezoek rekent server.js per verzoek uit recent; alleen dit blok leeg bij een fout
+  uit.nu = blok('nu', function () {
+    const P = require('./financien-plan.js');
+    const grens = new Date(Date.parse(nu + 'T12:00:00Z') - P.RECENT_DAGEN * 86400000).toISOString().slice(0, 10);
+    const gezien = a.db.prepare("SELECT t.nr, t.eerste_gezien FROM transacties t JOIN rekeningen r ON r.rek = t.rek WHERE t.status IN ('booked', 'pending') AND t.vervangen_door IS NULL" +
+      " AND lower(coalesce(r.eigenaar, '')) NOT IN ('extern', 'pot') AND t.eerste_gezien >= ? AND t.datum >= ? ORDER BY t.eerste_gezien DESC LIMIT 2000").all(grens, plusDagenNu(nu, -P.RECENT_BOEK_DAGEN));
+    const tot = (a.db.prepare('SELECT max(eerste_gezien) m FROM transacties').get() || {}).m || null;
+    return { deze_maand: P.dezeMaand(b.delen, { nu: nu, twaalf: twaalf }), recent: P.recentVan(b.delen, { gezien: gezien, uitschieters: uit.uitgaven && uit.uitgaven.uitschieters }), recent_tot: tot, komende: null };
+  });
   // wv2621 (stap 5): de basis van de prognose op dezelfde delen en 12 maanden (financien-vooruit.js; jaar/kwartaalreeksen gaan in de kalender)
   uit.reeksen_jaar = blok('vooruit', function () { return require('./financien-vooruit.js').reeksenJaar(a); });
   uit.basis_vooruit = blok('vooruit', function () { return require('./financien-vooruit.js').basis(b.delen, twaalf, uit.reeksen_jaar || []); });

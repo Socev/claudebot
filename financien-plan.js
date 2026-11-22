@@ -280,5 +280,179 @@ function geldstroom(delen, o) {
       'zoveel steeg of daalde het saldo van de zichtbare rekeningen door deze stromen. Cynthia\'s eigen rekeningen zijn niet gekoppeld.' };
 }
 
+// ── 6. Nu en straks (wv3924, besluitenpagina nr 151 = 2C51; Fable "Een 9 - financien" F2; David Ja 22-11-2026 18:22) ──
+// Drie zinnen bovenaan Financiën › Overzicht, elke keer anders dan het vorige bezoek:
+//   dezeMaand  de lopende maand tot de peildag: leven (zonder eenmalig groot) en inkomen (zonder jaarposten) tegen het gemiddelde van de 12
+//              volledige maanden op dezelfde dag van de maand (een kortere maand telt tot zijn laatste dag). Binnen € 100 of 10 % = "ongeveer".
+//   recent     de boekingen die de bank-ronde de laatste 21 dagen voor het eerst zag (transacties.eerste_gezien) met een boekdatum in de
+//              laatste 35 dagen (een later gekoppelde rekening met jaren historie telt zo niet als "nieuw"), per boeking één regel met
+//              "ongewoon" (uitschieter, eenmalig groot, eenmalig inkomen of een nieuwe tegenpartij ≥ € 250). nieuwSinds (server.js, per verzoek)
+//              telt daaruit wat er sinds Davids laatste bezoek bijkwam; het bezoek zelf zet de App met POST /app/financien/gezien.
+//   komende    de vaste posten van de vaste-lastenrekening (dezelfde actieve reeksen als afvinken) met hun volgende verwachte post in de
+//              komende 14 dagen, plus wat al verwacht was en nog niet gezien (hooguit 20 dagen terug), tegen het laatste saldo en de vaste
+//              storting die in die 14 dagen hoort te komen. Laagste stand op volgorde van datum; haalt = laagste ≥ 0. Leunt NIET op de
+//              12-maandenprognose van financien-vooruit.js (die volgens de fin-planner-review te rooskleurig is, 2B93 nog open), wel op
+//              verwachte bedragen: daarom "naar schatting" in de zin.
+const NU_RAND_EUR = 100, NU_RAND_PCT = 0.1, KOMENDE_DAGEN = 14, KOMENDE_TERUG = 20, RECENT_DAGEN = 21, RECENT_BOEK_DAGEN = 35, RECENT_MAX = 400, NIEUW_TP_MIN = 250;
+const MND_KORT = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
+function eurRond(n) { return '€ ' + String(Math.round(Math.abs(n))).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+function dagKort(d) { return Number(d.slice(8, 10)) + ' ' + MND_KORT[Number(d.slice(5, 7)) - 1]; }
+function naamKort(s) { return cel(s, 30) || 'zonder naam'; }
+function dezeMaand(delen, o) {
+  const nu = o.nu, mNu = nu.slice(0, 7), dag = Number(nu.slice(8, 10)), twaalf = o.twaalf || [];
+  const per = new Map();
+  (delen || []).forEach(function (x) { if (!per.has(x.maand)) per.set(x.maand, []); per.get(x.maand).push(x); });
+  const tel = function (m, totDag) {
+    const s = { uit: 0, eenmalig: 0, in: 0, jaar: 0 };
+    (per.get(m) || []).forEach(function (x) {
+      if (Number(String(x.datum).slice(8, 10)) > totDag) return;
+      if (x.stroom === 'leven') { if (x.eenmalig) s.eenmalig -= x.deel; else s.uit -= x.deel; }
+      else if (x.stroom === 'inkomen') { if (x.jaar) s.jaar += x.deel; else s.in += x.deel; }
+    });
+    return s;
+  };
+  const n = tel(mNu, dag);
+  const uit = { maand: mNu, tot_dag: nu, uitgegeven: r2(n.uit), eenmalig: r2(n.eenmalig), binnen: r2(n.in), jaarpost: r2(n.jaar), maanden: twaalf.length };
+  let zin = 'Deze maand tot nu (t/m ' + dagKort(nu) + '): ' + eurRond(n.uit) + ' uitgegeven';
+  if (twaalf.length >= 3) {
+    const l = twaalf.map(function (m) { return tel(m, Math.min(dag, dagenIn(m))); });
+    const gUit = l.reduce(function (z, s) { return z + s.uit; }, 0) / l.length, gIn = l.reduce(function (z, s) { return z + s.in; }, 0) / l.length;
+    const d = n.uit - gUit, rand = Math.max(NU_RAND_EUR, NU_RAND_PCT * Math.abs(gUit));
+    uit.gewoon_uitgegeven = r2(gUit); uit.gewoon_binnen = r2(gIn);
+    uit.oordeel = Math.abs(d) <= rand ? 'gelijk' : d < 0 ? 'minder' : 'meer';
+    zin += uit.oordeel === 'gelijk' ? ', ongeveer wat een gewone maand op deze dag kost (' + eurRond(gUit) + ').'
+      : ', ' + eurRond(d) + ' ' + uit.oordeel + ' dan een gewone maand op deze dag (' + eurRond(gUit) + ').';
+    if (n.eenmalig > 0.5) zin += ' Daarbovenop ' + eurRond(n.eenmalig) + ' eenmalig groot.';
+    const dIn = n.in - gIn, randIn = Math.max(NU_RAND_EUR, NU_RAND_PCT * Math.abs(gIn));
+    zin += ' Binnengekomen: ' + eurRond(n.in) + (Math.abs(dIn) <= randIn ? ', zoals gewoonlijk' : ' (gewoonlijk ' + eurRond(gIn) + ' op deze dag)');
+  } else {
+    uit.oordeel = null;
+    if (n.eenmalig > 0.5) zin += ', plus ' + eurRond(n.eenmalig) + ' eenmalig groot';
+    zin += '; binnengekomen ' + eurRond(n.in) + ' (te weinig volle maanden om met een gewone maand te vergelijken)';
+  }
+  if (n.jaar > 0.5) zin += ', plus ' + eurRond(n.jaar) + ' dividend of ander eenmalig inkomen';
+  uit.zin = zin.replace(/\.?$/, '.');
+  uit.toon = uit.oordeel === 'meer' ? 'let' : 'goed';
+  return uit;
+}
+// gezien = [{ nr, eerste_gezien }] (de query in financien-overzicht.js); uitschieters = uitgaven.uitschieters (datum, filter.id, bedrag)
+function recentVan(delen, o) {
+  const per = new Map(), eerst = new Map();
+  (delen || []).forEach(function (x) {
+    if (!per.has(x.nr)) per.set(x.nr, []);
+    per.get(x.nr).push(x);
+    if (x.id && (!eerst.has(x.id) || x.datum < eerst.get(x.id))) eerst.set(x.id, x.datum);
+  });
+  const uitsch = new Set((o.uitschieters || []).map(function (u) { return (u.filter && u.filter.id) + '|' + u.datum + '|' + r2(u.bedrag); }));
+  const keer = new Map((o.uitschieters || []).map(function (u) { return [(u.filter && u.filter.id) + '|' + u.datum + '|' + r2(u.bedrag), u.keer]; }));
+  const uit = [];
+  (o.gezien || []).forEach(function (g) {
+    const l = per.get(g.nr);
+    if (!l || !l.length) return;   // andere valuta of buiten het venster
+    const x = l[0], bedrag = r2(x.bedrag), groot = l.slice().sort(function (p, q) { return Math.abs(q.deel) - Math.abs(p.deel); })[0];
+    const k = x.id + '|' + x.datum + '|' + r2(-x.bedrag);
+    let ongewoon = null;
+    if (uitsch.has(k)) ongewoon = (keer.get(k) ? String(keer.get(k)).replace('.', ',') + '× ' : 'veel meer dan ') + 'de gebruikelijke post';
+    else if (l.some(function (y) { return y.eenmalig; })) ongewoon = 'eenmalig groot';
+    else if (l.some(function (y) { return y.jaar; })) ongewoon = 'eenmalig inkomen';
+    else if (groot.stroom !== 'intern' && bedrag <= -NIEUW_TP_MIN && x.id && eerst.get(x.id) === x.datum) ongewoon = 'nieuwe tegenpartij';
+    uit.push({ nr: g.nr, gezien: String(g.eerste_gezien), datum: x.datum, naam: naamKort(x.naam || x.tegenpartij || x.omschrijving), bedrag: bedrag,
+      stroom: groot.stroom, intern: l.every(function (y) { return y.stroom === 'intern'; }) || undefined, ongewoon: ongewoon || undefined });
+  });
+  uit.sort(function (p, q) { return p.gezien < q.gezien ? 1 : p.gezien > q.gezien ? -1 : q.nr - p.nr; });
+  return uit.slice(0, RECENT_MAX).map(function (x) { const y = Object.assign({}, x); delete y.nr; return y; });   // geen boekingsnummer naar buiten (financien-app privacytoets)
+}
+function wanneerTekst(iso, nuMs) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return 'onbekend';
+  const dag = function (ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); };
+  const uur = new Date(t).toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' });
+  const d = dag(t), v = dag(nuMs), g = dag(nuMs - 86400000);
+  return d === v ? 'vandaag ' + uur : d === g ? 'gisteren ' + uur : dagKort(d);
+}
+// nu = overzicht.nu (met recent en recent_tot), sinds = iso van het vorige bezoek of null. Puur; server.js roept dit per verzoek aan.
+function nieuwSinds(nu, sinds, nuMs, bezoekOp) {   // bezoekOp = wanneer David keek (alleen voor de tekst); sinds = tot waar hij de boekingen zag
+  const recent = (nu && Array.isArray(nu.recent)) ? nu.recent : [], ms = nuMs || Date.now();
+  const eerste = !(typeof sinds === 'string' && Number.isFinite(Date.parse(sinds)));
+  const grens = eerste ? new Date(ms - 7 * 86400000).toISOString() : new Date(Date.parse(sinds)).toISOString();
+  const l = recent.filter(function (x) { return x.gezien > grens; });
+  const echt = l.filter(function (x) { return !x.intern; });
+  const grootste = echt.slice().sort(function (p, q) { return Math.abs(q.bedrag) - Math.abs(p.bedrag); }).slice(0, 3);
+  const ongewoon = echt.filter(function (x) { return x.ongewoon; }).sort(function (p, q) { return Math.abs(q.bedrag) - Math.abs(p.bedrag); }).slice(0, 3);
+  const post = function (x) { return x.naam + ' ' + eurRond(x.bedrag) + (x.bedrag > 0 ? ' bij' : ''); };
+  const kop = eerste ? 'De laatste 7 dagen' : 'Sinds je laatste bezoek (' + wanneerTekst(typeof bezoekOp === 'string' && Number.isFinite(Date.parse(bezoekOp)) ? bezoekOp : grens, ms) + ')';
+  let zin;
+  if (!l.length) zin = kop + ' niets nieuws van de bank.';
+  else {
+    zin = kop + ': ' + l.length + (l.length === 1 ? ' nieuwe boeking' : ' nieuwe boekingen') + (echt.length < l.length ? ' (' + (l.length - echt.length) + ' tussen je eigen rekeningen)' : '') + '.';
+    if (grootste.length) zin += (grootste.length === 1 ? ' ' : ' Grootste: ') + grootste.map(post).join(', ') + '.';
+    zin += ongewoon.length ? ' Ongewoon: ' + ongewoon.map(function (x) { return post(x) + ' (' + x.ongewoon + ')'; }).join(', ') + '.' : ' Niets ongewoons.';
+  }
+  return { sinds: eerste ? null : grens, eerste: eerste, tot: (nu && nu.recent_tot) || null, aantal: l.length, grootste: grootste, ongewoon: ongewoon, zin: zin, toon: ongewoon.length ? 'let' : 'goed' };
+}
+// o: { nu, reeksen, rijen, naam, overslaan, saldo: { saldo, op } | null, stortingen: [{ van, bedrag, dag }], intern_in: [transacties] }
+function komende(o) {
+  const nu = o.nu, mNu = nu.slice(0, 7), tot = plusDagen(nu, KOMENDE_DAGEN), terug = plusDagen(nu, -KOMENDE_TERUG);
+  const posten = [];
+  (o.rijen || []).forEach(function (x) {
+    if (o.overslaan && o.overslaan(x)) return;
+    const rs = (o.reeksen || []).filter(function (r) { return (x.sleutels || []).indexOf(r.sleutel) >= 0; });
+    let bedrag = 0, datum = null, oud = false;
+    rs.forEach(function (r) {
+      const vv = volgendeVan(r);
+      if (!vv || vv < terug || vv > tot) return;
+      const keer = r.ritme === 'maand' ? Math.max(1, Math.round((r.n_per_maand || 1) * KOMENDE_DAGEN / 30)) : 1;
+      bedrag += r.bedrag * keer;
+      if (!datum || vv < datum) datum = vv;
+      if (vv < nu) oud = true;
+    });
+    if (!datum || !(bedrag > 0)) return;
+    const nm = o.naam ? o.naam(x) : x.naam;   // een bank als tegenpartij zegt weinig: dan de soort post (Hypotheek)
+    posten.push({ naam: naamKort(x.soort_post && /\b(bank|abn amro|rabobank|ing)\b/i.test(String(nm)) ? x.soort_post : nm), datum: datum, bedrag: r2(bedrag), nog_niet_gezien: oud || undefined });
+  });
+  posten.sort(function (p, q) { return p.datum < q.datum ? -1 : p.datum > q.datum ? 1 : q.bedrag - p.bedrag; });
+  const stortingen = [];
+  (o.stortingen || []).forEach(function (s) {
+    if (!(s.bedrag > 0)) return;
+    const op = function (m) { return m + '-' + String(Math.min(dagenIn(m), Math.max(1, s.dag | 0 || 1))).padStart(2, '0'); };
+    let d = op(mNu);
+    const al = (o.intern_in || []).some(function (t) { return String(t.datum).slice(0, 7) === mNu && Math.abs(t.bedrag - s.bedrag) <= 0.005 * s.bedrag + 0.01; });
+    if (d <= nu || al) d = op(maandPlus(mNu, 1));
+    if (d > tot) return;
+    stortingen.push({ van: naamKort(s.van), bedrag: r2(s.bedrag), datum: d });
+  });
+  const som = r2(posten.reduce(function (z, p) { return z + p.bedrag; }, 0));
+  const uit = { van: nu, tot: tot, dagen: KOMENDE_DAGEN, posten: posten, som: som, stortingen: stortingen, saldo: null, saldo_op: null, over: null, laagste: null, haalt: null };
+  if (o.saldo && typeof o.saldo.saldo === 'number' && Number.isFinite(o.saldo.saldo)) {
+    // op volgorde van datum; op dezelfde dag eerst wat eraf gaat (voorzichtig)
+    const ev = posten.map(function (p) { return { d: p.datum < nu ? nu : p.datum, b: -p.bedrag }; }).concat(stortingen.map(function (s) { return { d: s.datum, b: s.bedrag }; }))
+      .sort(function (p, q) { return p.d < q.d ? -1 : p.d > q.d ? 1 : p.b - q.b; });
+    let stand = o.saldo.saldo, laag = { bedrag: stand, datum: nu };
+    ev.forEach(function (e) { stand += e.b; if (stand < laag.bedrag) laag = { bedrag: stand, datum: e.d }; });
+    uit.saldo = r2(o.saldo.saldo); uit.saldo_op = o.saldo.op || null; uit.over = r2(stand); uit.laagste = { bedrag: r2(laag.bedrag), datum: laag.datum }; uit.haalt = laag.bedrag >= 0;
+  }
+  const rek = o.rekening || 'de vaste-lastenrekening';
+  let zin;
+  if (!posten.length) zin = 'De komende ' + KOMENDE_DAGEN + ' dagen (t/m ' + dagKort(tot) + ') staan er geen vaste posten op ' + rek + '.';
+  else {
+    const top = posten.slice().sort(function (p, q) { return q.bedrag - p.bedrag; }).slice(0, 3);
+    zin = 'De komende ' + KOMENDE_DAGEN + ' dagen (t/m ' + dagKort(tot) + ') gaat er van ' + rek + ' naar verwachting ' + eurRond(som) + ' af (' + posten.length + (posten.length === 1 ? ' post' : ' posten') +
+      '; grootste: ' + top.map(function (p) { return p.naam + ' ' + dagKort(p.datum < nu ? nu : p.datum) + ' ' + eurRond(p.bedrag); }).join(', ') + ').';
+    const oud = posten.filter(function (p) { return p.nog_niet_gezien; }).length;
+    if (oud) zin += ' Daarvan ' + (oud === 1 ? 'is er 1' : 'zijn er ' + oud) + ' al verwacht maar nog niet gezien.';
+  }
+  if (uit.haalt === null) zin += posten.length ? ' Het saldo van de rekening is niet te lezen, dus of hij het haalt is niet te zeggen.' : '';
+  else if (posten.length) {
+    const saldoT = 'saldo ' + eurRond(uit.saldo) + (uit.saldo_op && uit.saldo_op < plusDagen(nu, -2) ? ' (stand ' + dagKort(uit.saldo_op) + ')' : '') +
+      (stortingen.length ? ' plus ' + stortingen.map(function (s) { return 'de vaste storting van ' + eurRond(s.bedrag) + ' rond ' + dagKort(s.datum); }).join(' en ') : '');
+    zin += uit.haalt ? ' Dat haalt de rekening naar schatting: ' + saldoT + ', er blijft ± ' + eurRond(uit.over) + ' over.'
+      : ' Dat haalt de rekening naar schatting niet: ' + saldoT + '; op ' + dagKort(uit.laagste.datum) + ' komt hij ± ' + eurRond(uit.laagste.bedrag) + ' tekort. Maak vóór die dag geld over.';
+  }
+  uit.zin = zin;
+  uit.toon = uit.haalt === false ? 'fout' : 'goed';
+  return uit;
+}
+
 module.exports = { potjes: potjes, potjesLees: potjesLees, potjesZet: potjesZet, potjeInvoer: potjeInvoer, afvinken: afvinken, geldstroom: geldstroom, geldstroomVan: geldstroomVan,
-  P_POTJES: P_POTJES, POTJE_CATS: POTJE_CATS, TE_LAAT_DAGEN: TE_LAAT_DAGEN };
+  P_POTJES: P_POTJES, POTJE_CATS: POTJE_CATS, TE_LAAT_DAGEN: TE_LAAT_DAGEN,
+  dezeMaand: dezeMaand, recentVan: recentVan, nieuwSinds: nieuwSinds, komende: komende, KOMENDE_DAGEN: KOMENDE_DAGEN, RECENT_DAGEN: RECENT_DAGEN, RECENT_BOEK_DAGEN: RECENT_BOEK_DAGEN };   // wv3924
