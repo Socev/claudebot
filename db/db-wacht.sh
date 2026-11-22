@@ -54,10 +54,29 @@ if [ "$(id -u)" = "0" ]; then
   mkdir -p "$(dirname "$STAND")"; chown pg:pgsock "$(dirname "$STAND")"; chmod 2750 "$(dirname "$STAND")"
   stand start "db-wacht gestart"
   wacht_pg_uit
-  mkdir -p "$BASIS/17" "$BASIS/wal-archief" "$BASIS/log" "$SOCK" "$STOPMAP"
-  chown pg:pgsock "$BASIS" "$BASIS/wal-archief" "$BASIS/log"; chmod 0750 "$BASIS" "$BASIS/wal-archief" "$BASIS/log"
-  # wv3869: archiefbestanden leesbaar voor groep pgsock (claude meet met pg_waldump); bestanden van vóór wv3869 waren pg:pg
-  find "$BASIS/wal-archief" -maxdepth 1 -type f -name '*.zst' ! -group pgsock -exec chgrp pgsock {} + 2>/dev/null || true
+  mkdir -p "$BASIS/17" "$BASIS/log" "$SOCK" "$STOPMAP"
+  chown pg:pgsock "$BASIS" "$BASIS/log"; chmod 0750 "$BASIS" "$BASIS/log"
+  # wv3895 (besluit nr 50 = C40, David Ja 22-11 18:15): geen WAL-archief meer (archive_mode off). Eenmalig bij de eerste start na de
+  #   wissel, vóór postgres: de tijdlijn-1-segmenten van de Olares-uitval (6/B4 t/m 6/C0, ± 1 MB) apart in wal-olares-2211 (meting
+  #   wv3885; hoort bij data.oud-20261122-131858, opruimen alleen met Davids Ja), groep pgsock zodat claude pg_waldump kan draaien
+  #   (wv3869); de rest van het archief weg. Blijft er een Olares-segment achter (mv faalde), dan blijft het hele archief staan.
+  if [ -d "$BASIS/wal-archief" ]; then
+    OUD="$BASIS/wal-olares-2211"
+    mkdir -p "$OUD"; chown pg:pgsock "$OUD"; chmod 0750 "$OUD"
+    blijft=0
+    for s in B4 B5 B6 B7 B8 B9 BA BB BC BD BE BF C0; do
+      f="$BASIS/wal-archief/0000000100000006000000$s.zst"
+      [ -e "$f" ] && mv -n "$f" "$OUD/"
+      [ -e "$f" ] && blijft=1
+    done
+    find "$OUD" -maxdepth 1 -type f -exec chown pg:pgsock {} + -exec chmod 0640 {} + 2>/dev/null || true
+    if [ "$blijft" = 1 ]; then
+      log "wv3895: Olares-segment niet verplaatst; WAL-archief blijft staan"
+    else
+      n=$(find "$BASIS/wal-archief" -maxdepth 1 -type f | wc -l)
+      rm -rf "$BASIS/wal-archief" && log "wv3895: WAL-archief weg ($n bestanden); $(find "$OUD" -maxdepth 1 -type f | wc -l) Olares-segmenten in wal-olares-2211"
+    fi
+  fi
   chown pg:pg "$BASIS/17"; chmod 0700 "$BASIS/17"
   [ -d "$DATA" ] && { chown -R pg:pg "$DATA"; chmod 0700 "$DATA"; }
   # verse container: er draait hier nog geen postmaster; een achtergebleven pid-bestand (na SIGKILL) kan een PID noemen die nu van een

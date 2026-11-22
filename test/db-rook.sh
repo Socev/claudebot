@@ -8,7 +8,7 @@ rood=0; ok(){ if [ "$1" = 0 ]; then echo "  OK    $2"; else echo "  ROOD  $2"; r
 docker rm -f $C >/dev/null 2>&1 || true
 # wv3187: met een (wegwerp)replicatiewachtwoord, zodat init-reserve.sql de rol reserve en het slot r230 aanmaakt
 RW="rookreserve$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-docker run -d --name $C -e RW="$RW" --entrypoint /bin/bash "$IMAGE" -c 'mkdir -p /opt/data/bin /opt/data/.pg && printf "%s" "$RW" > /opt/data/.pg/reserve.wachtwoord && chmod 600 /opt/data/.pg/reserve.wachtwoord && chown -R claude:claude /opt/data/.pg && chown claude:claude /opt/data /opt/data/bin && mkdir -p /opt/data/pg/wal-archief && printf oud | zstd -q > /opt/data/pg/wal-archief/0000000100000000000000AA.zst && chown pg:pg /opt/data/pg/wal-archief/0000000100000000000000AA.zst && chmod 0640 /opt/data/pg/wal-archief/0000000100000000000000AA.zst && /app/db/db-wacht.sh & exec sleep 600' >/dev/null
+docker run -d --name $C -e RW="$RW" --entrypoint /bin/bash "$IMAGE" -c 'mkdir -p /opt/data/bin /opt/data/.pg && printf "%s" "$RW" > /opt/data/.pg/reserve.wachtwoord && chmod 600 /opt/data/.pg/reserve.wachtwoord && chown -R claude:claude /opt/data/.pg && chown claude:claude /opt/data /opt/data/bin && mkdir -p /opt/data/pg/wal-archief && printf oud | zstd -q > /opt/data/pg/wal-archief/0000000100000000000000AA.zst && printf olares | zstd -q > /opt/data/pg/wal-archief/0000000100000006000000B6.zst && chown -R pg:pg /opt/data/pg/wal-archief && chmod 0640 /opt/data/pg/wal-archief/*.zst && /app/db/db-wacht.sh & exec sleep 600' >/dev/null
 for i in $(seq 1 60); do docker exec $C grep -q "init-SQL toegepast" /opt/data/pg/db-wacht.log 2>/dev/null && break; sleep 1; done
 docker exec $C cat /opt/data/pg/db-wacht.log 2>/dev/null | tail -5
 docker exec $C grep -q "init-SQL toegepast" /opt/data/pg/db-wacht.log; ok $? "db-wacht: initdb, postgres op, init-SQL toegepast"
@@ -33,9 +33,9 @@ docker exec -u claude $C /usr/lib/postgresql/17/bin/psql -X -h /run/pg -U pgbaas
 docker exec $C grep -q "reserve-SQL toegepast" /opt/data/pg/db-wacht.log; ok $? "init-reserve.sql toegepast"
 R=$(docker exec -u claude $C sh -c "echo \"select (select rolreplication::text||rolsuper::text||rolcanlogin::text from pg_roles where rolname='reserve') as r, (select count(*) from pg_replication_slots where slot_name='r230' and slot_type='physical')::int as s\" | /app/sb-sql" 2>&1)
 [ "$R" = '[{"r":"truefalsetrue","s":1}]' ]; ok $? "rol reserve (replication, geen superuser) + slot r230 ($R)"
-# wv3408 (B01): slotruimte voor dagen R230-uitval (64GB) en geen geforceerde segmentwissel per minuut (300 s)
-W=$(docker exec -u claude $C sh -c "echo \"select (select setting from pg_settings where name='max_slot_wal_keep_size') as keep, (select setting from pg_settings where name='archive_timeout') as at\" | /app/sb-sql" 2>&1)
-[ "$W" = '[{"keep":"65536","at":"300"}]' ]; ok $? "wv3408: max_slot_wal_keep_size 64GB, archive_timeout 300 s ($W)"
+# wv3408 (B01): slotruimte voor dagen R230-uitval (64GB); wv3895 (C40): geen WAL-archief en geen geforceerde segmentwissel
+W=$(docker exec -u claude $C sh -c "echo \"select (select setting from pg_settings where name='max_slot_wal_keep_size') as keep, (select setting from pg_settings where name='archive_mode') as am, (select setting from pg_settings where name='archive_timeout') as at\" | /app/sb-sql" 2>&1)
+[ "$W" = '[{"keep":"65536","am":"off","at":"0"}]' ]; ok $? "wv3408/wv3895: max_slot_wal_keep_size 64GB, archive_mode off, archive_timeout 0 ($W)"
 docker exec -e PGPASSWORD="$RW" $C /usr/lib/postgresql/17/bin/psql -X -At "host=127.0.0.1 user=reserve replication=true dbname=postgres" -c IDENTIFY_SYSTEM >/dev/null 2>&1; ok $? "replicatie als reserve via 127.0.0.1 met wachtwoord"
 docker exec -e PGPASSWORD="$RW" $C /usr/lib/postgresql/17/bin/psql -X -At "host=127.0.0.1 user=reserve dbname=postgres" -c 'select 1' >/dev/null 2>&1; [ $? != 0 ]; ok $? "reserve kan geen gewone databankverbinding openen"
 docker exec -e PGPASSWORD=fout $C /usr/lib/postgresql/17/bin/psql -X -At "host=127.0.0.1 user=reserve replication=true dbname=postgres" -c IDENTIFY_SYSTEM >/dev/null 2>&1; [ $? != 0 ]; ok $? "fout wachtwoord geweigerd"
@@ -54,16 +54,14 @@ docker exec $C curl -fsS -m 3 http://127.0.0.1:8091/health; echo
 docker exec $C curl -fsS -m 3 http://127.0.0.1:8091/health >/dev/null 2>&1; ok $? "luik /health: postgres + PostgREST op"
 S=$(docker exec $C curl -s -o /dev/null -w '%{http_code}' -m 3 http://127.0.0.1:8091/rest/v1/); [ "$S" = 401 ]; ok $? "zonder sleutel 401 ($S)"
 S=$(docker exec -u claude $C sh -c 'curl -s -o /dev/null -w "%{http_code}" -m 5 -H "apikey: $(cat /tmp/k)" http://127.0.0.1:8091/rest/v1/'); [ "$S" = 200 ]; ok $? "met sleutel 200 via PostgREST ($S)"
-# wv3869: WAL-archief leesbaar voor claude (groep pgsock): een oud pg:pg-bestand krijgt bij de start groep pgsock (root-deel
-# db-wacht), en een vers gearchiveerd segment (pg_switch_wal als pgbaas) staat er niet leeg, 0640 pg:pgsock en leesbaar als claude
-P=$(docker exec $C stat -c '%U:%G %a' /opt/data/pg/wal-archief/0000000100000000000000AA.zst)
-[ "$P" = "pg:pgsock 640" ]; ok $? "wv3869: oud archiefbestand na de start pg:pgsock 640 ($P)"
-docker exec -u pg $C /usr/lib/postgresql/17/bin/psql -X -At -h /run/pg -U pgbaas -d postgres -c "create table rook_wal(x int); insert into rook_wal values (1); select pg_switch_wal(); drop table rook_wal" >/dev/null 2>&1
-for i in $(seq 1 30); do [ -n "$(docker exec $C find /opt/data/pg/wal-archief -maxdepth 1 -name '0*.zst' ! -name '*AA.zst' -size +0 2>/dev/null)" ] && break; sleep 1; done
-P=$(docker exec -u claude $C sh -c 'for f in $(find /opt/data/pg/wal-archief -maxdepth 1 -name "0*.zst" ! -name "*AA.zst"); do printf "%s " "$(stat -c "%U:%G %a" "$f")"; zstd -q -t "$f" && printf "leesbaar "; done')
-echo "  archief: $P"
-case "$P" in "pg:pgsock 640 leesbaar"*) r=0;; *) r=1;; esac; ok $r "wv3869: vers WAL-segment 0640 pg:pgsock, als claude leesbaar"
-docker run --rm -u claude -v "$PWD:/src:ro" --entrypoint bash "$IMAGE" /src/test/wal-archief.sh /app/db/wal-archief.sh; ok $? "wv3869: test/wal-archief.sh in het image als claude"
+# wv3895 (C40): bij de start is het oude archief weg, het Olares-segment (6/B6) staat apart in wal-olares-2211, 0640 pg:pgsock, als
+# claude leesbaar; het andere segment (AA) is weg
+docker exec $C test -e /opt/data/pg/wal-archief; [ $? != 0 ]; ok $? "wv3895: map wal-archief weg na de start"
+P=$(docker exec -u claude $C sh -c 'f=/opt/data/pg/wal-olares-2211/0000000100000006000000B6.zst; printf "%s %s " "$(stat -c "%U:%G %a" /opt/data/pg/wal-olares-2211)" "$(stat -c "%U:%G %a" "$f")"; zstd -q -d -c "$f"; ls /opt/data/pg/wal-olares-2211 | wc -l')
+[ "$P" = "pg:pgsock 750 pg:pgsock 640 olares1" ]; ok $? "wv3895: Olares-segment bewaard in wal-olares-2211, leesbaar als claude, alleen dat ene ($P)"
+docker exec $C grep -q "wv3895: WAL-archief weg (1 bestanden)" /opt/data/pg/db-wacht.log; ok $? "wv3895: db-wacht.log noemt het opruimen"
+docker exec -u pg $C /usr/lib/postgresql/17/bin/psql -X -At -h /run/pg -U pgbaas -d postgres -c "select pg_switch_wal()" >/dev/null 2>&1; sleep 2
+docker exec $C test -e /opt/data/pg/wal-archief; [ $? != 0 ]; ok $? "wv3895: na een segmentwissel ontstaat geen nieuw archief"
 [ $rood -gt 0 ] && { echo "-- pgrst.log"; docker exec $C tail -20 /tmp/pgrst.log; echo "-- db-wacht.log"; docker exec $C tail -30 /opt/data/pg/db-wacht.log; }
 docker rm -f $C >/dev/null 2>&1 || true
 echo "db-rook: $rood rood"; [ $rood = 0 ]

@@ -299,7 +299,7 @@ COPY package.json /app/package.json
 RUN npm install --omit=dev --no-audit --no-fund \
  && npm cache clean --force
 
-RUN chown -R root:root /app/db && chmod 0755 /app/db && chmod 0644 /app/db/* && chmod 0755 /app/db/db-wacht.sh /app/db/wal-archief.sh \
+RUN chown -R root:root /app/db && chmod 0755 /app/db && chmod 0644 /app/db/* && chmod 0755 /app/db/db-wacht.sh \
  && rm -f /app/db/pgdg-vinger.py \
  && printf '#!/bin/sh\n# wv3180: beheer-SQL op de eigen databank (stdin → JSON-rijen), zie /app/db/sb-sql.js\nexec node /app/db/sb-sql.js "$@"\n' > /app/sb-sql \
  && chmod 0755 /app/sb-sql && ln -sf /app/db/db-wacht.sh /app/db-wacht.sh \
