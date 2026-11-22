@@ -42,6 +42,7 @@ const UPLOAD_RE = /^\/fac\/upload\/([a-z0-9-]{8,64}\/[1-9][0-9]?)$/;
 // POST /fac/facturen/validatie is een leesvraag (Historie: zoeken, profiel, betaald-regel; wv952/wv991); een ontbrekende soort is
 // overzicht, net als in facturen.js. Een andere soort (ook de alias controles van het Socev-luik) valt voor "alleen kijken" onder de gewone 403.
 const VALIDATIE_PAD = '/fac/facturen/validatie';
+const ZOEK_PAD = '/fac/facturen/zoek';   // wv3915 (2C95 e): het zoekveld over de facturen is ook lezen
 const LEES_SOORTEN = new Set(['overzicht', 'zoek', 'tegenpartij', 'hoe', 'factuur']);
 const JWT_MAX = 8192;
 const JWT_DEEL_RE = /^[A-Za-z0-9_-]+$/;
@@ -217,7 +218,7 @@ function maak(o) {
       // De validatie-POST is lezen; de soort staat in de body en wordt hieronder na het lezen ervan getoetst (wv991).
       const alleenKijken = rol.mag_bevestigen === false && req.method === 'POST';
       const kijkWeiger = () => weiger(403, 'je kunt in Facturen alleen kijken en uploaden; vraag het David', 'alleen kijken');
-      if (alleenKijken && !UPLOAD_RE.test(p) && p !== '/fac/facturen/upload' && p !== VALIDATIE_PAD) return kijkWeiger();
+      if (alleenKijken && !UPLOAD_RE.test(p) && p !== '/fac/facturen/upload' && p !== VALIDATIE_PAD && p !== ZOEK_PAD) return kijkWeiger();
 
       // ruwe upload (één bestand per verzoek); de route van server.js schrijft naar een eigen map per gebruiker
       const up = UPLOAD_RE.exec(p);

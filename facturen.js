@@ -63,7 +63,7 @@ const ROUTES = {
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'feit', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering',
     'betaaldatum', 'sepa-batch', 'sepa-bestand', 'sepa-specificatie', 'regel', 'regel-weg', 'afzender-voorstel', 'maand-specificatie', 'bank-keuze',
-    'leverancier/verzendwijze', 'bevestig-groep', 'koppel-zeker', 'naar-cynthia', 'ontkoppel', 'herlees', 'kaart-toch-betalen'],
+    'leverancier/verzendwijze', 'bevestig-groep', 'koppel-zeker', 'naar-cynthia', 'ontkoppel', 'herlees', 'kaart-toch-betalen', 'zoek'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (sinds wv2547 ook vanaf een vaste plek, onder het invoerslot) én die hier een verse vingerafdruk vragen.
 const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus', 'POST /app/facturen/leverancier/verzendwijze'];
@@ -284,7 +284,7 @@ function signaalKort(s, fdb) {
 
 // ───────────────────────────── GET-routes ─────────────────────────────
 
-function overzicht(fdb, r, nu) {
+function overzicht(fdb, r, nu, nogBetalen) {
   const [ff, fp] = factuurFilter(r, 'f');
   const tel = (where, p) => Number(fdb.db.prepare('SELECT count(*) AS n FROM factuur f WHERE ' + where + ' AND ' + ff).get(...p, ...fp).n);
   const vandaag = dagAmsterdam(nu);
@@ -305,12 +305,59 @@ function overzicht(fdb, r, nu) {
       mislukt: tel("f.status = 'verzending_mislukt'", []),
       // concept in Gmail dat na 3 dagen nog niet verstuurd is (David gooide het weg of vergat het; Fable F4 #4): zichtbaar, geen signaal
       concept_oud: tel("f.status = 'concept_klaar' AND f.bijgewerkt_op < ?", [nuIso(nu - 3 * 86400000)]),
+      // wv3915 (2C95 f): staat de betaalmail aan (David in zijn app), dan telt stap 2 "Bij Cynthia" alleen wat op David wacht
+      bij_david: isEig(r) && r.ingang === 'app' && nogBetalen === 'auto' ? bijDavid(fdb, r, nu, nogBetalen) : undefined,
     },
+    nogbetalen_aan: isEig(r) && r.ingang === 'app' ? nogBetalen === 'auto' : undefined,   // wv3915: de app noemt stap 2 dan "Bij Cynthia"
+    stand: standVan(fdb, r, nu),   // wv3915 (2C95 d): wat de lege lijst Beoordelen laat zien
     gezondheid: gezondheid(fdb, r, nu),
     // wv856 (Fable #9b): de namen van de eigen entiteiten, want Instellingen (waar de eigenaar ze vandaan haalt) is alleen voor de eigenaar
     entiteiten: isEig(r) ? undefined : entiteitenRijen(fdb).filter((e) => e.actief === 1 && magEntiteit(r, e.sleutel))
       .map((e) => ({ sleutel: e.sleutel, naam: e.naam, naam_kort: e.naam_kort || null })),
   };
+}
+/*
+ * wv3915 (besluitenpagina nr 195 = 2C95 d, David Ja 22-11-2026): de lege lijst Beoordelen zegt wat er verder ligt in plaats van alleen
+ * "Alles beoordeeld": concepten die in Gmail op versturen wachten (met de oudste), open betalingen (waarvan over de vervaldatum) en verwachte
+ * incasso's. Zelfde rolfilter als de tellers; alleen tellen, geen namen of bedragen.
+ */
+function standVan(fdb, r, nu) {
+  const [ff, fp] = factuurFilter(r, 'f');
+  const vandaag = dagAmsterdam(nu);
+  const st = BETAAL_STATUS.map(() => '?').join(',');
+  const c = fdb.db.prepare("SELECT count(*) AS n, min(f.bijgewerkt_op) AS oudste FROM factuur f WHERE f.status = 'concept_klaar' AND " + ff).get(...fp);
+  const b = fdb.db.prepare("SELECT count(*) AS n, sum(CASE WHEN f.vervaldatum IS NOT NULL AND f.vervaldatum < ? THEN 1 ELSE 0 END) AS te_laat FROM factuur f " +
+    "WHERE f.betaalspoor = 'te_betalen' AND f.soort <> 'creditnota' AND f.status IN (" + st + ') AND ' + ff).get(vandaag, ...BETAAL_STATUS, ...fp);
+  const i = fdb.db.prepare("SELECT count(*) AS n FROM factuur f WHERE f.betaalspoor = 'incasso_verwacht' AND f.status IN (" + st + ') AND ' + ff).get(...BETAAL_STATUS, ...fp);
+  const oudste = c.oudste ? Math.max(0, Math.floor((nu - Date.parse(c.oudste)) / 86400000)) : null;
+  return { concepten: Number(c.n), concept_oudste_dagen: oudste, betalen_open: Number(b.n), betalen_te_laat: Number(b.te_laat || 0), incasso_verwacht: Number(i.n) };
+}
+/*
+ * wv3915 (2C95 f, Fable-review "Een 9 - facturen" idee 8): met de betaalmail aan ligt een te betalen factuur gewoon bij Cynthia; het getal op
+ * stap 2 telt dan alleen wat op David wacht: een nog niet nagebeld rekeningnummer, een betaalverzoek dat niet (zeker) verstuurd is of niet kon
+ * (Privé, alleen-eigenaar, …), en een factuur die na de herinnering nog niet betaald is. Wat wacht, verstuurd wordt of verstuurd is: niet.
+ */
+const BIJ_CYNTHIA = ['wacht', 'verzenden', 'verstuurd'];
+function bijDavid(fdb, r, nu, nogBetalen) {
+  const [ff, fp] = factuurFilter(r, 'f');
+  const ctx = kernCtx(fdb, nu);
+  const st = BETAAL_STATUS.map(() => '?').join(',');
+  const ids = fdb.db.prepare("SELECT f.id FROM factuur f WHERE f.betaalspoor = 'te_betalen' AND f.status IN (" + st + ') AND ' + ff + ' LIMIT ' + LIJST_MAX).all(...BETAAL_STATUS, ...fp);
+  let te_laat = null;
+  let n = 0;
+  for (const { id } of ids) {
+    const f = D.factuurVoorKern(fdb, id);
+    if (K.isCreditnota(f)) continue;
+    const lev = leverancierKern(fdb, f.leverancier_id);
+    if (K.magBevestigen(Object.assign({}, f, { status: 'te_beoordelen' }), { leverancier: lev, ctx }).redenen.some((x) => /IBAN/.test(x))) { n++; continue; }
+    const s = nbStand(fdb, f, nogBetalen);
+    if (!BIJ_CYNTHIA.includes(s.status)) { n++; continue; }
+    if (s.status === 'verstuurd') {
+      if (!te_laat) { te_laat = new Set(); try { for (const x of nhStanden(fdb, nu)) if (x.stand === 'te_laat') te_laat.add(x.factuur); } catch (e) { /* geen herinneringstand: niet meetellen */ } }
+      if (te_laat.has(f.id)) n++;
+    }
+  }
+  return n;
 }
 // Bovenbalk rechts: bron zonder ronde in > 26 u = rood; per rekening dagen sinds de laatste upload of bankluis-ronde (oranje/rood).
 function gezondheid(fdb, r, nu) {
@@ -397,6 +444,7 @@ function detail(fdb, r, id, nu, nogBetalen) {
     entiteiten: ents,
     verzendmodus: D.metaLees(fdb, 'verzendmodus'),
     bedragpatroon: bedragpatroonVoor(fdb, r, f, ctx.vandaag),
+    vorige: f.status === 'te_beoordelen' ? vorigBedrag(fdb, r, f) : undefined,   // wv3915 (2C95 c): "vorige keer € x" of "eerste keer"
     afzender: isEig(r) ? afzenderVan(fdb, f) : undefined,   // wv1917: voor "Onthoud voor deze afzender"
     // wv1323: een feitkaart voor een rekening op deze factuur (alleen de eigenaar; de factuur moet nagebeld worden)
     feiten: ip.iban_nieuw && f.status === 'te_beoordelen' ? feitKaarten(fdb, r, nu).filter((k) => k.facturen.some((x) => x.id === f.id)) : [],
@@ -412,6 +460,31 @@ function detail(fdb, r, id, nu, nogBetalen) {
 function knopVerstuurAan(fdb) {
   return D.metaLees(fdb, 'versturen_per_factuur') === '1' && D.metaLees(fdb, 'versturen_vrijgegeven') === '1';
 }
+/*
+ * wv3915 (besluitenpagina nr 195 = 2C95 c): "is dit normaal?" bij het bedrag. Het vorige bedrag bij deze partij: de jongste eerdere factuur van
+ * dezelfde leverancier (geen creditnota, geen dubbel, niet "geen factuur") of de jongste afschrijving aan het IBAN van deze factuur, vanuit
+ * welke entiteit ook (hele bankhistorie, zonder regels die al aan deze factuur hangen), wat het laatst was; entiteit erbij. Niets van beide terwijl er een leverancier of
+ * IBAN is: eerste keer. Zonder leverancier én zonder IBAN: null (niet vast te stellen). Rolfilter zoals overal.
+ */
+function vorigBedrag(fdb, r, f) {
+  const iban = K.ibanNorm(f.iban);
+  if (!f.leverancier && !iban) return null;
+  const [ff, fp] = factuurFilter(r, 'g');
+  const fv = f.leverancier ? fdb.db.prepare("SELECT g.incl, g.valuta, g.entiteit, coalesce(g.factuurdatum, substr(g.aangemaakt_op, 1, 10)) AS datum FROM factuur g WHERE g.leverancier = ? AND g.id <> ? " +
+    "AND g.soort <> 'creditnota' AND g.status NOT IN ('geen_factuur','te_beoordelen') AND g.dubbel_van IS NULL AND g.incl > 0 AND " + ff + ' ORDER BY datum DESC, g.aangemaakt_op DESC LIMIT 1').get(f.leverancier, f.id, ...fp) : null;
+  let bv = null;
+  if (iban) {
+    // alle entiteiten: een partij die al vaak vanuit een andere praktijk betaald is, is geen "eerste keer" (gemeten op de echte stand 22-11)
+    const [tf, tp] = eigenaarFilter(r, 't');
+    bv = fdb.db.prepare('SELECT -t.bedrag_centen AS incl, t.boekdatum AS datum, t.entiteit FROM bank_transactie t WHERE t.verwijderd_op IS NULL AND t.bedrag_centen < 0 ' +
+      'AND t.tegenpartij_iban = ? AND NOT EXISTS (SELECT 1 FROM koppeling k WHERE k.transactie = t.id AND k.factuur = ?) AND ' + tf +
+      ' ORDER BY t.boekdatum DESC, (t.entiteit = ?) DESC LIMIT 1').get(iban, f.id, ...tp, f.entiteit || '');
+  }
+  const kies = fv && (!bv || fv.datum >= bv.datum) ? { centen: fv.incl, valuta: fv.valuta || 'EUR', datum: fv.datum, bron: 'factuur', entiteit: fv.entiteit || null }
+    : bv ? { centen: bv.incl, valuta: 'EUR', datum: bv.datum, bron: 'bank', entiteit: bv.entiteit || null } : null;
+  if (!kies) return { eerste: true };
+  return Object.assign({ eerste: false }, kies);
+}
 // wv1317: gebruikelijke bandbreedte van de betalingen aan het IBAN van deze factuur (laatste 12 maanden, eigen entiteit), met het oordeel
 // over het factuurbedrag. Alleen over bankregels die deze rol mag zien; zonder IBAN of met < 3 betalingen: null.
 function bedragpatroonVoor(fdb, r, f, vandaag) {
@@ -422,6 +495,43 @@ function bedragpatroonVoor(fdb, r, f, vandaag) {
     'AND t.boekdatum >= ? AND ' + tf).all(f.entiteit, iban, K.plusDagen(vandaag, -365), ...tp);
   const p = V.bedragPatroon(lijst, vandaag, f.incl);
   return p ? Object.assign({ rekening: eind4(iban) }, p) : null;
+}
+/*
+ * wv3915 (besluitenpagina nr 195 = 2C95 e): één zoekveld over alle facturen, die van de app en (alleen de eigenaar) het oude FV2-archief.
+ * tekst = leverancier, factuurnummer, kenmerk of bedrag ("123,45", "€ 1.234,56", "123" = € 123,00 – € 123,99). 2–60 tekens; hooguit 50
+ * treffers, jongste factuurdatum eerst; aantal = alle treffers. Alleen lezen: de zoektekst komt niet in de log of de audit.
+ */
+const ZOEK_MAX = 50;
+function zoekBedrag(t) {
+  const s = String(t).replace(/[€\s]/g, '');
+  if (!/^-?\d{1,3}(\.\d{3})*(,\d{1,2})?$|^-?\d+([.,]\d{1,2})?$/.test(s)) return null;
+  const nl = /,\d{1,2}$/.test(s) || /^\d{1,3}(\.\d{3})+$/.test(s) ? s.replace(/\./g, '').replace(',', '.') : s.replace(',', '.');
+  const x = Math.abs(Number(nl));
+  if (!Number.isFinite(x)) return null;
+  const heel = !/[.,]\d{1,2}$/.test(s) || /^\d{1,3}(\.\d{3})+$/.test(s);
+  const c = Math.round(x * 100);
+  return heel ? [c, c + 99] : [c, c];
+}
+function zoekFacturen(fdb, r, d) {
+  const tekst = String(d && d.tekst || '').replace(/\s+/g, ' ').trim();
+  if (tekst.length < 2 || tekst.length > 60) weiger(400, 'zoektekst van 2 tot 60 tekens');
+  const bedrag = zoekBedrag(tekst);
+  const like = '%' + tekst.toLowerCase().replace(/[\\%_]/g, (x) => '\\' + x) + '%';
+  const [ff, fp] = factuurFilter(r, 'f');
+  const tw = "(lower(coalesce(l.naam, '')) LIKE ? ESCAPE '\\' OR lower(coalesce(f.leverancier_naam, '')) LIKE ? ESCAPE '\\' OR lower(coalesce(f.nummer, '')) LIKE ? ESCAPE '\\' " +
+    "OR lower(coalesce(f.kenmerk, '')) LIKE ? ESCAPE '\\'" + (bedrag ? ' OR abs(f.incl) BETWEEN ? AND ?' : '') + ')';
+  const tp = [like, like, like, like].concat(bedrag || []);
+  const app = fdb.db.prepare('SELECT f.*, l.naam AS lev_naam, (SELECT max(o.opgehaald_op) FROM opdracht o WHERE o.factuur = f.id AND o.status IN (\'opgehaald\',\'gelukt\')) AS naar_boekhouding_op ' +
+    'FROM factuur f LEFT JOIN leverancier l ON l.id = f.leverancier WHERE ' + tw + ' AND ' + ff).all(...tp, ...fp)
+    .map((f) => Object.assign(factuurKort(f, f.lev_naam), { herkomst: 'app', binnen_op: f.aangemaakt_op, bevestigd_op: f.bevestigd_op || null,
+      naar_boekhouding_op: f.naar_boekhouding_op || null, betaald_gezien_op: f.betaald_gezien_op || null }));
+  const aw = "(lower(coalesce(a.leverancier_naam, '')) LIKE ? ESCAPE '\\' OR lower(coalesce(a.nummer, '')) LIKE ? ESCAPE '\\' OR lower(coalesce(a.kenmerk, '')) LIKE ? ESCAPE '\\'" +
+    (bedrag ? ' OR abs(a.incl) BETWEEN ? AND ?' : '') + ')';
+  const archief = isEig(r) ? fdb.db.prepare('SELECT a.id, a.entiteit, a.leverancier_naam, a.nummer, a.factuurdatum, a.vervaldatum, a.incl, a.valuta, a.betaalwijze, a.status FROM factuur_archief a WHERE ' + aw)
+    .all(like, like, like, ...(bedrag || [])).map((a) => ({ id: a.id, herkomst: 'archief', status: a.status || null, leverancier_naam: a.leverancier_naam, nummer: a.nummer,
+      factuurdatum: a.factuurdatum, vervaldatum: a.vervaldatum, incl: a.incl, valuta: a.valuta || 'EUR', entiteit: a.entiteit, betaalwijze: a.betaalwijze || null })) : [];
+  const alle = app.concat(archief).sort((a, b) => String(b.factuurdatum || '').localeCompare(String(a.factuurdatum || '')) || String(a.id).localeCompare(String(b.id)));
+  return { aantal: alle.length, facturen: alle.slice(0, ZOEK_MAX), afgekapt: alle.length > ZOEK_MAX };
 }
 // Documentinzage: JSON met base64 (de App tekent met pdf.js); rolcontrole via de factuur of het POT-afschrift; elke inzage een auditrij.
 function document(fdb, r, id, o) {
@@ -4843,7 +4953,7 @@ function maak(opties) {
       const rest = v.pad.slice(PREFIX.length + 1);
       const d = v.d && typeof v.d === 'object' ? v.d : {};
       if (v.methode === 'GET') {
-        if (rest === '') return ok(overzicht(fdb, r, nu));
+        if (rest === '') return ok(overzicht(fdb, r, nu, v.nogBetalen));
         let m;
         if ((m = /^lijst\/([a-z]{3,12})$/.exec(rest))) return ok(lijst(fdb, r, m[1], nu));
         if ((m = /^factuur\/([0-9a-f]{16})$/.exec(rest))) return ok(detail(fdb, r, m[1], nu, v.nogBetalen));
@@ -4881,6 +4991,7 @@ function maak(opties) {
         case 'terugdraaien': return ok(terugdraaien(fdb, r, d, nu), 'terugdraaien ' + kort(d.id, 16));
         case 'naar-cynthia': { const j = naarCynthia(fdb, r, d, nu, vo); return ok(j, 'naar-cynthia ' + kort(d.id, 16) + (j.opnieuw ? ' opnieuw' : '')); }   // wv3372
         case 'kaart-toch-betalen': return ok(kaartTochBetalen(fdb, r, d, nu), 'kaart-toch-betalen ' + kort(d.id, 16));   // wv3911 (C08)
+        case 'zoek': { const j = zoekFacturen(fdb, r, d); return ok(j, 'zoek ' + j.aantal); }   // wv3915 (2C95 e): alleen lezen, de zoektekst niet in de log
         case 'ontkoppel': { const j = ontkoppel(fdb, r, d, nu, vo); return ok(j, 'ontkoppel ' + kort(d.factuur, 16) + ' ' + j.betaalspoor_voor + '>' + j.betaalspoor); }   // wv3452
         case 'nagebeld': return ok(nagebeld(fdb, r, d, nu, vo), 'nagebeld ' + kort(d.id, 16));
         case 'geen-factuur': return ok(gebeurtenisRoute(fdb, r, d, 'geen_factuur', nu));
