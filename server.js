@@ -10181,7 +10181,7 @@ let loketAvondBezig = false;
 async function loketAvondTik(opt) {
   const o = opt || {};
   if (!AN || typeof AN.avondMoment !== 'function' || loketAvondBezig) return null;
-  if (!o.proef && (!SERVER_ECHT || !rolPrimair())) return null;
+  if (!o.proef && (typeof SERVER_ECHT === 'undefined' || !SERVER_ECHT || !rolPrimair())) return null;
   const t = o.ams || ovisAms();
   const klok = String(t.uur).padStart(2, '0') + ':' + String(t.min).padStart(2, '0');
   loketAvondBezig = true;
@@ -10203,7 +10203,7 @@ async function loketAvondTik(opt) {
   } catch (e) { logError('app-nieuws-avond', e); return { fout: true }; }
   finally { loketAvondBezig = false; }
 }
-if (AN && SERVER_ECHT) { setInterval(function () { loketAvondTik(); }, 5 * 60000).unref(); }
+if (AN && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setInterval(function () { loketAvondTik(); }, 5 * 60000).unref(); }   // poortblok-toetsen laden dit zonder SERVER_ECHT
 function appNieuwsInfo() {
   if (!AN) return { aan: false };
   try {
