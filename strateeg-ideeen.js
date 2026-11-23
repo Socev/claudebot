@@ -192,7 +192,8 @@ function maak(o) {
   function grensOk(voorDavid) {
     const g = CFG.grens, v = verbruik(nlNu().dag);
     if (v.dag >= (voorDavid ? g.aanroepen_dag : g.aanroepen_dag - g.voor_david)) return false;
-    return v.maand < g.aanroepen_maand && v.usd_dag < g.usd_dag && v.usd_maand < g.usd_maand;
+    // de volgende aanroep mag de dollargrens niet over kunnen gaan: reken zijn maximum (usd_aanroep_max) er al bij (Codex r2 MOET 1)
+    return v.maand < g.aanroepen_maand && v.usd_dag + g.usd_aanroep_max <= g.usd_dag && v.usd_maand + g.usd_aanroep_max <= g.usd_maand;
   }
   let denkEind = 0;   // echte klok: na denk_max_ms start de denktaak geen nieuwe aanroep meer (Codex-MOET 1)
   async function roep(soort, rondeId, systeem, prompt, schemaJ, voorDavid, timeoutMs) {
@@ -201,14 +202,14 @@ function maak(o) {
     if (belangRe && belangRe.test(prompt)) { log({ stap: 'idee-belang-in-prompt', soort }); return null; }   // vangnet: nooit met een belangwoord naar het model
     const t0 = nu(), dag = nlNu().dag;
     // eerst reserveren (telt meteen mee voor de grens), daarna het verbruik invullen
-    const rid = Number(db().prepare("INSERT INTO idee_aanroep (ms, dag, maand, ronde_id, soort, ok, usd, fout) VALUES (?, ?, ?, ?, ?, 0, 0, 'loopt')").run(t0, dag, dag.slice(0, 7), rondeId, soort).lastInsertRowid);
+    const rid = Number(db().prepare("INSERT INTO idee_aanroep (ms, dag, maand, ronde_id, soort, ok, usd, fout) VALUES (?, ?, ?, ?, ?, 0, ?, 'loopt')").run(t0, dag, dag.slice(0, 7), rondeId, soort, CFG.grens.usd_aanroep_max).lastInsertRowid);
     let r;
     const rest = denkEind ? Math.max(10000, denkEind - Date.now()) : Infinity;
     try { r = await o.claude(systeem, prompt, schemaJ, { timeoutMs: Math.min(timeoutMs || 300000, rest), effort: soort === 'A' || soort === 'D2' ? 'medium' : 'low' }); }
     catch (e) { r = { ok: false, fout: 'aanroep faalde' }; }
     const v = (r && r.verbruik) || {};
     db().prepare('UPDATE idee_aanroep SET ok = ?, tok_in = ?, tok_uit = ?, usd = ?, duur_ms = ?, fout = ? WHERE id = ?')
-      .run(r && r.ok ? 1 : 0, (v.in || 0) + (v.cache_lees || 0) + (v.cache_schrijf || 0), v.uit || 0, typeof v.kosten === 'number' ? v.kosten : 0, nu() - t0, r && r.ok ? null : String((r && r.fout) || 'fout').slice(0, 120), rid);
+      .run(r && r.ok ? 1 : 0, (v.in || 0) + (v.cache_lees || 0) + (v.cache_schrijf || 0), v.uit || 0, typeof v.kosten === 'number' ? v.kosten : (r && r.ok ? CFG.grens.usd_aanroep_max : 0), nu() - t0, r && r.ok ? null : String((r && r.fout) || 'fout').slice(0, 120), rid);
     return r && r.ok && r.data && typeof r.data === 'object' ? r.data : null;
   }
 
@@ -436,7 +437,8 @@ function maak(o) {
         }
       }
       // termijn voorbij: nog één toetsronde, daarna vervallen
-      if (s.beslisdatum < vandaag && s.na_termijn) { beslis(s.id, 0, 'termijn', []); continue; }
+      // (na een toetsronde mét oordeel; zonder oordeel uiterlijk een week na de beslisdatum, zodat een stilgevallen model niets eeuwig open houdt)
+      if (s.beslisdatum < vandaag && (s.na_termijn || s.beslisdatum < I.plusDagen(vandaag, -7))) { beslis(s.id, 0, 'termijn', []); continue; }
       // eigen zoekvragen + persberichten
       const kop = [];
       for (const q of JSON.parse(s.zoek || '[]').slice(0, 2)) kop.push(...await feedKoppen('gnews', gnewsUrl(q, '3d'), false, q));
@@ -460,10 +462,13 @@ function maak(o) {
     });
     const d = await roep('B', rondeId, SYS_B, 'Vandaag: ' + vandaag + '.\n<koppen>\n' + blokken.join('\n') + '\n</koppen>\nAntwoord per stelling met id = het s-nummer.', SCHEMA_B, false, 300000);
     const st = db().prepare('INSERT OR IGNORE INTO idee_kop_gezien (stelling_id, sleutel, ms) VALUES (?, ?, ?)');
-    if (d) transactie(() => { for (const s of naarB) for (const c of kopIn[s.id]) for (const k of c.leden) st.run(s.id, k.sleutel, nu()); });
+    const beoordeeld = new Set();
     let getoetst = 0;
     for (const a of (d && Array.isArray(d.stellingen) ? d.stellingen : [])) {
-      const s = naarB.find((x) => 's' + x.id === String(a.id) || String(x.id) === String(a.id)); if (!s) continue;
+      const s = naarB.find((x) => 's' + x.id === String(a.id) || String(x.id) === String(a.id)); if (!s || beoordeeld.has(s.id)) continue;
+      if (!['open', 'uitgekomen', 'weerlegd'].includes(a.oordeel)) continue;
+      beoordeeld.add(s.id);
+      transactie(() => { for (const c of kopIn[s.id]) for (const k of c.leden) st.run(s.id, k.sleutel, nu()); });
       const ids = (Array.isArray(a.bron_ids) ? a.bron_ids : []).map(String).filter((x) => eigen[s.id].has(x));   // alleen bewijs uit het eigen blok (Codex-MOET 4)
       const kans = typeof a.kans_nu === 'number' && a.kans_nu >= 0 && a.kans_nu <= 1 ? Math.round(a.kans_nu * 1000) / 1000 : null;
       const zin = I.schoon(a.zin, 240);
@@ -475,7 +480,7 @@ function maak(o) {
       getoetst++;
     }
     // termijn voorbij zonder uitkomst: dit was de laatste kans (volgende ronde vervalt hij)
-    for (const s of naarB) if (s.beslisdatum < vandaag) db().prepare("UPDATE idee_stand SET na_termijn = 1 WHERE stelling_id = ? AND status = 'open'").run(s.id);
+    for (const s of naarB) if (s.beslisdatum < vandaag && beoordeeld.has(s.id)) db().prepare("UPDATE idee_stand SET na_termijn = 1 WHERE stelling_id = ? AND status = 'open'").run(s.id);
     return getoetst;
   }
   function beslis(id, uitkomst, hoe, bron, oordeel) {
@@ -616,6 +621,7 @@ function maak(o) {
       // na de await opnieuw lezen: intussen kan een denkronde de stelling hebben beslist of de opdracht hebben ingetrokken (Codex-MOET 2)
       const nu2 = db().prepare('SELECT status, positie, actie_reden, actie_ms FROM idee_stand WHERE stelling_id = ?').get(r.id);
       if (!nu2 || nu2.positie !== r.positie) continue;
+      if (o.strateegStand && o.strateegStand() === 'pauze') break;
       if (r.positie === 'wacht_koop' && (nu2.status !== 'open' || nu() - nu2.actie_ms > CFG.koop.geldig_uren * 3600000)) continue;
       r.actie_reden = nu2.actie_reden;
       // alles hieronder synchroon in één transactie

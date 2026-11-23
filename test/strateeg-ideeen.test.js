@@ -315,7 +315,7 @@ test('toetsen: gesloten Polymarket-markt beslist zonder model; één zachte bron
   assert.strictEqual(I.bewijsGenoeg([{ hard: 1, uitgever: 'SEC', melders: 1 }]), true);
   // termijn
   klok.t = nlMs('2026-11-24', '07:46');
-  const w3 = wereld({ klok, items: KOPPEN(klok.t), antwoord: antwoordA({ beslisdatum: '2026-11-26' }) });
+  const w3 = wereld({ klok, items: KOPPEN(klok.t), antwoord: (schema, prompt) => schema === G.SCHEMA_B ? { stellingen: [{ id: 's1', oordeel: 'open', kans_nu: 0.5, bron_ids: [], zin: 'nog niets' }] } : antwoordA({ beslisdatum: '2026-11-26' })(schema, prompt) });
   await w3.m._denk.ronde('vast');
   klok.t = nlMs('2026-11-28', '10:05');
   await w3.m._denk.ronde('vast');   // na de termijn: laatste toetsronde
@@ -369,4 +369,26 @@ test('Codex-review: een hangend koersverzoek houdt de tik niet langer op dan de 
   d.prepare("INSERT INTO idee_stand (stelling_id, status, positie, actie_ms, kosten) VALUES (1, 'open', 'wacht_koop', ?, 0)").run(klok.t);
   const t0 = Date.now(); await m.tik({ gedaan: 'niets' }, { gedaan: 'niets' });
   assert.ok(Date.now() - t0 < 1500, 'tik klaar binnen de grens: ' + (Date.now() - t0) + ' ms');
+});
+
+test('Codex r2: dollargrens rekent het maximum van de volgende aanroep mee; zonder oordeel geen laatste toetskans verbruikt', async () => {
+  const klok = { t: nlMs('2026-11-24', '07:46') };
+  const w = wereld({ klok, items: KOPPEN(klok.t), antwoord: () => null });
+  w.m.info();
+  w.d.prepare("INSERT INTO idee_aanroep (ms, dag, maand, soort, ok, usd) VALUES (?, '2026-11-24', '2026-11', 'A', 1, ?)").run(klok.t, CFG.grens.usd_dag - CFG.grens.usd_aanroep_max + 0.01);
+  await w.m._denk.ronde('vast');
+  assert.strictEqual(w.log.prompts.length, 0, 'net onder de daggrens maar met het maximum erbij erover: geen aanroep');
+  // B antwoordt niets voor een stelling na de termijn → na_termijn blijft 0, koppen niet als gezien gemarkeerd
+  const w2 = wereld({ klok, items: KOPPEN(klok.t), antwoord: (schema, prompt) => schema === G.SCHEMA_B ? { stellingen: [] } : antwoordA({ beslisdatum: '2026-11-26' })(schema, prompt) });
+  await w2.m._denk.ronde('vast');
+  klok.t = nlMs('2026-11-28', '10:05');
+  await w2.m._denk.ronde('vast');
+  assert.strictEqual(w2.d.prepare('SELECT na_termijn FROM idee_stand WHERE stelling_id = 1').get().na_termijn, 0);
+  assert.strictEqual(w2.d.prepare('SELECT COUNT(*) AS n FROM idee_kop_gezien').get().n, 0);
+  klok.t = nlMs('2026-11-29', '10:05');
+  await w2.m._denk.ronde('vast');
+  assert.strictEqual(w2.d.prepare('SELECT status FROM idee_stand WHERE stelling_id = 1').get().status, 'open', 'niet vervallen zonder dat er een toetsronde met oordeel was');
+  klok.t = nlMs('2026-12-04', '10:05');
+  await w2.m._denk.ronde('vast');
+  assert.strictEqual(w2.d.prepare('SELECT status FROM idee_stand WHERE stelling_id = 1').get().status, 'vervallen', 'een week na de termijn vervalt hij toch');
 });
