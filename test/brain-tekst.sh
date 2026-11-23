@@ -38,7 +38,7 @@ PY
 for i in $(seq 1 5); do printf '# Notitie %s\nHet risico van een eigen verzekering is soms hoog; eigen keuze, risico bekend.\n' "$i" > "$V/20_Prive/Notities/n$i.md"; done
 W="$W" V="$V" node --no-warnings - <<'JS'
 const fs = require('fs'), path = require('path');
-const S = require('./secondbrain.js'), BT = require('./brain-tekst.js');
+const vm = require('vm'), S = require('./secondbrain.js'), BT = require('./brain-tekst.js');
 let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (!ok && extra !== undefined ? '  [' + JSON.stringify(extra).slice(0, 600) + ']' : '')); }
 (async function () {
@@ -104,7 +104,23 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('21 uitrol.sh: brain-tekst.js in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bbrain-tekst\.js\b/.test(ui));
   toets('22 3C83: zoek-snel seint bij pagina nieuwer en verouderd', /reden === 'pagina nieuwer'\) verouderdSein\('feitenlijst'\)/.test(zs) && /verouderdSein\('tekstindex'\)/.test(zs) && /verouderd: function \(laag\) \{ if \(typeof zoekOverdagVraag === 'function'\) zoekOverdagVraag\(laag\)/.test(src));
   toets('23 3C83: overdag 07–23, zelfde argv als de nacht, zonder socev-run, begrensd', /ZOEK_OVERDAG_VAN = 7, ZOEK_OVERDAG_TOT = 23/.test(src) && /sb2ZoekKlok\('sb2-feitenlijst', \{ van: \[5, 0\], tot: \[5, 30\] \}, 5, SB2_FEITEN_ARGV\)/.test(src)
-    && /zoekOverdagStap\(SB2_INDEX_ARGV/.test(src) && /ZOEK_OVERDAG_VRAAG_MS = 5 \* 60000/.test(src) && /nachtketenActief\(\)\) return false/.test(src));
+    && /zoekOverdagStap\(SB2_INDEX_ARGV/.test(src) && /ZOEK_OVERDAG_VRAAG_MS = 5 \* 60000/.test(src));
+  // wv3891: overdag mag de ronde bij keten aan maar niet lopend; niet bij een lopende stap, onderhoud, OVIS-nacht of buiten 07–23 (vm op de echte functies)
+  {
+    const knip = (n) => { const m = src.match(new RegExp('^function ' + n + '\\([^)]*\\) \\{[\\s\\S]*?\\n\\}\\n', 'm')); return m ? m[0] : ''; };
+    const code = knip('zoekOverdagKetenLoopt') + knip('zoekOverdagMag');
+    const st = { lopend: 0, aan: true, onderhoud: false, ovis: null, uur: 11, gooi: false };
+    const ctx = { zoekOverdag: { aan: true, loopt: false }, SERVER_ECHT: true, rolPrimair: () => true, ZOEK_OVERDAG_VAN: 7, ZOEK_OVERDAG_TOT: 23,
+      nachtketenActief: () => st.aan, nachtketenInfo: () => { if (st.gooi) throw new ReferenceError('tdz'); return { aan: st.aan, lopend: st.lopend }; },
+      onderhoud: { stand: () => ({ aan: st.onderhoud }) }, ovisLoopt: { get nu() { return st.ovis; } }, ovisAms: () => ({ uur: st.uur }) };
+    let mag = null;
+    try { vm.createContext(ctx); vm.runInContext(code + '\nthis.__m = zoekOverdagMag;', ctx); mag = ctx.__m; } catch (e) { console.log('   vm-fout ' + e.message); }
+    const r = (z) => { Object.assign(st, { lopend: 0, aan: true, onderhoud: false, ovis: null, uur: 11, gooi: false }, z); return mag ? mag() : 'geen'; };
+    const u = { aanNietLopend: r({}), lopend: r({ lopend: 1 }), ketenUit: r({ aan: false }), onderhoud: r({ onderhoud: true }), ovisNacht: r({ ovis: 'nacht' }),
+      uur6: r({ uur: 6 }), uur23: r({ uur: 23 }), uur22: r({ uur: 22 }), tdz: r({ gooi: true }) };
+    toets('24 wv3891: overdag ook bij keten aan (niet lopend); niet bij lopende stap/onderhoud/OVIS-nacht/buiten 07–23', u.aanNietLopend === true && u.lopend === false && u.ketenUit === true
+      && u.onderhoud === false && u.ovisNacht === false && u.uur6 === false && u.uur23 === false && u.uur22 === true && u.tdz === true, u);
+  }
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(2); });

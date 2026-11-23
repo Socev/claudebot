@@ -23809,7 +23809,7 @@ const sb2Zoekindex = sb2ZoekKlok('sb2-zoekindex', { van: [5, 5], tot: [6, 0] }, 
 // (zelfde commando's als de nachtklokken; gemeten 21-11: index 3,4 s, feitenlijst < 1 s) en meteen als een vraag op een gewijzigde pagina
 // stuit (zoek-snel.js opt.verouderd), hooguit eens per 5 min. Zonder socev-run: een mislukte overdagronde geeft geen box-rij of bericht
 // (de nachtklok blijft het alarm, en Zoek snel zoekt dan live zoals vóór wv3734); alleen het podlog en /health zoek_snel.overdag. Niet tijdens
-// de onderhoudsstand, de OVIS-nachtronde of de nachtketen. Schakelaar ZOEK_OVERDAG=uit.
+// de onderhoudsstand, de OVIS-nachtronde of een lopende nachtketen-stap (wv3891). Schakelaar ZOEK_OVERDAG=uit.
 const ZOEK_OVERDAG_VAN = 7, ZOEK_OVERDAG_TOT = 23, ZOEK_OVERDAG_UUR_MS = 55 * 60000, ZOEK_OVERDAG_VRAAG_MS = 5 * 60000;
 const ZOEK_OVERDAG_STAAT = path.join(KLOKKEN_DIR, 'sb2-zoek-overdag.json');
 const zoekOverdag = { loopt: false, laatste: null, aan: process.env.ZOEK_OVERDAG !== 'uit' };
@@ -23823,8 +23823,13 @@ function zoekOverdagStap(argv, maxMs) {
     } catch (e) { klaar({ exit: 127, ms: Date.now() - t0 }); }
   });
 }
+// wv3891: "de keten loopt NU" (een stap actief, /health.nachtketen.lopend), niet nachtketenActief() — die is waar zolang de vlag aan staat,
+// ook overdag, waardoor de overdagronde sinds wv3734 nooit liep. Fout of keten nog niet geladen (TDZ): loopt niet.
+function zoekOverdagKetenLoopt() {
+  try { return nachtketenInfo().lopend > 0; } catch (e) { return false; }
+}
 function zoekOverdagMag() {
-  if (!zoekOverdag.aan || !SERVER_ECHT || !rolPrimair() || zoekOverdag.loopt || nachtketenActief()) return false;
+  if (!zoekOverdag.aan || !SERVER_ECHT || !rolPrimair() || zoekOverdag.loopt || zoekOverdagKetenLoopt()) return false;
   try { if (onderhoud.stand().aan) return false; } catch (e) { return false; }
   if (ovisLoopt.nu === 'nacht') return false;
   const a = ovisAms();
