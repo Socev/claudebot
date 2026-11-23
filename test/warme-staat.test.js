@@ -114,6 +114,18 @@ test('app-data: bij een wijziging, hooguit eens per 15 s, zonder vendor/tmp; laa
   assert.ok(m.stand().soorten['app-data'].op_r230 === true && m.stand().soorten['app-data'].leeftijd_s <= 1);
 });
 
+test('geheimenbundel: ontbreekt een verplichte sleutel, dan blijft de vorige staan (Codex MOET 2)', async function () {
+  const o = opzet(); const m = W.maak(o.opties({ standin: false }));
+  await m.ronde();
+  const voor = fs.readFileSync(path.join(o.nep, 'geheimen.age'));
+  fs.writeFileSync(path.join(o.T, 'chart/claudebot/templates/deployment.yaml'), '# leeg\n');
+  cp.execFileSync('bash', ['-c', 'cd "$1" && git -c user.email=t@t -c user.name=t commit -qam leeg', '_', path.join(o.T, 'chart')]);
+  const m2 = W.maak(o.opties({ standin: false }));
+  o.s.klok += 25 * 3600e3; const r = await m2.ronde();
+  assert.strictEqual(r.uitkomst, 'deels'); assert.match(m2.stand().soorten.geheimen.fout, /verplicht ontbreekt: API_SECRET/);
+  assert.deepStrictEqual(fs.readFileSync(path.join(o.nep, 'geheimen.age')), voor, 'vorige bundel ongemoeid');
+});
+
 test('passief en stand-in doen niets (kruisproef van de rolpoort)', async function () {
   const o = opzet(); o.s.primair = false;
   const m = W.maak(o.opties());
@@ -155,6 +167,7 @@ test('terugweg: Olares passief + stand vps haalt op, controleert de sha', async 
   assert.strictEqual((await m.ronde()).uitkomst, 'opgehaald');
   assert.deepStrictEqual(fs.readFileSync(path.join(o.thuis, 'uitwijk-warm/terug/app-data.gz')), gz);
   assert.ok(!fs.existsSync(path.join(o.thuis, 'uitwijk-warm/terug/kern.gz')), 'verkeerde sha geweigerd');
+  assert.strictEqual(m.stand().terug.kern.fout, 'sha256 klopt niet', 'afgewezen soort blijft zichtbaar naast een geslaagde');
   assert.ok(!/geef-terug geheimen/.test(log(o)), 'geheimen nooit terug');
   o.s.klok += 61000; assert.strictEqual((await m.ronde()).uitkomst, 'gelijk');
 });

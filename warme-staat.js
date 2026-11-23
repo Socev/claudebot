@@ -294,7 +294,7 @@ function maak(o) {
     const rijen = fs.readFileSync(tsv, 'utf8').split('\n').filter(function (r) { return r.trim() && r[0] !== '#' && !r.startsWith('naam\t'); })
       .map(function (r) { const k = r.split('\t'); return { naam: k[0], doel: k[1], bron: k[2] || '', vorm: k[3] || '', nodig: k[4] || '' }; });
     let chart = null;
-    const regels = [], namen = [], in_kluiskopie = [], mist = [];
+    const regels = [], namen = [], in_kluiskopie = [], mist = [], verplicht_mist = [];
     for (const r of rijen) {
       if (!/^[A-Z][A-Z0-9_]*$/.test(r.naam) || r.bron === 'nieuw') continue;
       let w = null;
@@ -308,13 +308,15 @@ function maak(o) {
       } else if (r.bron.startsWith('pod-bestand:')) {
         try { w = fs.readFileSync(r.bron.slice(12)).toString('base64'); } catch (e) { w = null; }
       } else continue;
-      if (!w || !vormOk(r.vorm, w)) { mist.push(r.naam); continue; }
+      if (!w || !vormOk(r.vorm, w)) { mist.push(r.naam); if (r.nodig === 'ja') verplicht_mist.push(r.naam); continue; }
       regels.push(r.naam + '=' + w); namen.push(r.naam);
     }
-    return { tekst: regels.join('\n') + '\n', namen: namen, in_kluiskopie: in_kluiskopie, mist: mist };
+    return { tekst: regels.join('\n') + '\n', namen: namen, in_kluiskopie: in_kluiskopie, mist: mist, verplicht_mist: verplicht_mist };
   }
   async function geheimenStroom() {
     const g = geheimenTekst();
+    // Codex MOET 2 (r1): ontbreekt een verplichte sleutel (nodig=ja), dan geen nieuwe bundel: de vorige blijft op de R230 staan en de fout is zichtbaar
+    if (g.verplicht_mist.length) { (staat.soorten.geheimen = staat.soorten.geheimen || {}).fout = 'verplicht ontbreekt: ' + g.verplicht_mist.join(' ').slice(0, 100); bewaar(); return 'fout'; }
     const inhoud = crypto.createHash('sha256').update(g.tekst).digest('hex');
     const s = staat.soorten.geheimen;
     if (s && s.inhoud === inhoud && nu() / 1000 - (s.bron_tijd || 0) < GEHEIM_MAX_MS / 1000 && !s.fout) return duw('geheimen');
@@ -371,12 +373,14 @@ function maak(o) {
         const p = spawn(sshBin, sshArgs.concat(['sudo -n ' + warmBin + ' geef-terug ' + soort]), { stdio: ['ignore', fd, 'ignore'] });
         g = await new Promise(function (k) { const t = setTimeout(function () { p.kill('SIGKILL'); }, 600000); p.on('close', function (c) { clearTimeout(t); k(c); }); p.on('error', function () { clearTimeout(t); k(127); }); });
       } finally { fs.closeSync(fd); }
-      if (g !== 0 || sha256Bestand(tmp) !== m.sha256) { fs.rmSync(tmp, { force: true }); st.terug.fout = soort + ': ophalen ' + g; continue; }
+      if (g !== 0 || sha256Bestand(tmp) !== m.sha256) { fs.rmSync(tmp, { force: true }); (st.terug.fouten = st.terug.fouten || {})[soort] = g !== 0 ? 'ophalen ' + g : 'sha256 klopt niet'; continue; }
+      if (st.terug.fouten) delete st.terug.fouten[soort];
       fs.renameSync(tmp, doel);
       st.terug[soort] = { sha256: m.sha256, bytes: m.bytes, bron_tijd: m.bron_tijd, opgehaald: Math.floor(nu() / 1000) };
       n++;
     }
-    if (n) { delete st.terug.fout; log('terugweg: ' + n + ' soort(en) opgehaald'); }
+    delete st.terug.fout;
+    if (n) log('terugweg: ' + n + ' soort(en) opgehaald');
     bewaar();
     return n ? 'opgehaald' : 'gelijk';
   }
@@ -423,6 +427,7 @@ function maak(o) {
       s[k] = { leeftijd_s: x.bron_tijd ? t - x.bron_tijd : null, bytes: x.bytes || null, op_r230: x.gedeeld ? x.gedeeld === x.sha256 : undefined, fout: x.fout || undefined };
     }
     const terug = {}; for (const k of Object.keys(st.terug)) if (SOORT_RE.test(k)) terug[k] = { leeftijd_s: t - (st.terug[k].bron_tijd || 0) };
+    for (const k of Object.keys(st.terug.fouten || {})) terug[k] = Object.assign(terug[k] || {}, { fout: st.terug.fouten[k] });
     return { kant: kant(), actief: primair(), rondes: st.rondes, fout: st.fout, soorten: s, terug: Object.keys(terug).length ? terug : undefined,
       terug_fout: st.terug.fout || undefined, standin: st.standin && st.standin.gemeten_op ? { code: st.standin.code, hier: st.standin.hier, image_gelijk: st.standin.image_gelijk, gezond: st.standin.gezond, fout: st.standin.fout } : undefined };
   }
