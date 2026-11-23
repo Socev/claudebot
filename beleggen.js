@@ -238,7 +238,8 @@ function leesTijd(s, regel, kolom) {
 const RE_VALUTA = /^[A-Z]{3}$/;
 // Bedrag met valuta in twee kolommen: precies één van de twee is een valutacode, de ander het getal. wv2985 (Davids echte NL-export 13-11):
 // transacties = getal, valuta ("Koers,," → 162,83 | USD); rekeningoverzicht = valuta, getal ("Mutatie,," → USD | 488,49). volgorde 'gv' of 'vg'
-// eist die vorm; null (portefeuille, nog niet op een echt bestand gezien) accepteert beide.
+// eist die vorm; null (portefeuille) accepteert beide. wv3927 (Davids echte NL-portefeuille 23-11): "Lokale waarde,," = valuta, getal
+// (EUR | 255,87; USD | 627,65), Slotkoers en Waarde in EUR één kolom zonder valuta, komma als decimaalteken; CASH-regel zonder ISIN/aantal/koers.
 function leesBedrag(rij, k, dec, regel, naam, leegMag, vasteValuta, volgorde) {
   const a = (rij[k.i] || '').trim(), b = k.partner == null ? '' : (rij[k.partner] || '').trim();
   if (k.partner == null) {
@@ -290,6 +291,10 @@ function leesBestand(tekst) {
   for (const d of data) for (const v of getalVelden) { const k = kaart[v]; if (!k) continue; for (const i of [k.i, k.partner]) if (i != null && !RE_VALUTA.test(String(d.rij[i] || '').trim())) lijst.push({ t: d.rij[i], regel: d.regel, kolom: v }); }
   const dec = decimaalteken(lijst);
   const uit = [];
+  // wv3927 (Fable-review financien M5 / C50): twee soorten regels slaat de lezer over in plaats van het hele bestand te weigeren, met een
+  // telling 'n regels niet meegenomen': een transactie met koers nul en verder alleen nullen (claim, omwisseling: geen geld) en een vervolgregel
+  // in het rekeningoverzicht zonder datum, tijd, mutatie, saldo en FX (alleen tekst). Al het andere blijft strikt: zodra er geld in staat, weigeren.
+  const overgeslagen = [];
   if (soort === 'transacties') {
     const telling = {};
     for (const { rij, regel } of data) {
@@ -311,6 +316,8 @@ function leesBestand(tekst) {
       if (koers.valuta && lokaal.valuta && koers.valuta !== lokaal.valuta) throw new LeesFout('koers en lokale waarde in verschillende valuta', regel, 'koers');
       const valuta = lokaal.valuta || koers.valuta;
       if (!valuta) throw new LeesFout('valuta ontbreekt', regel, 'lokale waarde');
+      // wv3927: koers nul met lokale waarde, waarde, kosten en totaal nul = geen geld (claim, omwisseling) → overslaan en tellen
+      if (koers.g.n === 0 && lokaal.g.n === 0 && waarde.g.n === 0 && totaal.g.n === 0 && !(kosten && kosten.g.n !== 0) && !(autofx && autofx.g.n !== 0)) { overgeslagen.push({ regel, reden: 'koers nul' }); continue; }
       // optellen; tekens (review achteraf MOET 1): koers > 0, erbij (aantal > 0) = geld eruit (lokale waarde en waarde < 0), eraf = geld erin
       if (!(koers.g.n > 0)) throw new LeesFout('koers moet groter dan nul zijn', regel, 'koers');
       if (Math.abs(Math.abs(aantal.n * koers.g.n) - Math.abs(lokaal.g.n)) > tol(lokaal.g.n)) throw new LeesFout('aantal × koers is niet de lokale waarde', regel, 'lokale waarde');
@@ -372,7 +379,10 @@ function leesBestand(tekst) {
     }
   } else {
     const telling = {}, perValuta = {};
+    const leegIn = (rij, k) => !k || (!String(rij[k.i] || '').trim() && (k.partner == null || !String(rij[k.partner] || '').trim()));
     for (const { rij, regel } of data) {
+      // wv3927: vervolgregel zonder datum en tijd en zonder geld (mutatie, saldo en FX leeg) → overslaan en tellen; met geld blijft het weigeren
+      if (leegIn(rij, kaart.datum) && leegIn(rij, kaart.tijd) && leegIn(rij, kaart.mutatie) && leegIn(rij, kaart.saldo) && leegIn(rij, kaart.fx)) { overgeslagen.push({ regel, reden: 'vervolgregel' }); continue; }
       const datum = leesDatum(veld(rij, kaart.datum), regel, 'datum'), tijd = leesTijd(veld(rij, kaart.tijd), regel, 'tijd');
       const valutadatum = leesDatum(veld(rij, kaart.valutadatum), regel, 'valutadatum', true);
       const isin = veld(rij, kaart.isin);
@@ -423,7 +433,7 @@ function leesBestand(tekst) {
       if (Math.sign(e.mutatie_cent) === Math.sign(r.mutatie_cent) || Math.abs(v - w) > wisselTol(w, r._fx)) throw new LeesFout('valutawissel klopt niet: bedrag / FX is niet de euroregel van dezelfde order', r.regel, 'fx');
     }
   }
-  return { soort, rijen: uit, decimaal: dec, scheiding: sep };
+  return { soort, rijen: uit, decimaal: dec, scheiding: sep, overgeslagen };
 }
 
 // ── rekenwerk ──
@@ -1544,7 +1554,8 @@ function maak(o) {
         const vorige = db.prepare("SELECT sha256 FROM bestand WHERE soort = 'portefeuille' ORDER BY id DESC LIMIT 1").get();
         if (vorige && vorige.sha256 === h) bekend = l.rijen.length; else nieuw = l.rijen.length;
       }
-      const samen = { ok: true, soort: l.soort, rijen: l.rijen.length, nieuw, al_bekend: bekend, decimaal: l.decimaal, datum: l.soort === 'portefeuille' ? datum : null,
+      const samen = { ok: true, soort: l.soort, rijen: l.rijen.length, nieuw, al_bekend: bekend, decimaal: l.decimaal,
+        niet_meegenomen: l.overgeslagen.length, niet_meegenomen_regels: l.overgeslagen.slice(0, 20).map((x) => x.regel), datum: l.soort === 'portefeuille' ? datum : null,
         effecten: l.soort === 'portefeuille' ? l.rijen.filter((r) => r.regelsoort === 'effect').length : undefined, bewaard: false };
       if (b.bewaar !== true) return { status: 200, body: samen, reden: 'beleggen bestand proef ' + l.soort };
       if (!nieuw && l.soort !== 'portefeuille') return { status: 200, body: Object.assign(samen, { bewaard: true, melding: 'niets nieuws: alles stond er al in' }), reden: 'beleggen bestand dubbel ' + l.soort };

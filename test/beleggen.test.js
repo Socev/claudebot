@@ -680,3 +680,59 @@ test('wv3756 migratie: bestaande databank zonder kolom richting krijgt hem bij o
   const u = m.app({ methode: 'GET', pad: '/app/beleggen' });
   assert.strictEqual(u.status, 200); assert.strictEqual(u.body.dagboek.length, 1); assert.strictEqual(u.body.dagboek[0].richting, null);
 });
+
+// wv3927 (Fable-review financien M5 / C50): de lezer op Davids echte portefeuille-export (23-11; hier met VERZONNEN namen, ISIN's en bedragen)
+// en twee soorten regels die hij overslaat met een telling in plaats van het hele bestand te weigeren.
+const ECHT_PORT = [
+  'Product,Symbool/ISIN,Aantal,Slotkoers,Lokale waarde,,Waarde in EUR',
+  'CASH & CASH FUND & FTX CASH (EUR),,,,EUR,"123,45","123,45"',
+  'VOORBEELD ROBOT CORP,XX0000000044,7,"40,10",USD,"280,70","255,41"',
+].join('\n') + '\n';
+test('wv3927 echte portefeuille-vorm: valuta → getal in "Lokale waarde,,", slotkoers zonder valuta, komma; 0 overgeslagen', () => {
+  const l = B.leesBestand(ECHT_PORT);
+  assert.deepStrictEqual([l.soort, l.decimaal, l.rijen.length, l.overgeslagen.length], ['portefeuille', ',', 2, 0]);
+  const e = l.rijen.find((r) => r.regelsoort === 'effect');
+  assert.deepStrictEqual([e.isin, e.aantal, e.koers, e.valuta, e.lokaal_cent, e.waarde_eur_cent], ['XX0000000044', '7', '40.10', 'USD', 28070, 25541]);
+  assert.deepStrictEqual(l.rijen.find((r) => r.regelsoort === 'cash').waarde_eur_cent, 12345);
+  // de vorm uit de review (valuta en bedrag in één cel, punt tussen komma's) blijft geweigerd
+  weigert(ECHT_PORT.replace('USD,"280,70"', '"USD 280.70",'), /./);
+});
+test('wv3927 transactie met koers nul en verder alleen nullen (claim, omwisseling) = overslaan en tellen; met geld blijft weigeren', () => {
+  const kop = ECHT_TX.split('\n')[0], rs = ECHT_TX.trim().split('\n').slice(1);
+  const nul = '09-11-2026,08:00,VOORBEELD CLAIM,XX0000000066,EAM,XAMS,6,"0,0000",EUR,"0,00",EUR,"0,00",,,,"0,00",';
+  const l = B.leesBestand([kop, rs[0], nul, rs[1]].join('\n') + '\n');
+  assert.deepStrictEqual([l.rijen.length, l.overgeslagen], [2, [{ regel: 3, reden: 'koers nul' }]]);
+  weigert([kop, nul.replace(',,,"0,00",', ',,"-1,00","-1,00",')].join('\n'), /koers moet groter dan nul/);   // kosten erbij = geld
+  weigert([kop, nul.replace('EUR,"0,00",EUR,"0,00"', 'EUR,"-5,00",EUR,"-5,00"')].join('\n'), /koers moet groter dan nul|lokale waarde/);
+  // elk bedrag apart niet nul (lokale waarde, waarde, totaal, AutoFX) = geen nulregel, dus weigeren
+  weigert([kop, nul.replace('EUR,"0,00",EUR,"0,00"', 'EUR,"-5,00",EUR,"0,00"')].join('\n'), /koers moet groter dan nul/);
+  weigert([kop, nul.replace('EUR,"0,00",EUR,"0,00"', 'EUR,"0,00",EUR,"-5,00"')].join('\n'), /koers moet groter dan nul/);
+  weigert([kop, nul.replace(',,,"0,00",', ',,,"-5,00",')].join('\n'), /koers moet groter dan nul/);
+  weigert([kop, nul.replace(',,,"0,00",', ',"-0,50",,"-0,50",')].join('\n'), /koers moet groter dan nul/);
+  weigert([kop, nul.replace(',,,"0,00",', ',,"-1,00","0,00",')].join('\n'), /koers moet groter dan nul/);   // kosten, totaal nul
+  weigert([kop, nul.replace(',,,"0,00",', ',"-0,50",,"0,00",')].join('\n'), /koers moet groter dan nul/);   // AutoFX, totaal nul
+  assert.strictEqual(B.leesBestand(ECHT_TX).overgeslagen.length, 0);
+});
+test('wv3927 rekeningoverzicht: vervolgregel zonder datum, tijd en geld = overslaan en tellen; zonder datum mét geld blijft weigeren', () => {
+  const [kop, ...rs] = ECHT_REK.trim().split('\n');
+  const verv = ',,,,,"vervolg van de omschrijving",,,,,,';
+  const l = B.leesBestand([kop, rs[0], verv, ...rs.slice(1)].join('\n') + '\n');
+  assert.deepStrictEqual([l.rijen.length, l.overgeslagen], [7, [{ regel: 3, reden: 'vervolgregel' }]]);
+  weigert([kop, rs[0], ',,,,,"vervolg",,EUR,"1,00",EUR,"1,00",', ...rs.slice(1)].join('\n'), /datum/);
+  weigert([kop, rs[0], '10-11-2026,,,,,"vervolg",,,,,,', ...rs.slice(1)].join('\n'), /tijd/);
+  weigert([kop, ',,,,,"vervolg","1,1172",,,,,', ...rs].join('\n'), /datum/);   // FX zonder datum = geen vervolgregel
+  weigert([kop, rs[0], ',15:45,,,,"vervolg",,,,,,', ...rs.slice(1)].join('\n'), /datum/);   // tijd zonder datum
+  weigert([kop, rs[0], ',,,,,"vervolg",,EUR,"1,00",,,', ...rs.slice(1)].join('\n'), /datum/);   // alleen mutatie
+  weigert([kop, rs[0], ',,,,,"vervolg",,,,EUR,"1,00",', ...rs.slice(1)].join('\n'), /datum/);   // alleen saldo
+  weigert([kop, rs[0], ',,,,,"vervolg",,,"1,00",,,', ...rs.slice(1)].join('\n'), /datum/);   // alleen het getal van de mutatie (partnerkolom)
+});
+test('wv3927 route: niet_meegenomen en de regelnummers in het antwoord; stand uit de echte portefeuille-vorm', () => {
+  const { post, get } = nieuw();
+  const [kop, ...rs] = ECHT_REK.trim().split('\n');
+  let u = post('bestand', { naam: 'Account.csv', tekst: [kop, rs[0], ',,,,,vervolg,,,,,,', ...rs.slice(1)].join('\n') + '\n', bewaar: true });
+  assert.deepStrictEqual([u.status, u.body.rijen, u.body.niet_meegenomen, u.body.niet_meegenomen_regels], [200, 7, 1, [3]]);
+  u = post('bestand', { naam: 'Portfolio.csv', tekst: ECHT_PORT, bewaar: true, datum: '2026-11-20' });
+  assert.deepStrictEqual([u.status, u.body.effecten, u.body.niet_meegenomen], [200, 1, 0]);
+  const s = get().body.stand;
+  assert.deepStrictEqual([s.bron, s.verdeling.belegd_cent, s.verdeling.cash_cent], ['bestand', 25541, 12345]);
+});
