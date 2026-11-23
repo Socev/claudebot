@@ -16244,8 +16244,8 @@ function handleApp(req, res) {
         if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
-        if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|fondsen|ronde|donateurs|teboeken|indelen|doelen|stichting|overleg|mensen|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)
-          || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank|vraag|gmail|boek|terug|bon)$/.test(route)   // wv3919: vraag (antwoord/gesloten), gmail (concept); wv3953: boek, terug, bon (Te boeken)
+        if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|fondsen|ronde|donateurs|teboeken|indelen|doelen|stichting|overleg|mensen|voorstellen|vbijlage\/v[0-9]{3}|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)
+          || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank|vraag|gmail|boek|terug|bon|voorstel)$/.test(route)   // wv3919: vraag (antwoord/gesloten), gmail (concept); wv3953: boek, terug, bon (Te boeken)
           || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)
           || /^(GET \/app\/ghawa\/delen|POST \/app\/ghawa\/delen\/(onderdeel|noodstop|kijker|kijker-weg|tekst|overleg|blok))$/.test(route)) return typeof appGhawa === 'function' ? appGhawa(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'ghawa');   // wv2886: fase 4 (doelen, stichting, overleg, mensen)   // wv2883: fase 3 (website)   // wv2877: OVIS GHAWA; wv2880: fase 2 (bijhouden)
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
@@ -26964,6 +26964,7 @@ async function appGhawa(req, res, a, route, d, s) {
   const post = route.indexOf('POST ') === 0;
   if (post && !appTeller('ghawa-schrijf', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa-schrijf');
   if (route === 'POST /app/ghawa/gmail') return appGhawaGmail(res, a, d || {});   // wv3919 (2C63 b, c)
+  if (route === 'POST /app/ghawa/voorstel') { const vr = await appGhawaVoorstel(res, a, s, d || {}); if (vr !== undefined) return vr; }   // wv3920: Ja/Nee op een voorstel uit WhatsApp
   // wv3953 (L01): een betaling aan een begrotingsregel hangen of dat terugdraaien verandert de geldadministratie: alleen met een verse
   // vingerafdruk (Davids besluit "gevoelig, Ja met verse vingerafdruk: geld en data"). Een bon erbij zetten mag zonder.
   if ((route === 'POST /app/ghawa/boek' || route === 'POST /app/ghawa/terug') && !appVersOk(a, s)) { res._app.reden = 'ghawa ' + route.slice(16) + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het boeken met je vingerafdruk', vers_nodig: true }); }
@@ -26978,6 +26979,37 @@ async function appGhawa(req, res, a, route, d, s) {
   if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'ghawa').slice(0, 80);
   if (post && u.status === 200 && ghawaDeel) ghawaDeel.markeerVuil();   // wv2889: het gedeelde deel bij de volgende ronde (≥ 15 min) bij
   return appStuur(res, u.status, u.body);
+}
+// wv3920 (besluitenpagina nr 137 = 2C37): Ja/Nee/Terugdraaien op een voorstel uit WhatsApp. Geld (bon boeken of terugdraaien) en de openbare
+// proefsite (nieuws) vragen een verse vingerafdruk; een antwoord of mijlpaal niet. Nieuws gaat via de bestaande conceptroute van de website
+// (proefsite = staging; publiceren blijft de eigen knop met vingerafdruk). Al het andere doet ghawa.js (ghawa-voorstel.js). → undefined = verder
+// in appGhawa (bon, antwoord, mijlpaal, nee), anders het antwoord.
+async function appGhawaVoorstel(res, a, s, d) {
+  let v; try { v = ghawaApp.voorstelVan(String(d.id || '')); } catch (e) { logError('ghawa-voorstel', e); return appWeiger(res, 503, 'De voorstellen zijn nu niet te lezen; probeer het zo opnieuw', 'ghawa voorstel fout'); }
+  if (!v) return appWeiger(res, 404, 'dat voorstel bestaat niet', 'ghawa voorstel onbekend');
+  const actie = String(d.actie || ''), door = a && a.id ? 'app ' + String(a.id).slice(0, 8) : 'app';
+  const VS = require(path.join(__dirname, 'ghawa-voorstel.js'));
+  if (VS.versNodig(v, actie) && !appVersOk(a, s)) { res._app.reden = 'ghawa voorstel ' + v.id + ' ' + actie + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig dit met je vingerafdruk', vers_nodig: true }); }
+  if (v.soort !== 'nieuws' || actie === 'nee') return undefined;
+  if (d.bevestigd !== true) return appWeiger(res, 400, 'bevestig je keuze', 'ghawa voorstel niet bevestigd');
+  if (!ghawaSite) return appWeiger(res, 404, 'De website zit niet in deze versie van de pod', 'ghawa-site ontbreekt');
+  if (!appTeller('ghawa-site', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ghawa-site');
+  let r;
+  try {
+    if (actie === 'ja') {
+      if (v.staat !== 'open') return appWeiger(res, 409, 'dit voorstel is al afgehandeld', 'ghawa voorstel al af');
+      const fotos = ghawaApp.voorstelFotos(v).map(function (f) { return { naam: f.naam, bestand: f.bytes.toString('base64'), alt: 'Foto bij: ' + String(v.gegevens.titel || '').slice(0, 150) }; });
+      r = await ghawaSite.s.concept({ titel: v.gegevens.titel, tekst: v.gegevens.tekst, categorie: 'bouw', fotos: fotos });
+      if (r.status === 200 && r.slug) { const k = ghawaApp.voorstelNieuws(v.id, r.slug, door, false); if (!k.ok) logError('ghawa-voorstel', new Error('concept staat, voorstel niet bijgewerkt ' + v.id)); }
+    } else if (actie === 'terug') {
+      if (v.staat !== 'ja' || !v.effect || !v.effect.slug) return appWeiger(res, 409, 'alleen een goedgekeurd voorstel draai je terug', 'ghawa voorstel niet ja');
+      r = await ghawaSite.s.weg({ slug: v.effect.slug });
+      if (r.status === 200) ghawaApp.voorstelNieuws(v.id, null, door, true);
+    } else return appWeiger(res, 400, 'kies ja, nee of terug', 'ghawa voorstel onbekend');
+  } catch (e) { logError('ghawa-voorstel', e); return appWeiger(res, 503, 'De site is nu niet te bereiken; probeer het zo opnieuw', 'ghawa voorstel site fout'); }
+  res._app.reden = ('ghawa voorstel ' + v.id + ' nieuws ' + actie + ' (' + r.status + ')').slice(0, 80);
+  const body = Object.assign({}, r); delete body.status;
+  return appStuur(res, r.status, Object.assign({ ok: r.status === 200 }, body));
 }
 // wv3919 (2C63 b, c): de vragen aan ECG (portie van hooguit 4) of de opvolgmail aan een fonds als CONCEPT in Davids Gmail, via het mailluik
 // (n8n AI - Mailconcept naar Gmail, zelfde weg als Bandjes en het POT-afschrift). Nooit versturen. Eén tegelijk (dubbel tikken = één concept);
@@ -30574,7 +30606,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata']);   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -30824,6 +30856,15 @@ async function smalActie(actie, d, wie) {
     if (!harvester) return { status: 404, j: { ok: false, fout: 'Harvester zit niet in deze versie van de pod' } };
     if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
     return harvester.smal('kaart', d);
+  }
+  // wv3920: GHAWA-lens in de nachtskill whatsapp-conversatie-consolidatie (Socev-sleutel): wat er te koppelen valt, en een voorstel zetten.
+  // Alleen de primaire kant schrijft; geen inhoud in een log (de pod logt alleen de actie en de status).
+  if (actie === 'ghawa/lens' || actie === 'ghawa/voorstel') {
+    if (!ghawaApp) return { status: 404, j: { ok: false, fout: 'GHAWA zit niet in deze versie van de pod' } };
+    if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
+    const r = actie === 'ghawa/lens' ? ghawaApp.voorstelLens() : ghawaApp.voorstelZet(d.voorstel || {});
+    const j = Object.assign({}, r); delete j.status;
+    return { status: r.status || 200, j: j };
   }
   if (actie === 'sms/voorstel') return typeof smsVoorstel === 'function' ? smsVoorstel(d) : { status: 404, j: { ok: false, fout: 'sms zit niet in deze versie van de pod' } };   // wv3664
   if (actie === 'bandjes/voorstel') {

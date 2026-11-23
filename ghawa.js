@@ -758,6 +758,7 @@ function documentenRoute(bronnenMap, vaultMap) {
 function maak(cfg) {
   const c = cfg || {};
   const BIJ = require('./ghawa-bij.js');
+  const VS = require('./ghawa-voorstel.js');   // wv3920
   let laatste = null, bijLaatst = 0, bijUitkomst = null, gemigreerd = false;
   const nuIso = () => (c.nu ? c.nu() : new Date().toISOString());
   const vandaag = () => nuIso().slice(0, 10);
@@ -766,7 +767,7 @@ function maak(cfg) {
     const db = new DatabaseSync(c.dbPad);
     try {
       db.exec('PRAGMA busy_timeout = 5000');
-      if (!gemigreerd) { db.exec('BEGIN IMMEDIATE'); try { BIJ.migreer(db); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; } gemigreerd = true; }
+      if (!gemigreerd) { db.exec('BEGIN IMMEDIATE'); try { BIJ.migreer(db); db.exec(require('./ghawa-voorstel.js').SCHEMA); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; } gemigreerd = true; }
       return fn(db);
     } finally { db.close(); }
   }
@@ -797,7 +798,12 @@ function maak(cfg) {
     const d = lees();
     const k = bereken(d);
     let body;
-    if (scherm === 'overzicht') body = overzicht(d, k, volgendeMijl(k.vandaag));
+    if (scherm === 'overzicht') {
+      body = overzicht(d, k, volgendeMijl(k.vandaag));
+      const nv = voorstellenOpen();   // wv3920: voorstellen uit WhatsApp bovenaan Vraagt aandacht
+      body.voorstellen_open = nv;
+      if (nv && Array.isArray(body.aandacht)) body.aandacht.unshift({ toon: 'info', label: 'WhatsApp', titel: nv === 1 ? 'Eén voorstel uit WhatsApp' : nv + ' voorstellen uit WhatsApp', sub: 'Ja of Nee met één tik', scherm: 'voorstellen' });
+    }
     else if (scherm === 'bouw') body = bouwRoute(d, k, 'Building');
     else if (scherm === 'apotheek') body = bouwRoute(d, k, 'Pharmacy');
     else if (scherm === 'activiteit' && m[2]) body = activiteitRoute(d, k, m[2]);
@@ -808,6 +814,8 @@ function maak(cfg) {
     else if (scherm === 'donateurs') body = donateursRoute(c.dbPad);   // INTERN
     else if (scherm === 'indelen') body = indelenRoute(c.dbPad, k.vandaag);   // INTERN
     else if (scherm === 'teboeken') body = teBoekenRoute(d, k);   // INTERN (wv3953)
+    else if (scherm === 'voorstellen') body = voorstellenRoute(d, k);   // INTERN (wv3920)
+    else if (scherm === 'vbijlage' && m[2]) return voorstelBijlageRoute(m[2].toUpperCase());   // app-paden zijn alleen kleine letters (APP_ROUTE_RE)   // INTERN (wv3920)
     if (!body) return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'ghawa onbekend ' + scherm };
     laatste = { op: nuIso(), scherm, ms: Date.now() - t0, sluit: k.sluit };
     return { status: 200, body: Object.assign({ ok: true, invoer_op: d.meta.invoer_op || null }, body), reden: 'ghawa ' + scherm + (k.sluit ? '' : ' sluit niet') };
@@ -819,6 +827,15 @@ function maak(cfg) {
     if (l == null && c.dbPad && fs.existsSync(c.dbPad)) {
       try { const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(c.dbPad, { readOnly: true });
         try { const u = S.leesDb(db); l = u ? u.mijlpalen : []; } finally { db.close(); } } catch (e) { l = []; }
+    }
+    // wv3920: een via WhatsApp bevestigde mijlpaal telt als gehaald (Overzicht, loopt uit, Calendar); koppeling op wanneer + tekst
+    if (l && l.length && c.dbPad && fs.existsSync(c.dbPad)) {
+      try { const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(c.dbPad, { readOnly: true });
+        try {
+          const heeftB = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mijlpaal_bevestigd'").get() && !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mijlpaal'").get();
+          const bev = heeftB ? db.prepare('SELECT m.wanneer, m.tekst, b.gehaald_op FROM mijlpaal_bevestigd b JOIN mijlpaal m ON m.sleutel = b.sleutel').all() : [];
+          if (bev.length) l = l.map((m) => { const x = bev.find((y) => y.tekst === m.tekst && (y.wanneer || null) === (m.wanneer || null)); return x ? Object.assign({}, m, { stand: 'gehaald', gehaald_op: x.gehaald_op }) : m; });
+        } finally { db.close(); } } catch (e) { if (c.fout) c.fout(e); }
     }
     return l || [];
   }
@@ -861,7 +878,15 @@ function maak(cfg) {
     let tot = null, fondsen = [];
     if (c.dbPad && fs.existsSync(c.dbPad)) {
       try {
-        const uit = schrijf((db) => { S.bewaar(db, data, nuIso()); return S.leesDb(db); });
+        const uit = schrijf((db) => {
+          S.bewaar(db, data, nuIso());
+          const u0 = S.leesDb(db);
+          if (u0 && Array.isArray(u0.mijlpalen)) {   // wv3920: een via WhatsApp bevestigde mijlpaal staat op gehaald (de vaultpagina zelf blijft zoals hij is)
+            const bev = new Map(mijlpalenDb(db).filter((m) => m.gehaald_op).map((m) => [m.volgorde, m.gehaald_op]));
+            u0.mijlpalen = u0.mijlpalen.map((m) => (bev.has(m.volgorde) ? Object.assign({}, m, { stand: 'gehaald', gehaald_op: bev.get(m.volgorde), bevestigd: 'WhatsApp' }) : m));
+          }
+          return u0;
+        });
         if (uit) data = Object.assign({}, data, uit);
         const d = lees();
         fondsen = d.fondsen.map((f) => ({ gever: f.gever, soort: f.soort }));
@@ -893,6 +918,10 @@ function maak(cfg) {
       r = schrijf((db) => (scherm === 'boek' ? BIJ.boek(db, b.id, { delen: b.delen, omschrijving: b.omschrijving, bevestigd: b.bevestigd }, nu, (v && v.door) || 'app', bon)
         : BIJ.bonBij(db, b.id, bon, nu, (v && v.door) || 'app')));
       if (bon && bonNieuw && r.ok === false) { try { fs.unlinkSync(path.join(c.bonMap || path.join(path.dirname(c.dbPad), 'bonnen'), bon)); } catch (e) { /* weg */ } }   // geweigerd: geen losse bon achterlaten (alleen een bestand dat deze aanvraag zelf schreef)
+    } else if (scherm === 'voorstel') {   // wv3920: Ja / Nee / Terugdraaien op een voorstel uit WhatsApp (nieuws doet server.js)
+      const actie = String(b.actie || '');
+      r = schrijf((db) => VS.besluit(db, b.id, actie, { bevestigd: b.bevestigd, regel: b.regel, antwoord: b.antwoord, stand: b.stand },
+        { BIJ, bonMap: c.bonMap || path.join(path.dirname(c.dbPad), 'bonnen'), map: voorstelMap(), nu, door: (v && v.door) || 'app' }));
     } else if (scherm === 'terug') r = schrijf((db) => BIJ.boekTerug(db, b.id, { bevestigd: b.bevestigd }, nu, (v && v.door) || 'app'));
     else if (scherm === 'afschrift') {
       const b64 = typeof b.bestand === 'string' ? b.bestand : '';
@@ -902,10 +931,62 @@ function maak(cfg) {
     } else return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'ghawa onbekend POST ' + scherm };
     const st = r.ok === false ? (r.status || 400) : 200;
     const kort = scherm === 'afschrift' ? (r.uitkomst || '') + ' ' + (r.munt || '') + ' nieuw ' + (r.nieuw || 0) : scherm === 'bank' ? (r.uitkomst || '') + ' ' + (r.nieuw || 0)
+      : scherm === 'voorstel' ? String(b.id || '').slice(0, 6) + ' ' + String(b.actie || '').slice(0, 6)
       : scherm === 'indelen' || scherm === 'boek' || scherm === 'terug' || scherm === 'bon' ? String(b.id || '').slice(0, 8) : scherm === 'fonds' || scherm === 'vraag' ? String(b.id || '').slice(0, 6) : String(b.stap || '').slice(0, 12);
     const body = Object.assign({}, r); delete body.status;
     return { status: st, body: Object.assign({ ok: st === 200 }, body), reden: 'ghawa POST ' + scherm + ' ' + kort };
   }
+  // ── wv3920: voorstellen uit WhatsApp (ghawa-voorstel.js). De lens (nachtskill, Socev-sleutel) leest wat er te koppelen valt en zet voorstellen;
+  // de app toont ze en David beslist. Bijlagen staan in een eigen map naast de databank (nooit gedeeld).
+  function voorstelMap() { return c.voorstelMap || path.join(path.dirname(c.dbPad), 'voorstel-bijlagen'); }
+  function mijlpalenDb(db) {
+    const S = require('./ghawa-stichting.js');
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mijlpaal'").get()) { try { S.bewaar(db, S.leesVault(c.vaultMap || ''), nuIso()); } catch (e) { if (c.fout) c.fout(e); } }
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mijlpaal'").get()) return [];
+    const bev = VS.mijlpaalBevestigd(db);
+    return db.prepare('SELECT sleutel, volgorde, wanneer, tekst, stand FROM mijlpaal ORDER BY volgorde').all().map((x) => Object.assign({}, x, bev.has(x.sleutel) ? { stand: 'gehaald', gehaald_op: bev.get(x.sleutel) } : {}));
+  }
+  function voorstelCtx() {
+    if (!gemigreerd) schrijf(() => null);
+    const d = lees(); const k = bereken(d);
+    return { d, k, tb: teBoekenRoute(d, k) };
+  }
+  function voorstelLens() {
+    if (!c.dbPad || !fs.existsSync(c.dbPad)) return { status: 503, ok: false, fout: 'De GHAWA-databank is er nog niet' };
+    const x = voorstelCtx();
+    const mijl = schrijf((db) => mijlpalenDb(db)).filter((m) => !/gehaald|klaar|done|afgerond|complete/i.test(m.stand || ''));
+    return Object.assign({ status: 200 }, VS.lens({ tb: x.tb, vragen: x.d.vragen, mijlpalen: mijl }));
+  }
+  function voorstelZet(inp) {
+    if (!c.dbPad || !fs.existsSync(c.dbPad)) return { status: 503, ok: false, fout: 'De GHAWA-databank is er nog niet' };
+    const x = voorstelCtx();
+    return schrijf((db) => VS.zet(db, inp, { tb: x.tb, vragen: x.d.vragen.filter((v) => STATUS_OPEN.test(v.status || '')), mijlpalen: mijlpalenDb(db), vault: c.vaultMap || '', map: voorstelMap(), nu: nuIso() }));
+  }
+  function voorstelVan(id) { if (!c.dbPad || !fs.existsSync(c.dbPad)) return null; return schrijf((db) => VS.haal(db, id)); }
+  function voorstelFotos(v) { return (v.bijlagen || []).map((n) => ({ naam: n, bytes: VS.bijlageLees(voorstelMap(), n) })).filter((f) => f.bytes && !/\.pdf$/.test(f.naam)); }
+  function voorstelNieuws(id, slug, door, terug) { return schrijf((db) => (terug ? VS.nieuwsTerugKlaar(db, id, nuIso(), door) : VS.nieuwsKlaar(db, id, slug, nuIso(), door))); }
+  function voorstellenRoute(d, k) {
+    const tb = teBoekenRoute(d, k);
+    const u = schrijf((db) => { VS.vervalOud(db, nuIso()); return { l: VS.lijst(db), mijl: mijlpalenDb(db) }; });
+    const vraag = new Map(d.vragen.map((q) => [q.id, q]));
+    const mijl = new Map(u.mijl.map((m) => [m.sleutel, m]));
+    const regelNaam = new Map(tb.regels.map((r) => [r.id, r.id + ' ' + (r.post || '') + (r.act_naam ? ' (' + r.act_naam + ')' : '')]));
+    const verrijk = (v) => {
+      const g = v.gegevens, e = {};
+      if (v.soort === 'antwoord') { const q = vraag.get(g.vraag); e.vraag = q ? { id: q.id, onderwerp: q.onderwerp, vraag: q.vraag, stand: q.status, antwoord: q.antwoord || null } : null; }
+      if (v.soort === 'mijlpaal') { const m = mijl.get(g.mijlpaal); e.mijlpaal = m ? { tekst: m.tekst, wanneer: m.wanneer, stand: m.stand } : null; }
+      if (v.soort === 'bon') { e.regel_naam = g.regel ? regelNaam.get(g.regel) || g.regel : null; e.regel_lens_naam = g.regel_lens ? regelNaam.get(g.regel_lens) || g.regel_lens : null; }
+      return Object.assign({}, v, { chat_naam: VS.CHATS[v.bron.chat] || v.bron.chat, bijlagen: v.bijlagen.length, uitleg: e });
+    };
+    return { intern: true, open: u.l.open.map(verrijk), afgehandeld: u.l.afgehandeld.map(verrijk), regels: tb.regels.map((r) => ({ id: r.id, naam: regelNaam.get(r.id), open: r.open })) };
+  }
+  function voorstelBijlageRoute(id) {
+    const v = voorstelVan(id);
+    if (!v) return { status: 404, body: { ok: false, fout: 'dat voorstel bestaat niet' }, reden: 'ghawa vbijlage onbekend' };
+    const uit = (v.bijlagen || []).slice(0, 4).map((n) => { const by = VS.bijlageLees(voorstelMap(), n); return by ? { type: n.split('.').pop(), data: by.toString('base64') } : null; }).filter(Boolean);
+    return { status: 200, body: { ok: true, id: v.id, bijlagen: uit }, reden: 'ghawa vbijlage ' + v.id };
+  }
+  function voorstellenOpen() { if (!c.dbPad || !fs.existsSync(c.dbPad)) return 0; try { return schrijf((db) => VS.aantalOpen(db)); } catch (e) { return 0; } }
   // Maandronde: kaart als de ECG-cijfers ouder zijn dan 35 dagen (één per maand); de server roept dit eens per dag aan.
   function maandKaart() {
     if (!c.dbPad || !fs.existsSync(c.dbPad)) return null;
@@ -915,7 +996,7 @@ function maak(cfg) {
     return BIJ.rondeKaart({ afschrift_ooit: (d.afschriften || []).some((a) => a.uitkomst === 'overgenomen') || d.ecgAfschrift > 0, ecg_gmd: k.standen.ecg_gmd, ecg_eur: k.standen.ecg_eur }, nuIso());
   }
   function info() {
-    const u = { aan: true, databank: !!(c.dbPad && fs.existsSync(c.dbPad)), laatste, bank: bijUitkomst ? { op: bijUitkomst.op, uitkomst: bijUitkomst.uitkomst, nieuw: bijUitkomst.nieuw || 0 } : null };
+    const u = { aan: true, databank: !!(c.dbPad && fs.existsSync(c.dbPad)), laatste, voorstellen_open: voorstellenOpen(), bank: bijUitkomst ? { op: bijUitkomst.op, uitkomst: bijUitkomst.uitkomst, nieuw: bijUitkomst.nieuw || 0 } : null };
     return u;
   }
   // wv2883: totalen voor de vergelijking met ghawa.org (alleen totalen; nooit donateur- of bankregelvelden) en de uitkomst bewaren
@@ -994,7 +1075,8 @@ function maak(cfg) {
   function siteCijfersZet(v) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('site:cijfers', JSON.stringify(Object.assign({ op: nuIso() }, v)))); }
   function siteCijfers() { try { const d = lees(); return d.meta['site:cijfers'] ? JSON.parse(d.meta['site:cijfers']) : null; } catch (e) { return null; } }
   function kaartGezet(sleutel) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('kaart:' + String(sleutel).slice(0, 60), nuIso())); }
-  return { app, info, bankBij, maandKaart, kaartGezet, totalen, siteCijfersZet, siteCijfers, conceptVoor, conceptGezet, fondsKaarten, kaartDicht, kalenderItems };
+  return { app, info, bankBij, maandKaart, kaartGezet, totalen, siteCijfersZet, siteCijfers, conceptVoor, conceptGezet, fondsKaarten, kaartDicht, kalenderItems,
+    voorstelLens, voorstelZet, voorstelVan, voorstelFotos, voorstelNieuws, voorstellenOpen };   // wv3920
 }
 
 module.exports = { maak, invoer, leesData, bereken, csvLees, cent, SCHEMA, TABELLEN, GHAWA_SOORTEN, donateursRoute, indelenRoute, vragenPortie, fondsOpvolg };

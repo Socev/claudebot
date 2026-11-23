@@ -7,7 +7,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 f=0
 C=$(grep -vE '^\s*(\*|//)' ghawa.js)
-if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|node:sqlite|\./ghawa-bij\.js|\./ghawa-stichting\.js)'\)$|^require\(path\.resolve"; then echo "ROOD  CI-poort: ghawa.js laadt een andere module"; f=1; fi
+if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|node:sqlite|\./ghawa-bij\.js|\./ghawa-stichting\.js|\./ghawa-voorstel\.js)'\)$|^require\(path\.resolve"; then echo "ROOD  CI-poort: ghawa.js laadt een andere module"; f=1; fi
 if echo "$C" | grep -vE "require\.main === module|process\.(argv|stdout|stderr|exit)" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new Function|child_process"; then echo "ROOD  CI-poort: ghawa.js raakt netwerk, proces of log"; f=1; fi
 # losse GHAWA-bank- of donateurvelden alleen in de twee INTERNE routes (donateursRoute, indelenRoute) en in de invoer
 if echo "$C" | grep -nE "FROM (bankregel_ghawa|donateur)\b" | grep -vE "SUM\(|COUNT\(|saldo_cent|DELETE|keten|naam FROM donateur|GROUP BY rek|naam, soort, vast, verwacht_cent FROM donateur|const sel = |GROUP BY 1, 2" ; then echo "ROOD  ghawa.js leest losse donateur- of GHAWA-bankvelden"; f=1; fi
@@ -20,13 +20,18 @@ T=$(grep -vE '^\s*(\*|//)' ghawa-stichting.js)
 if echo "$T" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|crypto)'\)$"; then echo "ROOD  CI-poort: ghawa-stichting.js laadt een andere module"; f=1; fi
 if echo "$T" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new Function|child_process|writeFile|appendFile|unlink|rmSync|mkdirSync|renameSync"; then echo "ROOD  CI-poort: ghawa-stichting.js raakt netwerk, proces, log of schrijft bestanden"; f=1; fi
 if echo "$T" | grep -nE "FROM (bankregel_ghawa|donateur)\b"; then echo "ROOD  ghawa-stichting.js leest donateur- of GHAWA-bankvelden"; f=1; fi
-[ $f = 0 ] && echo "GROEN CI-poort: ghawa.js, ghawa-bij.js en ghawa-stichting.js zonder netwerk of log; intern alleen in de interne routes"
-grep -qF "|indelen|doelen|stichting|overleg|mensen|activiteit" server.js || { echo "ROOD  server.js: GET-routes van fase 4 (doelen, stichting, overleg, mensen) niet in de app-poort"; f=1; }
+# wv3920: ghawa-voorstel.js alleen fs, path, crypto; geen netwerk, proces of log; in de release
+V=$(grep -vE '^\s*(\*|//)' ghawa-voorstel.js)
+if echo "$V" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|crypto)'\)$"; then echo "ROOD  CI-poort: ghawa-voorstel.js laadt een andere module"; f=1; fi
+if echo "$V" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new Function|child_process"; then echo "ROOD  CI-poort: ghawa-voorstel.js raakt netwerk, proces of log"; f=1; fi
+grep -qE '^RELEASE_OPTIONEEL=".* ghawa-voorstel\.js' uitrol.sh || { echo "ROOD  uitrol.sh: ghawa-voorstel.js niet in RELEASE_OPTIONEEL"; f=1; }
+[ $f = 0 ] && echo "GROEN CI-poort: ghawa.js, ghawa-bij.js, ghawa-stichting.js en ghawa-voorstel.js zonder netwerk of log; intern alleen in de interne routes"
+grep -qF "|indelen|doelen|stichting|overleg|mensen|voorstellen|vbijlage\/v[0-9]{3}|activiteit" server.js || { echo "ROOD  server.js: GET-routes van fase 4 (doelen, stichting, overleg, mensen) niet in de app-poort"; f=1; }
 grep -q "const ghawaApp = (function () {" server.js || { echo "ROOD  server.js: ghawaApp ontbreekt"; f=1; }
 grep -qE "if \(route === 'GET /app/ghawa' \|\| /\^GET .*ghawa.*\.test\(route\)" server.js || { echo "ROOD  server.js: route /app/ghawa niet in de app-poort"; f=1; }
 grep -qE "^\s+ghawa: typeof ghawaInfo === 'function'" server.js || { echo "ROOD  server.js: /health.ghawa ontbreekt"; f=1; }
 P=$(grep -oE "POST \\\\/app\\\\/ghawa\\\\/\([a-z|]+\)" server.js)
-[ "$P" = 'POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank|vraag|gmail|boek|terug|bon)' ] || { echo "ROOD  server.js: POST-routes voor GHAWA zijn niet precies de vijf van fase 2 plus vraag en gmail (wv3919) en boek, terug, bon (wv3953) ($P)"; f=1; }
+[ "$P" = 'POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank|vraag|gmail|boek|terug|bon|voorstel)' ] || { echo "ROOD  server.js: POST-routes voor GHAWA zijn niet precies de vijf van fase 2 plus vraag en gmail (wv3919) en boek, terug, bon (wv3953) ($P)"; f=1; }
 # wv3953 (L01): boeken en terugdraaien alleen met een verse vingerafdruk, vóór de rekenkern
 GA=$(awk '/^async function appGhawa\(/,/^}/' server.js)
 echo "$GA" | grep -qF "if ((route === 'POST /app/ghawa/boek' || route === 'POST /app/ghawa/terug') && !appVersOk(a, s))" || { echo "ROOD  server.js: boeken of terugdraaien zonder verse vingerafdruk"; f=1; }
@@ -52,5 +57,5 @@ echo "$PB" | grep -q "if (wat === 'publiceer') {" && echo "$PB" | grep -q "a.soo
 grep -qF "/^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)" server.js || { echo "ROOD  server.js: website-routes niet precies GET + concept/weg/publiceer"; f=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* ghawa-site\.js ghawa-stichting\.js" uitrol.sh || { echo "ROOD  uitrol.sh: ghawa-site.js/ghawa-stichting.js niet in RELEASE_OPTIONEEL"; f=1; }
 [ $f = 0 ] && echo "GROEN website: alleen git, staging 2× / main 1×, publiceren achter vingerafdruk"
-node --no-warnings --test --test-reporter=spec test/ghawa.test.js test/ghawa-bij.test.js test/ghawa-2c63.test.js test/ghawa-teboeken.test.js test/ghawa-site.test.js test/ghawa-stichting.test.js test/ghawa-mijlpalen.test.js || f=1
+node --no-warnings --test --test-reporter=spec test/ghawa.test.js test/ghawa-bij.test.js test/ghawa-2c63.test.js test/ghawa-teboeken.test.js test/ghawa-voorstel.test.js test/ghawa-site.test.js test/ghawa-stichting.test.js test/ghawa-mijlpalen.test.js || f=1
 exit $f
