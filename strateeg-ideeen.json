@@ -9,7 +9,7 @@
  "verkoop": { "markt_ingehaald": 0.05, "houd_beursdagen": 1, "noodrem": 0.25 },
  "stelling": { "termijn_max_dagen": 120, "per_ronde": 3, "per_dag": 6, "open_max": 20, "per_bedrijf": 2 },
  "poly": { "liquiditeit_min": 1000, "volume_min": 20000, "eind_van": -3, "eind_tot": 45, "beslist": [0.03, 0.97], "uitkomst": [0.02, 0.98] },
- "grens": { "aanroepen_dag": 24, "aanroepen_maand": 400, "usd_dag": 1.5, "usd_maand": 25, "usd_aanroep_max": 0.25, "voor_david": 6, "david_dag": 5,
+ "grens": { "aanroepen_dag": 24, "aanroepen_maand": 400, "usd_dag": 1.5, "usd_maand": 25, "usd_aanroep_max": 0.25, "prompt_max_tekens": 40000, "voor_david": 6, "david_dag": 5,
    "extra_dag": 2, "koppen": 60, "per_bron": 10, "min_nieuwe_koppen": 5, "denk_max_ms": 720000, "beurt_max_ms": 40000, "idee_uur": 10 },
  "tijd": { "rondes": ["07:45", "12:45", "15:45", "20:15"], "weekend": ["10:00"], "peiling_min": 30, "peiling_van": "08:00", "peiling_tot": "22:00",
    "waardeer": ["09:20", "12:20", "16:20", "22:10"], "kwartier_marge": [4, 12], "extra_afstand_min": 60 },

@@ -200,16 +200,17 @@ function maak(o) {
     if (denkEind && Date.now() > denkEind) { const f = new Error('tijd'); f.tijd = true; throw f; }
     if (!grensOk(voorDavid)) { const f = new Error('grens'); f.grens = true; throw f; }
     if (belangRe && belangRe.test(prompt)) { log({ stap: 'idee-belang-in-prompt', soort }); return null; }   // vangnet: nooit met een belangwoord naar het model
+    if (prompt.length + systeem.length > CFG.grens.prompt_max_tekens) { log({ stap: 'idee-prompt-te-groot', soort }); return null; }   // begrensde invoer = begrensde kosten
     const t0 = nu(), dag = nlNu().dag;
     // eerst reserveren (telt meteen mee voor de grens), daarna het verbruik invullen
     const rid = Number(db().prepare("INSERT INTO idee_aanroep (ms, dag, maand, ronde_id, soort, ok, usd, fout) VALUES (?, ?, ?, ?, ?, 0, ?, 'loopt')").run(t0, dag, dag.slice(0, 7), rondeId, soort, CFG.grens.usd_aanroep_max).lastInsertRowid);
     let r;
     const rest = denkEind ? Math.max(10000, denkEind - Date.now()) : Infinity;
-    try { r = await o.claude(systeem, prompt, schemaJ, { timeoutMs: Math.min(timeoutMs || 300000, rest), effort: soort === 'A' || soort === 'D2' ? 'medium' : 'low' }); }
+    try { r = await o.claude(systeem, prompt, schemaJ, { timeoutMs: Math.min(timeoutMs || 300000, rest), effort: soort === 'A' || soort === 'D2' ? 'medium' : 'low', maxUsd: CFG.grens.usd_aanroep_max }); }
     catch (e) { r = { ok: false, fout: 'aanroep faalde' }; }
     const v = (r && r.verbruik) || {};
     db().prepare('UPDATE idee_aanroep SET ok = ?, tok_in = ?, tok_uit = ?, usd = ?, duur_ms = ?, fout = ? WHERE id = ?')
-      .run(r && r.ok ? 1 : 0, (v.in || 0) + (v.cache_lees || 0) + (v.cache_schrijf || 0), v.uit || 0, typeof v.kosten === 'number' ? v.kosten : (r && r.ok ? CFG.grens.usd_aanroep_max : 0), nu() - t0, r && r.ok ? null : String((r && r.fout) || 'fout').slice(0, 120), rid);
+      .run(r && r.ok ? 1 : 0, (v.in || 0) + (v.cache_lees || 0) + (v.cache_schrijf || 0), v.uit || 0, typeof v.kosten === 'number' ? v.kosten : CFG.grens.usd_aanroep_max, nu() - t0, r && r.ok ? null : String((r && r.fout) || 'fout').slice(0, 120), rid);
     return r && r.ok && r.data && typeof r.data === 'object' ? r.data : null;
   }
 

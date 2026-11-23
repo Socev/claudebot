@@ -47,8 +47,8 @@ function wereld(o) {
     if (o.fout) throw new Error(o.fout);
     return rss([]);
   };
-  const claude = o.claude || (async (sys, prompt, schema) => {
-    log.prompts.push({ sys, prompt, schema });
+  const claude = o.claude || (async (sys, prompt, schema, opt) => {
+    log.prompts.push({ sys, prompt, schema, opt });
     if (o.hang) await new Promise((r) => setTimeout(r, o.hang));
     const k = o.antwoord && o.antwoord(schema, prompt);
     return k ? { ok: true, data: k, verbruik: { in: 1000, uit: 200, kosten: o.usd != null ? o.usd : 0.05 } } : { ok: false, fout: 'nep' };
@@ -337,6 +337,7 @@ test('Codex-review: bewijs alleen uit het eigen blok, toetsing ziet koppen die a
     return antwoordA()(schema, prompt); } });
   await w.m._denk.ronde('vast');
   assert.strictEqual(tijdensAanroep, 1, 'aanroep telt al mee terwijl hij loopt');
+  assert.ok(w.log.prompts.every((p) => p.opt && p.opt.maxUsd === CFG.grens.usd_aanroep_max), 'kostenplafond per aanroep meegegeven');
   assert.strictEqual(w.d.prepare("SELECT COUNT(*) AS n FROM idee_aanroep WHERE fout = 'loopt'").get().n, 0);
   // Codex-MOET 3: dezelfde koppen gingen al naar A, maar zijn voor de toetsing van stelling 1 en 2 nog nieuw
   klok.t = nlMs('2026-11-24', '12:46');

@@ -23320,6 +23320,7 @@ async function harvesterClaude(systeem, prompt, schema, o) {
     const args = ['-p', '--output-format', 'json', '--restricted', '--strict-mcp-config', '--tools', '', '--permission-mode', 'acceptEdits',
       '--permission-prompts', 'none', '--no-session-persistence', '--model', (o && o.model) || HARVESTER_MODEL, '--effort', (o && ['low', 'medium', 'high'].includes(o.effort)) ? o.effort : 'low', '--system-prompt', systeem,
       '--json-schema', JSON.stringify(schema)];
+    if (o && typeof o.maxUsd === 'number' && o.maxUsd > 0 && o.maxUsd <= 5) args.push('--max-budget-usd', String(o.maxUsd));   // wv4012: kostenplafond per aanroep (Ideeënboek)
     let k, uit = '', fout = '';
     try { k = metOomEerst(function () { return spawn(HARVESTER_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); }); }
     catch (e) { opruim(); return klaar({ ok: false, fout: 'claude start niet' }); }
