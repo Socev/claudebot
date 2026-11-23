@@ -26049,7 +26049,9 @@ async function appSecondBrain(req, res, a, d, route) {
   catch (e) { logError('app-secondbrain', e); return appWeiger(res, 500, 'fout op de pod', 'secondbrain uitzondering'); }
   const actie = route === 'GET /app/secondbrain' ? 'kaart' : route.slice('POST /app/secondbrain/'.length);
   const au = r.audit || {};
-  res._app.reden = 'secondbrain ' + actie + (au.domein ? ' ' + au.domein : '') + (au.h ? ' h=' + au.h : '') + (r.status !== 200 ? ' (' + r.status + ')' : '');
+  res._app.reden = 'secondbrain ' + actie + (au.domein ? ' ' + au.domein : '') + (au.h ? ' h=' + au.h : '') + (r.status !== 200 ? ' (' + r.status + ')' : '')
+    + (au.weiger ? ' weiger=' + au.weiger : '')   // wv3946 (3C135): waarom Bewerken niet opende (soort, geen tekst)
+    + (actie === 'bewaar' && d && d.plat === true ? ' plat' : '');   // wv3946: opgeslagen via Bewerk als platte tekst
   return appStuur(res, r.status, r.j);
 }
 // Financiën (bouwplan § 7): bij een vaste last of PayPal-dienst het pad van de vaultpagina uit de koppeltabel, als die in de kaart staat.
@@ -28313,10 +28315,71 @@ function appWerkBewerk(res, a, d, route) {
   } catch (e) { logError('app-werk-bewaar', e); return appWeiger(res, 500, 'opslaan lukte niet; je tekst staat nog hier', 'werk bewaar fout'); }
   return appStuur(res, 200, { ok: true, versie: appWerkSha(nieuw), gewijzigd: true });
 }
+// wv3946 (besluitenpagina nr 503 = 3C203, David Ja 22-11 18:17): "Maak hier een document van" bij een antwoord in het gesprek. De app
+// stuurt de tekst die David in beeld heeft (zoals Download als…); de pod bewaart hem als werkbestand <titel>.md in een eigen klus (soort
+// document, bron_job = het antwoord) en geeft het pad werk:<klus>/1 terug, zodat de Lezer het meteen opent met Bewerken en Deel als link.
+// Zelfde poort als werk-bewaar: niet vanaf een vaste plek, geen sleutelachtige tekst, hooguit 2 MB, niet boven de opslaggrens van 2 GB.
+// Tweede tik op hetzelfde antwoord met dezelfde tekst = hetzelfde document (geen dubbel in Werkbestanden).
+const APP_DOC_RE = /[<>:"|?*\u0000-\u001f\u007f/\\]+/g;
+function appDocNaam(md) {
+  const t = (appBeurtLabel(md) || '').replace(/…$/, '').replace(APP_DOC_RE, ' ').replace(/\s+/g, ' ').replace(/^[.\s]+|[.\s]+$/g, '');
+  return (Array.from(t).slice(0, 70).join('').trim() || 'Antwoord van Socev') + '.md';
+}
+function appWerkNieuw(res, a, d) {
+  const md = d && d.md, bron = d && typeof d.bron_job === 'string' && APP_JOB_RE.test(d.bron_job) ? d.bron_job : null;
+  res._app.reden = 'docs werk-nieuw' + (bron ? ' bij-antwoord' : '');
+  if (typeof md !== 'string' || !md.trim()) return appWeiger(res, 400, 'er is geen tekst om een document van te maken', 'werk nieuw leeg');
+  if (md.indexOf('\u0000') >= 0 || Buffer.byteLength(md, 'utf8') > WERK_MAX_MD) return appWeiger(res, 413, 'deze tekst is te groot voor een document', 'werk nieuw groot');
+  if (appVastBeheerDicht(a)) return appWeiger(res, 403, 'op een vaste plek kun je hier geen document maken', 'werk nieuw vast');
+  let S = null;
+  try { S = require(path.join(__dirname, 'secondbrain.js')); } catch (e) { S = null; }
+  if (!S || typeof S.masker !== 'function') return appWeiger(res, 503, 'een document maken kan in deze versie van de pod niet', 'werk nieuw masker');
+  if (S.masker(md, false, null) !== md) return appWeiger(res, 422, 'in dit antwoord staat iets dat op een sleutel lijkt; daar maak ik geen document van', 'werk nieuw sleutel');
+  const tekst = md.replace(/\r\n/g, '\n').replace(/\n*$/, '\n');
+  const buf = Buffer.from(tekst, 'utf8');
+  const sha = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 32);
+  let items;
+  try { items = appBestandenIndex(); } catch (e) { logError('app-werk-nieuw', e); return appWeiger(res, 503, 'Werkbestanden is nu niet leesbaar', 'werk nieuw index'); }
+  if (bron) {
+    const al = items.find(function (m) { return m.soort === 'document' && m.bron_job === bron && m.sha === sha && Array.isArray(m.bestanden) && m.bestanden.length
+      && fs.existsSync(path.join(APP_BESTANDEN_DIR, m.dag, m.job_id, 'b', '1')); });   // de index leeft 20 s: het bestand moet er echt nog zijn
+    if (al) { res._app.reden += ' al'; return appStuur(res, 200, { ok: true, pad: 'werk:' + al.job_id + '/1', job_id: al.job_id, n: 1, naam: al.bestanden[0].naam, al: true }); }
+  }
+  if (!appStaat.bestandenGemeten) appBestandenOpruim();
+  if ((appStaat.bestandenTotaal || 0) + buf.length > APP_BESTANDEN_TOTAAL_BYTES) return appWeiger(res, 507, 'Werkbestanden zit vol (2 GB); er wordt elk uur opgeruimd', 'werk nieuw vol');
+  const id = crypto.randomBytes(8).toString('hex'), op = new Date();
+  const dir = path.join(APP_BESTANDEN_DIR, op.toISOString().slice(0, 10), id);
+  const naam = appVeiligeNaam(appDocNaam(tekst), new Set());
+  try {
+    fs.mkdirSync(path.join(dir, 'b'), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(dir, 'b', '1'), buf, { mode: 0o600, flag: 'wx' });
+    const m = { job_id: id, soort: 'document', kanaal: (d && typeof d.kanaal === 'string' && Object.prototype.hasOwnProperty.call(APP_KANALEN, d.kanaal)) ? d.kanaal : 'hoofd', app: true,
+      label: naam.replace(/\.md$/, ''), ok: true, op: op.toISOString(), bestanden: [{ n: 1, naam: naam, grootte: buf.length }], overgeslagen: 0, vol: false,
+      rapport: false, bron_job: bron, sha: sha };
+    const tmp = path.join(dir, 'meta.json.nieuw');
+    fs.writeFileSync(tmp, JSON.stringify(m), { mode: 0o600 });
+    fs.renameSync(tmp, path.join(dir, 'meta.json'));
+    appStaat.bestandenTotaal = (appStaat.bestandenTotaal || 0) + buf.length;
+    appStaat.bestandenIndex = null;
+  } catch (e) { logError('app-werk-nieuw', e); try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e2) {} return appWeiger(res, 500, 'het document maken lukte niet', 'werk nieuw fout'); }
+  return appStuur(res, 200, { ok: true, pad: 'werk:' + id + '/1', job_id: id, n: 1, naam: naam, al: false });
+}
+// wv3946 (3C135): de app meldt waarom haar editor een pagina niet aankon (soort, waar; nooit tekst). Alleen een logregel.
+const APP_DOCS_WEIGER_SOORT = new Set(['merkteken', 'commentaar', 'opmaak', 'start']);
 async function appDocs(req, res, a, s, d, route) {
   if (route === 'POST /app/docs/werk-bewerk' || route === 'POST /app/docs/werk-bewaar') {
     if (!appTeller('docs-werk', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs werk');
     return appWerkBewerk(res, a, d || {}, route);
+  }
+  if (route === 'POST /app/docs/werk-nieuw') {
+    if (!appTeller('docs-werk-nieuw', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens docs werk-nieuw');
+    return appWerkNieuw(res, a, d || {});
+  }
+  if (route === 'POST /app/docs/weiger') {
+    if (!appTeller('docs-weiger', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs weiger');
+    const so = d && APP_DOCS_WEIGER_SOORT.has(d.soort) ? d.soort : 'onbekend', waar = d && d.waar === 'werk' ? 'werk' : 'brain';
+    res._app.reden = 'docs weiger=' + so + ' ' + waar;
+    return appStuur(res, 200, { ok: true });
   }
   if (!docsDelen) return appWeiger(res, 404, 'Delen zit niet in deze versie van de pod', 'docs ontbreekt');
   if (!appTeller('docs', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs');

@@ -233,6 +233,18 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
   toets('4 symlink als versie: 404', t.status === 404, t);
   t = await sbapp('versies', { pad: '01_Ontwikkeling/Plan.md' }, vast);
   toets('4 versies op een vaste plek: 403', t.status === 403, t);
+  // wv3946 (3C135): Bewerk als platte tekst (zelfde route, plat: true) → vorige versie → Terugzetten = byte voor byte het origineel
+  const KADER = '\uFEFF---\r\ntitel: kaderproef\r\n---\r\n# Kaderproef\r\n\r\n> [!note] Let op\r\n> Zie [[Andere pagina|de andere]] en [[#Kop]].\r\n\r\n%% notitie %%\r\nTekst met ** losse sterren.\r\n';
+  zet('01_Ontwikkeling/Kader.md', KADER);
+  const kb = await sbapp('bewerk', { pad: '01_Ontwikkeling/Kader.md' });
+  toets('4p bewerk: bewerkbaar, platte tekst zonder frontmatter/BOM, LF', kb.j.bewerkbaar && kb.j.md === '# Kaderproef\n\n> [!note] Let op\n> Zie [[Andere pagina|de andere]] en [[#Kop]].\n\n%% notitie %%\nTekst met ** losse sterren.\n', kb.j.md);
+  const kw = await sbapp('bewaar', { pad: '01_Ontwikkeling/Kader.md', versie: kb.j.versie, md: kb.j.md.replace('Let op', 'Let goed op').replace('[[#Kop]]', '[[Derde]]'), plat: true });
+  const naPlat = fs.readFileSync(path.join(V, '01_Ontwikkeling/Kader.md'));
+  toets('4p platte tekst opgeslagen: BOM, frontmatter en CRLF blijven, wikilinks letterlijk', kw.status === 200 && kw.j.gewijzigd && naPlat.toString('utf8') === KADER.replace('Let op', 'Let goed op').replace('[[#Kop]]', '[[Derde]]'), [kw, naPlat.toString('utf8')]);
+  const kv = await sbapp('versies', { pad: '01_Ontwikkeling/Kader.md' });
+  toets('4p na platte tekst: een vorige versie onder Versies', kv.status === 200 && kv.j.versies.length === 1, kv.j);
+  const kt = await sbapp('bewaar-terug', { pad: '01_Ontwikkeling/Kader.md', versie: kv.j.versie, id: kv.j.versies[0].id });
+  toets('4p Terugzetten: byte-gelijk het origineel', kt.status === 200 && fs.readFileSync(path.join(V, '01_Ontwikkeling/Kader.md')).equals(Buffer.from(KADER, 'utf8')), kt);
 
   // ── 6. beveiligd (wv1383): Access-app per deling, toestaanlijst, intrekken ruimt alles op ──
   const OTP = 'e9e612dc-1f11-4c07-bd74-5929e4704eec';

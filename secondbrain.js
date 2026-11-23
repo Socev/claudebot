@@ -649,15 +649,21 @@ function maak(opt) {
     return { bom: bom, fm: fm, fmTekst: f ? f[1] : '', body: r, crlf: /\r\n/.test(r) || (!r && /\r\n/.test(fm)) };
   }
   // Waarom deze pagina niet in Docs bewerkt kan worden (null = wel). t = de hele inhoud zoals die nu op schijf staat.
+  // wv3946 (3C135): elke reden heeft een vaste soort; die gaat (zonder paginatekst) in het app-log, zodat te meten is waarom Bewerken niet opent
+  const NIET_BEWERKBAAR = { vast: 'op een vaste plek kun je hier alleen lezen', systeem: 'systeempagina\'s houden Socev en de wachters bij',
+    socev: 'deze pagina houdt Socev zelf bij', bron: 'bronnen blijven zoals ze binnenkwamen', groot: 'deze pagina is te groot om hier te bewerken',
+    tekens: 'deze pagina bevat tekens die hier niet veilig te bewaren zijn', sleutel: 'er staat iets in dat op een sleutel lijkt; dat blijft afgeschermd' };
+  const redenSoort = function (reden) { for (const k in NIET_BEWERKBAAR) if (NIET_BEWERKBAAR[k] === reden) return k; return reden ? 'anders' : null; };
   function nietBewerkbaar(z, t, ctx) {
-    if (ctx.vast) return 'op een vaste plek kun je hier alleen lezen';
+    const R = NIET_BEWERKBAAR;
+    if (ctx.vast) return R.vast;
     const p = z.b.p, naam = p.split('/').pop().toLowerCase();
-    if (p.indexOf('00_Systeem/') === 0) return 'systeempagina\'s houden Socev en de wachters bij';
-    if (ALLEEN_LEZEN_NAAM.indexOf(naam) >= 0) return 'deze pagina houdt Socev zelf bij';
-    if (isVerborgen(p)) return 'bronnen blijven zoals ze binnenkwamen';
-    if (z.st.size > MAX_BEWERK) return 'deze pagina is te groot om hier te bewerken';
-    if (Buffer.byteLength(t, 'utf8') !== z.st.size) return 'deze pagina bevat tekens die hier niet veilig te bewaren zijn';
-    if (masker(t, false, null) !== t) return 'er staat iets in dat op een sleutel lijkt; dat blijft afgeschermd';
+    if (p.indexOf('00_Systeem/') === 0) return R.systeem;
+    if (ALLEEN_LEZEN_NAAM.indexOf(naam) >= 0) return R.socev;
+    if (isVerborgen(p)) return R.bron;
+    if (z.st.size > MAX_BEWERK) return R.groot;
+    if (Buffer.byteLength(t, 'utf8') !== z.st.size) return R.tekens;
+    if (masker(t, false, null) !== t) return R.sleutel;
     return null;
   }
   function docsBewerk(d, ctx) {
@@ -669,7 +675,9 @@ function maak(opt) {
     const reden = nietBewerkbaar(z, t, ctx);
     const dl = delen(t);
     const body = dl.body.replace(/\r\n/g, '\n');
-    return { status: 200, audit: audit(z.b), j: { ok: true, pad: z.b.p, versie: sha(t), bewerkbaar: !reden, reden: reden,
+    const au = audit(z.b);
+    if (reden) au.weiger = redenSoort(reden);   // wv3946: de soort reden in het app-log
+    return { status: 200, audit: au, j: { ok: true, pad: z.b.p, versie: sha(t), bewerkbaar: !reden, reden: reden, reden_soort: reden ? redenSoort(reden) : null,
       eigenschappen: dl.fmTekst ? eigenschappen(dl.fmTekst, ctx) : [], md: reden ? masker(body) : body } };
   }
   function bewaarVorige(p, t) {

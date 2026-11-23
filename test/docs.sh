@@ -77,6 +77,15 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   let bt = await app('bewerk', { pad: '01_Ontwikkeling/Fm.md' });
   r = await app('bewaar', { pad: '01_Ontwikkeling/Fm.md', versie: bt.j.versie, md: 'vast\n' }, tel.vast);
   toets('vaste plek: bewerk alleen lezen, bewaar 403', b.status === 200 && !b.j.bewerkbaar && r.status === 403, [b.j.reden, r]);
+  // wv3946 (3C135): de soort reden in antwoord en audit (geen tekst), een bewerkbare pagina heeft geen soort
+  toets('wv3946: vaste plek = reden_soort vast, ook in de audit', b.j.reden_soort === 'vast' && b.audit && b.audit.weiger === 'vast', [b.j.reden_soort, b.audit]);
+  toets('wv3946: bewerkbare pagina = reden_soort null, geen weiger in de audit', bt.j.reden_soort === null && !(bt.audit && bt.audit.weiger), [bt.j.reden_soort, bt.audit]);
+  const soorten = {};
+  for (const [p, w] of [['01_Ontwikkeling/Sleutel.md', 'sleutel'], ['00_Systeem/Systeemoverzicht.md', 'systeem'], ['10_Zakelijk/Tolgaarde/Bronnen/bron.md', 'bron'], ['CLAUDE.md', 'socev']]) {
+    const x = await app('bewerk', { pad: p });
+    soorten[p] = x.j.reden_soort;
+    toets('wv3946: reden_soort ' + w + ' voor ' + p, x.j.reden_soort === w && x.audit.weiger === w && JSON.stringify(x.audit).indexOf('Token') < 0, [x.j.reden_soort, x.audit]);
+  }
   r = await app('bewaar', { pad: '20_Prive/Notitie.md', versie: '0'.repeat(32), md: 'x' }, tel.vast);
   toets('wv3446: privé niet meer verborgen met de vast-vlag; schrijven blijft dicht = 403', r.status === 403, r);
   // onderhoud en grendel
