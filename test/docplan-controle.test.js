@@ -256,3 +256,58 @@ test('(f) schrijf: signaal bij de factuur, bijwerken, behoud, vanzelf dicht; fac
     D.sluit(fdb);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// wv3899 (besluitenpagina nr 123 = 2C23): het oordeel per factuur als regel in Facturen, ook bij "klopt" en "niet te beoordelen"
+test('(f) oordeelTekst: noemt de gevonden dagen en wiens rooster; dagenKort', () => {
+  assert.equal(C.dagenKort(['2026-10-08', '2026-09-30', '2026-10-01']), '30 sep, 1 en 8 okt 2026');
+  assert.equal(C.dagenKort(['2025-12-31', '2026-01-02']), '31 dec 2025, 2 jan 2026');
+  const wie = { naam: 'Bram Proefsen', praktijk_naam: 'Tolgaarde' };
+  const uit = { datums: ['2026-10-01', '2026-10-14'], maanden: [] };
+  assert.equal(C.oordeelTekst({ oordeel: 'klopt', vorm: 'dagen', aantal: 2, mis: [] }, uit, wie), '2 dagen, alle 2 gevonden (1 en 14 okt 2026) · rooster Tolgaarde, Bram Proefsen');
+  assert.equal(C.oordeelTekst({ oordeel: 'afwijkend', vorm: 'dagen', aantal: 2, mis: ['2026-10-14'] }, uit, wie),
+    'Wijkt af: 14 okt 2026 staat niet in het rooster (1 van 2 gevonden: 1 okt 2026) · rooster Tolgaarde, Bram Proefsen');
+  assert.equal(C.oordeelTekst({ oordeel: 'onbekend', vorm: 'factuurmaand', maanden: ['2026-09', '2026-10'], dagen: 3.5 }, { datums: [], maanden: [] }, wie),
+    'Niet te beoordelen: geen dagen op de factuur (in september en oktober 2026 wel 3,5 roosterdagen) · rooster Tolgaarde, Bram Proefsen');
+  assert.match(C.oordeelTekst({ oordeel: 'afwijkend', vorm: 'factuurmaand', maanden: ['2026-04', '2026-05'], dagen: 0 }, { datums: [], maanden: [] }, wie), /^Wijkt af: geen dagen op de factuur en in april en mei 2026 niets in het rooster/);
+  assert.match(C.oordeelTekst({ oordeel: 'klopt', vorm: 'maand', maanden: ['2026-10'], dagen: 4 }, { datums: [], maanden: ['2026-10'] }, wie), /de factuur noemt oktober 2026, daarin 4 roosterdagen/);
+  // review ZOU 1: een heel lange regel blijft ≤ 600 tekens en houdt wiens rooster het is
+  const veel = Array.from({ length: 200 }, (_, i) => new Date(Date.UTC(2025, 9, 31 + i)).toISOString().slice(0, 10));
+  const lang = C.oordeelTekst({ oordeel: 'afwijkend', vorm: 'dagen', aantal: 200, mis: veel.slice(0, 100) }, { datums: veel, maanden: [] }, wie);
+  assert.ok(lang.length <= 600 && lang.endsWith('… · rooster Tolgaarde, Bram Proefsen'), lang.length + ' ' + lang.slice(-60));
+});
+
+test('(f) schrijf: roosteroordeel per factuur (migratie 31), tellingen gelijk aan de controle, behoud bij mislukte tekst, opruimen', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'docplan-oordeel-'));
+  try {
+    const fdb = D.open(dir);
+    fdb.db.exec("INSERT INTO entiteit (sleutel, naam) VALUES ('tolgaarde', 'TG (proef)'), ('groenhouten', 'GH (proef)')");
+    const ronde = (fl, dagen, w) => {
+      const u = C.controle({ maanden: MAANDEN_F, lijsten: [LIJST], dp: docplan(), fac: facturen(), nu: NU, dagen: dagen === undefined ? DAGEN : dagen, facturen: fl });
+      return { u, t: C.schrijf(fdb, D, u, w || '2026-11-03T10:00:00.000Z') };
+    };
+    const oq = () => fdb.db.prepare('SELECT factuur, oordeel, regel AS tekst, wanneer FROM roosteroordeel ORDER BY factuur').all().map((x) => Object.assign({}, x));
+    const fl = [fKand('aaaaaaaaaaaaaa01', T_DAGEN), fKand('aaaaaaaaaaaaaa02', T_DAGEN.replace('14-10-2026', '15-10-2026')), fKand('aaaaaaaaaaaaaa03', 'geen datum hier', { factuurdatum: '2026-11-02' })];
+    const { u, t } = ronde(fl);
+    assert.equal(t.oordelen, 3);
+    const rijen = oq();
+    // tellingen in de tabel = tellingen van de controle (zoals in het logboek)
+    const tel = (o) => rijen.filter((x) => x.oordeel === o).length;
+    assert.deepEqual([tel('klopt'), tel('afwijkend'), tel('onbekend')], [u.tel.TG.f_klopt, u.tel.TG.f_afwijkend, u.tel.TG.f_onbekend]);
+    assert.deepEqual(rijen.map((x) => x.oordeel), ['klopt', 'afwijkend', 'onbekend']);
+    assert.equal(rijen[0].tekst, '2 dagen, alle 2 gevonden (1 en 14 okt 2026) · rooster Tolgaarde, Bram Proefsen');
+    assert.match(rijen[1].tekst, /^Wijkt af: 15 okt 2026 staat niet in het rooster \(1 van 2 gevonden: 1 okt 2026\)/);
+    assert.match(rijen[2].tekst, /^Niet te beoordelen: geen dagen op de factuur \(in oktober en november 2026 wel 3,5 roosterdagen\)/);
+    assert.ok(!/NL00TEST/.test(JSON.stringify(fdb.db.prepare('SELECT * FROM roosteroordeel').all())), 'geen IBAN in de tabel');
+    // pdftotext mislukt voor 01 (tekst null): het oude oordeel blijft (met de oude tijd); 03 valt uit de complete lijst: weg
+    const r2 = ronde([fKand('aaaaaaaaaaaaaa01', null), fKand('aaaaaaaaaaaaaa02', T_DAGEN)], undefined, '2026-11-04T10:00:00.000Z');
+    assert.deepEqual(oq().map((x) => [x.factuur, x.oordeel, x.wanneer]), [['aaaaaaaaaaaaaa01', 'klopt', '2026-11-03T10:00:00.000Z'], ['aaaaaaaaaaaaaa02', 'klopt', '2026-11-04T10:00:00.000Z']]);
+    assert.equal(r2.t.oordeel_weg, 1);
+    // dagen-RPC weg (toets draaide niet): niets veranderd, niets weg
+    ronde([], null, '2026-11-05T10:00:00.000Z');
+    assert.equal(oq().length, 2);
+    // afgekapte lijst: niets weg
+    ronde(Array.from({ length: 301 }, (_, i) => fKand('dddddddddddd' + String(i).padStart(4, '0'), T_DAGEN)), undefined, '2026-11-06T10:00:00.000Z');
+    assert.equal(oq().filter((x) => x.factuur.startsWith('aaaa')).length, 2);
+    D.sluit(fdb);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

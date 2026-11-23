@@ -27,6 +27,10 @@
  *                               (public.sb_dienst_dagen, 0022). Geen dagen maar wel een maand ("waarneming oktober 2026"): die maand moet dagen
  *                               hebben; niets van beide: de factuurmaand of de maand ervoor (anders "niet te beoordelen", geen signaal).
  *                               Eén signaal per factuur (knop Open factuur in de app). Nooit een blokkade, nooit een bericht aan de waarnemer.
+ *                               wv3899 (besluit 2C23): het oordeel van élke getoetste factuur (klopt / afwijkend / niet te beoordelen) staat
+ *                               met een regel in gewone taal in facturen.sqlite (tabel roosteroordeel, migratie 31); Facturen toont die bij de
+ *                               factuur (alleen de eigenaar). De regel noemt de gevonden dagen en wiens rooster, tegen vals vertrouwen bij een
+ *                               verkeerde naamkoppeling.
  *
  * Signalen staan in Facturen (tabel signaal, migratie 17; f: migratie 18) in dezelfde vorm als de bankcontrole: alleen de eigenaar, knop "Wegzetten (met reden)".
  * Zelfde sleutel = nooit twee keer (ON CONFLICT DO NOTHING). Is de oorzaak weg (betaling binnen, naam gekoppeld), dan sluit deze controle het
@@ -133,6 +137,50 @@ function factuurOordeel(k, uit, dagSet, maandDagen) {
   if (!(n > 0)) return { oordeel: 'afwijkend', vorm, maanden, dagen: 0 };
   return { oordeel: vorm === 'maand' ? 'klopt' : 'onbekend', vorm, maanden, dagen: n };
 }
+const MAANDNAAM = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+const MAANDKORT = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
+function enLijst(l) { return l.length < 2 ? l.join('') : l.slice(0, -1).join(', ') + ' en ' + l[l.length - 1]; }
+/* dagenKort(['2026-09-30', '2026-10-01', '2026-10-08']) → "30 sep, 1 en 8 okt 2026". Puur. */
+function dagenKort(datums) {
+  const per = new Map();
+  for (const d of [...datums].sort()) { const k = d.slice(0, 7); if (!per.has(k)) per.set(k, []); per.get(k).push(Number(d.slice(8, 10))); }
+  const jaren = new Set([...per.keys()].map((k) => k.slice(0, 4)));
+  const delen = [...per].map(([k, ds], i, a) => enLijst(ds.map(String)) + ' ' + MAANDKORT[Number(k.slice(5, 7)) - 1] +
+    (jaren.size > 1 || i === a.length - 1 ? ' ' + k.slice(0, 4) : ''));
+  return delen.join(', ');
+}
+function maandenTekst(ms) {
+  const jaren = new Set(ms.map((m) => m.slice(0, 4)));
+  return enLijst(ms.map((m, i) => MAANDNAAM[Number(m.slice(5, 7)) - 1] + (jaren.size > 1 || i === ms.length - 1 ? ' ' + m.slice(0, 4) : '')));
+}
+const aantalTekst = (n) => String(Math.round(Number(n) * 10) / 10).replace('.', ',');
+/*
+ * oordeelTekst(u, uit, wie) → de regel bij de factuur in Facturen (wv3899, besluit 2C23). Puur. u = factuurOordeel(), uit = dagenUitTekst(),
+ * wie = { naam, praktijk_naam }. Noemt altijd de gevonden dagen en wiens rooster het is: een "klopt" op een verkeerde naamkoppeling valt zo op.
+ */
+function oordeelTekst(u, uit, wie) {
+  // review ZOU 1: hooguit 600 tekens (CHECK in migratie 31), maar wiens rooster het is valt nooit weg: kort alleen het eerste deel in
+  const bij = ' · rooster ' + wie.praktijk_naam + ', ' + String(wie.naam || 'onbekende persoon').slice(0, 120);
+  const kern = oordeelKern(u, uit);
+  return kern.length + bij.length <= 600 ? kern + bij : kern.slice(0, 600 - bij.length - 1) + '…' + bij;
+}
+function oordeelKern(u, uit) {
+  if (u.vorm === 'dagen') {
+    const n = u.aantal, mis = u.mis || [], gevonden = uit.datums.filter((d) => !mis.includes(d));
+    const dg = (x) => x + (x === 1 ? ' dag' : ' dagen');
+    if (!mis.length) return dg(n) + ', ' + (n === 1 ? 'gevonden' : 'alle ' + n + ' gevonden') + ' (' + dagenKort(gevonden) + ')';
+    return 'Wijkt af: ' + dagenKort(mis) + (mis.length === 1 ? ' staat' : ' staan') + ' niet in het rooster (' + gevonden.length + ' van ' + n + ' gevonden' +
+      (gevonden.length ? ': ' + dagenKort(gevonden) : '') + ')';
+  }
+  const mt = maandenTekst(u.maanden || []);
+  if (u.oordeel === 'klopt') return 'geen losse dagen op de factuur; de factuur noemt ' + mt + ', daarin ' + aantalTekst(u.dagen) + ' roosterdagen';
+  if (u.oordeel === 'afwijkend') {
+    return u.vorm === 'maand' ? 'Wijkt af: de factuur noemt ' + mt + ', maar dan staat er niets in het rooster'
+      : 'Wijkt af: geen dagen op de factuur en in ' + mt + ' niets in het rooster';
+  }
+  return 'Niet te beoordelen: geen dagen op de factuur (in ' + mt + ' wel ' + aantalTekst(u.dagen) + ' roosterdagen)';
+}
+
 /*
  * factuurKandidaten(fac, dp) → [{ id, entiteit, pr, obj, factuurdatum, nummer, incl, sha256, soort }], hooguit FACTUUR_MAX + 1 (meer dan MAX = de
  * lijst is afgekapt: controle beoordeelt dan de nieuwste MAX en laat open signalen van de rest staan). Facturen-app (geen archief: dat heeft
@@ -299,6 +347,7 @@ function controle(o) {
   const fAlle = Array.isArray(o.facturen) ? o.facturen : [];
   const fl = fAlle.slice(0, FACTUUR_MAX);
   const f = { klaar: Array.isArray(o.dagen) && Array.isArray(o.facturen), afgekapt: fAlle.length > FACTUUR_MAX, beoordeeld: [] };
+  const oordelen = [];   // wv3899: per beoordeelde factuur het oordeel + de regel voor Facturen (schrijf → tabel roosteroordeel)
   if (!Array.isArray(o.dagen)) {
     for (const k of fl) { behoud.push(FACTUUR_SOORT + ':' + k.id); if (tel[k.pr]) tel[k.pr].f_overgeslagen++; }
   } else {
@@ -316,6 +365,9 @@ function controle(o) {
       const uit = dagenUitTekst(k.tekst, k.factuurdatum);
       const u = factuurOordeel(k, uit, dagSet, dagen);
       tel[k.pr]['f_' + u.oordeel]++;
+      oordelen.push({ factuur: k.id, oordeel: u.oordeel, tekst: oordeelTekst(u, uit, { naam: naam.get(k.obj), praktijk_naam: PRAKTIJK[k.pr].naam }),
+        details: { persoon: k.obj, praktijk: k.pr, vorm: u.vorm, aantal: u.aantal || 0, gevonden: uit.datums.filter((d) => !(u.mis || []).includes(d)).slice(0, 62),
+          mis: (u.mis || []).slice(0, 31), maanden: u.maanden, dagen_rooster: u.dagen == null ? null : u.dagen } });
       if (u.oordeel !== 'afwijkend') continue;
       signalen.push(B.maakSignaal(FACTUUR_SOORT, { entiteit: k.entiteit, naam: naam.get(k.obj) || 'onbekende persoon', alleen_eigenaar: true,
         facturen: [k.id], bedrag_centen: k.incl, sleutel_vast: k.id,
@@ -323,7 +375,7 @@ function controle(o) {
           vorm: u.vorm, aantal: u.aantal || 0, mis: (u.mis || []).slice(0, 31), maanden: u.maanden, dagen_rooster: u.dagen == null ? null : u.dagen } }));
     }
   }
-  return { signalen, tel, vandaag, behoud, f };
+  return { signalen, tel, vandaag, behoud, f, oordelen };
 }
 
 /*
@@ -364,6 +416,19 @@ function schrijf(fdb, D, u, wanneer) {
       D.audit(fdb, { wie: WIE, wat: 'signaal_vanzelf_opgelost', object_soort: 'signaal', object_id: s.id, entiteit: s.entiteit, voor: { status: 'open' },
         na: { status: 'afgehandeld', soort: s.soort }, wanneer });
     }
+    // wv3899: het oordeel per factuur voor de regel in Facturen. Alleen als de toets draaide; een factuur zonder oordeel deze ronde (pdftotext
+    // mislukt, afgekapte lijst) houdt zijn vorige oordeel; bij een complete lijst verdwijnt het oordeel van een factuur die er niet meer in staat.
+    if (fu.klaar && Array.isArray(u.oordelen) && fdb.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'roosteroordeel'").get()) {
+      const zet = fdb.db.prepare('INSERT INTO roosteroordeel (factuur, oordeel, regel, details, wanneer) VALUES (?, ?, ?, ?, ?) ' +
+        'ON CONFLICT (factuur) DO UPDATE SET oordeel = excluded.oordeel, regel = excluded.regel, details = excluded.details, wanneer = excluded.wanneer');
+      for (const x of u.oordelen) zet.run(x.factuur, x.oordeel, x.tekst, JSON.stringify(x.details).slice(0, 4000), wanneer);
+      t.oordelen = u.oordelen.length;
+      if (!fu.afgekapt) {
+        const houd = new Set(u.oordelen.map((x) => x.factuur).concat((u.behoud || []).map((k) => k.slice(FACTUUR_SOORT.length + 1))));
+        const weg = fdb.db.prepare('DELETE FROM roosteroordeel WHERE factuur = ?');
+        for (const r of fdb.db.prepare('SELECT factuur FROM roosteroordeel').all()) if (!houd.has(r.factuur)) t.oordeel_weg = (t.oordeel_weg || 0) + weg.run(r.factuur).changes;
+      }
+    }
     return t;
   });
 }
@@ -371,4 +436,4 @@ function schrijf(fdb, D, u, wanneer) {
 /* jaren(nu) → de jaren waarvoor (c) de roosternamenlijst vraagt: 2026 t/m dit jaar. */
 function jaren(nu) { const j = []; for (let x = VAN_JAAR; x <= Number(dagAmsterdam(nu).slice(0, 4)); x++) j.push(x); return j; }
 
-module.exports = { controle, schrijf, jaren, maandenVanaf, factuurKandidaten, dagenUitTekst, factuurOordeel, rekeningOnbekend, SOORTEN, FACTUUR_SOORT, VAN_JAAR, NA_DAGEN, TERUG_DAGEN };
+module.exports = { controle, schrijf, jaren, maandenVanaf, factuurKandidaten, dagenUitTekst, factuurOordeel, oordeelTekst, dagenKort, rekeningOnbekend, SOORTEN, FACTUUR_SOORT, VAN_JAAR, NA_DAGEN, TERUG_DAGEN };

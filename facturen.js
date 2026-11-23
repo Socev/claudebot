@@ -445,6 +445,8 @@ function detail(fdb, r, id, nu, nogBetalen) {
     verzendmodus: D.metaLees(fdb, 'verzendmodus'),
     bedragpatroon: bedragpatroonVoor(fdb, r, f, ctx.vandaag),
     vorige: f.status === 'te_beoordelen' ? vorigBedrag(fdb, r, f) : undefined,   // wv3915 (2C95 c): "vorige keer € x" of "eerste keer"
+    // wv3899 (2C23): roosteroordeel van de factuurtoets (tabel roosteroordeel, gevuld na de bankronde); alleen de eigenaar in zijn app, nooit via /fac
+    rooster: isEig(r) && r.ingang === 'app' ? roosterOordeel(fdb, f.id) : undefined,
     afzender: isEig(r) ? afzenderVan(fdb, f) : undefined,   // wv1917: voor "Onthoud voor deze afzender"
     // wv1323: een feitkaart voor een rekening op deze factuur (alleen de eigenaar; de factuur moet nagebeld worden)
     feiten: ip.iban_nieuw && f.status === 'te_beoordelen' ? feitKaarten(fdb, r, nu).filter((k) => k.facturen.some((x) => x.id === f.id)) : [],
@@ -454,6 +456,13 @@ function detail(fdb, r, id, nu, nogBetalen) {
     knop_verstuur: isEig(r) && r.ingang === 'app' && f.status === 'te_beoordelen' ? { aan: knopVerstuurAan(fdb) } : undefined,
     al_betaald: isEig(r) && f.status === 'te_beoordelen' ? alBetaaldBewijs(fdb, f) : undefined,
   };
+}
+// wv3899: { oordeel, tekst, wanneer } of null (niet getoetst: geen factuur uit het rooster, nog geen ronde, of een database van vóór migratie 31)
+function roosterOordeel(fdb, id) {
+  try {
+    const x = fdb.db.prepare('SELECT oordeel, regel, wanneer FROM roosteroordeel WHERE factuur = ?').get(id);
+    return x ? { oordeel: x.oordeel, tekst: x.regel, wanneer: x.wanneer } : null;
+  } catch (e) { return null; }
 }
 // wv3914: schakelaar "Bevestig en verstuur" (meta versturen_per_factuur = '1', aan pas na de registerrij inkoop-direct-knop) en de algemene
 // vrijgave van direct verzenden; directBesluit leest beide opnieuw op het verzendmoment.

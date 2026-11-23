@@ -1415,6 +1415,22 @@ CREATE TRIGGER IF NOT EXISTS betaal_herinnering_vast BEFORE UPDATE ON betaal_her
   BEGIN SELECT RAISE(ABORT, 'betaal_herinnering: rijen blijven (alleen gemeld_op één keer)'); END;
 `;
 
+/*
+ * wv3899 (besluitenpagina nr 123 = 2C23): het roosteroordeel van de DocPlan-factuurtoets per factuur (docplan-controle.js regel f), zodat
+ * Facturen bij elke getoetste waarnemersfactuur een regel kan tonen ("4 dagen, alle 4 gevonden", "Wijkt af: …", "Niet te beoordelen: …"),
+ * niet alleen bij "afwijkend" (dat blijft daarnaast een signaal). Eén rij per factuur, de jongste toets telt; geen IBAN of bedrag.
+ * Geen verwijzing naar factuur(id): de controle ruimt zelf op. LET OP terugrol: een release van vóór wv3899 opent deze database niet meer
+ * (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 31` (de oude code kent de tabel niet en hindert hem niet).
+ */
+const M31 = `
+CREATE TABLE IF NOT EXISTS roosteroordeel (
+  factuur TEXT PRIMARY KEY ${ID('factuur')},
+  oordeel TEXT NOT NULL CHECK (oordeel IN ('klopt','afwijkend','onbekend')),
+  regel TEXT NOT NULL CHECK (length(regel) BETWEEN 1 AND 600),
+  details TEXT CHECK (details IS NULL OR length(details) <= 4000),
+  wanneer TEXT NOT NULL
+);
+`;
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -1445,13 +1461,14 @@ const MIGRATIES = [
   { versie: 28, naam: 'herinnering aan Cynthia bij een niet betaald gezien betaalverzoek: herinnering_mail, betaal_herinnering (wv3455)', sql: M28 },
   { versie: 29, naam: 'Bevestig en verstuur per factuur: opdracht.direct_knop, vast na het aanmaken (wv3914)', fn: (db) => M29(db) },
   { versie: 30, naam: 'signaal: DocPlan, bekende waarnemer op een onbekende rekening, rekening_onbekend (wv3898)', fn: (db) => M30(db) },
+  { versie: 31, naam: 'DocPlan-factuurtoets: roosteroordeel per factuur voor de regel in Facturen (wv3899)', sql: M31 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
   'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel', 'afzender_regel',
   'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso', 'paypal_regel', 'boekstuk_verzending', 'boekstuk_vrijgave', 'sepa_verzending',
-  'betaal_verzending', 'ontkoppeling', 'herinnering_mail', 'betaal_herinnering'];
+  'betaal_verzending', 'ontkoppeling', 'herinnering_mail', 'betaal_herinnering', 'roosteroordeel'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 
