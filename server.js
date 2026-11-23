@@ -6179,7 +6179,8 @@ APP_GLIJD_ROUTES.add('POST /app/voor-jou/woord');   // wv3250: een steekwoordkeu
 APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/rekening');   // wv2292: Bewerk in Saldi = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/stroom');   // wv2596: stroom kiezen = David die werkt
-APP_GLIJD_ROUTES.add('POST /app/financien/doel');   // wv2621: doel erbij of weg = David die werkt
+APP_GLIJD_ROUTES.add('POST /app/financien/doel');
+APP_GLIJD_ROUTES.add('POST /app/financien/oppak');   // wv3925: Ik wil dit = David die werkt   // wv2621: doel erbij of weg = David die werkt
 ['POST /app/financien/ah/koppel', 'POST /app/financien/ah/ontkoppel'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2703: AH koppelen = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/potje');   // wv2706: potje zetten of weg = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij een reis tikken = David die werkt
@@ -14379,7 +14380,9 @@ function appFinVault(nu) {
 }
 // bankdeel + vaultdeel; fouten van beide samen
 function appFinSamen(basis, d, v) {
-  return Object.assign(basis, d, { overzicht: appFinNu(d.overzicht), hypotheek: v.hypotheek, belasting: v.belasting, dga: v.dga, fouten: (Array.isArray(d.fouten) ? d.fouten : []).concat(v.fouten) });
+  // wv3925 (Codex MOET 1): de herkenningen van wat de App nu toont gaan mee; de App stuurt ze terug bij gezien (alleen hashes, geen naam of bedrag)
+  let teller = null; try { teller = appFinTellerMod().sleutels(d); } catch (e) { teller = null; }
+  return Object.assign(basis, d, { overzicht: appFinNu(d.overzicht), hypotheek: v.hypotheek, belasting: v.belasting, dga: v.dga, fouten: (Array.isArray(d.fouten) ? d.fouten : []).concat(v.fouten), teller_sleutels: teller });
 }
 // wv3924 (besluitenpagina nr 151 = 2C51, David Ja 22-11-2026 18:22): "nieuw sinds je laatste bezoek" bovenaan Financiën › Overzicht. Per verzoek
 // (niet in het 60 s-geheugen): overzicht.nu.recent (financien-plan.js recentVan) tegen financien-bezoek.json; recent zelf gaat niet mee naar de App.
@@ -14387,8 +14390,9 @@ function appFinSamen(basis, d, v) {
 // Kopie van het overzicht: het geheugen (appFinCache) blijft onaangeroerd. Geen bedrag of naam in het bestand of in api.log.
 const APP_FIN_BEZOEK = path.join(APP_DATA, 'financien-bezoek.json'), APP_FIN_GEZIEN_PER_UUR = 120;
 function appFinBezoek() {
-  try { const b = appLeesStreng(APP_FIN_BEZOEK, {}); return { laatst: typeof b.laatst === 'string' ? b.laatst : null, op: typeof b.op === 'string' ? b.op : null }; }
-  catch (e) { logError('financien-bezoek', e); return { laatst: null, op: null }; }
+  try { const b = appLeesStreng(APP_FIN_BEZOEK, {}); return { laatst: typeof b.laatst === 'string' ? b.laatst : null, op: typeof b.op === 'string' ? b.op : null,
+    signalen: Array.isArray(b.signalen) ? b.signalen : null, oppak: b.oppak && typeof b.oppak === 'object' && !Array.isArray(b.oppak) ? b.oppak : {} }; }   // wv3925: + signalen (teller) en oppak (Ik wil dit)
+  catch (e) { logError('financien-bezoek', e); return { laatst: null, op: null, signalen: null, oppak: {}, onleesbaar: true }; }
 }
 function appFinNu(ov) {
   if (!ov || !ov.nu || typeof ov.nu !== 'object') return ov;
@@ -14405,10 +14409,23 @@ async function appFinGezien(req, res, a, d) {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(tot) || !Number.isFinite(t) || t > Date.now() + 5 * 60000) return appWeiger(res, 400, 'onbekend moment', 'fin-gezien tot');
   if (!appTeller('fin-gezien', APP_FIN_GEZIEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens fin-gezien');
   const b = appFinBezoek(), oud = Date.parse(b.laatst || '');
+  if (b.onleesbaar) return appWeiger(res, 503, 'bewaren lukte nu niet', 'fin-gezien onleesbaar');   // wv3925: nooit de tikken (oppak) wegschrijven
   const laatst = Number.isFinite(oud) && oud >= t ? b.laatst : new Date(t).toISOString();
-  try { appSchrijfJson(APP_FIN_BEZOEK, { versie: 1, laatst: laatst, op: new Date().toISOString(), apparaat: (a && a.id) || null }); }
+  // wv3925 (2C78 b): wat de App toonde (teller_sleutels uit GET /app/financien, terug in d.signalen) is gezien; het bolletje gaat naar nul. Een
+  // signaal dat pas na het laden verscheen staat er niet in en blijft tellen (Codex MOET 1). Zonder lijst (oudere App) blijft het oude staan.
+  const F = appFinTellerMod();
+  const signalen = d && Array.isArray(d.signalen) ? F.geldigeLijst(d.signalen) : (b.signalen || null);
+  try { appSchrijfJson(APP_FIN_BEZOEK, { versie: 1, laatst: laatst, op: new Date().toISOString(), apparaat: (a && a.id) || null, signalen: signalen, oppak: b.oppak }); }
   catch (e) { logError('financien-bezoek', e); return appWeiger(res, 503, 'bewaren lukte nu niet', 'fin-gezien schrijven'); }
   return appStuur(res, 200, { ok: true, laatst: laatst });
+}
+// het bankkind-antwoord als stand voor de App, en in het 60 s-geheugen (ook vanuit de teller, wv3925: dan rekent het openen erna niet opnieuw)
+function appFinUitKind(j, nu) {
+  const d = {};
+  ['peildatum', 'maand', 'deze_maand', 'vorige_maand', 'verloop', 'vaste_lasten', 'buffer', 'stroom', 'paypal', 'signalen', 'links', 'fouten', 'gambia', 'saldi', 'overzicht'].forEach(function (k) { d[k] = j[k] === undefined ? null : j[k]; });   // wv2202: + gambia; wv2258: + saldi; wv2596: + overzicht
+  if (typeof secondbrainFinPagina === 'function') secondbrainFinPagina(d);   // wv832: link naar de vaultpagina (koppeltabel)
+  appFinCache = Array.isArray(d.fouten) && d.fouten.length ? null : { op: nu, d: d };   // half overzicht niet bewaren (Fable diffreview #4)
+  return d;
 }
 async function appFinancien(req, res, a) {
   res._app.reden = 'financien';
@@ -14424,11 +14441,85 @@ async function appFinancien(req, res, a) {
     if (appFinCache && nu - appFinCache.op < APP_FIN_TERUGVAL_MS) return appStuur(res, 200, appFinSamen({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString(), oud: true }, appFinCache.d, appFinVault(nu)));
     return appWeiger(res, 503, oud ? 'Financiën wordt net bijgewerkt; probeer het over een paar minuten' : 'de cijfers zijn nu niet te lezen; probeer het zo opnieuw', oud ? 'financien oud' : 'financien fout');
   }
-  const d = {};
-  ['peildatum', 'maand', 'deze_maand', 'vorige_maand', 'verloop', 'vaste_lasten', 'buffer', 'stroom', 'paypal', 'signalen', 'links', 'fouten', 'gambia', 'saldi', 'overzicht'].forEach(function (k) { d[k] = j[k] === undefined ? null : j[k]; });   // wv2202: + gambia; wv2258: + saldi; wv2596: + overzicht
-  if (typeof secondbrainFinPagina === 'function') secondbrainFinPagina(d);   // wv832: link naar de vaultpagina (koppeltabel)
-  appFinCache = Array.isArray(d.fouten) && d.fouten.length ? null : { op: nu, d: d };   // half overzicht niet bewaren (Fable diffreview #4)
+  const d = appFinUitKind(j, nu);
   return appStuur(res, 200, appFinSamen({ ok: true, vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }, d, appFinVault(nu)));   // wv1337: + vault
+}
+
+// wv3925 (besluitenpagina nr 178 = 2C78 b + d, David Ja 22-11-2026 18:22; Fable "Een 9 - financien" S2 en S4; regels in financien-teller.js).
+// GET /app/financien/teller: het bolletje op de tegel = signalen onder "Om naar te kijken" + een tekort in de komende 14 dagen die er bij het laatste
+// bezoek nog niet stonden. Bron: het 60 s-geheugen van GET /app/financien als dat er is (tot 15 min oud), anders één eigen berekening (zelfde
+// bankkind, hooguit eens per 15 min, één tegelijk). Alleen aantallen terug. Fout = 503; de App laat dan geen bolletje zien (stil).
+// POST /app/financien/oppak { advies }: "Ik wil dit" zet het advies als punt in Voor jou (mk_voor_jou_zet, idempotent op de sleutel: een tweede
+// tik maakt geen tweede punt) en onthoudt de tik in financien-bezoek.json (oppak: { id: { op } }; geen bedrag of naam). GET /app/financien/oppak:
+// per advies-id de stand op de lijst (open, gedaan, gezet) uit mk_voor_jou_lijst.
+const APP_FIN_TELLER_MS = 15 * 60000, APP_FIN_OPPAK_PER_UUR = 30;
+let appFinTellerCache = null, appFinTellerBezig = null, appFinTellerFoutOp = 0;   // { op, sleutels }; foutOp: na een mislukte berekening 2 min geen nieuwe (Codex ZOU 1)
+function appFinTellerMod() { return require(path.join(__dirname, 'financien-teller.js')); }
+function appFinTellerStand(nu) {
+  if (appFinCache && nu - appFinCache.op < APP_FIN_TELLER_MS) {
+    if (!appFinTellerCache || appFinTellerCache.op !== appFinCache.op) appFinTellerCache = { op: appFinCache.op, sleutels: appFinTellerMod().sleutels(appFinCache.d) };
+    return appFinTellerCache;
+  }
+  return appFinTellerCache && nu - appFinTellerCache.op < APP_FIN_TELLER_MS ? appFinTellerCache : null;
+}
+async function appFinTellerVers() {
+  const nu = Date.now(), st = appFinTellerStand(nu);
+  if (st) return st;
+  if (appFinTellerBezig) return appFinTellerBezig;
+  if (nu - appFinTellerFoutOp < 2 * 60000) throw new Error('financien kort geleden niet te lezen');
+  appFinTellerBezig = (async function () {
+    let r = null;
+    try { r = await bankKind(['app-financien'], typeof beleggenFinInvoer === 'function' ? beleggenFinInvoer() : {}, APP_FIN_MAX_MS); } catch (e) { r = null; }
+    const j = r && r.j;
+    // een half antwoord (fouten) telt niet: geen onvolledige teller en niets dat via gezien wordt opgeslagen (Codex MOET 2)
+    if (!j || j.ok !== true || (Array.isArray(j.fouten) && j.fouten.length)) { appFinTellerFoutOp = Date.now(); throw new Error('financien niet te lezen'); }
+    const op = Date.now(), d = appFinUitKind(j, op);   // vult ook het 60 s-geheugen: Financiën openen vlak erna rekent niet opnieuw
+    appFinTellerCache = { op: op, sleutels: appFinTellerMod().sleutels(d) };
+    return appFinTellerCache;
+  })().finally(function () { appFinTellerBezig = null; });
+  return appFinTellerBezig;
+}
+async function appFinTeller(req, res, a) {
+  res._app.reden = 'financien-teller'; res._app.stil = true;
+  if (!appTeller('fin-teller', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens fin-teller');
+  let st;
+  try { st = await appFinTellerVers(); } catch (e) { logError('financien-teller', new Error('stand niet te lezen')); return appWeiger(res, 503, 'nu niet te tellen', 'fin-teller'); }
+  const b = appFinBezoek();
+  // nog nooit bezocht met teller (oude bezoekregel zonder signalen): niets is "nieuw", anders staat er bij de eerste keer de hele lijst
+  if (!b.signalen) return appStuur(res, 200, { ok: true, totaal: 0, signalen: 0, tekort: 0 });
+  const t = appFinTellerMod().tel(st.sleutels, b.signalen);
+  return appStuur(res, 200, { ok: true, totaal: t.totaal, signalen: t.signalen, tekort: t.tekort });
+}
+async function appFinOppakLijst(req, res, a) {
+  res._app.reden = 'financien-oppak'; res._app.stil = true;
+  const b = appFinBezoek();
+  let punten = null;
+  if (Object.keys(b.oppak).length) { try { punten = await appVjPunten(); } catch (e) { punten = null; } }
+  return appStuur(res, 200, { ok: true, lijst: appFinTellerMod().opLijst(b.oppak, punten || []), lijst_gelezen: punten !== null || !Object.keys(b.oppak).length });
+}
+async function appFinOppak(req, res, a, d) {
+  res._app.reden = 'financien-oppak';
+  const id = String((d && d.advies) || '');
+  const F = appFinTellerMod();
+  if (!F.ID_RE.test(id)) return appWeiger(res, 400, 'onbekend advies', 'fin-oppak id');
+  if (!appTeller('fin-oppak', APP_FIN_OPPAK_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens fin-oppak');
+  // het advies uit de stand die David zag (60 s-geheugen, tot 30 min); niet in de stand = verouderd scherm
+  const ov = appFinCache && Date.now() - appFinCache.op < APP_FIN_TERUGVAL_MS && appFinCache.d && appFinCache.d.overzicht;
+  const adv = ov && ov.advies && Array.isArray(ov.advies.adviezen) ? ov.advies.adviezen.find(function (x) { return x && x.id === id; }) : null;
+  if (!adv) return appWeiger(res, 409, 'dit advies staat er niet meer; tik Ververs', 'fin-oppak niet in stand');
+  const b0 = appFinBezoek();
+  if (b0.onleesbaar) return appWeiger(res, 503, 'bewaren lukte nu niet', 'fin-oppak onleesbaar');
+  let p, r;
+  try { p = F.oppakKaart(adv); } catch (e) { return appWeiger(res, 400, 'onbekend advies', 'fin-oppak kaart'); }
+  try { r = await appSbRpc('mk_voor_jou_zet', { p: p }); } catch (e) { logError('financien-oppak', e); return appWeiger(res, 503, 'Voor jou is nu niet bereikbaar; probeer het zo opnieuw', 'fin-oppak rpc'); }
+  appStaat.vjCache = null;   // de lijst vers (Voor jou en de stand hieronder)
+  const b = appFinBezoek(), oppak = Object.assign({}, b.oppak);
+  const al = Object.hasOwn(oppak, id);
+  oppak[id] = { op: (oppak[id] && oppak[id].op) || new Date().toISOString() };
+  try { appSchrijfJson(APP_FIN_BEZOEK, { versie: 1, laatst: b.laatst, op: b.op, signalen: b.signalen, oppak: oppak }); } catch (e) { logError('financien-bezoek', e); }   // het punt staat er al; alleen het geheugen mist
+  const status = r && typeof r.status === 'string' ? r.status : null;
+  return appStuur(res, 200, { ok: true, advies: id, stand: status === 'open' || status === 'later' ? 'open' : status ? 'gedaan' : 'gezet', al: al,
+    vanaf: r && typeof r.toon_vanaf === 'string' ? r.toon_vanaf : null });
 }
 
 // wv2292 (David 3-11-2026: "namen van de rekeningen aan kunnen passen, en koppelen bij wie ze horen ... custom labels"): Bewerk per
@@ -16239,6 +16330,9 @@ function handleApp(req, res) {
         if (route === 'POST /app/financien/reizen') return appFinReizen(req, res, a, d);   // wv2715: kosten per reis (lijst of één reis)
         if (route === 'POST /app/financien/reislabel') return appFinReislabel(req, res, a, d);   // wv2715: boeking bij een reis: erbij, eraf of terug
         if (route === 'POST /app/financien/vermogen') return appFinVermogen(req, res, a, d);   // wv2716: vermogensverloop per maand sinds 2016
+        if (route === 'GET /app/financien/teller') return appFinTeller(req, res, a);   // wv3925 (2C78 b): bolletje op de tegel
+        if (route === 'GET /app/financien/oppak') return appFinOppakLijst(req, res, a);   // wv3925 (2C78 d): welke adviezen op je lijst staan
+        if (route === 'POST /app/financien/oppak') return appFinOppak(req, res, a, d);   // wv3925 (2C78 d): "Ik wil dit" = punt in Voor jou
         if (route === 'POST /app/financien/gezien') return appFinGezien(req, res, a, d);   // wv3924 (2C51): bezoek aan Overzicht (voor "nieuw sinds je laatste bezoek")
         if (['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam', 'POST /app/financien/regels'].indexOf(route) >= 0) return appFinCorrigeer(req, res, a, d, route);   // wv2717: zelf corrigeren
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
@@ -31015,7 +31109,7 @@ function bankKaart(soort, t, sleutel) {
   const stappen = ["Zeg in de app tegen Socev: 'koppel de bank'.", 'Open de link die Socev je geeft in Chrome (niet in een app-venster); hij is een uur geldig.',
     'Log in bij ' + bank + ' en vink alleen ' + rek + ' aan.', "Klaar als de pagina 'Gekoppeld' zegt; deze kaart gaat daarna vanzelf dicht."];
   const p = { sleutel: sleutel, soort: 'doen', stappen: stappen, waar: 'overal', prive: true, duur_min: 5,
-    herkomst: { handmatig: 'bank-ronde', bank: t.sessie_kort, module: 'financien', doel: { scherm: 'financien', focus: null } } };
+    herkomst: { handmatig: 'bank-ronde', bank: t.sessie_kort, module: 'financien', doel: { scherm: 'financien', focus: 'blok:saldi' } } };   // wv3925 (2C78 c): opent op Geld › Saldi
   if (soort === 'verlopen') return Object.assign(p, { titel: 'Bank — koppeling ' + bank + ' verlopen: opnieuw koppelen', volgorde: 5,
     deadline: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }),
     waarom: 'De toestemming waarmee Socev ' + rek + ' bij ' + bank + ' leest, geldt niet meer (verlopen of ingetrokken). Socev ziet daar nu geen nieuwe saldi en afschrijvingen meer, tot je opnieuw koppelt.',
@@ -31823,7 +31917,10 @@ async function geldRijZet(datum, tekst) {
 // De kaart. Geen paden, wv-nummers of verwijzingen (mk_voor_jou_zet weigert die); de stappen staan in de kaart zelf.
 function geldKaart(s, peil) {
   const sl = 'geld-' + crypto.createHash('sha256').update(String(s.sleutel)).digest('hex').slice(0, 12);
-  const p = { sleutel: sl, soort: 'doen', waar: 'overal', prive: true, duur_min: 5, volgorde: 40, herkomst: { handmatig: 'geld-briefing', module: 'financien', doel: { scherm: 'financien', focus: null } } };
+  // wv3925 (besluitenpagina nr 178 = 2C78 c): de kaart opent Financiën op de plek waar het staat: bijstorten = Overzicht › Nu en straks met de
+  // posten open; PayPal = Geld › Vaste lasten; dubbel = Geld › Om naar te kijken (dat blok staat sinds de nieuwe vormgeving in het tabblad Geld)
+  const focus = s.kaart === 'dekking' ? 'blok:komende' : s.paypal ? 'blok:vast' : 'blok:signalen';
+  const p = { sleutel: sl, soort: 'doen', waar: 'overal', prive: true, duur_min: 5, volgorde: 40, herkomst: { handmatig: 'geld-briefing', module: 'financien', doel: { scherm: 'financien', focus: focus } } };
   const eind = (function () { const d = new Date(peil.slice(0, 7) + '-01T12:00:00Z'); d.setUTCMonth(d.getUTCMonth() + 1); d.setUTCDate(0); return d.toISOString().slice(0, 10); })();
   if (s.kaart === 'dekking') return Object.assign(p, { titel: 'Vaste-lastenrekening — bijstorten vóór de 1e', volgorde: 10, deadline: eind,
     waarom: String(s.zin) + ' Op de 1e gaan onder meer hypotheek en lease eraf; staat er dan te weinig op, dan kan een incasso mislukken.',
@@ -31839,7 +31936,7 @@ function geldKaart(s, peil) {
     meting: bankNuKort() + ': ' + String(s.zin) });
   return Object.assign(p, { titel: String(s.naam || 'Abonnement').slice(0, 40) + ' — op twee rekeningen nakijken', deadline: dl,
     waarom: String(s.zin) + ' Socev ziet alleen de afschrijvingen, niet of het om twee contracten gaat.',
-    stappen: ['Open in de Socev-app Apps › Financiën en kijk onder "Om naar te kijken" welke rekeningen het zijn.',
+    stappen: ['Tik deze kaart of open in de Socev-app Apps › Financiën › Geld en kijk onder "Om naar te kijken" welke rekeningen het zijn.',
       'Kijk bij de aanbieder of er twee contracten of abonnementen lopen.', 'Is er één overbodig: zeg hem op bij de aanbieder; anders zet je deze kaart op gedaan.'],
     meting: bankNuKort() + ': ' + String(s.zin) });
 }
