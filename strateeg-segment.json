@@ -1,0 +1,147 @@
+{
+ "versie": 1,
+ "opgesteld": "2026-11-23",
+ "bron": "mk-scripts/wv4002/ontwerp-fable.md (Fable 5.2, 23-11-2026) + backtest mk-scripts/wv4002/bt; bevroren tot de einddag",
+ "variant": "V1",
+ "variant_uitleg": "de drie sterkste sectoren over het afgelopen jaar zonder de laatste maand; een gehouden sector blijft zolang hij bij de beste vijf staat; herzien op de eerste beursdag van de maand",
+ "regels": {
+  "signaal": "mom",
+  "a": 252,
+  "b": 21,
+  "k": 3,
+  "buffer": 5,
+  "herzien": "maand",
+  "max_aandeel": 0.5,
+  "contant_min": 0.02,
+  "min_sloten": 274
+ },
+ "start": 1000,
+ "tarief": {
+  "vast": 1.0,
+  "halve_spread": 0.001,
+  "vast_alt": 4.9,
+  "uitleg": "€ 1 per order + 0,10 % halve spread (aanname); ter vergelijking € 4,90 per order (Xetra-tarief)"
+ },
+ "schoon": {
+  "grens": 0.08,
+  "los_grens": 0.12,
+  "rust": 0.04,
+  "venster": 21,
+  "breuk": 5
+ },
+ "tijd": {
+  "dagronde_van": "07:30",
+  "herzien": [
+   "16:20",
+   "16:35",
+   "16:50",
+   "17:05",
+   "17:20"
+  ],
+  "waardeer": [
+   "09:20",
+   "12:20",
+   "16:20",
+   "22:10"
+  ],
+  "beurzen": [
+   "XE",
+   "VS"
+  ],
+  "max_uitstel_dagen": 3,
+  "max_beurt_ms": 40000,
+  "kwartier_marge": [
+   4,
+   12
+  ]
+ },
+ "vers": {
+  "max_oud_min": 5,
+  "min_koersen": 2,
+  "sprong": 0.08
+ },
+ "startdag_vanaf": "2026-11-24",
+ "einddag": "2026-12-23",
+ "etf": [
+  {
+   "id": "tech",
+   "naam": "Technologie",
+   "isin": "IE00BWBXM948",
+   "ls_id": 212079,
+   "tweeling_isin": "IE00B3WJKG14",
+   "tweeling_ls": 196083
+  },
+  {
+   "id": "zorg",
+   "naam": "Zorg",
+   "isin": "IE00BWBXM617",
+   "ls_id": 212067,
+   "tweeling_isin": "IE00B43HR379",
+   "tweeling_ls": 196116
+  },
+  {
+   "id": "fin",
+   "naam": "Financiële bedrijven",
+   "isin": "IE00BWBXM500",
+   "ls_id": 212064,
+   "tweeling_isin": "IE00B4JNQZ49",
+   "tweeling_ls": 196107
+  },
+  {
+   "id": "energie",
+   "naam": "Energie",
+   "isin": "IE00BWBXM492",
+   "ls_id": 212073,
+   "tweeling_isin": "IE00B42NKQ00",
+   "tweeling_ls": 196110
+  },
+  {
+   "id": "industrie",
+   "naam": "Industrie",
+   "isin": "IE00BWBXM724",
+   "ls_id": 212076,
+   "tweeling_isin": "IE00B4LN9N13",
+   "tweeling_ls": 378464
+  },
+  {
+   "id": "duurzaam",
+   "naam": "Duurzame consumptie",
+   "isin": "IE00BWBXM278",
+   "ls_id": 212058,
+   "tweeling_isin": "IE00B4MCHD36",
+   "tweeling_ls": 196119
+  },
+  {
+   "id": "basis",
+   "naam": "Basisconsumptie",
+   "isin": "IE00BWBXM385",
+   "ls_id": 212061,
+   "tweeling_isin": "IE00B40B8R38",
+   "tweeling_ls": 378467
+  },
+  {
+   "id": "materialen",
+   "naam": "Materialen",
+   "isin": "IE00BWBXM831",
+   "ls_id": 212055,
+   "tweeling_isin": "IE00B4MKCJ84",
+   "tweeling_ls": 378446
+  },
+  {
+   "id": "nuts",
+   "naam": "Nutsbedrijven",
+   "isin": "IE00BWBXMB69",
+   "ls_id": 212070,
+   "tweeling_isin": "IE00B4KBBD01",
+   "tweeling_ls": 378449
+  },
+  {
+   "id": "communicatie",
+   "naam": "Communicatie",
+   "isin": "IE00BFWFPX50",
+   "ls_id": 767539,
+   "tweeling_isin": "IE00BDDRF478",
+   "tweeling_ls": 767479
+  }
+ ]
+}

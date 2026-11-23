@@ -617,6 +617,10 @@ jobs:
       - name: "strateeg (wv3993, OVIS Beleggen Strateeg)"
         if: ${{ !cancelled() }}
         run: node --test test/strateeg.test.js
+      # wv4002: Strateeg › boek Segment (fictief, drie van tien sector-ETF's) — schonen, signaal, besluit, klok en de naspeelproef dat de vier boeken bit-gelijk blijven.
+      - name: "strateeg-segment (wv4002, boek Segment)"
+        if: ${{ !cancelled() }}
+        run: node --test test/strateeg-segment.test.js
       # wv2991: OVIS Personeelsscherm fase 0 — proefscherm tekenen, koppelen met IP-eis, intrekken, tik en meldingen (nep-D1, nep-Cloudflare).
       - name: "personeelsscherm (wv2991, OVIS Personeelsscherm fase 0)"
         if: ${{ !cancelled() }}

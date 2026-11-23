@@ -4708,7 +4708,7 @@ function handleRequest(req, res) {
       vastgoed: typeof vastgoedInfo === 'function' ? vastgoedInfo() : { aan: false },
       nza: typeof nzaInfo === 'function' ? nzaInfo() : { aan: false },   // wv3099: OVIS NZa scherm (alleen of het aan staat + telling)   // wv3085: OVIS Vastgoed (alleen aantallen: objecten, feiten, stukken, aanroepen)
       beleggen: typeof beleggenInfo === 'function' ? beleggenInfo() : { aan: false },
-      strateeg: typeof strateegApp !== 'undefined' && strateegApp ? strateegApp.info() : { aan: false },   // wv3993: Strateeg (fictief geld): stand, opzet, modus, laatste tik, aantal orders
+      strateeg: typeof strateegApp !== 'undefined' && strateegApp ? Object.assign(strateegApp.info(), { segment: typeof segmentApp !== 'undefined' && segmentApp ? segmentApp.info() : { aan: false } }) : { aan: false },   // wv3993: Strateeg (fictief geld): stand, opzet, modus, laatste tik, aantal orders
       personeelsscherm: typeof personeelsschermInfo === 'function' ? personeelsschermInfo() : { aan: false },   // wv2991: OVIS Personeelsscherm (gekoppeld, laatst gezien, volgnr; nooit token, code of IP)
       imagine: typeof imagineInfo === 'function' ? imagineInfo() : { aan: false },   // wv2984: OVIS Imagine (aantallen, schijf, nog te wissen; geen titels of beelden)   // wv2982: OVIS Beleggen (aantallen rijen, vault_ok; geen bedragen)
       ghawa: typeof ghawaInfo === 'function' ? ghawaInfo() : { aan: false },   // wv2877: OVIS GHAWA (databank aanwezig?, laatste scherm en of het sluit; geen inhoud)
@@ -27079,6 +27079,9 @@ async function appStrateeg(req, res, a, route, d) {
   try { u = strateegApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
   catch (e) { logError('strateeg', new Error('route faalde')); return appWeiger(res, 503, 'de Strateeg is nu niet te lezen; probeer het zo opnieuw', 'strateeg fout'); }
   if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'strateeg').slice(0, 80);
+  if (u.status === 200 && !post && route === 'GET /app/beleggen/strateeg' && u.body && typeof u.body === 'object') {   // wv4002: vijfde boek Segment erbij
+    try { u.body.segment = segmentApp ? segmentApp.overzicht() : null; } catch (e) { u.body.segment = null; logError('strateeg-segment', new Error('overzicht faalde')); }
+  }
   return appStuur(res, u.status, u.body);
 }
 // wv3757 (besluit nr 910 / L10, David Ja 21-11 13:19 met vingerafdruk): Beleggen voor Financiën › Vermogen (beleggen.js voorFinancien: waarde van
@@ -27197,12 +27200,30 @@ const strateegApp = (function () {
       log: function (o) { schrijfLog(nu() + ' strateeg ' + velden(o)); } });
   } catch (e) { logError('strateeg', new Error('laden faalde')); return null; }
 })();
+// wv4002 (David app 23-11 14:52 "Probeer dan op basis van marktsegment keuzes te maken"): vijfde boek Segment (fictief, drie van tien
+// sector-ETF's), eigen module en regelbestand (strateeg-segment.js/.json); deelt de databank maar raakt de vier boeken niet. Loopt in dezelfde
+// minuuttik ná de Strateeg en alleen als die niets deed (ontwerp mk-scripts/wv4002/ontwerp-fable.md § 6).
+const segmentApp = (function () {
+  const p = path.join(__dirname, 'strateeg-segment.js');
+  if (!strateegApp || !fs.existsSync(p) || typeof strateegApp._db !== 'function') return null;
+  try {
+    const H = require(path.join(__dirname, 'harvester.js'));
+    const S = require(path.join(__dirname, 'strateeg.js'));
+    return require(p).maak({ db: strateegApp._db, universumIsins: S.UNIVERSUM.instrumenten.map((i) => i.isin).concat([S.UNIVERSUM.index.isin]), wereldIsin: S.UNIVERSUM.index.isin,
+      strateegStand: function () { return strateegApp._M.get('stand'); },
+      haal: async function (url) { const r = await H.veiligHaal(url, { ua: BELEGGEN_KOERS_UA }, 'application/json, text/plain;q=0.9, */*;q=0.5'); return r.body; },
+      log: function (o) { schrijfLog(nu() + ' strateeg ' + velden(o)); } });
+  } catch (e) { logError('strateeg-segment', new Error('laden faalde')); return null; }
+})();
 let strateegBezig = false;
 async function strateegTik() {
   if (!strateegApp || !SERVER_ECHT || !rolPrimair() || strateegBezig) return;
   strateegBezig = true;
-  try { await strateegApp.tik(); }
+  let uit = null;
+  try { uit = await strateegApp.tik(); }
   catch (e) { logError('strateeg', new Error('tik faalde')); }   // geen inhoud in de log
+  try { if (segmentApp && uit) await segmentApp.tik(uit); }
+  catch (e) { logError('strateeg-segment', new Error('tik faalde')); }
   finally { strateegBezig = false; }
 }
 if (strateegApp && SERVER_ECHT) { setInterval(function () { strateegTik(); }, 60000).unref(); }
