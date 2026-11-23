@@ -622,6 +622,10 @@ jobs:
       - name: "strateeg-segment (wv4002, boek Segment)"
         if: ${{ !cancelled() }}
         run: node --test test/strateeg-segment.test.js
+      # wv4012: Strateeg › boek Ideeën (fictief, stellingen uit nieuws en Davids idee) — verifiëren, koop/verkoopregels, harde grens, belang, onveranderlijk vastleggen, tik blokkeert niet.
+      - name: "strateeg-ideeen (wv4012, boek Ideeën)"
+        if: ${{ !cancelled() }}
+        run: node --test test/strateeg-ideeen.test.js
       # wv2991: OVIS Personeelsscherm fase 0 — proefscherm tekenen, koppelen met IP-eis, intrekken, tik en meldingen (nep-D1, nep-Cloudflare).
       - name: "personeelsscherm (wv2991, OVIS Personeelsscherm fase 0)"
         if: ${{ !cancelled() }}
