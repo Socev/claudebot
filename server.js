@@ -26078,6 +26078,9 @@ const docsDelen = (function () {
     return require(p).maak({ dir: DOCS_DIR, vault: VAULT, host: DOCS_HOST, fout: typeof foutOfKapot === 'function' ? foutOfKapot : logError, bron: bron, access: docsAccess,
       masker: S.masker, isVastDicht: S.isVastDicht, isVerborgen: S.isVerborgen, bsnMasker: function (t) { return appBsnMasker(t); },
       lees: function (x) { return VV().lees(x, 'utf8'); },
+      // wv3901 (3C41): het concept na Beveiligd delen via het mailluik (zelfde weg als Bandjes en GHAWA; nooit versturen)
+      gmail: typeof APP_GMAIL_CONCEPTEN === 'string' ? APP_GMAIL_CONCEPTEN : null,
+      mailconcept: function (c) { return typeof bandjesMailConcept === 'function' ? bandjesMailConcept(c) : Promise.resolve({ ok: false, zeker: true, reden: 'het mailluik zit niet in deze versie van de pod' }); },
       hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
       d1: async function (sql, params) {
         if (!process.env.CLOUDFLARE_API_TOKEN) return { ok: false, rijen: null };
@@ -28260,9 +28263,15 @@ async function appDocs(req, res, a, s, d, route) {
   if (!docsDelen) return appWeiger(res, 404, 'Delen zit niet in deze versie van de pod', 'docs ontbreekt');
   if (!appTeller('docs', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs');
   if (route === 'POST /app/docs/delen' && !appVersOk(a, s)) { res._app.reden = 'docs delen, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het delen met je vingerafdruk', vers_nodig: true }); }
+  // wv3901 (3C41, David: "gevoelig, met verse vingerafdruk"): een mailconcept aan de ontvangers van een beveiligde deling; eigen teller
+  if (route === 'POST /app/docs/mailconcept') {
+    if (!appTeller('docs-mail', 12, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 12)', 'grens docs mail');
+    if (!appVersOk(a, s)) { res._app.reden = 'docs mailconcept, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het mailconcept met je vingerafdruk', vers_nodig: true }); }
+  }
   // wv2547 (review gpt-5.5 MOET 1): de vingerafdruk vóór de eerste await verbruiken, zodat twee gelijktijdige deelverzoeken er niet één delen;
   // lukt het delen niet (bv. 409 namen eerst bevestigen), dan krijgt de sessie hem terug (alleen als niemand hem intussen opnieuw zette)
-  const versVoor = route === 'POST /app/docs/delen' ? s.vers_tot : null;
+  // wv3901: het mailconcept idem (één vingerafdruk = één concept)
+  const versVoor = route === 'POST /app/docs/delen' || route === 'POST /app/docs/mailconcept' ? s.vers_tot : null;
   if (versVoor !== null) s.vers_tot = 0;
   let r;
   try { r = await docsDelen.app(route, d || {}, { vast: appVastBeheerDicht(a) }); }   // wv2547: delen ook op een vaste plek (verse vingerafdruk)

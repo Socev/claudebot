@@ -681,8 +681,48 @@ function maak(opt) {
     return { status: 200, audit: { domein: null, h: x ? x.h : null }, j: { ok: true } };
   }
 
+  // wv3901 (besluitenpagina nr 341 = 3C41, David Ja 22-11 18:17): na Beveiligd delen een CONCEPT in Davids Gmail aan precies de ontvangers
+  // van die deling (uit het register, één op één: dezelfde adressen als in het Access-beleid; nooit uit de app meegestuurd), met de link en
+  // twee zinnen uitleg over de code van Cloudflare. opt.mailconcept is het mailluik van de pod (n8n AI - Mailconcept naar Gmail); de pod
+  // verstuurt niets, David verstuurt zelf. Alleen een beveiligde deling die nog buiten staat (niet: openbaar, opruimen open, werkbestand
+  // waarvan de bron weg is maakt niet uit: de link werkt dan nog). Vaste plek: niet (zoals delen).
+  function mailVoor(x) {
+    const titel = String(x.titel || 'de pagina').replace(/[\r\n]+/g, ' ').slice(0, 120);
+    const onderwerp = 'Gedeelde pagina: ' + titel;
+    const bericht = 'Beste,\n\nVia deze link kun je "' + titel + '" lezen:\n' + url(x.slug, x.soort) + '\n\n' +
+      'Bij het openen vul je je mailadres in; je krijgt dan een code per mail (van Cloudflare, in het Engels). Vul die code in en de pagina opent; ' +
+      'dat werkt alleen met het mailadres waar deze mail naartoe ging.\n\nVriendelijke groet,\nDavid';
+    return { aan: x.ontvangers.join(','), onderwerp: onderwerp, bericht: bericht };
+  }
+  let mailBezig = false;
+  async function mailconcept(d, ctx) {
+    const slug = d && d.slug;
+    if (typeof slug !== 'string' || !SLUG_RE.test(slug)) return { status: 400, j: { ok: false, fout: 'onbekende deling' } };
+    if (ctx.vast) return { status: 403, j: { ok: false, fout: 'een mailconcept bij een deling kan niet vanaf een apparaat met een vaste plek' } };
+    if (typeof opt.mailconcept !== 'function') return { status: 503, j: { ok: false, fout: 'het mailconcept zit niet in deze versie van de pod' } };
+    const reg = leesRegister();
+    if (reg.kapot) return { status: 503, j: { ok: false, fout: REG_KAPOT } };
+    const x = reg.delingen.find((y) => y.slug === slug) || null;
+    if (!x) return { status: 404, j: { ok: false, fout: 'deze deling staat er niet (meer)' } };
+    const audit = { domein: null, h: x.h || null };
+    if (x.soort !== 'beveiligd') return { status: 409, audit: audit, j: { ok: false, fout: 'alleen bij een beveiligde deling; een openbare link deel je met Deel link of Kopieer link' } };
+    if (x.access_open || x.alleen_opruimen) return { status: 409, audit: audit, j: { ok: false, fout: 'deze deling is ingetrokken' } };
+    const o = ontvangersUit(Array.isArray(x.ontvangers) ? x.ontvangers : []);
+    if (o.fout || o.lijst.length !== x.ontvangers.length) return { status: 409, audit: audit, j: { ok: false, fout: 'de adressen van deze deling zijn niet te lezen; deel de pagina opnieuw' } };
+    if (mailBezig) return { status: 409, audit: audit, j: { ok: false, fout: 'er wordt al een concept gemaakt; even geduld' } };
+    mailBezig = true;
+    let r;
+    try { r = await opt.mailconcept(mailVoor({ titel: x.titel, slug: x.slug, soort: x.soort, ontvangers: o.lijst })); }
+    catch (e) { fout('docs-mailconcept', e); r = { ok: false, zeker: false, reden: 'geen antwoord van het mailluik' }; }
+    finally { mailBezig = false; }
+    if (!r || !r.ok) return { status: 502, audit: audit, j: { ok: false, zeker: !!(r && r.zeker),
+      fout: (r && r.zeker ? 'Er staat geen concept in Gmail: ' : 'Niet zeker of het concept in Gmail staat (kijk even bij Concepten): ') + String((r && r.reden) || 'onbekende fout') } };
+    return { status: 200, audit: audit, j: { ok: true, aan: o.lijst, gmail: typeof opt.gmail === 'string' ? opt.gmail : null, melding: 'Het concept staat in Gmail (Concepten), aan ' + o.lijst.join(', ') + '. Nakijken en versturen doe je zelf.' } };
+  }
+
   async function app(route, d, ctx) {
     ctx = ctx || {};
+    if (route === 'POST /app/docs/mailconcept') return mailconcept(d, ctx);
     if (route === 'POST /app/docs/stand') return stand(d, ctx);
     if (route === 'POST /app/docs/voorbeeld') return voorbeeld(d, ctx);
     if (route === 'POST /app/docs/delen') return delen(d, ctx);

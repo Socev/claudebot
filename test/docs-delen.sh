@@ -415,7 +415,7 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
   const fetchLog = [];
   let fetchAntw = () => ({ success: true, result: {} });
   const ctx = vm.createContext({ require, process: { env: { SECONDBRAIN_DIR: path.join(W, 'sd2'), DOCS_DIR: path.join(W, 'docs2'), CLOUDFLARE_API_TOKEN: 'proef' } }, __dirname: process.cwd(), path, fs, crypto, console,
-    setInterval: () => ({ unref() {} }), VAULT: V, logError: () => {}, appBsnMasker: bsnMasker, appPoortGeheim: () => 'proefgeheim', VV: () => VV, onderhoud: { stand: () => ({ aan: false }) }, ONDERHOUD_LOCK: '/tmp/x',
+    setInterval: () => ({ unref() {} }), kalenderApp: null /* wv3901: het potloodblok (wv3741) staat sinds cbfa879 tussen Calendar en GHAWA in het knipsel */, VAULT: V, logError: () => {}, appBsnMasker: bsnMasker, appPoortGeheim: () => 'proefgeheim', VV: () => VV, onderhoud: { stand: () => ({ aan: false }) }, ONDERHOUD_LOCK: '/tmp/x',
     smalCf: async (url, body) => { cfAanroep.push({ url, body }); return { status: 200, j: { success: true, result: [{ success: true, results: [] }] } }; },
     SMAL_CF_BASIS: 'https://cf', SMAL_CF_ACCOUNT: 'acc', appTeller: () => true, appVersOk: (a, s) => s.vers === true,
     appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Date, Promise, JSON, String, Number, Array, Object, Math, Buffer, Map, Set,
@@ -438,6 +438,14 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
   toets('5 delen met verse vingerafdruk: 200, D1-query naar de juiste databank, vingerafdruk verbruikt', dl.s === 200 && cfAanroep.length === 1 &&
     /^https:\/\/cf\/client\/v4\/accounts\/acc\/d1\/database\/[0-9a-f-]{36}\/query$/.test(cfAanroep[0].url) && /^INSERT INTO deel/.test(cfAanroep[0].body.sql) && sess.vers_tot === 0, { dl, cf: cfAanroep[0] && cfAanroep[0].url });
   toets('5 audit: geen pad en geen link in de reden', res._app.reden.indexOf(dl.j.gedeeld.slug) < 0 && res._app.reden.indexOf('Reis') < 0, res._app.reden);
+  {   // wv3901: mailconcept door appDocs — zonder vingerafdruk 403 vers_nodig; met: naar de module (onbekende slug 404) en de vingerafdruk terug
+    const n0 = gestuurd.length;
+    await ctx.__dd.appDocs({}, { _app: {} }, { soort: 'meereizend' }, { vers: false }, { slug: 'Zzzzzzzzzzzzzzzzzzzzzz' }, 'POST /app/docs/mailconcept');
+    const s5 = { vers: true, vers_tot: 7 };
+    await ctx.__dd.appDocs({}, { _app: {} }, { soort: 'meereizend' }, s5, { slug: 'Zzzzzzzzzzzzzzzzzzzzzz' }, 'POST /app/docs/mailconcept');
+    toets('5 mailconcept via appDocs: zonder verse vingerafdruk 403 vers_nodig; met: module (404) en vingerafdruk terug', gestuurd[n0].s === 403 && gestuurd[n0].j.vers_nodig === true &&
+      gestuurd[n0 + 1].s === 404 && s5.vers_tot === 7, gestuurd.slice(n0));
+  }
   // wv1901 (David 28-10: op alle pc's alles): een vaste plek leest ook een privépagina (stand 200). wv2547 (David 6-11: "ALLE plekken mogen
   // ALLES"): delen is geen telefoonzaak meer; een vaste plek deelt zoals de telefoon (verse vingerafdruk van dat apparaat, invoerslot in de router)
   res = { _app: {} };
@@ -488,6 +496,62 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
   fetchAntw = () => ({ success: true, result: [{ id: 'a1', domain: 'deel.socev.dev/b/AAAAAAAAAAAAAAAAAAAAAA' }, { id: 'a2', domain: 'deel.socev.dev/b/AAAAAAAAAAAAAAAAAAAAAA/x' }] });
   const zq = await X.docsAccess.zoek('deel.socev.dev/b/AAAAAAAAAAAAAAAAAAAAAA');
   toets('5 zoek: alleen precies dat domein', zq.ok && JSON.stringify(zq.ids) === '["a1"]' && /\?domain=deel\.socev\.dev%2Fb%2FAAAAAAAAAAAAAAAAAAAAAA$/.test(fetchLog[fetchLog.length - 1].url), zq);
+
+  // ── 8. wv3901 (3C41): mailconcept na Beveiligd delen — aan precies de ontvangers uit het register, link + uitleg, alleen concept ──
+  {
+    const DD8 = path.join(W, 'docs8');
+    const db8 = new Map();
+    const d18 = async (sql, p) => { db.clear(); for (const [k, v2] of db8) db.set(k, v2); const r8 = await d1(sql, p); db8.clear(); for (const [k, v2] of db) db8.set(k, v2); return r8; };
+    const luik = [];
+    let luikAntw = { ok: true, concept_id: 'c1' };
+    const mk = (extra) => D.maak(Object.assign({ dir: DD8, vault: V, host: 'deel.socev.dev', fout: () => {}, bron: sb.bron, masker: S.masker, bsnMasker, isVastDicht: S.isVastDicht,
+      isVerborgen: S.isVerborgen, hmac: (p) => crypto.createHmac('sha256', 'proef').update(p).digest('hex').slice(0, 16), d1: d18, lees: (p) => fs.readFileSync(p, 'utf8'), access,
+      mailconcept: async (c) => { luik.push(c); if (luikAntw instanceof Error) throw luikAntw; return luikAntw; } }, extra || {}));
+    const dm = mk();
+    const am = (r8, d, c) => dm.app(r8 === 'gedeeld' ? 'GET /app/docs/gedeeld' : 'POST /app/docs/' + r8, d, c || tel);
+    const P8 = '01_Ontwikkeling/Plan.md';
+    const v8 = await am('voorbeeld', { pad: P8 });
+    let r8 = await am('delen', { pad: P8, soort: 'beveiligd', sha: v8.j.sha, ontvangers: ['Proef@Example.org', 'tweede@example.org'] });
+    const s8 = r8.j && r8.j.gedeeld && r8.j.gedeeld.slug;
+    toets('8 voorwaarde: beveiligd gedeeld', r8.status === 200 && !!s8, r8);
+    r8 = await am('mailconcept', { slug: s8, ontvangers: ['indringer@example.org'], aan: 'indringer@example.org' });
+    const c8 = luik[0] || {};
+    toets('8 mailconcept: 200, één aanroep van het luik, aan = precies de ontvangers uit het register (meegestuurde adressen genegeerd)', r8.status === 200 && luik.length === 1 &&
+      c8.aan === 'proef@example.org,tweede@example.org' && JSON.stringify(r8.j.aan) === '["proef@example.org","tweede@example.org"]', { r8, c8 });
+    toets('8 mailconcept: onderwerp met de titel, bericht met de /b/-link en de uitleg over de code', /^Gedeelde pagina: /.test(c8.onderwerp || '') &&
+      (c8.bericht || '').indexOf('https://deel.socev.dev/b/' + s8 + '\n') >= 0 && /code per mail \(van Cloudflare, in het Engels\)/.test(c8.bericht || '') && !/[<>]/.test(c8.bericht || ''), c8);
+    toets('8 mailconcept: melding zegt dat David zelf verstuurt', /Nakijken en versturen doe je zelf/.test(r8.j.melding || ''), r8.j);
+    luik.length = 0;
+    r8 = await am('mailconcept', { slug: s8 }, vast);
+    toets('8 mailconcept vanaf een vaste plek: 403, luik niet aangeroepen', r8.status === 403 && luik.length === 0, r8);
+    r8 = await am('mailconcept', { slug: '../x' });
+    toets('8 mailconcept: onzin-slug 400', r8.status === 400 && luik.length === 0, r8);
+    r8 = await am('mailconcept', { slug: 'Zzzzzzzzzzzzzzzzzzzzzz' });
+    toets('8 mailconcept: onbekende slug 404', r8.status === 404 && luik.length === 0, r8);
+    const vo = await am('voorbeeld', { pad: '01_Ontwikkeling/Zonder kop.md' });
+    const ro = await am('delen', { pad: '01_Ontwikkeling/Zonder kop.md', soort: 'openbaar', sha: vo.j.sha });
+    r8 = await am('mailconcept', { slug: ro.j.gedeeld.slug });
+    toets('8 mailconcept bij een openbare deling: 409, luik niet aangeroepen', ro.status === 200 && r8.status === 409 && luik.length === 0, { ro, r8 });
+    luikAntw = { ok: false, zeker: true, reden: 'het mailluik weigerde het concept (HTTP 400)' };
+    r8 = await am('mailconcept', { slug: s8 });
+    toets('8 luik weigert zeker: 502 "Er staat geen concept in Gmail"', r8.status === 502 && /^Er staat geen concept in Gmail/.test(r8.j.fout) && r8.j.zeker === true, r8);
+    luikAntw = new Error('netwerk');
+    r8 = await am('mailconcept', { slug: s8 });
+    toets('8 luik gooit: 502 "Niet zeker … kijk even bij Concepten"', r8.status === 502 && /^Niet zeker/.test(r8.j.fout), r8);
+    luikAntw = { ok: true, concept_id: 'c2' };
+    luik.length = 0;
+    const twee = await Promise.all([am('mailconcept', { slug: s8 }), am('mailconcept', { slug: s8 })]);
+    toets('8 twee keer tegelijk: één concept, de tweede 409', luik.length === 1 && twee.map((x) => x.status).sort().join(',') === '200,409', twee.map((x) => x.status));
+    const zonder = mk({ mailconcept: undefined });
+    r8 = await zonder.app('POST /app/docs/mailconcept', { slug: s8 }, tel);
+    toets('8 pod zonder mailluik-koppeling: 503', r8.status === 503, r8);
+    // koppeling in server.js
+    const src8 = fs.readFileSync('server.js', 'utf8');
+    toets('8 server.js: mailconcept via bandjesMailConcept, verse vingerafdruk (403 vers_nodig), eigen teller, vingerafdruk verbruikt',
+      /mailconcept: function \(c\) \{ return typeof bandjesMailConcept === 'function' \? bandjesMailConcept\(c\)/.test(src8) &&
+      /route === 'POST \/app\/docs\/mailconcept'\) \{\n\s+if \(!appTeller\('docs-mail', 12, 3600000\)\)[^\n]*\n\s+if \(!appVersOk\(a, s\)\) \{[^\n]*vers_nodig: true/.test(src8) &&
+      /const versVoor = route === 'POST \/app\/docs\/delen' \|\| route === 'POST \/app\/docs\/mailconcept' \? s\.vers_tot : null;/.test(src8));
+  }
 
   // ── 7. B137: server.js meldt een kapot opslagbestand één keer in de box (foutOfKapot) en geeft hem aan Harvester, AIX, Docs en de sluitlijst ──
   {
