@@ -255,6 +255,7 @@ COPY ah-bonnen.js /app/release-bootstrap/ah-bonnen.js
 COPY financien-plan.js /app/release-bootstrap/financien-plan.js
 COPY financien-reis.js /app/release-bootstrap/financien-reis.js
 COPY financien-vermogen.js /app/release-bootstrap/financien-vermogen.js
+COPY financien-teller.js /app/release-bootstrap/financien-teller.js
 # wv3923: gedeelde lezer woningwaarde + bankstand hypotheek (financien-vault, financien-overzicht, vastgoed)
 COPY woning-bron.js /app/release-bootstrap/woning-bron.js
 COPY financien-corrigeer.js /app/release-bootstrap/financien-corrigeer.js

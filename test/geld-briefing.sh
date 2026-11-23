@@ -66,7 +66,7 @@ fs.writeFileSync(BOX, '# box\n\n## [direct] 2026-10-20 10:00 — oude rij\n- sta
 const src = fs.readFileSync('server.js', 'utf8');
 const a = src.indexOf('// ── wv680: bankluis'), b = src.indexOf('// ── einde bankluis ──');
 const k1 = src.indexOf('function smalKind('), k2 = src.indexOf('async function smalSbRpc(');
-const logs = [], zend = [], rpc = [];
+const logs = [], zend = [], rpc = [], schaduw = [];   // schaduw: wv3958, loketSchaduw (wv3689) staat buiten het knipsel
 let zendFout = null, rpcFout = null, leesFout = null; const tabel = [];
 const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD, N8N_API_KEY: 'k' };
 const g2 = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT: VAULT, SECRET: 'x'.repeat(40),
@@ -78,6 +78,7 @@ const g2 = { VV: () => require(require('path').resolve('vault-veilig.js')), requ
     if (i >= 0) tabel[i] = rij; else tabel.push(rij);
     return rij; },   // n8n geeft bij upsert één object terug (OpenAPI); de pod leest daarna terug
   fetch: async function () { throw new Error('geen netwerk in deze toets'); },
+  loketSchaduw: (b, d, t) => { schaduw.push([b, d, t]); },
   appSbRpc: async function (n, p) { if (rpcFout) throw new Error(rpcFout); rpc.push({ n, p }); return { ok: true }; },
   logError: (w, e) => logs.push(w + ': ' + (e && e.message || e)), schrijfLog: (x) => logs.push(x), nu: () => 'NU', velden: (o) => JSON.stringify(o),
   reqPath: (req) => (req.url || '').split('?')[0], rolPoort: (res, verder) => verder(), rol: { eerste: true }, rolPrimair: () => true, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 50 };
@@ -118,6 +119,7 @@ const boxRijen = () => (fs.readFileSync(BOX, 'utf8').match(/^## \[direct\]/gm) |
   toets('zo 25-10 18:00: blok voor ma 26-10', u.gedaan === true && u.blok === '2026-10-26' && zend.length === 1 && zend[0].p === '/data-tables/TABEL/rows/upsert', [u, zend]);
   toets('rij: bron geld, filter op bron, tekst met de signalen, jaarvergelijking niet (eerste keer)', zend[0].body.data.bron === 'geld' && zend[0].body.filter.filters[0].value === 'geld' &&
     /KPN - Mobiel/.test(zend[0].body.data.tekst) && /\(staat in Voor jou\)/.test(zend[0].body.data.tekst) && !/NM jaar/.test(zend[0].body.data.tekst), zend[0].body.data.tekst);
+  toets('loket-schaduw: na de teruglezing één keer bron geld, dezelfde datum en tekst (wv3689 fase 1)', schaduw.length === 1 && schaduw[0][0] === 'geld' && schaduw[0][1] === '2026-10-26' && schaduw[0][2] === zend[0].body.data.tekst, schaduw);
   toets('leesopdracht: --peil vandaag, geen --vorige de eerste keer', JSON.stringify(kindArgs[0]) === JSON.stringify(['geld-briefing', '--peil', '2026-10-25']), kindArgs);
   toets('kaart dubbel gezet: doen, privé, stappen, deadline, geen pad of wv', rpc.length === 1 && rpc[0].n === 'mk_voor_jou_zet' && rpc[0].p.p.soort === 'doen' && rpc[0].p.p.prive === true &&
     rpc[0].p.p.stappen.length >= 3 && /^\d{4}-\d{2}-\d{2}$/.test(rpc[0].p.p.deadline) && !/wv\d|\/opt\/|\.md/.test(JSON.stringify(rpc[0].p.p)) && /^geld-[0-9a-f]{12}$/.test(rpc[0].p.p.sleutel), rpc[0] && rpc[0].p.p);
