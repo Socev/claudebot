@@ -4708,6 +4708,7 @@ function handleRequest(req, res) {
       vastgoed: typeof vastgoedInfo === 'function' ? vastgoedInfo() : { aan: false },
       nza: typeof nzaInfo === 'function' ? nzaInfo() : { aan: false },   // wv3099: OVIS NZa scherm (alleen of het aan staat + telling)   // wv3085: OVIS Vastgoed (alleen aantallen: objecten, feiten, stukken, aanroepen)
       beleggen: typeof beleggenInfo === 'function' ? beleggenInfo() : { aan: false },
+      strateeg: typeof strateegApp !== 'undefined' && strateegApp ? strateegApp.info() : { aan: false },   // wv3993: Strateeg (fictief geld): stand, opzet, modus, laatste tik, aantal orders
       personeelsscherm: typeof personeelsschermInfo === 'function' ? personeelsschermInfo() : { aan: false },   // wv2991: OVIS Personeelsscherm (gekoppeld, laatst gezien, volgnr; nooit token, code of IP)
       imagine: typeof imagineInfo === 'function' ? imagineInfo() : { aan: false },   // wv2984: OVIS Imagine (aantallen, schijf, nog te wissen; geen titels of beelden)   // wv2982: OVIS Beleggen (aantallen rijen, vault_ok; geen bedragen)
       ghawa: typeof ghawaInfo === 'function' ? ghawaInfo() : { aan: false },   // wv2877: OVIS GHAWA (databank aanwezig?, laatste scherm en of het sluit; geen inhoud)
@@ -16253,6 +16254,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking
         if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk' || route === 'GET /app/nza/punten') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen); wv3676: tab Punten
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
+        if (route === 'GET /app/beleggen/strateeg' || route === 'GET /app/beleggen/strateeg/backtest' || route === 'POST /app/beleggen/strateeg/stand') return typeof appStrateeg === 'function' ? appStrateeg(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'strateeg');   // wv3993: Strateeg (fictief)
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || route === 'GET /app/beleggen/teller' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze|past)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0 || route === 'POST /app/kalender/gevonden') return typeof appKalender === 'function' ? appKalender(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv3679: POST = Klopt niet / terug   // wv2333: OVIS Calendar (alleen lezen)
         if (route.indexOf('GET /app/promedico/') === 0) return typeof appPromedico === 'function' ? appPromedico(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'promedico');   // wv3143: Promedico-laag in Calendar (alleen lezen)
@@ -27067,6 +27069,18 @@ async function appBeleggen(req, res, a, route, d) {
   if (u.status === 200 && (!post || leest)) res._app.stil = true; else res._app.reden = String(u.reden || 'beleggen').slice(0, 80);
   return appStuur(res, u.status, u.body);
 }
+// wv3993: Strateeg (fictief geld) — zelfde poort en tellers als Beleggen; GET stil, POST stand telt als schrijven
+async function appStrateeg(req, res, a, route, d) {
+  if (!strateegApp) return appWeiger(res, 404, 'de Strateeg zit niet in deze versie van de pod', 'strateeg ontbreekt');
+  if (!appTeller('beleggen', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens beleggen');
+  const post = req.method === 'POST';
+  if (post && !appTeller('beleggen-schrijf', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens beleggen-schrijf');
+  let u;
+  try { u = strateegApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
+  catch (e) { logError('strateeg', new Error('route faalde')); return appWeiger(res, 503, 'de Strateeg is nu niet te lezen; probeer het zo opnieuw', 'strateeg fout'); }
+  if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'strateeg').slice(0, 80);
+  return appStuur(res, u.status, u.body);
+}
 // wv3757 (besluit nr 910 / L10, David Ja 21-11 13:19 met vingerafdruk): Beleggen voor Financiën › Vermogen (beleggen.js voorFinancien: waarde van
 // vandaag, per maandeinde en de peilwaarden; alleen lezen). Gaat via stdin naar de bank-lezer (financien-overzicht vermogenPunt, financien-vermogen
 // verloop). Geen databank of een fout = zonder Beleggen (Financiën werkt gewoon door). Geen bedragen in de log.
@@ -27160,6 +27174,38 @@ async function beleggenMailTik() {
   finally { beleggenMailBezig = false; }
 }
 if (beleggenMail && SERVER_ECHT) { setInterval(function () { beleggenMailTik(); }, 5 * 60000).unref(); }
+// ── wv3993: OVIS Beleggen › Strateeg — een maand droog oefenen met € 1.000 FICTIEF geld (David, app 23-11-2026 09:04; ontwerp en review
+// Fable 5.2, mk-scripts/wv3993/ontwerp.md). Eigen databank /opt/data/strateeg/strateeg.sqlite (700/600), los van beleggen.sqlite; nooit een
+// echte order, geen broker. Rekenwerk (backtest, scores) in een kindproces (strateeg-kind.js). Koersen: Lang & Schwarz (ls-tc.de, browser-UA,
+// persoonlijk gebruik), aandacht: Wikipedia-pageviews, cijferdata: SEC (data.sec.gov) en de Nasdaq-kalender; alles GET via veiligHaal.
+// Eigen klok elke minuut (alleen echte pod met rol primair); de module beslist zelf: opzet, dagronde 07:00, kwartier 09:01–22:01, avond 22:05.
+// Log: alleen aantallen. Geen berichten aan David (stilte is de default); hartslag 'strateeg-dag' na de avondronde.
+//   GET  /app/beleggen/strateeg            alles voor de tab Strateeg
+//   GET  /app/beleggen/strateeg/backtest   volledige uitkomst van de laatste backtest
+//   POST /app/beleggen/strateeg/stand      { stand: 'pauze' | 'aan' }
+const STRATEEG_DB = process.env.STRATEEG_DB || '/opt/data/strateeg/strateeg.sqlite';
+const strateegApp = (function () {
+  const p = path.join(__dirname, 'strateeg.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const H = require(path.join(__dirname, 'harvester.js'));
+    const S = require(p);
+    return S.maak({ dbPad: STRATEEG_DB, kind: S.forkKind(path.dirname(STRATEEG_DB)),
+      haal: async function (url, soort) { const r = await H.veiligHaal(url, { ua: soort === 'ls' ? BELEGGEN_KOERS_UA : BELEGGEN_UA }, 'application/json, text/plain;q=0.9, */*;q=0.5'); return r.body; },
+      boxRij: function (t) { return ovisBoxRij(t); },
+      hartslag: function (n, b) { return appSbRpc('mk_hartslag_stempel', { p_component: 'strateeg-dag', p_gemeten_rijen: n, p_bevindingen: b }); },
+      log: function (o) { schrijfLog(nu() + ' strateeg ' + velden(o)); } });
+  } catch (e) { logError('strateeg', new Error('laden faalde')); return null; }
+})();
+let strateegBezig = false;
+async function strateegTik() {
+  if (!strateegApp || !SERVER_ECHT || !rolPrimair() || strateegBezig) return;
+  strateegBezig = true;
+  try { await strateegApp.tik(); }
+  catch (e) { logError('strateeg', new Error('tik faalde')); }   // geen inhoud in de log
+  finally { strateegBezig = false; }
+}
+if (strateegApp && SERVER_ECHT) { setInterval(function () { strateegTik(); }, 60000).unref(); }
 // wv3756 (besluitenpagina nr 908 = L08, David Ja 21-11 13:18): Socev kan erbij in het gewone gesprek (skill beleggen). Zelfde databank en
 // berekening als het scherm; alleen lezen en een dagboekregel (vaultpagina Dagboek via vault-veilig, zoals de app). Socev draait als gebruiker
 // socev zonder kluis: deze route vraagt alleen de agent-sleutel, geen nieuwe sleutel. Alleen de bekende velden gaan door (de secret niet).

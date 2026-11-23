@@ -613,6 +613,10 @@ jobs:
       - name: "beleggen-mail (wv3758, OVIS Beleggen zonder huiswerk)"
         if: ${{ !cancelled() }}
         run: bash test/beleggen-mail.sh
+      # wv3993: OVIS Beleggen › Strateeg (fictief geld) — rekenen, bronnen, spreidingsregels, beursuren, lekproeven en een gesimuleerde beursdag met nep-bronnen (geen netwerk).
+      - name: "strateeg (wv3993, OVIS Beleggen Strateeg)"
+        if: ${{ !cancelled() }}
+        run: node --test test/strateeg.test.js
       # wv2991: OVIS Personeelsscherm fase 0 — proefscherm tekenen, koppelen met IP-eis, intrekken, tik en meldingen (nep-D1, nep-Cloudflare).
       - name: "personeelsscherm (wv2991, OVIS Personeelsscherm fase 0)"
         if: ${{ !cancelled() }}

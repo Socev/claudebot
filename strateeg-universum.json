@@ -1,0 +1,572 @@
+{
+ "versie": 1,
+ "opgesteld": "2026-11-23",
+ "bron": "mk-scripts/wv3993/ontwerp.md § 2.1; ISIN en L&S-nummer gemeten 23-11 (Roche: CH0012032048 niet bij L&S, wel CH0012032113)",
+ "nooit": [
+  "US03703U1079"
+ ],
+ "index": {
+  "isin": "IE00B4L5Y983",
+  "naam": "iShares Core MSCI World",
+  "ls_id": 44039,
+  "beurs": "XE",
+  "tarief": "ETF"
+ },
+ "instrumenten": [
+  {
+   "isin": "US67066G1040",
+   "naam": "NVIDIA",
+   "thema": "tech",
+   "laag": "chips",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 43763,
+   "wiki": [
+    "Nvidia"
+   ],
+   "nasdaq": "NVDA",
+   "cik": 1045810
+  },
+  {
+   "isin": "US11135F1012",
+   "naam": "Broadcom",
+   "thema": "tech",
+   "laag": "chips",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 604621,
+   "wiki": [
+    "Broadcom",
+    "Broadcom_Inc."
+   ],
+   "nasdaq": "AVGO",
+   "cik": 1730168
+  },
+  {
+   "isin": "US0079031078",
+   "naam": "AMD",
+   "thema": "tech",
+   "laag": "chips",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 41789,
+   "wiki": [
+    "AMD",
+    "Advanced_Micro_Devices"
+   ],
+   "nasdaq": "AMD",
+   "cik": 2488
+  },
+  {
+   "isin": "US8740391003",
+   "naam": "TSMC (ADR)",
+   "thema": "tech",
+   "laag": "chips",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 308950,
+   "wiki": [
+    "TSMC"
+   ],
+   "nasdaq": "TSM"
+  },
+  {
+   "isin": "US5951121038",
+   "naam": "Micron",
+   "thema": "tech",
+   "laag": "chips",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 52571,
+   "wiki": [
+    "Micron_Technology"
+   ],
+   "nasdaq": "MU",
+   "cik": 723125
+  },
+  {
+   "isin": "US4581401001",
+   "naam": "Intel",
+   "thema": "tech",
+   "laag": "chips",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 42023,
+   "wiki": [
+    "Intel"
+   ],
+   "nasdaq": "INTC",
+   "cik": 50863,
+   "tegenwicht": true
+  },
+  {
+   "isin": "NL0010273215",
+   "naam": "ASML",
+   "thema": "tech",
+   "laag": "chipmachines",
+   "beurs": "EA",
+   "tarief": "NL",
+   "ls_id": 45299,
+   "wiki": [
+    "ASML",
+    "ASML_Holding"
+   ]
+  },
+  {
+   "isin": "NL0000334118",
+   "naam": "ASM International",
+   "thema": "tech",
+   "laag": "chipmachines",
+   "beurs": "EA",
+   "tarief": "NL",
+   "ls_id": 155835,
+   "wiki": [
+    "ASM_International"
+   ]
+  },
+  {
+   "isin": "NL0012866412",
+   "naam": "BE Semiconductor",
+   "thema": "tech",
+   "laag": "chipmachines",
+   "beurs": "EA",
+   "tarief": "NL",
+   "ls_id": 613503,
+   "wiki": [
+    "Besi",
+    "BE_Semiconductor_Industries"
+   ]
+  },
+  {
+   "isin": "DE0006231004",
+   "naam": "Infineon",
+   "thema": "tech",
+   "laag": "chips",
+   "beurs": "XE",
+   "tarief": "EU",
+   "ls_id": 34331,
+   "wiki": [
+    "Infineon_Technologies"
+   ]
+  },
+  {
+   "isin": "US5949181045",
+   "naam": "Microsoft",
+   "thema": "tech",
+   "laag": "platform",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 42026,
+   "wiki": [
+    "Microsoft"
+   ],
+   "nasdaq": "MSFT",
+   "cik": 789019
+  },
+  {
+   "isin": "US02079K3059",
+   "naam": "Alphabet A",
+   "thema": "tech",
+   "laag": "platform",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 162465,
+   "wiki": [
+    "Alphabet_Inc."
+   ],
+   "nasdaq": "GOOGL",
+   "cik": 1652044
+  },
+  {
+   "isin": "US0231351067",
+   "naam": "Amazon",
+   "thema": "tech",
+   "laag": "platform",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 41786,
+   "wiki": [
+    "Amazon_(company)"
+   ],
+   "nasdaq": "AMZN",
+   "cik": 1018724
+  },
+  {
+   "isin": "US30303M1027",
+   "naam": "Meta",
+   "thema": "tech",
+   "laag": "platform",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 41765,
+   "wiki": [
+    "Meta_Platforms",
+    "Facebook",
+    "_Inc."
+   ],
+   "nasdaq": "META",
+   "cik": 1326801
+  },
+  {
+   "isin": "US0378331005",
+   "naam": "Apple",
+   "thema": "tech",
+   "laag": "platform",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 41780,
+   "wiki": [
+    "Apple_Inc."
+   ],
+   "nasdaq": "AAPL",
+   "cik": 320193
+  },
+  {
+   "isin": "US68389X1054",
+   "naam": "Oracle",
+   "thema": "tech",
+   "laag": "software",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 41996,
+   "wiki": [
+    "Oracle_Corporation"
+   ],
+   "nasdaq": "ORCL",
+   "cik": 1341439
+  },
+  {
+   "isin": "DE0007164600",
+   "naam": "SAP",
+   "thema": "tech",
+   "laag": "software",
+   "beurs": "XE",
+   "tarief": "EU",
+   "ls_id": 34313,
+   "wiki": [
+    "SAP",
+    "SAP_SE"
+   ]
+  },
+  {
+   "isin": "US69608A1088",
+   "naam": "Palantir",
+   "thema": "tech",
+   "laag": "software",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 1241119,
+   "wiki": [
+    "Palantir",
+    "Palantir_Technologies"
+   ],
+   "nasdaq": "PLTR",
+   "cik": 1321655
+  },
+  {
+   "isin": "US4592001014",
+   "naam": "IBM",
+   "thema": "tech",
+   "laag": "software",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 42107,
+   "wiki": [
+    "IBM"
+   ],
+   "nasdaq": "IBM",
+   "cik": 51143,
+   "tegenwicht": true
+  },
+  {
+   "isin": "US17275R1023",
+   "naam": "Cisco",
+   "thema": "tech",
+   "laag": "netwerk",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 41777,
+   "wiki": [
+    "Cisco",
+    "Cisco_Systems"
+   ],
+   "nasdaq": "CSCO",
+   "cik": 858877,
+   "tegenwicht": true
+  },
+  {
+   "isin": "US5324571083",
+   "naam": "Eli Lilly",
+   "thema": "health",
+   "laag": "farma",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 45947,
+   "wiki": [
+    "Eli_Lilly_and_Company"
+   ],
+   "nasdaq": "LLY",
+   "cik": 59478
+  },
+  {
+   "isin": "DK0062498333",
+   "naam": "Novo Nordisk B",
+   "thema": "health",
+   "laag": "farma",
+   "beurs": "CPH",
+   "tarief": "EUV",
+   "ls_id": 3031857,
+   "wiki": [
+    "Novo_(company)",
+    "Novo_Nordisk"
+   ]
+  },
+  {
+   "isin": "GB0009895292",
+   "naam": "AstraZeneca",
+   "thema": "health",
+   "laag": "farma",
+   "beurs": "LSE",
+   "tarief": "EUVL",
+   "ls_id": 43490,
+   "wiki": [
+    "AstraZeneca"
+   ]
+  },
+  {
+   "isin": "CH0012032113",
+   "naam": "Roche",
+   "thema": "health",
+   "laag": "farma",
+   "beurs": "SIX",
+   "tarief": "EUV",
+   "ls_id": 246408,
+   "wiki": [
+    "Roche",
+    "Hoffmann-La_Roche"
+   ]
+  },
+  {
+   "isin": "US58933Y1055",
+   "naam": "Merck & Co",
+   "thema": "health",
+   "laag": "farma",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 43436,
+   "wiki": [
+    "Merck_&_Co."
+   ],
+   "nasdaq": "MRK",
+   "cik": 310158
+  },
+  {
+   "isin": "US00287Y1091",
+   "naam": "AbbVie",
+   "thema": "health",
+   "laag": "farma",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 46127,
+   "wiki": [
+    "AbbVie"
+   ],
+   "nasdaq": "ABBV",
+   "cik": 1551152
+  },
+  {
+   "isin": "US7170811035",
+   "naam": "Pfizer",
+   "thema": "health",
+   "laag": "farma",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 43226,
+   "wiki": [
+    "Pfizer"
+   ],
+   "nasdaq": "PFE",
+   "cik": 78003,
+   "tegenwicht": true
+  },
+  {
+   "isin": "DE000BAY0017",
+   "naam": "Bayer",
+   "thema": "health",
+   "laag": "farma",
+   "beurs": "XE",
+   "tarief": "EU",
+   "ls_id": 34373,
+   "wiki": [
+    "Bayer"
+   ],
+   "tegenwicht": true
+  },
+  {
+   "isin": "US92532F1003",
+   "naam": "Vertex",
+   "thema": "health",
+   "laag": "biotech",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 45827,
+   "wiki": [
+    "Vertex_Pharmaceuticals"
+   ],
+   "nasdaq": "VRTX",
+   "cik": 875320
+  },
+  {
+   "isin": "US75886F1075",
+   "naam": "Regeneron",
+   "thema": "health",
+   "laag": "biotech",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 44558,
+   "wiki": [
+    "Regeneron_Pharmaceuticals"
+   ],
+   "nasdaq": "REGN",
+   "cik": 872589
+  },
+  {
+   "isin": "NL0010832176",
+   "naam": "argenx",
+   "thema": "health",
+   "laag": "biotech",
+   "beurs": "EA",
+   "tarief": "NL",
+   "ls_id": 959538,
+   "wiki": [
+    "Argenx"
+   ]
+  },
+  {
+   "isin": "US09062X1037",
+   "naam": "Biogen",
+   "thema": "health",
+   "laag": "biotech",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 41954,
+   "wiki": [
+    "Biogen"
+   ],
+   "nasdaq": "BIIB",
+   "cik": 875045,
+   "tegenwicht": true
+  },
+  {
+   "isin": "US60770K1079",
+   "naam": "Moderna",
+   "thema": "health",
+   "laag": "biotech",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 791776,
+   "wiki": [
+    "Moderna"
+   ],
+   "nasdaq": "MRNA",
+   "cik": 1682852
+  },
+  {
+   "isin": "US46120E6023",
+   "naam": "Intuitive Surgical",
+   "thema": "health",
+   "laag": "medtech",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 51821,
+   "wiki": [
+    "Intuitive_Surgical"
+   ],
+   "nasdaq": "ISRG",
+   "cik": 1035267
+  },
+  {
+   "isin": "US1011371077",
+   "naam": "Boston Scientific",
+   "thema": "health",
+   "laag": "medtech",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 53669,
+   "wiki": [
+    "Boston_Scientific"
+   ],
+   "nasdaq": "BSX",
+   "cik": 885725
+  },
+  {
+   "isin": "DE000SHL1006",
+   "naam": "Siemens Healthineers",
+   "thema": "health",
+   "laag": "medtech",
+   "beurs": "XE",
+   "tarief": "EU",
+   "ls_id": 583411,
+   "wiki": [
+    "Siemens_Healthineers"
+   ]
+  },
+  {
+   "isin": "NL0000009538",
+   "naam": "Philips",
+   "thema": "health",
+   "laag": "medtech",
+   "beurs": "EA",
+   "tarief": "NL",
+   "ls_id": 41675,
+   "wiki": [
+    "Philips"
+   ],
+   "tegenwicht": true
+  },
+  {
+   "isin": "US8835561023",
+   "naam": "Thermo Fisher",
+   "thema": "health",
+   "laag": "lab",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 45155,
+   "wiki": [
+    "Thermo_Fisher_Scientific"
+   ],
+   "nasdaq": "TMO",
+   "cik": 97745
+  },
+  {
+   "isin": "US4523271090",
+   "naam": "Illumina",
+   "thema": "health",
+   "laag": "lab",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 46535,
+   "wiki": [
+    "Illumina",
+    "_Inc."
+   ],
+   "nasdaq": "ILMN",
+   "cik": 1110803,
+   "tegenwicht": true
+  },
+  {
+   "isin": "US91324P1021",
+   "naam": "UnitedHealth",
+   "thema": "health",
+   "laag": "verzekeraar",
+   "beurs": "VS",
+   "tarief": "VS",
+   "ls_id": 45920,
+   "wiki": [
+    "UnitedHealth_Group"
+   ],
+   "nasdaq": "UNH",
+   "cik": 731766
+  }
+ ]
+}
