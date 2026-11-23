@@ -51,6 +51,25 @@ function backtest(invoer) {
   };
   lek.ok = afkap.ok && lek.kanarie.ontploft && lek.kanarie.afkap_rood && lek.schud.ok && doelOk.ok;
   const ord = R.oordeel(m, lek, regels.oordeel);
+  // ── robuustheid (Fable-review MOET 1, 23-11): rust het oordeel op de keuze van het universum? ──
+  const kort = (x) => ({ ic: rond(x.ic, 4), ic_t: rond(x.ic_t, 2), top_meer: rond(x.top_meer, 5), top_meer_90: x.top_meer_90 ? { onder: rond(x.top_meer_90.onder, 5), boven: rond(x.top_meer_90.boven, 5) } : null, ic0: rond(x.ic0, 4) });
+  const vsH = hoofd.voorspellingen;
+  // (a) score min het eigen lopende gemiddelde per aandeel (alleen eerdere dagen): haalt het vaste voorkeursaandeel eruit
+  const verleden = {};
+  const ontdaan = vsH.map((v) => { const sc = v.score.map((x, k) => { const l = verleden[v.isins[k]] || (verleden[v.isins[k]] = []); const g = l.length ? R.gem(l.slice(-252)) : 0; return x - g; }); v.score.forEach((x, k) => verleden[v.isins[k]].push(x)); return Object.assign({}, v, { score: sc }); });
+  // (b) zonder de vijf aandelen met het hoogste rendement over de toetsperiode (achteraf gekozen: juist dat is de vraag)
+  const tA = vsH.length ? vsH[0].t : 0, tB = vsH.length ? vsH[vsH.length - 1].t : 0;
+  const rend = Object.keys(meta).map((i) => { const a = data.P[i]; let s0 = tA; while (s0 < tB && !(a[s0] > 0)) s0++; return [i, a[tB] > 0 && a[s0] > 0 ? a[tB] / a[s0] : 0]; }).sort((x, y) => y[1] - x[1]);
+  const weg = new Set(rend.slice(0, 5).map((x) => x[0]));
+  const zonder = vsH.map((v) => { const k = v.isins.map((i, j) => (weg.has(i) ? -1 : j)).filter((j) => j >= 0); const pak = (a) => k.map((j) => a[j]); return Object.assign({}, v, { isins: pak(v.isins), score: pak(v.score), score0: pak(v.score0), mu: pak(v.mu), kans: pak(v.kans), y: v.y ? { meer: pak(v.y.meer), z: pak(v.y.z) } : null }); });
+  // (c) alleen de rang op bèta (meebewegen met de markt), zonder model
+  const ib = hoofd.namen.indexOf('beta');
+  const beta = ib < 0 ? [] : vsH.map((v) => Object.assign({}, v, { score: hoofd.DS[v.t].X.map((x) => x[ib]) }));
+  const robuust = { per_aandeel_ontdaan: kort(R.maten(ontdaan, { h: regels.horizon, trekkingen: 500 })), zonder_winnaars: Object.assign({ weg: [...weg].map((i) => meta[i].naam) }, kort(R.maten(zonder, { h: regels.horizon, trekkingen: 500 }))),
+    alleen_beta: ib < 0 ? null : kort(R.maten(beta, { h: regels.horizon, trekkingen: 200 })) };
+  const g = regels.oordeel;
+  ord.robuust = !!(robuust.zonder_winnaars.ic >= g.ic && robuust.zonder_winnaars.ic_t >= g.t && robuust.zonder_winnaars.top_meer_90 && robuust.zonder_winnaars.top_meer_90.onder > 0
+    && robuust.per_aandeel_ontdaan.ic >= g.ic && robuust.per_aandeel_ontdaan.ic_t >= g.t);
   // varianten (beschrijvend; alleen de hoofdvariant beslist)
   const varianten = [];
   for (const h of [5, 10, 20]) for (const set of ['prijs', 'prijs_wiki', 'volledig']) {
@@ -74,7 +93,7 @@ function backtest(invoer) {
     hoofd: { h: regels.horizon, set: regels.set, ic: rond(m.ic, 4), ic_t: rond(m.ic_t, 2), ic0: rond(m.ic0, 4), ic_min_ic0: rond(m.ic_min_ic0, 4), jaren: m.jaren.map((j) => ({ jaar: j.jaar, ic: rond(j.ic, 4), dagen: j.dagen })), jaren_pos: rond(m.jaren_pos, 2),
       top_meer: rond(m.top_meer, 5), top_meer_90: m.top_meer_90 ? { onder: rond(m.top_meer_90.onder, 5), boven: rond(m.top_meer_90.boven, 5) } : null,
       trefkans_top: rond(m.trefkans_top, 4), trefkans_alle: rond(m.trefkans_alle, 4), brier: rond(m.brier, 5), bakjes: m.bakjes.map((b) => ({ p: rond(b.p, 3), y: rond(b.y, 3), n: b.n })) },
-    oordeel: ord, lek, varianten, portefeuille,
+    oordeel: ord, robuust, lek, varianten, portefeuille,
     model: (function () { const md = hoofd.modellen[hoofd.modellen.length - 1]; return md && md.w ? { namen: hoofd.namen, w: md.w.map((x) => rond(x, 5)), lambda: md.lambda, helling: rond(md.helling, 6) } : null; })(),
   };
 }

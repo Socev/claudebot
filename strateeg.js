@@ -88,7 +88,7 @@ function maak(o) {
   async function haal(bron, url, soort) {
     const dag = nlNu().dag;
     try { const t = await o.haal(url, soort || 'ls'); tel(bron, dag, true); return t; }
-    catch (e) { tel(bron, dag, false); if (e && /\b(403|429)\b/.test(String(e.message || e))) { const f = new Error('bron_dicht'); f.dicht = true; throw f; } return null; }
+    catch (e) { tel(bron, dag, false); if (/ls-tc\.de/.test(url) && e && /\b(403|429)\b/.test(String(e.message || e))) { const f = new Error('bron_dicht'); f.dicht = true; throw f; } return null; }   // Fable-MOET 4: alleen L&S stopt de handel
   }
   function nlNu(ms) { return R.deelIn(ms == null ? nu() : ms, 'Europe/Amsterdam'); }
   const hm = (s) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3, 5));
@@ -312,13 +312,22 @@ function maak(o) {
     const modus = M.get('modus') || 'engine';
     let mu = vs.mu;
     if (modus === 'terugval') mu = terugvalMu(dag);
-    if (!vs.dag) { schrijfTik(ms, dag, 'geen_voorspelling', 0, 0, 'niets', 'geen_voorspelling', nu() - t0); return; }
-    // welke koersen: posities van beide boeken, de vier beste kandidaten, de wereld-ETF; op het signaalkwartier ook de doellijst
-    const signaalKwartier = nl.min === hm(REGELS.signaal_kwartier);
-    const isMaatstafStart = signaalKwartier && !boekLees('vasthouden').opgezet;
-    const kand = Object.keys(mu).filter((i) => !echt.posities.some((p) => p.isin === i)).sort((a, b) => mu[b] - mu[a]).slice(0, 4);
+    // Fable-MOET 4: zonder voorspelling van vandaag (dagronde mislukt) wordt er niet gehandeld, ook niet op een oude
+    if (!vs.dag || M.get('score_voor') !== dag) { schrijfTik(ms, dag, 'ok', 0, 0, 'niets', 'geen_voorspelling', nu() - t0); return; }
+    // Fable-MOET 2/3: op de startdag beginnen alle vier de boeken samen op het eerste kwartier op of na 16:16 (dan zijn Europa en de VS open);
+    // Boek Signaal wisselt elke dag op het eerste kwartier op of na 16:16 dat nog niet liep (een gemist exact kwartier telt niet als gemiste dag)
+    const naSignaal = nl.min >= hm(REGELS.signaal_kwartier);
+    const startdag = M.get('startdag');
+    if (dag === startdag && !naSignaal) { schrijfTik(ms, dag, 'ok', 0, 0, 'niets', 'wacht', nu() - t0); return; }
+    const signaalKwartier = naSignaal && M.get('signaal_dag') !== dag;
+    const isMaatstafStart = naSignaal && !boekLees('vasthouden').opgezet;
+    // koerskandidaten binnen de spreiding (Codex-MOET 2): de doellijst (opbouw) + de vier beste die met de huidige posities mogen
+    const gehouden = echt.posities.map((p) => p.isin);
+    const opbouwDoel = gehouden.length < REGELS.posities ? R.doelLijst(mu, meta, REGELS, Object.keys(mu)).filter((i) => !gehouden.includes(i)) : [];
+    const pastIn = (i) => (gehouden.length < REGELS.posities && R.spreidingOk(gehouden.concat(i), meta, REGELS)) || gehouden.some((j) => R.spreidingOk(gehouden.filter((x) => x !== j).concat(i), meta, REGELS));
+    const kand = Object.keys(mu).filter((i) => !gehouden.includes(i) && pastIn(i)).sort((a, b) => mu[b] - mu[a]).slice(0, 4);
     const doel = signaalKwartier ? R.doelLijst(mu, meta, REGELS, Object.keys(mu)) : [];
-    let isins = [...new Set(echt.posities.map((p) => p.isin).concat(kand, sign.posities.map((p) => p.isin), doel, [UNIVERSUM.index.isin]))];
+    let isins = [...new Set(gehouden.concat(opbouwDoel, kand, sign.posities.map((p) => p.isin), doel, [UNIVERSUM.index.isin]))];
     if (isMaatstafStart) isins = ALLE.map((i) => i.isin);
     let min;
     try { min = await haalMinuten(isins, ms); }
@@ -339,7 +348,7 @@ function maak(o) {
       if (!(prijzen[isin] > 0)) { telReden[isin] = versheid[isin] && !versheid[isin].open ? 'beurs_dicht' : 'koers_oud'; return false; }
       if (R.minutenSindsOpen(REGELS.beurzen, metaIdx[isin].beurs, msNu) < REGELS.niet_eerste_minuten) { telReden[isin] = 'beurs_dicht'; return false; }
       if (cijfersNabij(isin, dag)) { telReden[isin] = 'cijfers_nabij'; return false; }
-      if (beweging[isin] != null && isFinite(bewU)) { const z = (beweging[isin] - bewU) / dagSd(isin); if (z > REGELS.achter_koers_sd) { telReden[isin] = 'koers_loopt_weg'; return false; } }
+      if (beweging[isin] != null && isFinite(bewU)) { const z = (beweging[isin] - bewU) / dagSd(isin); if (Math.abs(z) > REGELS.gebeurtenis_sd) { telReden[isin] = 'gebeurtenis'; return false; } if (z > REGELS.achter_koers_sd) { telReden[isin] = 'koers_loopt_weg'; return false; } }
       return true;
     };
     const magVerkopen = (isin) => {
@@ -352,7 +361,8 @@ function maak(o) {
     const echtB = Object.assign({}, echt, { posities: echt.posities.map((p) => Object.assign({}, p, { sinds: Number(p.sinds) })) });
     const vandaagGewisseld = !!db().prepare("SELECT 1 FROM opdracht WHERE boek = 'echt' AND dag = ? AND reden_code = 'gewisseld_in' LIMIT 1").get(dag);
     const eersteVanMaand = modus !== 'terugval' || eersteBeursdagVanMaand(dag);
-    const r = R.besluit({ regels: REGELS, meta, tarieven: REGELS.tarieven, prijzen, mu, posities: echtB.posities, contant: echtB.contant, vandaagIdx: dagIdx,
+    const waardering = {}; for (const p of echtB.posities) { const k = laatsteKoers(p.isin); if (k > 0) waardering[p.isin] = k; }
+    const r = R.besluit({ regels: REGELS, meta, tarieven: REGELS.tarieven, prijzen, waardering, mu, posities: echtB.posities, contant: echtB.contant, vandaagIdx: dagIdx,
       wisselVandaag: vandaagGewisseld || !eersteVanMaand, budgetOver: REGELS.kostenbudget * REGELS.start - kostenDezeMaand(dag), magKopen, magVerkopen,
       stopUit: !REGELS.stop_aan, opbouw: !echt.opgezet, opbouwMax: 3, noodrem: true, kopenReden: (i) => telReden[i] || 'beurs_dicht' });
     let orders = 0;
@@ -368,10 +378,13 @@ function maak(o) {
       if (signaalKwartier) {
         const sb = Object.assign({}, sign, { posities: sign.posities.map((p) => Object.assign({}, p)) });
         for (const p of sb.posities.slice()) if (!doel.includes(p.isin) && prijzen[p.isin] > 0) { if (boekOrder(sb, { isin: p.isin, kant: 'verkoop', aantal: p.aantal, reden_code: 'signaal_uit' }, prijzen[p.isin], msNu, dag, false, vs)) orders++; }
+        // Fable-MOET 6: per naam het doelgewicht (niet het vrije geld verdelen over wat toevallig een koers heeft); ontbrekende namen volgen later
         const erbij = doel.filter((i) => !sb.posities.some((p) => p.isin === i) && prijzen[i] > 0);
-        const w = boekWaarde(sb), vrij = sb.contant - REGELS.contant_min * w;
-        for (const i of erbij) { const bedrag = Math.min(vrij / erbij.length, sb.contant); const aantal = Math.floor((bedrag / prijzen[i]) * 1e4) / 1e4; if (aantal > 0 && boekOrder(sb, { isin: i, kant: 'koop', aantal, reden_code: 'signaal_in' }, prijzen[i], msNu, dag, false, vs)) orders++; }
-        sb.opgezet = 1; boekSchrijf(sb);
+        const per = boekWaarde(sb) * (1 - REGELS.contant_min) / REGELS.posities;
+        for (const i of erbij) { const bedrag = Math.min(per, sb.contant); if (bedrag < 20) continue; const aantal = Math.floor((bedrag / prijzen[i]) * 1e4) / 1e4; if (aantal > 0 && boekOrder(sb, { isin: i, kant: 'koop', aantal, reden_code: 'signaal_in' }, prijzen[i], msNu, dag, false, vs)) orders++; }
+        if (sb.posities.length >= REGELS.posities) sb.opgezet = 1;
+        boekSchrijf(sb);
+        if (doel.every((i) => sb.posities.some((p) => p.isin === i))) M.zet('signaal_dag', dag);   // Codex-MOET: ontbrekende namen later die dag opnieuw
       }
       // maatstaven op de startdag (signaalkwartier): gelijk gewogen alle 40 en de wereld-ETF; geen verse koers = laatste slot
       if (isMaatstafStart) {
@@ -431,7 +444,7 @@ function maak(o) {
         for (const [kw, b] of balk) st.run(isin, kw, b.o, b.h, b.l, b.c, b.n);
         if (balk.size) n++;
       }
-      waardenVastleggen(nu(), dag);
+      const tAvond = nu(); waardenVastleggen(tAvond, dag); M.zet('avond_tijd', tAvond);
       db().exec('COMMIT');
     } catch (e) { db().exec('ROLLBACK'); throw e; }
     // opruimen: tik/kwartier ouder dan een jaar
@@ -465,26 +478,30 @@ function maak(o) {
         await opzet(dag); return { gedaan: 'opzet' };
       }
       if (!beursdag(dag)) return { gedaan: 'niets' };
-      if (nl.min >= 7 * 60 && M.get('dagronde') !== dag && nl.min < 22 * 60) {
-        M.zet('dagronde', dag);
-        const ok = await dagronde(dag);
-        // start van de proef: de eerste beursdag waarop de backtest in de app staat en de voorspellingen van vandaag er zijn
-        if (ok && !M.get('startdag') && M.get('stand') !== 'pauze') {
+      const stand = proefStand(dag);
+      // dagronde vanaf 07:00; mislukt hij (bron weg, kind faalt), dan elke 20 minuten opnieuw tot 22:00 (Fable-MOET 4)
+      const poging = Number(M.get('dagronde_poging') || 0);
+      if (stand !== 'klaar' && nl.min >= 7 * 60 && nl.min < 22 * 60 && M.get('dagronde') !== dag && ms - poging >= 20 * 60000) {
+        M.zet('dagronde_poging', ms);
+        let ok = false;
+        try { ok = await dagronde(dag); } catch (e) { log({ stap: 'dagronde', ok: 0 }); }
+        if (ok) M.zet('dagronde', dag);
+        // start: de eerste beursdag waarop backtest én voorspellingen vóór 09:00 klaar waren (Fable-MOET 2: nooit midden op de dag beginnen)
+        if (ok && !M.get('startdag') && M.get('stand') !== 'pauze' && nlNu().min < 9 * 60) {
           const ein = new Date(dag + 'T12:00:00Z'); ein.setUTCDate(ein.getUTCDate() + REGELS.proef_dagen - 1);
-          M.zet('startdag', dag); M.zet('einddag', ein.toISOString().slice(0, 10)); M.zet('regels_sha', REGELS_SHA);
+          M.zet('startdag', dag); M.zet('einddag', ein.toISOString().slice(0, 10)); M.zet('regels_sha', REGELS_SHA); M.zet('start_score_dag', M.get('score_dag'));
           log({ stap: 'start' });
         }
         return { gedaan: 'dagronde' };
       }
-      const stand = proefStand(dag);
-      const kwMin = REGELS.kwartier_minuten.includes(nl.min % 60) && nl.min >= hm(REGELS.kwartier_van) && nl.min <= hm(REGELS.kwartier_tot);
-      if (kwMin && stand === 'aan') {
-        const sleutel = dag + ' ' + nl.min;
-        if (M.get('kwartier') === sleutel) return { gedaan: 'niets' };
-        M.zet('kwartier', sleutel);
-        await kwartier(ms, nl); return { gedaan: 'kwartier' };
+      // kwartier: het laatste slot (minuut 1/16/31/46) van hooguit 10 minuten geleden dat vandaag nog niet liep (Fable-MOET 3)
+      let slot = null;
+      for (let m = nl.min; m >= nl.min - 10; m--) if (REGELS.kwartier_minuten.includes(((m % 60) + 60) % 60) && m >= hm(REGELS.kwartier_van) && m <= hm(REGELS.kwartier_tot)) { slot = m; break; }
+      if (slot != null && M.get('kwartier') !== dag + ' ' + slot) {
+        M.zet('kwartier', dag + ' ' + slot);
+        if (stand === 'aan') { await kwartier(ms, { dag, min: slot }); return { gedaan: 'kwartier' }; }
+        if (stand !== 'wacht') schrijfTik(ms, dag, stand, 0, 0, 'niets', stand, 0);
       }
-      if (kwMin && stand !== 'aan' && stand !== 'wacht' && M.get('kwartier') !== dag + ' ' + nl.min) { M.zet('kwartier', dag + ' ' + nl.min); schrijfTik(ms, dag, stand, 0, 0, 'niets', stand, 0); }
       if (nl.min >= 22 * 60 + 5 && M.get('avond') !== dag && (stand === 'aan' || stand === 'pauze')) { M.zet('avond', dag); await avondronde(dag); return { gedaan: 'avond' }; }
       return { gedaan: 'niets' };
     } finally { bezig = false; }
@@ -497,7 +514,7 @@ function maak(o) {
     const u = JSON.parse(r.uitkomst);
     if (vol) return u;
     const pf = {}; for (const [k, v] of Object.entries(u.portefeuille || {})) pf[k] = Object.assign({}, v, { lijn: undefined });
-    return { gemaakt: r.gemaakt, sha: r.sha, voorspelt: !!r.voorspelt, data: u.data, hoofd: u.hoofd, oordeel: u.oordeel, lek: u.lek, varianten: u.varianten, portefeuille: pf,
+    return { gemaakt: r.gemaakt, sha: r.sha, voorspelt: !!r.voorspelt, robuust: u.robuust || null, data: u.data, hoofd: u.hoofd, oordeel: u.oordeel, lek: u.lek, varianten: u.varianten, portefeuille: pf,
       lijnen: { echt: (u.portefeuille.echt || {}).lijn, signaal: (u.portefeuille.signaal || {}).lijn, vasthouden: (u.portefeuille.vasthouden || {}).lijn, index: (u.portefeuille.index || {}).lijn, terugval: (u.portefeuille.terugval || {}).lijn },
       model: u.model ? { gewichten: u.model.namen.map((n, k) => ({ kenmerk: n, naam: KENMERK_NAAM[n] || n, w: u.model.w[k] })) } : null };
   }
@@ -519,7 +536,7 @@ function maak(o) {
     const vsDag = (db().prepare('SELECT MAX(dag) AS d FROM voorspelling').get() || {}).d;
     const vp = vsDag ? db().prepare('SELECT isin, score, mu, kans, rang, doorslag FROM voorspelling WHERE dag = ? ORDER BY rang').all(vsDag).map((x) => ({ isin: x.isin, naam: naam(x.isin), thema: (meta[x.isin] || {}).thema, mu: x.mu, kans: x.kans, rang: x.rang, doorslag: doorslagZin(x) })) : [];
     // uitgekomen sinds de start: alleen eigen voorspellingen vanaf de startdag
-    const gesc = startdag ? db().prepare('SELECT dag, isin, score, kans, meer FROM voorspelling WHERE dag >= ? AND meer IS NOT NULL').all(isoMin(startdag, 1)) : [];
+    const gesc = startdag ? db().prepare('SELECT dag, isin, score, kans, meer FROM voorspelling WHERE dag >= ? AND meer IS NOT NULL').all(M.get('start_score_dag') || startdag) : [];
     const perDag = {}; for (const g of gesc) (perDag[g.dag] = perDag[g.dag] || []).push(g);
     const ics = Object.values(perDag).map((l) => R.spearman(l.map((x) => x.score), l.map((x) => x.meer))).filter((x) => x != null);
     const tref = gesc.filter((g) => (g.score > 0) === (g.meer > 0)).length;
@@ -529,7 +546,16 @@ function maak(o) {
       reeks[id] = db().prepare('SELECT dag, waarde FROM waarde WHERE boek = ? AND tijd IN (SELECT MAX(tijd) FROM waarde WHERE boek = ? GROUP BY dag) ORDER BY dag').all(id, id).map((x) => [x.dag, Math.round(x.waarde * 100) / 100]);
     }
     const vandaagReeks = {};
-    for (const id of BOEKEN) vandaagReeks[id] = db().prepare('SELECT tijd, waarde FROM waarde WHERE boek = ? AND dag = ? ORDER BY tijd').all(id, dag).map((x) => [x.tijd, Math.round(x.waarde * 100) / 100]);
+    // vasthouden overdag niet per kwartier: 40 namen, waarvan de meeste dan een koers van gisteravond dragen (Fable-MOET 5)
+    for (const id of BOEKEN) vandaagReeks[id] = id === 'vasthouden' ? [] : db().prepare('SELECT tijd, waarde FROM waarde WHERE boek = ? AND dag = ? ORDER BY tijd').all(id, dag).map((x) => [x.tijd, Math.round(x.waarde * 100) / 100]);
+    // vergelijken alleen op de laatste avondstand, waarin alle 41 koersen van dezelfde avond zijn (Fable-MOET 5)
+    const tA = Number(M.get('avond_tijd') || 0);
+    const vergelijk = tA ? { tijd: tA, kosten_echt: db().prepare("SELECT COALESCE(SUM(kosten), 0) AS k FROM opdracht WHERE boek = 'echt' AND tijd <= ?").get(tA).k, dag: (db().prepare("SELECT dag FROM waarde WHERE tijd = ? LIMIT 1").get(tA) || {}).dag || null, waarde: Object.fromEntries(BOEKEN.map((id) => [id, (db().prepare('SELECT waarde FROM waarde WHERE boek = ? AND tijd = ?').get(id, tA) || {}).waarde ?? null])) } : null;
+    // kosten: als deel van wat er omging, en wat dezelfde orders bij tien keer het bedrag zouden kosten (vaste kosten wegen dan lichter)
+    let omzet = 0, vast = 0, variabel = 0;
+    for (const x of db().prepare("SELECT aantal, prijs, kosten_uit FROM opdracht WHERE boek = 'echt'").all()) { omzet += x.aantal * x.prijs; try { const k = JSON.parse(x.kosten_uit); vast += k.vast || 0; variabel += (k.valuta || 0) + (k.zegel || 0); } catch (e) { /* */ } }
+    const spread = omzet * REGELS.halve_spread;
+    const kostPct = omzet ? (vast + variabel + spread) / omzet : null, kostPct10 = omzet ? (vast + 10 * (variabel + spread)) / (10 * omzet) : null;
     const bronnen = db().prepare('SELECT bron, SUM(CASE WHEN dag = ? THEN verzoeken ELSE 0 END) AS vandaag, SUM(CASE WHEN dag = ? THEN fout ELSE 0 END) AS fout_vandaag, MAX(laatst_ok) AS laatst_ok FROM bron_stand GROUP BY bron').all(dag, dag)
       .map((x) => Object.assign({}, x));
     const dagN = startdag ? db().prepare('SELECT COUNT(DISTINCT dag) AS n FROM tik WHERE dag >= ? AND status = \'ok\'').get(startdag).n : 0;
@@ -537,7 +563,7 @@ function maak(o) {
       ok: true, fictief: true, vandaag: dag, stand: proefStand(dag), startdag, einddag, proef_dagen: REGELS.proef_dagen, beursdagen_gedaan: dagN,
       modus: M.get('modus'), regels_sha: M.get('regels_sha') || REGELS_SHA, opzet: M.get('opzet'), opzet_fout: M.get('opzet_fout'),
       regels: { posities: REGELS.posities, per_aandeel: REGELS.per_aandeel, max_aandeel: REGELS.max_aandeel, max_per_thema: REGELS.max_per_thema, min_per_thema: REGELS.min_per_thema, max_per_laag: REGELS.max_per_laag, contant_min: REGELS.contant_min, min_order: REGELS.min_order, houdtijd: REGELS.houdtijd, kostenbudget: REGELS.kostenbudget, stop_aan: !!REGELS.stop_aan, horizon: REGELS.horizon, tarieven: Object.fromEntries(Object.entries(REGELS.tarieven).map(([k, v]) => [k, v.uitleg])) },
-      boeken, kosten_echt: { totaal: Math.round(kosten.k * 100) / 100, orders: kosten.n, maand: Math.round(kostenDezeMaand(dag) * 100) / 100, budget: REGELS.kostenbudget * REGELS.start },
+      boeken, vergelijk, kosten_echt: { totaal: Math.round(kosten.k * 100) / 100, orders: kosten.n, maand: Math.round(kostenDezeMaand(dag) * 100) / 100, budget: REGELS.kostenbudget * REGELS.start, pct_omzet: kostPct, pct_omzet_10000: kostPct10 },
       orders, laatste_tik: laatsteTik, tikken_vandaag: vandaagTik.map((x) => ({ reden: x.reden_code, naam: REDEN_NAAM[x.reden_code] || x.reden_code, besluit: x.besluit, n: x.n })),
       voorspellingen: { dag: vsDag, lijst: vp }, uitgekomen: { dagen: ics.length, gescoord: gesc.length, ic: ics.length ? R.gem(ics) : null, trefkans: gesc.length ? tref / gesc.length : null, brier },
       reeks, vandaag_reeks: vandaagReeks, backtest: laatsteBacktest(false), bronnen, universum: UNIVERSUM.instrumenten.length, index: UNIVERSUM.index.naam,

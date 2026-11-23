@@ -33,7 +33,7 @@ const NL_DAG = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', 
 function nlDag(ms) { return NL_DAG.format(new Date(ms)); }
 function weekdag(iso) { return new Date(iso + 'T12:00:00Z').getUTCDay(); }   // 0 = zondag, 6 = zaterdag
 
-// Dagreeks → [{d: 'jjjj-mm-dd', k: koers}] oplopend, alleen werkdagen, laatste punt per dag, uitschieters eruit.
+// Dagreeks → [{d: 'jjjj-mm-dd', k: koers}] oplopend, alleen werkdagen, laatste punt per dag (weekendpunten weg: daar staan ongecorrigeerde koersen).
 // vandaag (iso) = het punt van vandaag telt niet mee als slot (het is een lopende koers).
 function lsDagreeks(tekst, vandaag) {
   const d = json(tekst);
@@ -48,11 +48,11 @@ function lsDagreeks(tekst, vandaag) {
     if (wd === 0 || wd === 6) continue;
     perDag.set(dag, p[1]);
   }
-  const rij = [...perDag.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([dag, k]) => ({ d: dag, k: k }));
-  return zonderUitschieters(rij);
+  // geen opschoning van uitschieters: elke opschoning die naar latere dagen kijkt is vooruitkijken (Codex-MOET 1, 23-11)
+  return [...perDag.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([dag, k]) => ({ d: dag, k: k }));
 }
 
-// Eén- of tweedaagse uitschieter: sprong > 30 % die binnen 4 beursdagen voor ≥ 80 % terugkeert → punt(en) weg.
+// NIET gebruikt (kijkt vooruit; Codex-MOET 1): alleen bewaard als meetgereedschap voor losse analyses.
 function zonderUitschieters(rij) {
   const weg = new Set();
   for (let i = 1; i < rij.length - 1; i++) {

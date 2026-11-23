@@ -58,12 +58,12 @@ test('kosten per tariefklasse (aanname uit de regels)', () => {
 });
 
 // ── bronnen ──
-test('L&S dagreeks: weekend, lopende dag en ééndagsuitschieter eruit', () => {
+test('L&S dagreeks: weekend en lopende dag eruit, geen opschoning met toekomstige dagen', () => {
   const t = fs.readFileSync(path.join(FIX, 'ls-dag.json'), 'utf8');
   const r = B.lsDagreeks(t, '2026-11-23');
   assert.ok(r.every((p) => p.d < '2026-11-23'), 'lopende dag telt nooit als slot');
   assert.ok(r.every((p) => { const w = new Date(p.d + 'T12:00:00Z').getUTCDay(); return w !== 0 && w !== 6; }), 'geen weekend');
-  assert.ok(!r.some((p) => p.d === '2026-11-18'), 'uitschieter weg');
+  assert.ok(r.some((p) => p.d === '2026-11-18'), 'geen opschoning die naar latere dagen kijkt: de uitschieter blijft');
   assert.ok(r.some((p) => p.d === '2026-11-20'));
 });
 test('L&S minuutreeks + kloktijd-stempel', () => {
@@ -89,6 +89,7 @@ test('vers: oud of vlak = niet vers', () => {
   assert.ok(R.vers(p, nu).vers);
   assert.strictEqual(R.vers(p.map((x) => [x[0] - 10 * 60000, x[1]]), nu).reden, 'oud');
   assert.strictEqual(R.vers(p.map((x) => [x[0], 100]), nu).reden, 'vlak');
+  assert.strictEqual(R.vers(p.map((x) => [x[0] + 60 * 60000, x[1]]), nu).reden, 'klok');
 });
 test('beursuren: VS via New York (ook rond de zomertijd), sluitingsdag, vroeg dicht', () => {
   const BZ = S.REGELS.beurzen;
@@ -133,6 +134,10 @@ test('wissel alleen als de voorsprong groter is dan de kosten; houdtijd; één p
   const s3 = belegd({ wisselVandaag: true }); s3.mu.I0 = 0.30; assert.strictEqual(R.besluit(s3).reden_code, 'al_gewisseld');
   const s4 = belegd({ budgetOver: 0.5 }); s4.mu.I0 = 0.30; assert.strictEqual(R.besluit(s4).reden_code, 'budget_op');
   const s5 = belegd({ magKopen: () => false, kopenReden: () => 'cijfers_nabij' }); s5.mu.I0 = 0.30; assert.strictEqual(R.besluit(s5).reden_code, 'cijfers_nabij');
+});
+test('opbouw die wacht zegt waarom (beurs dicht), niet "geen kandidaat"', () => {
+  const r = R.besluit(sBesluit({ magKopen: () => false, kopenReden: () => 'beurs_dicht' }));
+  assert.strictEqual(r.orders.length, 0); assert.strictEqual(r.reden_code, 'beurs_dicht');
 });
 test('voerUit: contant nooit negatief', () => {
   const boek = { contant: 50, posities: [] };
@@ -194,17 +199,19 @@ function nepModule(o) {
     if (/series=intraday/.test(url)) {
       const isin = idNaarIsin[id]; const laatst = hist[id] ? hist[id][hist[id].length - 1][1] : 100;
       const pnt = []; const nuMs = klok; const begin = nuMs - 90 * 60000;
-      for (let t = begin; t <= nuMs - 60000; t += 60000) { const klokMs = t + 3600000; pnt.push([klokMs, laatst * (1 + 0.01 * Math.sin(t / 600000 + Number(id)))]); }
+      const vlak = o.vlak && o.vlak(isin, klok);
+      for (let t = begin; t <= nuMs - 60000; t += 60000) { const klokMs = t + 3600000; pnt.push([klokMs, vlak ? laatst : laatst * (1 + 0.01 * Math.sin(t / 600000 + Number(id)))]); }
       return JSON.stringify({ info: { isin, plotlines: [{ id: 'previousDay', value: laatst }] }, series: { intraday: { data: pnt } } });
     }
-    if (/wikimedia/.test(url)) return JSON.stringify({ items: [] });
+    if (/wikimedia/.test(url)) { if (o.wiki403) throw new Error('http 403'); return JSON.stringify({ items: [] }); }
     if (/data\.sec\.gov/.test(url)) return JSON.stringify({ filings: { recent: { form: [], filingDate: [], items: [] }, files: [] } });
     if (/calendar\/earnings/.test(url)) return JSON.stringify({ data: { rows: [] } });
     throw new Error('onbekend adres');
   };
   const kind = async (taak, invoer) => {
-    const isins = Object.keys(invoer.meta);
+    const isins = o.volgorde ? o.volgorde(Object.keys(invoer.meta)) : Object.keys(invoer.meta);
     const dag = Object.values(invoer.reeksen)[0].slice(-1)[0].d;
+    if (taak === 'scoor' && o.kindFaal > 0) { o.kindFaal--; return { ok: false, fout: 'nep' }; }
     if (taak === 'backtest') return { ok: true, instellingen_sha: 'x', gemaakt_ms: 1, oordeel: { voorspelt: o.voorspelt !== false, criteria: [] }, portefeuille: {}, data: {}, hoofd: {}, lek: { ok: true }, varianten: [] };
     return { ok: true, dag, model: { periode: 'p', w: [], namen: [] }, voorspellingen: isins.map((isin, k) => ({ isin, score: (isins.length - k) / 10, mu: (isins.length - k) / 1000, kans: 0.5, doorslag: [['r126', 0.1]] })), recent: [] };
   };
@@ -234,7 +241,8 @@ test('kwartierlus: opzet → dagronde → start → opbouw binnen de regels → 
   assert.ok(o.boeken.signaal.posities.length === 6);
   assert.ok(o.orders.every((x) => x.reden_zin && x.reden_zin.length > 20), 'elke order heeft een reden-zin');
   assert.ok(o.tikken_vandaag.reduce((a, x) => a + x.n, 0) >= 53);
-  assert.ok(o.reeks.echt.length === 1 && o.vandaag_reeks.echt.length >= 53);
+  assert.ok(o.reeks.echt.length === 1 && o.vandaag_reeks.echt.length >= 24, 'waarde per kwartier vanaf 16:16 op de startdag');
+  assert.ok(o.orders.filter((x) => x.boek === 'echt').every((x) => x.tijd >= Date.UTC(2026, 10, 30, 15, 16)), 'op de startdag begint Echt pas samen met de maatstaven (16:16)');
   // geen order binnen 15 minuten na opening van de thuisbeurs (eerste kwartier 09:01 voor Europa)
   const db = N.m._db();
   for (const x of db.prepare("SELECT tijd, isin FROM opdracht WHERE boek = 'echt'").all()) {
@@ -263,4 +271,43 @@ test('kwartierlus: proef stopt na de einddag; modus terugval als de backtest nie
   assert.strictEqual(o.modus, 'terugval'); assert.strictEqual(o.einddag, '2026-12-30');
   N.zet(Date.UTC(2026, 11, 31, 9, 1)); await N.m.tik();   // 31-12 10:01 NL: na de einddag
   assert.strictEqual(N.m.app({ methode: 'GET', pad: '/app/beleggen/strateeg' }).body.stand, 'klaar');
+});
+
+test('start nooit midden op de dag; dagronde herkanst; 403 van Wikipedia breekt niets; signaal niet aan één minuut', async () => {
+  const N = nepModule({ start: Date.UTC(2026, 10, 30, 8, 30), wiki403: true, kindFaal: 1 });   // 09:30 NL
+  assert.strictEqual((await N.m.tik()).gedaan, 'opzet');
+  N.zet(Date.UTC(2026, 10, 30, 8, 31)); assert.strictEqual((await N.m.tik()).gedaan, 'dagronde');   // kind faalt
+  let o = N.m.app({ methode: 'GET', pad: '/app/beleggen/strateeg' }).body;
+  assert.strictEqual(o.startdag, null);
+  N.zet(Date.UTC(2026, 10, 30, 8, 40)); assert.notStrictEqual((await N.m.tik()).gedaan, 'dagronde', 'niet binnen 20 minuten opnieuw');
+  N.zet(Date.UTC(2026, 10, 30, 8, 52)); assert.strictEqual((await N.m.tik()).gedaan, 'dagronde', 'herkansing na 20 minuten');
+  o = N.m.app({ methode: 'GET', pad: '/app/beleggen/strateeg' }).body;
+  assert.strictEqual(o.startdag, null, 'na 09:00 geslaagd = vandaag geen start');
+  assert.ok(o.voorspellingen.lijst.length > 30, 'scores er wel, ondanks 403 van Wikipedia');
+  N.zet(Date.UTC(2026, 11, 1, 6, 0)); assert.strictEqual((await N.m.tik()).gedaan, 'dagronde');
+  assert.strictEqual(N.m.app({ methode: 'GET', pad: '/app/beleggen/strateeg' }).body.startdag, '2026-12-01');
+  // 16:16 gemist (herstart); 16:20 pakt het slot 16:16 op en start signaal + maatstaven
+  N.zet(Date.UTC(2026, 11, 1, 15, 20)); assert.strictEqual((await N.m.tik()).gedaan, 'kwartier');
+  o = N.m.app({ methode: 'GET', pad: '/app/beleggen/strateeg' }).body;
+  assert.strictEqual(o.boeken.signaal.posities.length, 6); assert.ok(o.boeken.vasthouden.posities.length >= 38);
+  const sig = o.boeken.signaal.posities.map((p) => p.waarde); assert.ok(Math.max(...sig) / Math.min(...sig) < 1.05, 'Signaal per naam het doelgewicht');
+  assert.strictEqual(N.m._M.get('signaal_dag'), '2026-12-01', 'signaal compleet → klaar voor vandaag');
+  // een kwartier ouder dan 10 minuten wordt niet ingehaald
+  N.zet(Date.UTC(2026, 11, 1, 15, 45)); assert.notStrictEqual((await N.m.tik()).gedaan, 'kwartier');
+});
+
+test('geen aankoop in het eerste kwartier na opening van de thuisbeurs (ook niet op dag 2 om 09:01)', async () => {
+  const ASML = 'NL0010273215';
+  // ASML bovenaan de voorspelling; op dag 1 een vlakke koers (niet vers) → niet gekocht; op dag 2 vers vanaf opening
+  const N = nepModule({ start: Date.UTC(2026, 10, 30, 5, 0), volgorde: (l) => [ASML].concat(l.filter((x) => x !== ASML)),
+    vlak: (isin, klok) => isin === ASML && klok < Date.UTC(2026, 11, 1, 0, 0) });
+  await N.m.tik(); N.zet(Date.UTC(2026, 10, 30, 6, 0)); await N.m.tik();
+  for (let min = 16 * 60 + 16; min <= 22 * 60 + 1; min += 15) { N.zet(Date.UTC(2026, 10, 30, Math.floor(min / 60) - 1, min % 60)); await N.m.tik(); }
+  const db = N.m._db();
+  assert.ok(!db.prepare("SELECT 1 FROM positie WHERE boek = 'echt' AND isin = ?").get(ASML), 'dag 1: niet vers = niet gekocht');
+  N.zet(Date.UTC(2026, 11, 1, 6, 0)); await N.m.tik();
+  for (let min = 9 * 60 + 1; min <= 10 * 60 + 1; min += 15) { N.zet(Date.UTC(2026, 11, 1, Math.floor(min / 60) - 1, min % 60)); await N.m.tik(); }
+  const k = db.prepare("SELECT tijd FROM opdracht WHERE boek = 'echt' AND isin = ? AND kant = 'koop'").get(ASML);
+  assert.ok(k, 'dag 2: ASML gekocht');
+  assert.ok(R.minutenSindsOpen(S.REGELS.beurzen, 'EA', k.tijd) >= S.REGELS.niet_eerste_minuten, 'niet in het eerste kwartier na opening');
 });

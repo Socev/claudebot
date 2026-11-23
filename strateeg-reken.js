@@ -442,7 +442,9 @@ function besluit(s) {
   const pos = s.posities.map((p) => Object.assign({}, p));
   let contant = s.contant;
   const orders = [];
-  const waarde = waardeVan(pos, contant, prijzen);
+  // waarderen op de laatst bekende koers (ook als de thuisbeurs dicht is); verse koersen alleen voor handelen (Codex-MOET 3)
+  const waardering = Object.assign({}, s.waardering || {}, prijzen);
+  const waarde = waardeVan(pos, contant, waardering);
   const nooit = new Set(s.geblokkeerd || []);
   // 1. stops
   if (!s.stopUit) for (const p of pos.slice()) {
@@ -473,11 +475,12 @@ function besluit(s) {
       contant -= aantal * px + k.totaal; pos.push({ isin: i, aantal, aankoop: prijzen[i], sinds: s.vandaagIdx }); gekocht++;
     }
     if (gekocht) return { orders, reden_code: orders[orders.length - 1].reden_code };
+    if (!pos.length) { const eerste = doel.find((i) => !pos.some((p) => p.isin === i)); return { orders, reden_code: eerste && s.kopenReden ? s.kopenReden(eerste) : 'beurs_dicht' }; }   // opbouw wacht: zeg waarom
   }
   // 3. te groot geworden → terug naar max_terug
   for (const p of pos) {
     const m = prijzen[p.isin]; if (!(m > 0) || !s.magVerkopen(p.isin)) continue;
-    const w = p.aantal * m / waarde;
+    const w = p.aantal * m / waarde;   // m is vers; waarde op de laatst bekende koersen
     if (w > regels.max_aandeel) {
       const verkoopW = (w - regels.max_terug) * waarde, aantal = Math.floor((verkoopW / m) * 1e4) / 1e4;
       if (verkoopW >= regels.min_order && aantal > 0) { orders.push({ isin: p.isin, kant: 'verkoop', aantal, reden_code: 'te_groot', gewicht: w }); return { orders, reden_code: 'te_groot' }; }
@@ -634,6 +637,7 @@ function lsEchteMs(stempel) {
 function vers(punten, nuMs, o) {
   o = o || {}; if (!punten || !punten.length) return { vers: false, reden: 'geen' };
   const laatste = punten[punten.length - 1];
+  if (laatste[0] - nuMs > 2 * 60000) return { vers: false, reden: 'klok' };   // stempel in de toekomst: tijdzone van de bron verschoven (ontwerp 5.3)
   if (nuMs - laatste[0] > (o.max_oud_ms || 5 * 60000)) return { vers: false, reden: 'oud' };
   const half = new Set(punten.filter((p) => nuMs - p[0] <= 30 * 60000).map((p) => p[1]));
   if (half.size < (o.min_koersen || 3)) return { vers: false, reden: 'vlak' };
