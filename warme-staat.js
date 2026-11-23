@@ -71,15 +71,22 @@ function globNaarRe(g) {
 }
 
 // Alle gewone bestanden onder wortel (relatief), zonder symlinks te volgen; uitsluiten(rel, isMap) = true slaat over.
+// Codex MOET 2 (r2): een map of bestand dat er is maar niet te lezen valt, breekt de kopie af (dan blijft de vorige staan); alleen een
+// ontbrekende wortel (die map bestaat hier niet) en wat tussen lijst en tar verdwijnt, tellen niet. Te veel bestanden = ook afbreken.
 function wandel(wortel, uitsluiten, max) {
   const uit = [];
   (function stap(rel) {
     let ents;
-    try { ents = fs.readdirSync(path.join(wortel, rel), { withFileTypes: true }); } catch (e) { return; }
+    try { ents = fs.readdirSync(path.join(wortel, rel), { withFileTypes: true }); }
+    catch (e) { if (e.code === 'ENOENT') { if (!rel) return; return; } throw new Error('niet te lezen: ' + (rel || '.') + ' (' + e.code + ')'); }
     for (const e of ents) {
       const r = rel ? rel + '/' + e.name : e.name;
-      if (e.isDirectory()) { if (!uitsluiten(r, true)) stap(r); } else if (e.isFile() && !uitsluiten(r, false)) uit.push(r);
-      if (uit.length > (max || 20000)) return;
+      if (e.isDirectory()) { if (!uitsluiten(r, true)) stap(r); }
+      else if (e.isFile() && !uitsluiten(r, false)) {
+        try { fs.accessSync(path.join(wortel, r), fs.constants.R_OK); } catch (x) { if (x.code !== 'ENOENT') throw new Error('niet te lezen: ' + r + ' (' + x.code + ')'); continue; }
+        uit.push(r);
+      }
+      if (uit.length > (max || 20000)) throw new Error('meer dan ' + (max || 20000) + ' bestanden onder ' + path.basename(wortel));
     }
   })('');
   return uit.sort();
@@ -244,7 +251,10 @@ function maak(o) {
   // ── app-data: peiling elke 5 s ──
   async function appTik() {
     if (st.appBezig || !primair() || (kant() !== 'olares' && kant() !== 'vps')) return 'stil';
-    const lijst = appLijst(false), vinger = vingerVan(appData, lijst);
+    let lijst;
+    try { lijst = appLijst(false); } catch (e) { (staat.soorten['app-data'] = staat.soorten['app-data'] || {}).fout = String(e.message).slice(0, 120); return 'fout'; }
+    if (!fs.existsSync(appData)) return 'geen';
+    const vinger = vingerVan(appData, lijst);
     const s = staat.soorten['app-data'];
     if (s && s.vinger === vinger && (!olares() || s.gedeeld === s.sha256)) return 'gelijk';
     if (nu() - st.appLaatst < APP_MIN_MS) return 'wacht';
@@ -337,7 +347,18 @@ function maak(o) {
     const g = await ssh('sudo -n ' + passiefBin + ' gelijk', { timeout: 60000, max: 8192 });
     let j = null; try { j = JSON.parse(g.stdout.trim().split('\n').pop()); } catch (e) { j = null; }
     if (g.code !== 0 || !j) { st.standin = { fout: 'gelijk ' + g.code, fout_op: nu() }; bewaar(); return 'fout'; }
-    const codeGelijk = j.code === sha, imageGelijk = j.image_gelijk === true;
+    // Codex MOET 1 (r2): het image van de stand-in moet gelijk zijn aan het image dat HIER draait (IMAGE_SHA = bouwcommit, staat in beide
+    // containers), niet alleen aan de pin in versies.env van de R230 (die volgt Olares pas 's nachts via het versiebriefje).
+    const hierImage = String(env.IMAGE_SHA || '').trim();
+    const imageGelijk = j.image_gelijk === true && (!/^[0-9a-f]{7,40}$/.test(hierImage) || !j.image_sha || j.image_sha === hierImage);
+    const codeGelijk = j.code === sha;
+    if (!codeGelijk || !imageGelijk) {
+      // start helpt alleen als de pin al klopt; zo niet, dan wachten tot versies.env Olares volgt (geen herstartlus), wel zichtbaar
+      if (codeGelijk && j.image_gelijk === true && j.image_sha && j.image_sha !== hierImage) {
+        st.standin = { code: j.code, image_gelijk: false, gezond: j.gezond === true, gemeten_op: nu(), hier: sha, fout: 'image op de R230 (' + String(j.image_sha).slice(0, 12) + ') ≠ hier (' + hierImage.slice(0, 12) + '): pin in versies.env loopt achter', fout_op: nu() };
+        bewaar(); return 'fout';
+      }
+    }
     st.standin = { code: j.code, image_gelijk: imageGelijk, gezond: j.gezond === true, gemeten_op: nu(), hier: sha };
     if (codeGelijk && imageGelijk && j.gezond === true) { bewaar(); return 'gelijk'; }
     if (!codeGelijk) {
@@ -399,12 +420,14 @@ function maak(o) {
     try {
       mappen();
       if (k === 'olares' && !fs.existsSync(ageBin)) { st.fout = 'age ontbreekt'; return { uitkomst: 'fout', fout: st.fout }; }
-      const logs = appLijst(true), lv = vingerVan(appData, logs), sl = staat.soorten['app-logs'];
-      if (!sl || sl.vinger !== lv || sl.fout) { try { await bouwStroom('app-logs', appData, logs, nu(), lv); } catch (e) { (staat.soorten['app-logs'] = sl || {}).fout = String(e.message).slice(0, 120); } }
-      if (k === 'olares') uit['app-logs'] = await duw('app-logs');
-      const kl = kernLijst(k !== 'olares'), kv = vingerVan(thuis, kl), sk = staat.soorten.kern;
-      if (!sk || sk.vinger !== kv || sk.fout) { try { await bouwStroom('kern', thuis, kl, nu(), kv); } catch (e) { (staat.soorten.kern = sk || {}).fout = String(e.message).slice(0, 120); } }
-      if (k === 'olares') uit.kern = await duw('kern');
+      for (const [soort, wortel, lijstVan] of [['app-logs', appData, function () { return appLijst(true); }], ['kern', thuis, function () { return kernLijst(k !== 'olares'); }]]) {
+        const sx = staat.soorten[soort];
+        try {
+          const l = lijstVan(), v = vingerVan(wortel, l);
+          if (!sx || sx.vinger !== v || sx.fout) await bouwStroom(soort, wortel, l, nu(), v);
+          if (k === 'olares') uit[soort] = await duw(soort);
+        } catch (e) { (staat.soorten[soort] = sx || {}).fout = String(e.message).slice(0, 120); uit[soort] = 'fout'; }
+      }
       for (const naam of Object.keys(o.dbs || DBS)) uit['db-' + naam] = await dbStroom(naam, (o.dbs || DBS)[naam]);
       if (k === 'olares') {
         try { uit.geheimen = await geheimenStroom(); } catch (e) { (staat.soorten.geheimen = staat.soorten.geheimen || {}).fout = String(e.message).slice(0, 120); uit.geheimen = 'fout'; }
@@ -412,6 +435,7 @@ function maak(o) {
       }
       bewaar();
       const fouten = Object.keys(staat.soorten).filter(function (s) { return staat.soorten[s].fout; });
+      if (uit.standin === 'fout') fouten.push('stand-in');   // Codex ZOU 1 (r2)
       st.fout = fouten.length ? fouten.join(', ') : null;
       if (!fouten.length && o.hartslag && k === 'olares' && nu() - (st.hartslagOp || 0) > 30 * 60e3) {
         st.hartslagOp = nu(); try { await o.hartslag({ n: Object.keys(staat.soorten).length, bevindingen: 0 }); } catch (e) { /* hartslag is bijzaak */ }

@@ -186,6 +186,33 @@ test('stand-in: andere code → code klaarzetten + start; gelijk → niets', asy
   o.s.klok += 300000; assert.strictEqual((await m.ronde()).soorten.standin, 'gelijk');
 });
 
+test('stand-in: ander image dan HIER (IMAGE_SHA) terwijl de pin op de R230 achterloopt → zichtbare fout, geen herstartlus (Codex MOET 1 r2)', async function () {
+  const o = opzet(); const opt = o.opties(); opt.env.IMAGE_SHA = 'bbbbbbbbbbbbbbbbbbbb';
+  const m = W.maak(opt);
+  fs.writeFileSync(path.join(o.nep, 'gelijk.json'), '{"code":"abcdef123456","image_gelijk":true,"image_sha":"aaaaaaaaaaaaaaaaaaaa","gezond":true}');
+  const r = await m.ronde();
+  assert.strictEqual(r.soorten.standin, 'fout'); assert.strictEqual(r.uitkomst, 'deels', 'stand-in-fout telt mee (ZOU 1)');
+  assert.match(m.stand().standin.fout, /pin in versies.env loopt achter/); assert.ok(!/ start/.test(log(o)), 'geen herstart');
+  o.s.klok += 300000; assert.strictEqual((await m.ronde()).soorten.standin, 'wacht', '30 min wachten');
+  fs.writeFileSync(path.join(o.nep, 'gelijk.json'), '{"code":"abcdef123456","image_gelijk":true,"image_sha":"bbbbbbbbbbbbbbbbbbbb","gezond":true}');
+  o.s.klok += 31 * 60e3; assert.strictEqual((await m.ronde()).soorten.standin, 'gelijk');
+});
+
+test('leesfout in een map breekt de kopie af en laat de vorige staan (Codex MOET 2 r2)', { skip: process.getuid && process.getuid() === 0 }, async function () {
+  const o = opzet(); const m = W.maak(o.opties({ standin: false }));
+  await m.ronde(); await m.appTik();
+  const kv = fs.readFileSync(path.join(o.nep, 'kern.age')), av = fs.readFileSync(path.join(o.nep, 'app-data.age'));
+  const geheugen = path.join(o.thuis, '.claude/projects/-opt-data-AI-SecondBrain/memory');
+  fs.writeFileSync(path.join(geheugen, 'nieuw.md'), 'x'); fs.chmodSync(geheugen, 0o000);
+  fs.writeFileSync(path.join(o.thuis, 'socev-app-data/vragen.json'), '[2]'); fs.chmodSync(path.join(o.thuis, 'socev-app-data/geheim'), 0o000);
+  try {
+    o.s.klok += 300000; const r = await m.ronde();
+    assert.strictEqual(r.soorten.kern, 'fout'); assert.match(m.stand().soorten.kern.fout, /niet te lezen/);
+    assert.strictEqual(await m.appTik(), 'fout');
+    assert.deepStrictEqual(fs.readFileSync(path.join(o.nep, 'kern.age')), kv); assert.deepStrictEqual(fs.readFileSync(path.join(o.nep, 'app-data.age')), av);
+  } finally { fs.chmodSync(geheugen, 0o700); fs.chmodSync(path.join(o.thuis, 'socev-app-data/geheim'), 0o700); }
+});
+
 test('witte lijst gelijk aan die van de nachtbundel (bin/podstaat-offsite.sh)', { skip: !fs.existsSync('/opt/data/bin/podstaat-offsite.sh') }, function () {
   const s = fs.readFileSync('/opt/data/bin/podstaat-offsite.sh', 'utf8');
   const m = /for f in (\.claude\.json [\s\S]*?); do/.exec(s); assert.ok(m, 'lijst gevonden');
