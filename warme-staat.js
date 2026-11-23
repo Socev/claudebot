@@ -259,7 +259,7 @@ function maak(o) {
     if (!fs.existsSync(appData)) return 'geen';
     const vinger = vingerVan(appData, lijst);
     const s = staat.soorten['app-data'];
-    if (s && s.vinger === vinger && (!olares() || s.gedeeld === s.sha256)) return 'gelijk';
+    if (s && s.vinger === vinger && (!olares() || s.gedeeld === s.sha256)) { if (s.fout) { s.fout = null; bewaar(); } return 'gelijk'; }   // Codex ZOU 1 (r5)
     if (nu() - st.appLaatst < APP_MIN_MS) return 'wacht';
     st.appBezig = true; st.appLaatst = nu();
     try {
@@ -278,7 +278,11 @@ function maak(o) {
     'print(r, n)\nsys.exit(0 if r=="ok" and n>0 else 3)\n';
   async function dbStroom(naam, rel) {
     const bron = path.join(thuis, rel);
-    let sd, sw; try { sd = fs.statSync(bron); } catch (e) { return 'geen'; }
+    let sd, sw;
+    try { sd = fs.statSync(bron); } catch (e) {   // Codex ZOU 2 (r5): alleen een ontbrekende databank is 'geen'
+      if (e.code === 'ENOENT') return 'geen';
+      (staat.soorten['db-' + naam] = staat.soorten['db-' + naam] || {}).fout = 'niet te lezen (' + e.code + ')'; bewaar(); return 'fout';
+    }
     try { sw = fs.statSync(bron + '-wal'); } catch (e) { sw = null; }
     const soort = 'db-' + naam;
     // een lege -wal (die de alleen-lezen verbinding zelf aanmaakt) telt als geen wal: anders elke databank één keer extra
