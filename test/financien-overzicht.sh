@@ -486,6 +486,44 @@ const srv = fs.readFileSync('server.js', 'utf8');
 toets('server.js: overzicht doorgegeven; routes boekingen en stroom; app-boekingen/app-stroom in BANK_LOKAAL, niet in BANK_OPDRACHTEN', /'saldi', 'overzicht'\]\.forEach/.test(srv) &&
   /route === 'POST \/app\/financien\/boekingen'\) return appFinBoekingen\(/.test(srv) && /route === 'POST \/app\/financien\/stroom'\) return appFinStroom\(/.test(srv) &&
   /const BANK_LOKAAL = \[[^\]]*'app-boekingen', 'app-stroom'/.test(srv) && !/const BANK_OPDRACHTEN = \[[^\]]*'app-(boekingen|stroom)'/.test(srv), null);
+// wv3926 (besluitenpagina nr 178 = 2C78 f): zoeken over alle jaren — som en aantal gelijk aan een eigen SQL-telling; bedrag op de cent; POT,
+// extern en een andere munt buiten beeld; nieuwste eerst; hypotheektermijn telt één keer (twee delen); Davids eigen naam vindt de partij
+if (O) {
+  const zk = (z, x) => O.boekingenLijst(A, a, Object.assign({ filter: { zoek: z }, vault: VAULT, fv: FVnep }, x || {}));
+  const telSql = (w, p) => a.db.prepare("SELECT count(*) n, round(coalesce(sum(t.bedrag), 0), 2) s FROM transacties t JOIN rekeningen r ON r.rek = t.rek WHERE t.status IN ('booked', 'pending') AND coalesce(t.valuta, 'EUR') = 'EUR'" +
+    " AND lower(coalesce(r.eigenaar, '')) NOT IN ('extern', 'pot') AND " + w).get(...(p || []));
+  const z1 = zk('albert heijn'), s1 = telSql("(coalesce(t.tegenpartij, '') || ' ' || coalesce(t.omschrijving, '')) LIKE ? AND (coalesce(t.tegenpartij, '') || ' ' || coalesce(t.omschrijving, '')) LIKE ?", ['%albert%', '%heijn%']);
+  toets('wv3926 zoek tekst: aantal en som = SQL-telling (Albert Heijn, alle maanden)', z1.zoek.soort === 'tekst' && z1.aantal === s1.n && z1.som === s1.s && s1.n === mnd.length && z1.uit === s1.s && z1.in === 0, [z1.aantal, z1.som, s1]);
+  toets('wv3926 zoek: nieuwste eerst, eerste/laatste datum, per jaar telt op tot het geheel', z1.boekingen[0].datum === z1.laatste && z1.boekingen[z1.boekingen.length - 1].datum === z1.eerste &&
+    z1.boekingen.every((b, i, l) => i === 0 || l[i - 1].datum >= b.datum) && z1.per_jaar.reduce((t, e) => t + e.aantal, 0) === z1.aantal && Math.abs(z1.per_jaar.reduce((t, e) => t + e.som, 0) - z1.som) < 0.005, z1.per_jaar);
+  const z2 = zk('ALBÉRT  heijn'), z3 = zk('Heijn Albert');
+  toets('wv3926 zoek: hoofdletters, accenten, dubbele spatie en woordvolgorde tellen niet', z2.aantal === z1.aantal && z3.aantal === z1.aantal, [z2.aantal, z3.aantal]);
+  const z4 = zk('2800'), s4 = telSql('round(abs(t.bedrag) * 100) = 280000');
+  toets('wv3926 zoek bedrag: "2800" = boekingen van precies € 2.800 (af of bij), hypotheektermijn één keer geteld', z4.zoek.soort === 'bedrag' && z4.aantal === s4.n && z4.som === s4.s && s4.n >= 1 && z4.getoond === z4.aantal, [z4.aantal, z4.som, s4, z4.boekingen.length]);
+  const z5 = zk('€ 2.800,00'), z6 = zk('2800.00'), z7 = zk('-2800');
+  toets('wv3926 zoek bedrag: "€ 2.800,00", "2800.00" en "-2800" vinden hetzelfde', z5.aantal === z4.aantal && z6.aantal === z4.aantal && z7.aantal === z4.aantal, [z5.aantal, z6.aantal, z7.aantal]);
+  const z8 = zk('12,5'), s8 = telSql('round(abs(t.bedrag) * 100) = 1250');
+  toets('wv3926 zoek bedrag: "12,5" = 12,50 (ook nul treffers is een uitkomst)', z8.zoek.soort === 'bedrag' && z8.aantal === s8.n && z8.som === s8.s, [z8.aantal, s8]);
+  const z9 = zk('Medewerker POT'), z10 = zk('Iemand Anders'), z11 = zk('Ver Weg Winkel');
+  toets('wv3926 zoek: POT-rekening, externe rekening en andere munt blijven buiten beeld', z9.aantal === 0 && z10.aantal === 0 && z11.aantal === 0 && z9.boekingen.length === 0 && z9.eerste === null, [z9.aantal, z10.aantal, z11.aantal]);
+  const z12 = zk('ABN AMRO BANK'), s12 = telSql("(coalesce(t.tegenpartij, '') || ' ' || coalesce(t.omschrijving, '')) LIKE ? AND (coalesce(t.tegenpartij, '') || ' ' || coalesce(t.omschrijving, '')) LIKE ? AND (coalesce(t.tegenpartij, '') || ' ' || coalesce(t.omschrijving, '')) LIKE ?", ['%abn%', '%amro%', '%bank%']);
+  toets('wv3926 zoek: hypotheektermijnen (aflossing + rente) tellen per boeking één keer; som = SQL', z12.aantal === s12.n && z12.som === s12.s && z12.boekingen.length > z12.getoond, [z12.aantal, z12.som, s12, z12.boekingen.length, z12.getoond]);
+  const z13 = zk('albert', { max: 3 });
+  toets('wv3926 zoek: aantal en som over alle treffers, de lijst begrensd (getoond)', z13.aantal === z1.aantal && z13.som === z1.som && z13.getoond === 3 && z13.boekingen.length === 3, [z13.aantal, z13.getoond]);
+  let fz = [];
+  ['x', '', ' ', 'a'.repeat(61)].forEach((t) => { try { zk(t); fz.push('geen fout: ' + JSON.stringify(t)); } catch (e) { if (!/zoek: 2 tot 60/.test(e.message)) fz.push(e.message); } });
+  toets('wv3926 zoek: te kort of te lang = nette fout', fz.length === 0, fz);
+  // Davids eigen naam voor een partij vindt hem ook
+  let C = null; try { C = require(path.resolve('financien-corrigeer.js')); } catch (e) { C = null; }
+  if (C && typeof C.naamZet === 'function') {
+    const b0 = zk('bakker').boekingen[0];
+    let r = null; try { r = C.naamZet(A, a, { id: b0.naam_id, naam: 'Brood van om de hoek' }); } catch (e) { r = String(e.message); }
+    const z14 = zk('om de hoek'), z15 = zk('bakker');
+    toets('wv3926 zoek: jouw eigen naam voor een partij vindt al zijn boekingen', z14.aantal === z15.aantal && z14.aantal > 0, [r, z14.aantal, z15.aantal]);
+  }
+}
+const srv3926 = fs.readFileSync('server.js', 'utf8');
+toets('wv3926 server.js: filter zoek doorgelaten (2–60 tekens, zonder van/tot) en in/uit/per jaar terug', /if \(f\.zoek != null\) \{ const z = typeof f\.zoek === 'string'/.test(srv3926) && /return z\.length >= 2 && z\.length <= 60 \? \{ zoek: z \} : null;/.test(srv3926) && /per_jaar: Array\.isArray\(j\.per_jaar\)/.test(srv3926), null);
 if (!process.env.HOUD) fs.rmSync(W, { recursive: true, force: true }); else console.log(W);
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');
 process.exit(fouten ? 1 : 0);

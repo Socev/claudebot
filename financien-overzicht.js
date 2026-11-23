@@ -638,11 +638,19 @@ function overzicht(A, a, o) {
   return uit;
 }
 
+// wv3926: één boeking zoals de lijsten hem tonen (boekingenLijst en zoekLijst)
+function boekingUit(x) {
+  return { nr: x.nr, datum: x.datum, rekening: x.rekening, tegenpartij: x.naam || x.tegenpartij, bank: x.naam && x.naam !== x.tegenpartij ? x.tegenpartij : undefined,
+      naam_id: x.tpk ? crypto.createHash('sha256').update('naam:' + x.tpk).digest('hex').slice(0, 16) : undefined, eigenaar: x.v_eig, door: x.door, kan: !x.eigen || undefined,
+      altijd_kan: !x.eigen && !!x.tpk && !GEMENGD.test(String(x.tegenpartij || '')) && !ENTITEIT.test(String(x.tegenpartij || '')) || undefined, omschrijving: x.omschrijving, bedrag: r2(x.deel),
+      heel: x.deel !== x.bedrag ? r2(x.bedrag) : undefined, stroom: x.stroom, sub: x.sub || undefined, categorie: x.cat, eenmalig: x.eenmalig || undefined, onzeker: x.zeker ? undefined : true, waarom: x.waarom, id: x.id };
+}
 // De boekingen achter een getal (POST /app/financien/boekingen). filter: van, tot (JJJJ-MM), stroom, sub, cat ('-' = zonder categorie), eig
 // (eigenaar, wv2620), eenmalig, id; hooguit 300.
 // o.vault: voor het aflossingsdeel van de hypotheek (dezelfde splitsing als het overzicht).
 function boekingenLijst(A, a, o) {
   const fl = o.filter || {};
+  if (fl.zoek != null) return zoekLijst(A, a, o);   // wv3926 (2C78 f): zoeken over alle jaren
   if (!/^\d{4}-\d{2}$/.test(String(fl.van || '')) || !/^\d{4}-\d{2}$/.test(String(fl.tot || '')) || fl.van > fl.tot) throw new Error('filter: van en tot als JJJJ-MM');
   const span = (Number(fl.tot.slice(0, 4)) - Number(fl.van.slice(0, 4))) * 12 + Number(fl.tot.slice(5, 7)) - Number(fl.van.slice(5, 7));
   if (span > 35) throw new Error('filter: hooguit 36 maanden');   // review wv2596 ZOU 1: geen zoektocht door de hele historie
@@ -667,10 +675,74 @@ function boekingenLijst(A, a, o) {
     // wv2717: nr, eigenaar, wie het zette en of corrigeren kan (geen overboeking met een eigen rekening; voortaan altijd niet bij een betaaldienst
     // of eigen BV); tegenpartij = Davids eigen naam als die er is, bank = de banknaam dan apart
     keuzes: (function () { try { return require('./financien-corrigeer.js').keuzes(A, a); } catch (e) { return undefined; } })(),
-    boekingen: l.slice(0, max).map(function (x) { return { nr: x.nr, datum: x.datum, rekening: x.rekening, tegenpartij: x.naam || x.tegenpartij, bank: x.naam && x.naam !== x.tegenpartij ? x.tegenpartij : undefined,
-      naam_id: x.tpk ? crypto.createHash('sha256').update('naam:' + x.tpk).digest('hex').slice(0, 16) : undefined, eigenaar: x.v_eig, door: x.door, kan: !x.eigen || undefined,
-      altijd_kan: !x.eigen && !!x.tpk && !GEMENGD.test(String(x.tegenpartij || '')) && !ENTITEIT.test(String(x.tegenpartij || '')) || undefined, omschrijving: x.omschrijving, bedrag: r2(x.deel),
-      heel: x.deel !== x.bedrag ? r2(x.bedrag) : undefined, stroom: x.stroom, sub: x.sub || undefined, categorie: x.cat, eenmalig: x.eenmalig || undefined, onzeker: x.zeker ? undefined : true, waarom: x.waarom, id: x.id }; }) };
+    boekingen: l.slice(0, max).map(boekingUit) };
+}
+
+// wv3926 (besluitenpagina nr 178 = 2C78 f; Fable "Een 9 - financien" F1): één zoekveld over al je boekingen, alle jaren. Een zoekterm in de
+// vorm van een bedrag ("12,50", "€ 1.234", "50") vindt de boekingen met precies dat bedrag (af of bij, op de cent); anders tekst: elk woord
+// moet voorkomen in de tegenpartij, de omschrijving of jouw eigen naam voor die partij (hoofdletters en accenten tellen niet). Dezelfde
+// rekeningen als het overzicht (geen externe of POT-rekening), ook overboekingen tussen je eigen rekeningen. De uitkomst gaat door dezelfde
+// indeling als de andere lijsten (stroom, categorie, Wijzig); aantal en som over alle treffers, de lijst de nieuwste 300.
+function zoekVorm(z) {
+  const t = String(z == null ? '' : z).normalize('NFC').replace(/\s+/g, ' ').trim();
+  if (t.length < 2 || t.length > 60) throw new Error('zoek: 2 tot 60 tekens');
+  const b = t.replace(/^[-+]\s*/, '').replace(/^€\s*/, '').replace(/^eur\s+/i, '');
+  let m = /^(\d{1,3}(?:\.\d{3})+|\d{1,7})(?:,(\d{1,2}))?$/.exec(b);   // 12 · 12,5 · 12,50 · 1.234,56
+  if (m) return { soort: 'bedrag', term: t, cent: Number(m[1].replace(/\./g, '')) * 100 + (m[2] ? Number(m[2].padEnd(2, '0')) : 0) };
+  m = /^(\d{1,7})\.(\d{1,2})$/.exec(b);   // 12.50 (punt als komma); 1.234 is duizendtal (hierboven)
+  if (m && m[2].length !== 3) return { soort: 'bedrag', term: t, cent: Number(m[1]) * 100 + Number(m[2].padEnd(2, '0')) };
+  const woorden = zoekNorm(t).split(' ').filter(Boolean);
+  if (!woorden.length || woorden.join('').length < 2) throw new Error('zoek: 2 tot 60 tekens');
+  return { soort: 'tekst', term: t, woorden: woorden };   // hooguit 60 tekens, dus nooit veel woorden; alle woorden tellen (Codex ZOU 1)
+}
+function zoekNorm(s) { return String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+function zoekLijst(A, a, o) {
+  const fl = o.filter || {}, z = zoekVorm(fl.zoek);
+  const mNu = String(o.nu || new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' })).slice(0, 7);
+  const rijen = a.db.prepare("SELECT t.nr, t.datum, t.bedrag, t.tegenpartij, t.omschrijving FROM transacties t JOIN rekeningen r ON r.rek = t.rek" +
+    " WHERE t.status IN ('booked', 'pending') AND lower(coalesce(r.eigenaar, '')) NOT IN ('extern', 'pot') AND t.datum IS NOT NULL AND (t.valuta IS NULL OR t.valuta = 'EUR')").all();
+  let namen = new Map();
+  if (z.soort === 'tekst') { try { namen = require('./financien-corrigeer.js').namenLees(a); } catch (e) { namen = new Map(); } }
+  const raak = new Set();
+  let mMin = null, mMax = null;
+  rijen.forEach(function (t) {
+    let ok;
+    if (z.soort === 'bedrag') ok = Math.round(Math.abs(t.bedrag) * 100) === z.cent;
+    else {
+      const hooi = zoekNorm([t.tegenpartij, t.omschrijving, namen.get(tpWoorden(t.tegenpartij))].filter(Boolean).join(' \u0001 '));
+      ok = z.woorden.every(function (w) { return hooi.indexOf(w) >= 0; });
+    }
+    if (!ok) return;
+    raak.add(t.nr);
+    const m = String(t.datum).slice(0, 7);
+    if (!mMin || m < mMin) mMin = m;
+    if (!mMax || m > mMax) mMax = m;
+  });
+  const uit = { zoek: { soort: z.soort, term: z.term }, aantal: 0, som: 0, in: 0, uit: 0, getoond: 0, eerste: null, laatste: null, per_jaar: [], boekingen: [] };
+  if (!raak.size) return uit;
+  let afl = null;
+  try { afl = aflossingVan((o.fv || require('./financien-vault.js')).lees(o.vault).hypotheek); } catch (e) { afl = null; }
+  // hetzelfde venster als de andere lijsten als de treffers erin vallen (categorie per tegenpartij), anders vanaf de oudste treffer
+  const v24 = maandPlus(mNu, -24), lv = mMin < v24 ? mMin : v24, lt = mMax > mNu ? mMax : mNu;
+  const l = boekingen(a, lv, lt, afl).delen.filter(function (x) { return raak.has(x.nr); })
+    .sort(function (p, q) { return p.datum < q.datum ? 1 : p.datum > q.datum ? -1 : q.nr - p.nr; });
+  const jaren = new Map(), nrs = new Set();
+  let inn = 0, af = 0;
+  l.forEach(function (x) {
+    nrs.add(x.nr);
+    const j = x.datum.slice(0, 4);
+    if (!jaren.has(j)) jaren.set(j, { jaar: j, nrs: new Set(), som: 0 });
+    const e = jaren.get(j); e.nrs.add(x.nr); e.som += x.deel;
+    if (x.deel > 0) inn += x.deel; else af += x.deel;
+  });
+  const max = Math.min(Math.max(parseInt(o.max, 10) || 300, 1), 300), lijst = l.slice(0, max);
+  uit.aantal = nrs.size; uit.som = r2(inn + af); uit.in = r2(inn); uit.uit = r2(af);
+  uit.getoond = new Set(lijst.map(function (x) { return x.nr; })).size;
+  uit.eerste = l[l.length - 1].datum; uit.laatste = l[0].datum;
+  uit.per_jaar = Array.from(jaren.values()).sort(function (p, q) { return p.jaar < q.jaar ? 1 : -1; }).map(function (e) { return { jaar: e.jaar, aantal: e.nrs.size, som: r2(e.som) }; });
+  uit.keuzes = (function () { try { return require('./financien-corrigeer.js').keuzes(A, a); } catch (e) { return undefined; } })();
+  uit.boekingen = lijst.map(boekingUit);
+  return uit;
 }
 
 // Davids keuze per tegenpartij en richting (alleen via bank-lezer.js app-stroom). stroom null = keuze weg (terug naar de vaste regels).

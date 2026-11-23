@@ -14563,6 +14563,8 @@ const APP_FIN_BOEK_PER_UUR = 300, APP_FIN_STROOM_PER_UUR = 60;
 function appFinFilter(d) {
   const f = d && d.filter, q = {};
   if (!f || typeof f !== 'object' || Array.isArray(f)) return null;
+  // wv3926 (besluitenpagina nr 178 = 2C78 f): zoeken over alle jaren — alleen de zoekterm (2–60 tekens); de bank-lezer bepaalt bedrag of tekst
+  if (f.zoek != null) { const z = typeof f.zoek === 'string' ? f.zoek.replace(/\s+/g, ' ').trim() : ''; return z.length >= 2 && z.length <= 60 ? { zoek: z } : null; }
   if (!/^\d{4}-\d{2}$/.test(String(f.van || '')) || !/^\d{4}-\d{2}$/.test(String(f.tot || ''))) return null;
   q.van = f.van; q.tot = f.tot;
   if (f.stroom != null) { if (['leven', 'inkomen', 'verschuiven', 'intern'].indexOf(f.stroom) < 0) return null; q.stroom = f.stroom; }
@@ -14594,7 +14596,11 @@ async function appFinBoekingen(req, res, a, d) {
   if (!j || j.ok !== true) return;
   // wv2717: keuzes = de categorieën en eigenaren voor Wijzig (zelf corrigeren)
   const kz = j.keuzes && Array.isArray(j.keuzes.categorieen) && Array.isArray(j.keuzes.eigenaren) ? { categorieen: j.keuzes.categorieen.filter(function (c) { return typeof c === 'string'; }).slice(0, 80), eigenaren: j.keuzes.eigenaren.filter(function (c) { return typeof c === 'string'; }).slice(0, 10) } : undefined;
-  return appStuur(res, 200, { ok: true, aantal: j.aantal | 0, som: typeof j.som === 'number' ? j.som : null, getoond: j.getoond | 0, boekingen: Array.isArray(j.boekingen) ? j.boekingen : [], keuzes: kz });
+  // wv3926: bij zoeken ook in en uit, per jaar en de eerste en laatste datum (alleen wat de bank-lezer gaf, op vorm)
+  const getal = function (x) { return typeof x === 'number' && Number.isFinite(x) ? x : null; }, dag = function (x) { return typeof x === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(x) ? x : null; };
+  const zk = q.zoek != null && j.zoek && typeof j.zoek === 'object' ? { zoek: { soort: j.zoek.soort === 'bedrag' ? 'bedrag' : 'tekst', term: q.zoek }, in: getal(j.in), uit: getal(j.uit), eerste: dag(j.eerste), laatste: dag(j.laatste),
+    per_jaar: Array.isArray(j.per_jaar) ? j.per_jaar.filter(function (e) { return e && /^\d{4}$/.test(String(e.jaar)); }).slice(0, 40).map(function (e) { return { jaar: String(e.jaar), aantal: e.aantal | 0, som: getal(e.som) }; }) : [] } : {};
+  return appStuur(res, 200, Object.assign({ ok: true, aantal: j.aantal | 0, som: typeof j.som === 'number' ? j.som : null, getoond: j.getoond | 0, boekingen: Array.isArray(j.boekingen) ? j.boekingen : [], keuzes: kz }, zk));
 }
 async function appFinStroom(req, res, a, d) {
   res._app.reden = 'financien-stroom';
@@ -14623,10 +14629,32 @@ function appFinReizenLijst() {
     return { id: String(r.id), titel: String(r.titel || '').slice(0, 120), van: r.van, tot: r.tot, soort: r.soort || null, stand: r.stand || null };
   });
 }
+// wv3926 (besluitenpagina nr 178 = 2C78 e; Fable S5): { meld: true } = alleen de reizen die de laatste 31 dagen eindigden, voor de melding op
+// het Overzicht van Financiën ("… is voorbij: n boekingen wachten op Ja of Nee"). Een bijzaak: nooit een fout terug (Tripper of de bank niet te
+// lezen = een lege lijst), en zonder zo'n reis geen bank-lezer.
+const APP_FIN_REIS_MELD_DAGEN = 31;
+async function appFinReizenMeld(res) {
+  res._app.reden = 'financien-reizen-meld'; res._app.stil = true;
+  const leeg = function () { return appStuur(res, 200, { ok: true, peildatum: null, archief_vanaf: null, reizen: [], reis: null, regels: null, uitleg: '' }); };
+  let lijst = null;
+  try { lijst = appFinReizenLijst(); } catch (e) { lijst = null; }
+  const nu = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), grens = new Date(Date.now() - APP_FIN_REIS_MELD_DAGEN * 86400000).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const recent = (lijst || []).filter(function (r) { return /^\d{4}-\d{2}-\d{2}$/.test(String(r.tot)) && r.tot < nu && r.tot >= grens && r.stand !== 'geannuleerd'; });
+  if (!recent.length) return leeg();
+  let r = null;
+  // de hele lijst naar de bank-lezer (een vooraf-boeking kan bij een andere reis horen: dezelfde telling als het tabblad Reizen); terug alleen de recente
+  try { r = await bankKind(['app-reizen'], { reizen: { lijst: lijst, reis: null } }, APP_FIN_MAX_MS); } catch (e) { r = null; }
+  const j = r && r.j;
+  if (!j || j.ok !== true || !Array.isArray(j.reizen)) return leeg();
+  const ids = new Set(recent.map(function (x) { return x.id; }));
+  return appStuur(res, 200, { ok: true, peildatum: j.peildatum || null, archief_vanaf: j.archief_vanaf || null, reizen: j.reizen.filter(function (x) { return x && ids.has(x.id); }), reis: null, regels: null, uitleg: '' });
+}
 async function appFinReizen(req, res, a, d) {
   res._app.reden = 'financien-reizen';
   if (d.reis != null && !/^[0-9a-f]{12}$/.test(String(d.reis))) return appWeiger(res, 400, 'onbekende reis', 'fin-reizen id');
+  if (d.meld != null && d.meld !== true) return appWeiger(res, 400, 'onbekende vraag', 'fin-reizen meld');
   if (!appTeller('fin-reizen', APP_FIN_REIS_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak opgevraagd dit uur', 'grens fin-reizen');
+  if (d.meld === true) return appFinReizenMeld(res);   // wv3926
   let lijst = null;
   try { lijst = appFinReizenLijst(); } catch (e) { logError('fin-reizen', new Error('reizen lezen faalde')); lijst = null; }
   if (!lijst) return appWeiger(res, 503, 'de reizen uit Tripper zijn nu niet te lezen; probeer het zo opnieuw', 'fin-reizen tripper');
