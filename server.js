@@ -29717,6 +29717,7 @@ function rolInfo() {
     // Kant zoals fetch-secrets.sh (image) hem toepaste; null = image van vóór stap 6d (dan geen n8n-override en het
     // Olares-tunneltoken nog in de omgeving). naar-vps eist hier 'vps' vóór de eerste beurt (review 6d #5).
     fetch_secrets_kant: process.env.FETCH_SECRETS_KANT || null,
+    warm: warmeStaat ? warmeStaat.stand() : null,   // wv3908: warme staat naar/van de R230 (leeftijd per soort)
     n8n_3b: ROL_KANT === 'olares' ? { laatste_iso: u3b.laatste_iso, laatste_uitkomst: u3b.laatste_uitkomst, aanroepen: u3b.aanroepen,
       bezig: u3b.bezig, box_wacht: fs.existsSync(U3B_WACHT) } : null };
 }
@@ -29794,6 +29795,30 @@ function dbTerugRonde() {
     dbTerug.fout = j.fout ? String(j.fout).slice(0, 160) : (err ? String(err.message || err).slice(0, 120) : null);
     if (dbTerug.uitkomst !== 'geen' || vorig !== 'geen') schrijfLog(nu() + ' dbterug ' + velden({ uitkomst: dbTerug.uitkomst, id: dbTerug.id, fout: dbTerug.fout }));
   });
+}
+
+// wv3908 (fase 1c "app blijft werken", bouwplan § 4.2): warme staat naar de R230 (logica en waarom in warme-staat.js). Alleen de actieve kant
+// (rolPrimair met lease): op Olares versleuteld (age) via ssh r230 → uitwijk-warm ontvang; op kant vps onversleuteld in /opt/data/uitwijk-warm/uit
+// voor de terugweg, die de Olares-pod (passief, stand vps) ophaalt. Plus: de stand-in op de R230 draait dezelfde code en hetzelfde image.
+// app-data peilt elke 5 s (hooguit eens per 15 s een kopie), de rest elke 5 min. Nooit in de toetsen (SERVER_ECHT) en nooit op de stand-in.
+var warmeStaat = (function () {   // var (geen const): rolInfo() hierboven leest hem; const gaf een TDZ-fout bij een vroege aanroep
+  const p = path.join(__dirname, 'warme-staat.js');
+  if (!fs.existsSync(p) || ROL_ALTIJD_PASSIEF) return null;
+  try {
+    return require(p).maak({
+      kant: function () { return ROL_KANT; }, primair: function () { return rolPrimair(); },
+      standVps: function () { return rol.actieve_kant === 'vps' && !!rol.gelezen && Date.now() - rol.gelezen < 30000; },
+      releaseDir: function () { return __dirname; },
+      releaseSha: function () { const b = path.basename(__dirname); return /^[0-9a-f]{7,40}$/.test(b) ? b : null; },
+      log: function (t) { schrijfLog(nu() + ' warm ' + velden({ melding: String(t).slice(0, 160) })); },
+      hartslag: function (h) { return appSbRpc('mk_hartslag_stempel', { p_component: 'warme_staat', p_gemeten_rijen: h.n, p_bevindingen: h.bevindingen }); } });
+  } catch (e) { logError('warme-staat', e); return null; }
+})();
+if (warmeStaat && SERVER_ECHT === true) {
+  setInterval(function () { warmeStaat.appTik().catch(function (e) { logError('warm-app', e); }); }, 5000).unref();
+  const warmRonde = function () { warmeStaat.ronde().then(function (r) { if (r && (r.uitkomst === 'deels' || r.uitkomst === 'fout')) schrijfLog(nu() + ' warm ' + velden({ uitkomst: r.uitkomst, fout: String(r.fout || '').slice(0, 160) })); })
+    .catch(function (e) { logError('warm-ronde', e); }); };
+  setTimeout(warmRonde, 2 * 60 * 1000).unref(); setInterval(warmRonde, 5 * 60 * 1000).unref();
 }
 
 // Direct bij de processtart: het bestand van het vorige proces telt niet meer (review stap 3, #7).
