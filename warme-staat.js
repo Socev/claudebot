@@ -207,6 +207,7 @@ function maak(o) {
   async function duw(soort) {   // alleen olares: het .age-bestand naar de R230 als die het nog niet heeft
     const s = staat.soorten[soort]; if (!s || !s.sha256 || s.gedeeld === s.sha256) return 'al';
     if (st.duwFoutOp && nu() - st.duwFoutOp < 60000 && soort === 'app-data') return 'wacht';   // R230 weg: niet elke 15 s een ssh
+    if (!primair()) return 'rol';   // Codex MOET 2 (r4): rol opnieuw vlak vóór elke wijzigende ssh (een ronde kan de lease overleven)
     const p = path.join(uitMap, soort + '.age'); let fd;
     try { fd = fs.openSync(p, 'r'); } catch (e) { return 'geen'; }
     let r;
@@ -366,17 +367,20 @@ function maak(o) {
     if (j.code === sha && imageOk(j) && j.gezond === true) { st.standin = { code: j.code, image_gelijk: true, gezond: true, gemeten_op: nu(), hier: sha }; bewaar(); return 'gelijk'; }
     let gestart = false;
     if (!imageOk(j)) {
-      if (j.image_gelijk === true) return standinFout('image op de R230 (' + String(j.image_sha || '?').slice(0, 12) + ') ≠ hier (' + String(hier).slice(0, 12) + '): pin in versies.env loopt achter', j, sha);
+      if (j.image_gelijk === true || (hier && j.pin_sha && j.pin_sha !== hier)) return standinFout('image op de R230 (' + String(j.image_sha || '?').slice(0, 12) + ') ≠ hier (' + String(hier).slice(0, 12) + '): pin in versies.env loopt achter', j, sha);
+      if (!primair()) return 'rol';
       const s1 = await ssh('sudo -n ' + passiefBin + ' start', { timeout: 200000, max: 8192 });
       if (s1.code !== 0) return standinFout('start ' + s1.code, j, sha);
       gestart = true; j = await standinGelijk();
       if (!j || !imageOk(j)) return standinFout('na start: image ' + (j ? String(j.image_sha || '?').slice(0, 12) : '?') + ' ≠ hier (' + String(hier).slice(0, 12) + '): pin in versies.env loopt achter', j, sha);
     }
+    if (!primair()) return 'rol';
     if (j.code !== sha) {
       // tar | ssh in één pijplijn (pipefail: een kapotte tar telt ook); de R230 eist server.js in de aangeleverde code
       const r = await draai('bash', ['-c', 'set -o pipefail; tar -C "$D" -cf - . | "$@"', '_', sshBin].concat(sshArgs, ['sudo -n ' + passiefBin + ' code ' + sha]),
         { timeout: 180000, max: 8192, env: { PATH: env.PATH || '/usr/bin:/bin', HOME: env.HOME || thuis, D: dir } });
       if (r.code !== 0) return standinFout('code ' + r.code, j, sha);
+      if (!primair()) return 'rol';
       const s2 = await ssh('sudo -n ' + passiefBin + ' start', { timeout: 200000, max: 8192 });
       if (s2.code !== 0) return standinFout('start ' + s2.code, j, sha);
       gestart = true; j = await standinGelijk();
@@ -445,7 +449,8 @@ function maak(o) {
           if (k === 'olares') uit[soort] = await duw(soort);
         } catch (e) { (staat.soorten[soort] = sx || {}).fout = String(e.message).slice(0, 120); uit[soort] = 'fout'; }
       }
-      for (const naam of Object.keys(o.dbs || DBS)) uit['db-' + naam] = await dbStroom(naam, (o.dbs || DBS)[naam]);
+      for (const naam of Object.keys(o.dbs || DBS)) { if (!primair()) break; uit['db-' + naam] = await dbStroom(naam, (o.dbs || DBS)[naam]); }
+      if (!primair()) return { uitkomst: 'rol verloren', soorten: uit };
       if (k === 'olares') {
         try { uit.geheimen = await geheimenStroom(); } catch (e) { (staat.soorten.geheimen = staat.soorten.geheimen || {}).fout = String(e.message).slice(0, 120); uit.geheimen = 'fout'; }
         if (o.standin !== false) { try { uit.standin = await standinRonde(); } catch (e) { uit.standin = 'fout'; } }

@@ -39,7 +39,7 @@ function opzet() {
     '  ontvang) cat > "$NEP/$3.age"; [ "$(sha256sum < "$NEP/$3.age" | cut -c1-64)" = "$4" ] || { echo sha >&2; exit 5; }; [ -e "$NEP/bevroren" ] && exit 3; echo "{\\"ok\\":true,\\"soort\\":\\"$3\\"}" ;;\n' +
     // nep-stand-in: code_sha (current), pin_sha (versies.env), draait_sha (IMAGE_SHA van de container); start = draait := pin
     '  gelijk) c=$(cat "$NEP/code_sha" 2>/dev/null); p=$(cat "$NEP/pin_sha" 2>/dev/null); d=$(cat "$NEP/draait_sha" 2>/dev/null); ' +
-    'printf \'{"code":"%s","image_gelijk":%s,"image_sha":"%s","gezond":true}\\n\' "$c" "$([ "$p" = "$d" ] && echo true || echo false)" "$d" ;;\n' +
+    'printf \'{"code":"%s","image_gelijk":%s,"image_sha":"%s","pin_sha":"%s","gezond":true}\\n\' "$c" "$([ "$p" = "$d" ] && echo true || echo false)" "$d" "$p" ;;\n' +
     '  code) cat > "$NEP/code.tar"; echo "$3" > "$NEP/code_sha"; echo "code $3" ;;\n  start) cp "$NEP/pin_sha" "$NEP/draait_sha" 2>/dev/null; echo gestart ;;\n' +
     '  terug-stand) cat "$NEP/terug-stand.json" ;;\n  geef-terug) cat "$NEP/terug/$3.gz" ;;\n  *) exit 2 ;;\nesac\n', { mode: 0o755 });
   let age = ECHTE_AGE, id = null, ontv = W.ONTVANGER;
@@ -200,12 +200,24 @@ test('stand-in: pin op de R230 loopt achter op het image van hier → geen code,
   assert.match(m.stand().standin.fout, /pin in versies.env loopt achter/); assert.ok(!/ start| code /.test(log(o)), 'geen code, geen herstart');
   o.s.klok += 300000; const r2 = await m.ronde();
   assert.strictEqual(r2.soorten.standin, 'wacht'); assert.strictEqual(r2.uitkomst, 'deels', 'fout blijft meetellen in de wachttijd'); assert.strictEqual(hs, 0);
+  // pin loopt achter én de container draait iets anders: ook dan geen start (pin_sha vóór de herstart getoetst, Codex MOET 1 r4)
+  standin(o, '0000000aaaaa', 'aaaaaaaaaaaaaaaaaaaa', 'cccccccccccccccccccc'); fs.writeFileSync(path.join(o.nep, 'log'), '');
+  o.s.klok += 31 * 60e3; assert.strictEqual((await m.ronde()).soorten.standin, 'fout'); assert.ok(!/ start| code /.test(log(o)));
+  assert.strictEqual(fs.readFileSync(path.join(o.nep, 'draait_sha'), 'utf8').trim(), 'cccccccccccccccccccc');
   // na de nachtronde: pin = hier; container draait nog oud → start, dan code
   standin(o, '0000000aaaaa', 'bbbbbbbbbbbbbbbbbbbb', 'aaaaaaaaaaaaaaaaaaaa');
   o.s.klok += 31 * 60e3; assert.strictEqual((await m.ronde()).soorten.standin, 'bijgewerkt');
   assert.strictEqual(fs.readFileSync(path.join(o.nep, 'code_sha'), 'utf8').trim(), 'abcdef123456');
   assert.strictEqual(fs.readFileSync(path.join(o.nep, 'draait_sha'), 'utf8').trim(), 'bbbbbbbbbbbbbbbbbbbb');
   o.s.klok += 300000; const r3 = await m.ronde(); assert.strictEqual(r3.uitkomst, 'ok'); assert.strictEqual(hs, 1, 'hartslag pas na herstel');
+});
+
+test('rol kwijt midden in een ronde: geen duw en geen stand-in-opdracht meer (Codex MOET 2 r4)', async function () {
+  const o = opzet(); standin(o, '0000000aaaaa', 'i1', 'i1'); let n = 0;
+  const m = W.maak(o.opties({ primair: function () { n++; return n <= 2; } }));   // 1 = ronde, 2 = duw app-logs, daarna weg
+  const r = await m.ronde();
+  assert.strictEqual(r.uitkomst, 'rol verloren');
+  assert.ok(!/uitwijk-passief/.test(log(o)), 'stand-in niet aangeraakt'); assert.ok(log(o).split('\n').filter(Boolean).length <= 1, 'hooguit de eerste duw: ' + log(o));
 });
 
 test('tar: een bestand dat tussen lijst en tar verdwijnt, breekt de kopie af (geen --ignore-failed-read, Codex MOET 2 r3)', async function () {
