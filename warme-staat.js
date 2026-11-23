@@ -181,7 +181,9 @@ function maak(o) {
     const lijstTekst = lijst.join('\0') + '\0';
     // tar leest de lijst van stdin (--null -T -); gzip -n (geen naam/tijd: zelfde inhoud = zelfde bytes); age schrijft het doel.
     // tar exit 1 = een bestand veranderde tijdens het lezen (atomair geschreven JSON: oude of nieuwe versie, beide heel): telt niet als fout.
-    const sh = 'set -o pipefail; { tar -C "$W" --null --no-recursion --ignore-failed-read --warning=no-file-changed -T - -cf -; r=$?; [ "$r" -le 1 ] || exit "$r"; } ' +
+    // Codex MOET 2 (r3): geen --ignore-failed-read: elke leesfout (ook een bestand dat tussen lijst en tar verdwijnt) breekt af; de volgende
+    // peiling/ronde probeert opnieuw en de vorige kopie blijft staan.
+    const sh = 'set -o pipefail; { tar -C "$W" --null --no-recursion --warning=no-file-changed -T - -cf -; r=$?; [ "$r" -le 1 ] || exit "$r"; } ' +
       '| gzip -n -6 ' + (versleuteld ? '| "$AGE" -r "$ONTV" -o "$DOEL"' : '> "$DOEL"');
     const r = await draai('bash', ['-c', sh], { invoer: lijstTekst, timeout: 300000,
       env: { PATH: env.PATH || '/usr/local/bin:/usr/bin:/bin', W: wortel, AGE: ageBin, ONTV: ontvanger, DOEL: tmp } });
@@ -340,37 +342,52 @@ function maak(o) {
   }
 
   // ── stand-in: zelfde code en image als hier ──
+  // Codex r2/r3: het image telt als gelijk als IMAGE_SHA (bouwcommit, in beide containers) van de stand-in gelijk is aan die van HIER. `start`
+  // neemt de pin uit versies.env van de R230 (uitwijk-sync zet die elke nacht uit het versiebriefje van Olares). Volgorde: eerst het image
+  // (start als de draaiende container niet de pin is), dan pas nieuwe code, en na elke start opnieuw meten. Loopt de pin achter, dan
+  // blijft de stand-in op zijn oude code + oude image (een paar dat samen hoort), met een zichtbare fout; 30 min tot de volgende poging.
+  async function standinGelijk() {
+    const g = await ssh('sudo -n ' + passiefBin + ' gelijk', { timeout: 60000, max: 8192 });
+    let j = null; try { j = JSON.parse(g.stdout.trim().split('\n').pop()); } catch (e) { j = null; }
+    return (g.code === 0 && j && typeof j === 'object') ? j : null;
+  }
+  function standinFout(t, j, sha) {
+    st.standin = { code: j ? j.code : undefined, image_gelijk: false, gezond: j ? j.gezond === true : false, gemeten_op: nu(), hier: sha, fout: t, fout_op: nu() };
+    bewaar(); return 'fout';
+  }
   async function standinRonde() {
     const sha = String(o.releaseSha ? o.releaseSha() : '').trim(), dir = o.releaseDir ? o.releaseDir() : null;
     if (!/^[0-9a-f]{7,40}$/.test(sha) || !dir || !fs.existsSync(path.join(dir, 'server.js'))) return 'geen release';
     if (st.standin.fout_op && nu() - st.standin.fout_op < STANDIN_MS) return 'wacht';
-    const g = await ssh('sudo -n ' + passiefBin + ' gelijk', { timeout: 60000, max: 8192 });
-    let j = null; try { j = JSON.parse(g.stdout.trim().split('\n').pop()); } catch (e) { j = null; }
-    if (g.code !== 0 || !j) { st.standin = { fout: 'gelijk ' + g.code, fout_op: nu() }; bewaar(); return 'fout'; }
-    // Codex MOET 1 (r2): het image van de stand-in moet gelijk zijn aan het image dat HIER draait (IMAGE_SHA = bouwcommit, staat in beide
-    // containers), niet alleen aan de pin in versies.env van de R230 (die volgt Olares pas 's nachts via het versiebriefje).
-    const hierImage = String(env.IMAGE_SHA || '').trim();
-    const imageGelijk = j.image_gelijk === true && (!/^[0-9a-f]{7,40}$/.test(hierImage) || !j.image_sha || j.image_sha === hierImage);
-    const codeGelijk = j.code === sha;
-    if (!codeGelijk || !imageGelijk) {
-      // start helpt alleen als de pin al klopt; zo niet, dan wachten tot versies.env Olares volgt (geen herstartlus), wel zichtbaar
-      if (codeGelijk && j.image_gelijk === true && j.image_sha && j.image_sha !== hierImage) {
-        st.standin = { code: j.code, image_gelijk: false, gezond: j.gezond === true, gemeten_op: nu(), hier: sha, fout: 'image op de R230 (' + String(j.image_sha).slice(0, 12) + ') ≠ hier (' + hierImage.slice(0, 12) + '): pin in versies.env loopt achter', fout_op: nu() };
-        bewaar(); return 'fout';
-      }
+    const hier = /^[0-9a-f]{7,40}$/.test(String(env.IMAGE_SHA || '').trim()) ? String(env.IMAGE_SHA).trim() : null;
+    const imageOk = function (j) { return j.image_gelijk === true && (!hier || !j.image_sha || j.image_sha === hier); };
+    let j = await standinGelijk();
+    if (!j) return standinFout('gelijk onleesbaar', null, sha);
+    if (j.code === sha && imageOk(j) && j.gezond === true) { st.standin = { code: j.code, image_gelijk: true, gezond: true, gemeten_op: nu(), hier: sha }; bewaar(); return 'gelijk'; }
+    let gestart = false;
+    if (!imageOk(j)) {
+      if (j.image_gelijk === true) return standinFout('image op de R230 (' + String(j.image_sha || '?').slice(0, 12) + ') ≠ hier (' + String(hier).slice(0, 12) + '): pin in versies.env loopt achter', j, sha);
+      const s1 = await ssh('sudo -n ' + passiefBin + ' start', { timeout: 200000, max: 8192 });
+      if (s1.code !== 0) return standinFout('start ' + s1.code, j, sha);
+      gestart = true; j = await standinGelijk();
+      if (!j || !imageOk(j)) return standinFout('na start: image ' + (j ? String(j.image_sha || '?').slice(0, 12) : '?') + ' ≠ hier (' + String(hier).slice(0, 12) + '): pin in versies.env loopt achter', j, sha);
     }
-    st.standin = { code: j.code, image_gelijk: imageGelijk, gezond: j.gezond === true, gemeten_op: nu(), hier: sha };
-    if (codeGelijk && imageGelijk && j.gezond === true) { bewaar(); return 'gelijk'; }
-    if (!codeGelijk) {
+    if (j.code !== sha) {
       // tar | ssh in één pijplijn (pipefail: een kapotte tar telt ook); de R230 eist server.js in de aangeleverde code
       const r = await draai('bash', ['-c', 'set -o pipefail; tar -C "$D" -cf - . | "$@"', '_', sshBin].concat(sshArgs, ['sudo -n ' + passiefBin + ' code ' + sha]),
         { timeout: 180000, max: 8192, env: { PATH: env.PATH || '/usr/bin:/bin', HOME: env.HOME || thuis, D: dir } });
-      if (r.code !== 0) { st.standin.fout = 'code ' + r.code; st.standin.fout_op = nu(); bewaar(); return 'fout'; }
+      if (r.code !== 0) return standinFout('code ' + r.code, j, sha);
+      const s2 = await ssh('sudo -n ' + passiefBin + ' start', { timeout: 200000, max: 8192 });
+      if (s2.code !== 0) return standinFout('start ' + s2.code, j, sha);
+      gestart = true; j = await standinGelijk();
+    } else if (!gestart && j.gezond !== true) {
+      const s3 = await ssh('sudo -n ' + passiefBin + ' start', { timeout: 200000, max: 8192 });
+      if (s3.code !== 0) return standinFout('start ' + s3.code, j, sha);
+      j = await standinGelijk();
     }
-    const s2 = await ssh('sudo -n ' + passiefBin + ' start', { timeout: 200000, max: 8192 });
-    if (s2.code !== 0) { st.standin.fout = 'start ' + s2.code; st.standin.fout_op = nu(); bewaar(); return 'fout'; }
-    st.standin.code = sha; st.standin.image_gelijk = true; st.standin.gezond = true; st.standin.bijgewerkt_op = nu(); delete st.standin.fout; bewaar();
-    log('stand-in bijgewerkt naar ' + sha + (codeGelijk ? ' (image)' : ''));
+    if (!j || j.code !== sha || !imageOk(j) || j.gezond !== true) return standinFout('na start niet gelijk of niet gezond', j, sha);
+    st.standin = { code: sha, image_gelijk: true, gezond: true, gemeten_op: nu(), hier: sha, bijgewerkt_op: nu() }; bewaar();
+    log('stand-in bijgewerkt naar ' + sha);
     return 'bijgewerkt';
   }
 
@@ -435,7 +452,7 @@ function maak(o) {
       }
       bewaar();
       const fouten = Object.keys(staat.soorten).filter(function (s) { return staat.soorten[s].fout; });
-      if (uit.standin === 'fout') fouten.push('stand-in');   // Codex ZOU 1 (r2)
+      if (uit.standin === 'fout' || (st.standin && st.standin.fout)) fouten.push('stand-in');   // Codex ZOU 1 (r2/r3): ook tijdens de wachttijd
       st.fout = fouten.length ? fouten.join(', ') : null;
       if (!fouten.length && o.hartslag && k === 'olares' && nu() - (st.hartslagOp || 0) > 30 * 60e3) {
         st.hartslagOp = nu(); try { await o.hartslag({ n: Object.keys(staat.soorten).length, bevindingen: 0 }); } catch (e) { /* hartslag is bijzaak */ }

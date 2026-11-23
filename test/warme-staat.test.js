@@ -37,7 +37,10 @@ function opzet() {
   const ssh = path.join(T, 'ssh');
   fs.writeFileSync(ssh, '#!/usr/bin/env bash\nNEP=' + JSON.stringify(nep) + '\nop="${@: -1}"\necho "$op" >> "$NEP/log"\nset -- $op\nshift 2\ncase "$2" in\n' +
     '  ontvang) cat > "$NEP/$3.age"; [ "$(sha256sum < "$NEP/$3.age" | cut -c1-64)" = "$4" ] || { echo sha >&2; exit 5; }; [ -e "$NEP/bevroren" ] && exit 3; echo "{\\"ok\\":true,\\"soort\\":\\"$3\\"}" ;;\n' +
-    '  gelijk) cat "$NEP/gelijk.json" ;;\n  code) cat > "$NEP/code.tar"; echo "code $3" ;;\n  start) echo gestart ;;\n' +
+    // nep-stand-in: code_sha (current), pin_sha (versies.env), draait_sha (IMAGE_SHA van de container); start = draait := pin
+    '  gelijk) c=$(cat "$NEP/code_sha" 2>/dev/null); p=$(cat "$NEP/pin_sha" 2>/dev/null); d=$(cat "$NEP/draait_sha" 2>/dev/null); ' +
+    'printf \'{"code":"%s","image_gelijk":%s,"image_sha":"%s","gezond":true}\\n\' "$c" "$([ "$p" = "$d" ] && echo true || echo false)" "$d" ;;\n' +
+    '  code) cat > "$NEP/code.tar"; echo "$3" > "$NEP/code_sha"; echo "code $3" ;;\n  start) cp "$NEP/pin_sha" "$NEP/draait_sha" 2>/dev/null; echo gestart ;;\n' +
     '  terug-stand) cat "$NEP/terug-stand.json" ;;\n  geef-terug) cat "$NEP/terug/$3.gz" ;;\n  *) exit 2 ;;\nesac\n', { mode: 0o755 });
   let age = ECHTE_AGE, id = null, ontv = W.ONTVANGER;
   if (echt) { id = path.join(T, 'id.txt'); cp.execFileSync(ECHTE_KEYGEN, ['-o', id], { stdio: 'ignore' }); ontv = cp.execFileSync(ECHTE_KEYGEN, ['-y', id]).toString().trim(); }
@@ -63,8 +66,10 @@ function open(o, f) {   // ontsleutel (echt) of strip de nepkop; geef de tar-lij
 function tarLijst(buf) { return cp.execFileSync('tar', ['-tzf', '-'], { input: buf }).toString().split('\n').filter(Boolean).map(function (x) { return x.replace(/^\.\//, ''); }).sort(); }
 function log(o) { try { return fs.readFileSync(path.join(o.nep, 'log'), 'utf8'); } catch (e) { return ''; } }
 
+function standin(o, code, pin, draait) { fs.writeFileSync(path.join(o.nep, 'code_sha'), code); fs.writeFileSync(path.join(o.nep, 'pin_sha'), pin); fs.writeFileSync(path.join(o.nep, 'draait_sha'), draait); }
+
 test('olares actief: alles versleuteld naar de R230, witte lijst, geen transcripts', async function () {
-  const o = opzet(); fs.writeFileSync(path.join(o.nep, 'gelijk.json'), '{"code":"abcdef123456","image_gelijk":true,"gezond":true}');
+  const o = opzet(); standin(o, 'abcdef123456', 'i1', 'i1');
   const m = W.maak(o.opties());
   const r = await m.ronde();
   assert.strictEqual(r.uitkomst, 'ok', JSON.stringify(r));
@@ -172,30 +177,43 @@ test('terugweg: Olares passief + stand vps haalt op, controleert de sha', async 
   o.s.klok += 61000; assert.strictEqual((await m.ronde()).uitkomst, 'gelijk');
 });
 
-test('stand-in: andere code → code klaarzetten + start; gelijk → niets', async function () {
-  const o = opzet(); const m = W.maak(o.opties());
-  fs.writeFileSync(path.join(o.nep, 'gelijk.json'), '{"code":"0000000aaaaa","image_gelijk":true,"gezond":true}');
+test('stand-in: andere code → code klaarzetten + start, daarna opnieuw gemeten; gelijk → niets', async function () {
+  const o = opzet(); const opt = o.opties(); opt.env.IMAGE_SHA = 'bbbbbbbbbbbbbbbbbbbb'; const m = W.maak(opt);
+  standin(o, '0000000aaaaa', 'bbbbbbbbbbbbbbbbbbbb', 'bbbbbbbbbbbbbbbbbbbb');
   assert.strictEqual((await m.ronde()).soorten.standin, 'bijgewerkt');
   assert.match(log(o), /uitwijk-passief code abcdef123456/); assert.match(log(o), /uitwijk-passief start/);
   assert.ok(cp.execFileSync('tar', ['-tf', path.join(o.nep, 'code.tar')]).toString().includes('server.js'));
-  fs.writeFileSync(path.join(o.nep, 'gelijk.json'), '{"code":"abcdef123456","image_gelijk":false,"gezond":true}');
-  fs.writeFileSync(path.join(o.nep, 'log'), '');
+  o.s.klok += 300000; fs.writeFileSync(path.join(o.nep, 'log'), '');
+  assert.strictEqual((await m.ronde()).soorten.standin, 'gelijk'); assert.ok(!/ start| code /.test(log(o)));
+  // pin wordt 's nachts nieuw (gelijk aan hier), container draait nog het oude image → alleen herstart, geen code
+  standin(o, 'abcdef123456', 'bbbbbbbbbbbbbbbbbbbb', 'cccccccccccccccccccc'); fs.writeFileSync(path.join(o.nep, 'log'), '');
   o.s.klok += 300000; assert.strictEqual((await m.ronde()).soorten.standin, 'bijgewerkt');
   assert.ok(!/ code /.test(log(o)) && / start/.test(log(o)), 'alleen herstart bij een ander image');
-  fs.writeFileSync(path.join(o.nep, 'gelijk.json'), '{"code":"abcdef123456","image_gelijk":true,"gezond":true}');
-  o.s.klok += 300000; assert.strictEqual((await m.ronde()).soorten.standin, 'gelijk');
 });
 
-test('stand-in: ander image dan HIER (IMAGE_SHA) terwijl de pin op de R230 achterloopt → zichtbare fout, geen herstartlus (Codex MOET 1 r2)', async function () {
-  const o = opzet(); const opt = o.opties(); opt.env.IMAGE_SHA = 'bbbbbbbbbbbbbbbbbbbb';
+test('stand-in: pin op de R230 loopt achter op het image van hier → geen code, geen herstartlus, fout telt mee tot herstel (Codex r2/r3)', async function () {
+  const o = opzet(); const opt = o.opties(); opt.env.IMAGE_SHA = 'bbbbbbbbbbbbbbbbbbbb'; let hs = 0; opt.hartslag = function () { hs++; };
   const m = W.maak(opt);
-  fs.writeFileSync(path.join(o.nep, 'gelijk.json'), '{"code":"abcdef123456","image_gelijk":true,"image_sha":"aaaaaaaaaaaaaaaaaaaa","gezond":true}');
+  standin(o, '0000000aaaaa', 'aaaaaaaaaaaaaaaaaaaa', 'aaaaaaaaaaaaaaaaaaaa');   // nieuwe code én achterlopende pin
   const r = await m.ronde();
-  assert.strictEqual(r.soorten.standin, 'fout'); assert.strictEqual(r.uitkomst, 'deels', 'stand-in-fout telt mee (ZOU 1)');
-  assert.match(m.stand().standin.fout, /pin in versies.env loopt achter/); assert.ok(!/ start/.test(log(o)), 'geen herstart');
-  o.s.klok += 300000; assert.strictEqual((await m.ronde()).soorten.standin, 'wacht', '30 min wachten');
-  fs.writeFileSync(path.join(o.nep, 'gelijk.json'), '{"code":"abcdef123456","image_gelijk":true,"image_sha":"bbbbbbbbbbbbbbbbbbbb","gezond":true}');
-  o.s.klok += 31 * 60e3; assert.strictEqual((await m.ronde()).soorten.standin, 'gelijk');
+  assert.strictEqual(r.soorten.standin, 'fout'); assert.strictEqual(r.uitkomst, 'deels');
+  assert.match(m.stand().standin.fout, /pin in versies.env loopt achter/); assert.ok(!/ start| code /.test(log(o)), 'geen code, geen herstart');
+  o.s.klok += 300000; const r2 = await m.ronde();
+  assert.strictEqual(r2.soorten.standin, 'wacht'); assert.strictEqual(r2.uitkomst, 'deels', 'fout blijft meetellen in de wachttijd'); assert.strictEqual(hs, 0);
+  // na de nachtronde: pin = hier; container draait nog oud → start, dan code
+  standin(o, '0000000aaaaa', 'bbbbbbbbbbbbbbbbbbbb', 'aaaaaaaaaaaaaaaaaaaa');
+  o.s.klok += 31 * 60e3; assert.strictEqual((await m.ronde()).soorten.standin, 'bijgewerkt');
+  assert.strictEqual(fs.readFileSync(path.join(o.nep, 'code_sha'), 'utf8').trim(), 'abcdef123456');
+  assert.strictEqual(fs.readFileSync(path.join(o.nep, 'draait_sha'), 'utf8').trim(), 'bbbbbbbbbbbbbbbbbbbb');
+  o.s.klok += 300000; const r3 = await m.ronde(); assert.strictEqual(r3.uitkomst, 'ok'); assert.strictEqual(hs, 1, 'hartslag pas na herstel');
+});
+
+test('tar: een bestand dat tussen lijst en tar verdwijnt, breekt de kopie af (geen --ignore-failed-read, Codex MOET 2 r3)', async function () {
+  const o = opzet(); const m = W.maak(o.opties({ standin: false }));
+  const lijst = m._appLijst(false); fs.unlinkSync(path.join(o.thuis, 'socev-app-data/vragen.json'));   // verdwijnt ná de lijst
+  assert.ok(lijst.includes('vragen.json'));
+  const r = cp.spawnSync('bash', ['-c', 'set -o pipefail; { tar -C "$1" --null --no-recursion --warning=no-file-changed -T - -cf -; r=$?; [ "$r" -le 1 ] || exit "$r"; } | gzip -n > /dev/null', '_', path.join(o.thuis, 'socev-app-data')], { input: 'apparaten.json\0vragen.json\0' });
+  assert.notStrictEqual(r.status, 0, 'verdwenen bestand = fout (tar exit 2)');
 });
 
 test('leesfout in een map breekt de kopie af en laat de vorige staan (Codex MOET 2 r2)', { skip: process.getuid && process.getuid() === 0 }, async function () {
