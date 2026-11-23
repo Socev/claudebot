@@ -497,7 +497,7 @@ function bereken(d) {
 // ── routes voor de app ──
 // Antwoorden in centen (gehele getallen); de app deelt door 100. Nooit bankregel_ghawa- of donateurvelden.
 const STATUS_OPEN = /^(open|partly answered)$/i;
-function overzicht(d, k) {
+function overzicht(d, k, mijl) {
   const vragenOpen = d.vragen.filter((v) => STATUS_OPEN.test(v.status || ''));
   const aandacht = [];
   if (k.aansluiting.D.niet_gespecificeerd > 0) aandacht.push({ toon: 'wacht', label: 'bonnen', titel: 'Opgenomen maar nog niet gespecificeerd',
@@ -541,7 +541,8 @@ function overzicht(d, k) {
     fasen: k.fasen.map((f) => ({ id: f.id, naam: f.naam, omschrijving: f.omschrijving, begroot: f.begroot, gerealiseerd: f.gerealiseerd, niet_nodig: f.niet_nodig, open: f.open, pct: f.pct })),
     ecg: { eur: k.ecg.eur.saldo, eur_datum: k.ecg.eur.datum, gmd: k.ecg.gmd.saldo, gmd_datum: k.ecg.gmd.datum },
     ghawa: { saldo: k.ghawa.saldo, geoormerkt: k.ghawa.geoormerkt, datum: k.ghawa.datum },
-    vragen: { open: vragenOpen.length, totaal: d.vragen.length }, aandacht };
+    vragen: { open: vragenOpen.length, totaal: d.vragen.length }, aandacht,
+    mijlpalen: mijl || null };   // wv3965 (2C63 e): de volgende twee, met einde en loopt_uit
 }
 function bouwRoute(d, k, project) {
   const acts = k.activiteiten.filter((a) => a.project === project).map((a) => { const x = Object.assign({}, a); return x; });
@@ -615,6 +616,7 @@ function fondsOpvolg(f, k) {
   r.push('Met vriendelijke groet,', '', 'David', 'Stichting GHAWA');
   return { onderwerp: 'Toezegging ' + bedrag + ' voor het gezondheidscentrum in Sukuta', bericht: r.join('\n') };
 }
+const GEHAALDE = /^(gehaald|klaar|gedaan|vervallen|geschrapt)$/;   // wv3965: zelfde lijst als ghawa-stichting.js
 const verlopen = (f, vandaag) => f.status === 'Committed - not yet received' && f.termijn && f.termijn < String(vandaag).slice(0, 10);
 // ── wv2880 (fase 2): fondsen en dossiers, donateurs (INTERN), indelen (INTERN), maandronde ──
 const DOSSIER = [[/wilde ganzen/i, 'Wilde Ganzen'], [/afas/i, 'AFAS Foundation'], [/rotary/i, 'Rotary Club Leusden'], [/rota\b/i, 'ROTA'], [/ghawa/i, 'Stichting GHAWA']];
@@ -795,7 +797,7 @@ function maak(cfg) {
     const d = lees();
     const k = bereken(d);
     let body;
-    if (scherm === 'overzicht') body = overzicht(d, k);
+    if (scherm === 'overzicht') body = overzicht(d, k, volgendeMijl(k.vandaag));
     else if (scherm === 'bouw') body = bouwRoute(d, k, 'Building');
     else if (scherm === 'apotheek') body = bouwRoute(d, k, 'Pharmacy');
     else if (scherm === 'activiteit' && m[2]) body = activiteitRoute(d, k, m[2]);
@@ -809,6 +811,45 @@ function maak(cfg) {
     if (!body) return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'ghawa onbekend ' + scherm };
     laatste = { op: nuIso(), scherm, ms: Date.now() - t0, sluit: k.sluit };
     return { status: 200, body: Object.assign({ ok: true, invoer_op: d.meta.invoer_op || null }, body), reden: 'ghawa ' + scherm + (k.sluit ? '' : ' sluit niet') };
+  }
+  // wv3965 (2C63 e): mijlpalen rechtstreeks uit de vault (één bestand; dezelfde bron als Doelen en mijlpalen), de databankkopie als terugval
+  function mijlLijst() {
+    const S = require('./ghawa-stichting.js');
+    let l = c.vaultMap ? S.mijlpalenUitVault(c.vaultMap) : null;   // review ZOU 1: een lege tabel is een antwoord; alleen een onleesbare pagina valt terug
+    if (l == null && c.dbPad && fs.existsSync(c.dbPad)) {
+      try { const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(c.dbPad, { readOnly: true });
+        try { const u = S.leesDb(db); l = u ? u.mijlpalen : []; } finally { db.close(); } } catch (e) { l = []; }
+    }
+    return l || [];
+  }
+  function volgendeMijl(dag) {
+    try { const S = require('./ghawa-stichting.js'); const l = mijlLijst();
+      return { volgende: S.volgendeMijlpalen(l, dag, 2), loopt_uit: S.mijlpalenMet(l, dag).filter((m) => m.loopt_uit).length, totaal: l.length }; }
+    catch (e) { if (c.fout) c.fout(e); return null; }
+  }
+  // OVIS Calendar: GHAWA-items van soort mijlpaal in [van, tot] (JJJJ-MM-DD), bij het lezen berekend (geen opslag, dus nooit dubbel):
+  // de mijlpalen op hun einddatum, de verwachte datum van elke toezegging die nog niet binnen is, en de ANBI-publicatie (uiterlijk 1 juli).
+  // Vorm = een rij van sb_kalender_tijdlijn (kalender-app.js regel()), met een negatief id dat nooit met een databank-id botst.
+  function kalenderItems(van, tot) {
+    const S = require('./ghawa-stichting.js');
+    const dag = vandaag(), uit = [];
+    const id = (s) => { let h = 2166136261; for (const ch of s) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619) >>> 0; } return -(h % 2147483647 || 1); };
+    const zet = (sl, datum, titel, wat) => { if (datum >= van && datum <= tot) uit.push({ event_id: id('ghawa:' + sl), begin_datum: datum, eind_datum: datum, hele_dag: true,
+      titel: String(titel).slice(0, 300), soort: 'mijlpaal', voor_wie: 'david', zekerheid: 'hoog', bron_soort: 'ghawa', sync_stand: 'geen', bron: { wat }, entiteiten: [] }); };
+    for (const m of S.mijlpalenMet(mijlLijst(), dag)) {
+      if (!m.einde) continue;
+      const extra = GEHAALDE.test(m.stand || '') ? ' · gehaald' : m.loopt_uit ? ' · loopt uit' : '';
+      zet('mijlpaal:' + m.wanneer + ':' + m.tekst, m.einde, 'GHAWA-mijlpaal: ' + m.tekst + (/^\d{1,2}-\d{1,2}-\d{4}$/.test(m.wanneer) ? '' : ' · ' + m.wanneer) + extra, 'mijlpaal');
+    }
+    if (c.dbPad && fs.existsSync(c.dbPad)) {
+      for (const f of lees().fondsen) {
+        if (f.status !== 'Committed - not yet received' || !/^\d{4}-\d{2}-\d{2}$/.test(f.termijn || '')) continue;
+        zet('fonds:' + f.id + ':' + f.termijn, f.termijn, 'GHAWA: toezegging ' + dossierVan(f.gever) + ' € ' + Math.round((f.eur_cent || 0) / 100).toLocaleString('nl-NL') + ' verwacht', 'toezegging');
+      }
+    }
+    for (let j = Math.max(2024, Number(van.slice(0, 4))); j <= Number(tot.slice(0, 4)); j++)
+      zet('anbi:' + j, j + '-07-01', 'GHAWA: ANBI-gegevens over ' + (j - 1) + ' op ghawa.org (uiterlijk 1 juli)', 'anbi');
+    return uit;
   }
   // wv2886 (fase 4, Stichting): doelen, stichting (statuten en ANBI), overleg, mensen. Leest de vault (ghawa-stichting.js) en houdt de afgeleide
   // tabellen overleg/besluit/actiepunt/mijlpaal bij; de server geeft de sitepagina's (v.site) en de Actie-Bewaker-rijen (v.bewaker) mee.
@@ -827,7 +868,7 @@ function maak(cfg) {
         tot = totalen();
       } catch (e) { if (c.fout) c.fout(e); }
     }
-    const body = S.route(scherm, { data, site: (v && v.site) || null, bewaker: (v && v.bewaker) || null, vault: c.vaultMap || '', totalen: tot, fondsen });
+    const body = S.route(scherm, { vandaag: vandaag(), data, site: (v && v.site) || null, bewaker: (v && v.bewaker) || null, vault: c.vaultMap || '', totalen: tot, fondsen });
     laatste = { op: nuIso(), scherm, ms: Date.now() - t0, sluit: null };
     return { status: 200, body: Object.assign({ ok: true }, body), reden: 'ghawa ' + scherm };
   }
@@ -953,7 +994,7 @@ function maak(cfg) {
   function siteCijfersZet(v) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('site:cijfers', JSON.stringify(Object.assign({ op: nuIso() }, v)))); }
   function siteCijfers() { try { const d = lees(); return d.meta['site:cijfers'] ? JSON.parse(d.meta['site:cijfers']) : null; } catch (e) { return null; } }
   function kaartGezet(sleutel) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('kaart:' + String(sleutel).slice(0, 60), nuIso())); }
-  return { app, info, bankBij, maandKaart, kaartGezet, totalen, siteCijfersZet, siteCijfers, conceptVoor, conceptGezet, fondsKaarten, kaartDicht };
+  return { app, info, bankBij, maandKaart, kaartGezet, totalen, siteCijfersZet, siteCijfers, conceptVoor, conceptGezet, fondsKaarten, kaartDicht, kalenderItems };
 }
 
 module.exports = { maak, invoer, leesData, bereken, csvLees, cent, SCHEMA, TABELLEN, GHAWA_SOORTEN, donateursRoute, indelenRoute, vragenPortie, fondsOpvolg };

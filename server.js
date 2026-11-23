@@ -26464,7 +26464,8 @@ async function appTripper(req, res, a, route) {
 const kalenderApp = (function () {
   const p = path.join(__dirname, 'kalender-app.js');
   if (!fs.existsSync(p)) return null;
-  try { return require(p).maak({ rpc: function (fn, body) { return appSbRpc(fn, body, 20000); }, stuk: kalenderStuk }); }
+  try { return require(p).maak({ rpc: function (fn, body) { return appSbRpc(fn, body, 20000); }, stuk: kalenderStuk,
+    extra: function (van, tot) { return typeof ghawaApp !== 'undefined' && ghawaApp && typeof ghawaApp.kalenderItems === 'function' ? ghawaApp.kalenderItems(van, tot) : []; } }); }   // wv3965: GHAWA-mijlpalen
   catch (e) { logError('kalender', e); return null; }
 })();
 // wv3679: het kennisbestand van een vondst van de datumdetector (voor de vindzin). Eerst het bronpad uit de vindplaats; staat daar niet

@@ -40,7 +40,7 @@ const SOORTEN = ['afspraak', 'ophaaldag', 'deadline', 'reis', 'dienst', 'afwezig
 const VOOR_WIE = ['david', 'gezin', 'socev', 'bezetting', 'info'];
 const AGENDA = { david: 'je agenda', gezin: 'Gezin', werk: 'Werk', hagro: 'HAGRO' };
 const BRON = { deadline_register: 'Deadlines', reispagina: 'Tripper', datumdetector: 'datumdetector', intake: 'Intake',
-  handmatig: 'met de hand', socev: 'Socev' };
+  handmatig: 'met de hand', socev: 'Socev', ghawa: 'GHAWA' };   // ghawa: wv3965, bij het lezen uit de GHAWA-app (o.extra)
 const SYNC = { gespiegeld: 'kopie van Google', geen: 'niet in een agenda', moet_erin: 'moet nog in je agenda', staat_erin: 'staat in je agenda' };
 
 function dagAmsterdam(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: TZ }); }
@@ -283,6 +283,12 @@ function maak(o) {
       staat.laatste = { op: new Date(nu).toISOString(), te_veel: ruw.length };
       return { status: 422, body: { ok: false, fout: 'te veel regels in dit venster (' + ruw.length + '); kies een kortere periode' }, reden: 'kalender te veel ' + ruw.length };
     }
+    // wv3965 (2C63 e): extra items die de pod bij het lezen uitrekent (GHAWA-mijlpalen, toezeggingen, ANBI-datum). Geen opslag, dus nooit dubbel;
+    // een fout daar laat de tijdlijn gewoon staan (info().extra_fout). Negatieve id's: nooit gelijk aan een event_id uit de databank.
+    if (typeof o.extra === 'function') {
+      try { const x = o.extra(w.van, w.tot); if (Array.isArray(x)) ruw = ruw.concat(x.filter((r) => r && Number(r.event_id) < 0)); staat.extra_fout = null; }
+      catch (e) { staat.extra_fout = new Date(nu).toISOString(); }
+    }
     const kapot = ruw.filter((r) => !(r && r.event_id != null && r.event_id !== '' && Number.isFinite(Number(r.event_id)) && r.begin_datum));
     if (kapot.length) throw new Error('kalender: ' + kapot.length + ' regel(s) zonder id of datum');
     const regels = ruw.map(regel);
@@ -293,7 +299,7 @@ function maak(o) {
       tel: { soort: tel(regels, 'soort', SOORTEN), voor_wie: tel(regels, 'voor_wie', VOOR_WIE) },
     } };
   }
-  function info() { return Object.assign({ aan: true }, staat.laatste ? { laatste: staat.laatste } : {}, staat.gevonden ? { gevonden: staat.gevonden } : {}); }
+  function info() { return Object.assign({ aan: true }, staat.laatste ? { laatste: staat.laatste } : {}, staat.gevonden ? { gevonden: staat.gevonden } : {}, staat.extra_fout ? { extra_fout: staat.extra_fout } : {}); }
   return { app, info };
 }
 

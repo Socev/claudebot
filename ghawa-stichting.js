@@ -135,6 +135,51 @@ function mijlpalen(projectMd) {
     .filter((x) => x.tekst);
 }
 
+// wv3965 (nr 163 = 2C63 e): "liggen we op schema?" Per mijlpaal een einddatum uit "wanneer" (de laatste dag die de tekst nog toelaat) en
+// "loopt uit" als die voorbij is en de mijlpaal niet gehaald is. Vormen: "18-10-2023", "mei 2025", "jul–sep 2026", "eind december 2026",
+// "begin 2027", "najaar 2026", "2027". Niet te lezen = einde null (dan nooit "loopt uit"; de mijlpaal achteraan, nooit stil weg).
+const MND = { jan: 1, januari: 1, feb: 2, februari: 2, mrt: 3, maa: 3, maart: 3, apr: 4, april: 4, mei: 5, jun: 6, juni: 6, jul: 7, juli: 7, aug: 8, augustus: 8,
+  sep: 9, sept: 9, september: 9, okt: 10, oktober: 10, nov: 11, november: 11, dec: 12, december: 12 };
+const SEIZOEN = { voorjaar: [5, 31], lente: [5, 31], zomer: [8, 31], najaar: [11, 30], herfst: [11, 30], winter: [12, 31] };
+const laatsteDag = (j, m) => new Date(Date.UTC(j, m, 0)).getUTCDate();
+const iso = (j, m, d) => j + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+function mijlpaalEinde(wanneer) {
+  const t = String(wanneer || '').toLowerCase().replace(/[–—]/g, '-').trim();
+  if (!t) return null;
+  const dm = /(\d{1,2})-(\d{1,2})-(\d{4})(?!.*\d{4})/.exec(t);   // de laatste volledige datum
+  if (dm) { const j = +dm[3], m = +dm[2], d = +dm[1]; return m >= 1 && m <= 12 && d >= 1 && d <= laatsteDag(j, m) ? iso(j, m, d) : null; }
+  const jaren = [...t.matchAll(/\b(20\d{2})\b/g)];
+  if (!jaren.length) return null;
+  const jm = jaren[jaren.length - 1], j = +jm[1];
+  const voor = t.slice(jaren.length > 1 ? jaren[jaren.length - 2].index + 4 : 0, jm.index);   // alleen het stuk vóór het laatste jaar
+  const woorden = voor.match(/[a-z]+/g) || [];
+  const maanden = woorden.filter((w) => MND[w]);
+  const q = /\bq([1-4])\b/.exec(voor);
+  if (maanden.length) {
+    const m = MND[maanden[maanden.length - 1]];
+    const vlak = woorden[woorden.lastIndexOf(maanden[maanden.length - 1]) - 1];
+    if (vlak === 'begin') return iso(j, m, 10);
+    if (vlak === 'half' || vlak === 'medio' || vlak === 'midden') return iso(j, m, 20);
+    return iso(j, m, laatsteDag(j, m));
+  }
+  if (q) { const m = +q[1] * 3; return iso(j, m, laatsteDag(j, m)); }
+  const sz = woorden.map((w) => SEIZOEN[w]).filter(Boolean).pop();
+  if (sz) return iso(j, sz[0], sz[1]);
+  if (woorden.includes('begin')) return iso(j, 3, 31);
+  if (woorden.some((w) => w === 'medio' || w === 'midden' || w === 'half')) return iso(j, 7, 31);
+  return iso(j, 12, 31);   // alleen een jaar, of "eind 2027"
+}
+const GEHAALD = /^(gehaald|klaar|gedaan|vervallen|geschrapt)$/;
+function mijlpalenMet(lijst, vandaag) {   // elke mijlpaal met einde en loopt_uit (vandaag = JJJJ-MM-DD)
+  return (lijst || []).map((m) => { const einde = mijlpaalEinde(m.wanneer);
+    return Object.assign({}, m, { einde, loopt_uit: !!(einde && vandaag && einde < vandaag && !GEHAALD.test(String(m.stand || ''))) }); });
+}
+function volgendeMijlpalen(lijst, vandaag, n) {   // de eerstvolgende niet-gehaalde, vroegste einde eerst (zonder einde achteraan)
+  return mijlpalenMet(lijst, vandaag).filter((m) => !GEHAALD.test(String(m.stand || '')))
+    .sort((a, b) => (a.einde == null) - (b.einde == null) || String(a.einde || '').localeCompare(String(b.einde || '')) || a.volgorde - b.volgorde).slice(0, n || 2);
+}
+function mijlpalenUitVault(vault) { const t = lees(vault, BRONNEN.project); return t == null ? null : mijlpalen(t); }   // null = pagina niet te lezen (dan pas de databankkopie)
+
 // ── 3. overleg, besluiten, actiepunten ──
 function eigenaren(s) {
   const t = ontlink(s).replace(/\.$/, '');
@@ -346,7 +391,7 @@ function route(scherm, v) {
   if (scherm === 'doelen') {
     const dd = site ? donatiedoelen(site.donatiedoelen) : null;
     return { statuten: d.statuten, statuten_bron: pad(BRONNEN.ghawa), donatiedoelen: dd, site_gelezen: !!site, app_bouw_gmd: v.totalen ? v.totalen.bouw_gmd : null, app_koers: v.totalen ? v.totalen.koers : null,
-      mijlpalen: d.mijlpalen, mijlpalen_bron: pad(BRONNEN.project) };
+      mijlpalen: mijlpalenMet(d.mijlpalen, v.vandaag), mijlpalen_bron: pad(BRONNEN.project) };   // wv3965: einde + loopt_uit
   }
   if (scherm === 'stichting') {
     const stukken = anbiStukken(site, v.vault);
@@ -387,4 +432,4 @@ function route(scherm, v) {
   return null;
 }
 
-module.exports = { leesVault, route, bewaar, leesDb, SCHEMA, BRONNEN, isoDatum, tabellen, sectie, ontlink, eigenaren, donatiedoelen, statutenDoel, mijlpalen, bewakerKoppel, anbiStukken, bestuurEcg, bestuurGhawa };
+module.exports = { leesVault, route, bewaar, leesDb, SCHEMA, BRONNEN, isoDatum, tabellen, sectie, ontlink, eigenaren, donatiedoelen, statutenDoel, mijlpalen, mijlpaalEinde, mijlpalenMet, volgendeMijlpalen, mijlpalenUitVault, bewakerKoppel, anbiStukken, bestuurEcg, bestuurGhawa };

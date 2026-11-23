@@ -52,5 +52,5 @@ echo "$PB" | grep -q "if (wat === 'publiceer') {" && echo "$PB" | grep -q "a.soo
 grep -qF "/^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)" server.js || { echo "ROOD  server.js: website-routes niet precies GET + concept/weg/publiceer"; f=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* ghawa-site\.js ghawa-stichting\.js" uitrol.sh || { echo "ROOD  uitrol.sh: ghawa-site.js/ghawa-stichting.js niet in RELEASE_OPTIONEEL"; f=1; }
 [ $f = 0 ] && echo "GROEN website: alleen git, staging 2× / main 1×, publiceren achter vingerafdruk"
-node --no-warnings --test --test-reporter=spec test/ghawa.test.js test/ghawa-bij.test.js test/ghawa-2c63.test.js test/ghawa-teboeken.test.js test/ghawa-site.test.js test/ghawa-stichting.test.js || f=1
+node --no-warnings --test --test-reporter=spec test/ghawa.test.js test/ghawa-bij.test.js test/ghawa-2c63.test.js test/ghawa-teboeken.test.js test/ghawa-site.test.js test/ghawa-stichting.test.js test/ghawa-mijlpalen.test.js || f=1
 exit $f
