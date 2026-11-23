@@ -92,11 +92,13 @@ const geheim = { GEHEIM_NEP: 'x', TELEGRAM_SESSIE: 'x', VAULT_BACKUP_CRYPT_WACHT
 const mag = { N8N_WEBHOOK_AGENDA_API: 'x', N8N_WEBHOOK_WERKROOSTER: 'x', N8N_WEBHOOK_WHATSAPP: 'x', SUPABASE_RPC_CONTACTEN: 'x',
   SUPABASE_RPC_NIEUW: 'x', N8N_WEBHOOK_SMS: 'x', N8N_WEBHOOK_SOCEV_AGENDA: 'x', N8N_WEBHOOK_MAILCONCEPT: 'x', WERKKAMER_SLEUTEL_POD: 'x',
   TODOIST_MCP_TOKEN: 'x', TZ: 'Europe/Amsterdam', CLAUDE_CODE_OAUTH_TOKEN: 'nep-inlog' };
+fs.writeFileSync(path.join(W, 'fin-lees.tok'), 'nep-lees-wv3929\n');   // wv3929
 const start = () => {
 const env = Object.assign({}, process.env, geheim, mag, {
   HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'), APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'), APP_DATA_DIR: path.join(d, 'app-data'), APP_UIT_BESTAND: path.join(d, 'app-uit'), TEL_UIT_BESTAND: path.join(d, 'tel-uit'),
   JOBOUT_DIR: path.join(d, 'jobout'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'),
   RUNTIME_FILE: path.join(d, 'runtime.json'), CODEX_HOME: path.join(d, 'codex'), SLEUTELPORTAAL_SLEUTEL: path.join(d, 'geen.key'),
+  FIN_LEES_TOKEN_TOETS_BESTAND: path.join(W, 'fin-lees.tok'),   // wv3929: nep-leestoken voor /smal/fin-sql
   OFFSITE_INTERVAL_MIN: '0', AUTO_UIT_POD: '1', LESSEN_INJECTIE: '0', API_SECRET: 'proef', MAX_AGENTS: '6',
   ROL_BESTAND: path.join(d, 'rol'), UITROL_MARKER: path.join(d, 'uitrol-wacht'),
   SUPABASE_URL: 'http://127.0.0.1:' + rpc.address().port, SOCEV_KANT: 'olares',
@@ -266,6 +268,13 @@ rpc.listen(0, '127.0.0.1', async function () {
     const g3 = await req('POST', '/smal/fin-sql', { secret: SMAL, sql: "SELECT jaar, replace(rubriek,'_',' ') r FROM reeks WHERE entiteit=? ;", params: ['TG'] });
     const cd = cfVragen[cfVragen.length - 1] || {};
     toets('G /smal/fin-sql: SELECT (ook met replace()) en params gaan door naar D1 fin', g3._status === 200 && g3.success === true && /\/d1\/database\/ffcb09ad/.test(cd.url) && cd.body.params[0] === 'TG' && !/;/.test(cd.body.sql), JSON.stringify(cd).slice(0, 200));
+    // wv3929 (2C08): eigen leestoken, nooit het pod-token; ontbreekt het, dan 503 en niets naar Cloudflare (geen stille terugval)
+    toets('G /smal/fin-sql: met het eigen leestoken, niet met het pod-token (wv3929)', cd.auth === 'Bearer nep-lees-wv3929', String(cd.auth).slice(0, 12));
+    fs.writeFileSync(path.join(W, 'fin-lees.tok'), '');
+    const nCf2 = cfVragen.length;
+    const g3c = await req('POST', '/smal/fin-sql', { secret: SMAL, sql: 'SELECT 1' });
+    toets('G /smal/fin-sql: zonder leestoken 503 met duidelijke fout, niets naar Cloudflare (wv3929)', g3c._status === 503 && /leessleutel/.test(g3c.fout || '') && cfVragen.length === nCf2, g3c._status + ' ' + (g3c.fout || ''));
+    fs.writeFileSync(path.join(W, 'fin-lees.tok'), 'nep-lees-wv3929\n');
     const g4 = await req('POST', '/smal/telegram', { secret: SMAL, opdracht: 'lees', chat: '--help' });
     const g5 = await req('POST', '/smal/telegram', { secret: SMAL, opdracht: 'stuur', chat: 'x' });
     const g6 = await req('POST', '/smal/telegram', { secret: SMAL, opdracht: 'dialogen', aantal: 9999 });

@@ -30373,6 +30373,7 @@ function socevSmalOpts(runOpts, chatId) {
 //   POST /smal/les          {lessen} (velden van les-vastleggen.mjs) -> mk_les_vast + vector, hier in server.js; domein altijd 'pa'
 //   POST /smal/vault-zoek   {query, max_num_results, score_threshold} -> AI Search /search van instance vault (alleen zoeken)
 //   POST /smal/fin-sql      {sql, params} -> D1 fin, alleen één SELECT/WITH zonder schrijfwoorden (laden blijft machinekamer)
+//                           wv3929 (2C08): met Davids eigen D1-leestoken (kluis cloudflare_d1_fin_lezen), nooit het pod-token (zie finLeesToken)
 //   POST /smal/telegram     {opdracht: dialogen|lees, chat, dagen, aantal} -> telegram-reader.js (zelf alleen-lezen)
 //   POST /smal/health-opgaven  {} -> health-import.py --alleen-opgaven als claude (wv887; zie healthOpgaven)
 //   POST /smal/mk-noodknop     {vraag_id? | opdracht: 'stand'} -> stopt de lopende machinekamerbeurt (wv3083; zie mkNoodknop): Socev alleen met Davids verse Ja.
@@ -30432,6 +30433,24 @@ async function smalSbRpc(sb, naam, body) {
   const t = await r.text();
   if (!r.ok) throw new Error('RPC ' + naam + ' gaf HTTP ' + r.status + ': ' + t.slice(0, 200));
   return t ? JSON.parse(t) : null;
+}
+// wv3929 (besluitenpagina nr 108 = 2C08, David Ja 22-11): /smal/fin-sql leest D1 `fin` met Davids eigen Cloudflare-token met alleen
+// D1 Read (kluisrij cloudflare_d1_fin_lezen, gezet 23-11). Gemeten 23-11: lezen 200; UPDATE en CREATE geven Cloudflare-fout 7500
+// "You do not have permission to perform this operation" (alleen opdrachten die niets wijzigen gaan door). Het tekstfilter smalSqlLezend
+// blijft als eerste slot. Ontbreekt de rij, dan 503 en NOOIT terug op CLOUDFLARE_API_TOKEN (dat mag schrijven). Kluisfout = 503.
+// Cache 10 min (leeg: 2 min); een 401/403 van Cloudflare leegt de cache. De waarde komt nooit in een log, fout of antwoord.
+// Proefkopie (niet SERVER_ECHT): FIN_LEES_TOKEN_TOETS_BESTAND = bestand met de nepwaarde, elke vraag opnieuw gelezen (leeg = ontbreekt).
+let finLeesCache = null;   // { w, tot }; alleen in het geheugen
+async function finLeesToken() {
+  if (!SERVER_ECHT && process.env.FIN_LEES_TOKEN_TOETS_BESTAND) { try { return fs.readFileSync(process.env.FIN_LEES_TOKEN_TOETS_BESTAND, 'utf8').trim() || null; } catch (e) { return null; } }
+  if (finLeesCache && Date.now() < finLeesCache.tot) return finLeesCache.w;
+  if (!sbBeheerKan()) return null;
+  const r = await sbBeheerQuery("select decrypted_secret as w from vault.decrypted_secrets where name = 'cloudflare_d1_fin_lezen'", { ua: 'socev-fin-sql/1', ms: 20000 });
+  if (!r || !r.ok) { if (r) await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + (r ? r.status : 'geen antwoord')); }
+  const rijen = await r.json();
+  const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
+  finLeesCache = { w: w || null, tot: Date.now() + (w ? 10 : 2) * 60 * 1000 };
+  return w || null;
 }
 async function smalCf(url, body, tok) {   // wv2738: tok = ander token (MemoryLane); zonder = het pod-token
   const r = await fetch(url, { method: 'POST', headers: { Authorization: 'Bearer ' + (tok || process.env.CLOUDFLARE_API_TOKEN), 'Content-Type': 'application/json' },
@@ -30578,11 +30597,15 @@ async function smalActie(actie, d, wie) {
     catch (e) { logError('vaultzoek-smal', new Error('code ' + String(e && e.code || '?'))); return { status: 502, j: { ok: false, fout: 'zoeken op betekenis faalde (eigen databank)' } }; }
   }
   if (actie === 'fin-sql') {
-    if (!process.env.CLOUDFLARE_API_TOKEN) return { status: 503, j: { ok: false, fout: 'geen Cloudflare-sleutel op de pod' } };
     if (!smalSqlLezend(d.sql)) return { status: 403, j: { ok: false, fout: 'alleen lezen: één SELECT of WITH, zonder commentaar (-- of /*) en zonder schrijfwoorden (replace alleen als functie); laden gaat via de machinekamer' } };
     const params = Array.isArray(d.params) ? d.params.slice(0, 200).map(function (v) { return (v == null || typeof v === 'number' || typeof v === 'boolean') ? v : String(v); }) : [];
+    let tok;
+    try { tok = await finLeesToken(); }
+    catch (e) { logError('fin-sql-sleutel', new Error(String(e && e.message || 'kluis').slice(0, 80))); return { status: 503, j: { ok: false, fout: 'de kluis met de leessleutel voor de cijferbank antwoordt niet; probeer het zo opnieuw' } }; }
+    if (!tok) return { status: 503, j: { ok: false, fout: 'de leessleutel voor de cijferbank ontbreekt (kluisnaam cloudflare_d1_fin_lezen); de pod valt bewust niet terug op zijn schrijfsleutel' } };
     const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/d1/database/' + SMAL_FIN_DB + '/query',
-      { sql: String(d.sql).trim().replace(/;\s*$/, ''), params: params });
+      { sql: String(d.sql).trim().replace(/;\s*$/, ''), params: params }, tok);
+    if (r.status === 401 || r.status === 403) finLeesCache = null;   // verlopen of ingetrokken: de volgende vraag leest de kluis opnieuw
     return { status: r.status === 200 ? 200 : (r.status === 400 ? 400 : 502), j: r.j || { success: false, errors: [{ message: 'D1 gaf HTTP ' + r.status }] } };
   }
   if (actie === 'telegram') {
