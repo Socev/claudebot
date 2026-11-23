@@ -25462,6 +25462,8 @@ function brainEntMaak() {
       entNu: function (code) { const m = entiteitNuMaak(); return m ? m.vanCode(code) : null; },   // wv3715: "Nu" van vannacht bij een eigen entiteit
       masker: function (t) { return appSleutelMasker(SB_MASKER ? SB_MASKER(t, false) : t); },   // wv1930: het sleutelmasker blijft op alle tekst (ook de naamregels van Second Brain; review ZOU 2)
       kaart: function () { const k = secondbrain && secondbrain.vers(false); return k && Array.isArray(k.bestanden) ? k.bestanden : null; },   // wv1930: privépersonen en Dossier
+      intakePad: path.join(INTAKE_DIR, 'intake.sqlite'),   // wv3938 (3C22): nieuwste stukken per partij (alleen lezen)
+      bekeken: appEntBekekenLees,   // wv3938 (3C45): laatst geopende partijen
       rpc: (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE) ? appSbRpc : null });
   } catch (e) { logError('brain-entiteiten', e); }
   return brainEnt;
@@ -25483,6 +25485,29 @@ function entiteitNuMaak() {
   } catch (e) { logError('entiteit-nu', e); entiteitNu = null; }
   return entiteitNu;
 }
+// wv3938 (3C45): laatst geopende partijen (alleen sleutels en tijd, hooguit 20) en de opening in de teller van het app-gebruik
+// (apps-geopend.json, id entiteit-kaart; dezelfde partij binnen een minuut telt één keer).
+const APP_ENT_BEKEKEN = path.join(APP_DATA, 'entiteiten-bekeken.json');
+var appEntBekekenLaatst = null;   // sleutel → ms; var: zie server-js-tdz
+function appEntBekekenLees() {
+  try { const j = appLeesStreng(APP_ENT_BEKEKEN, null); return j && Array.isArray(j.laatst) ? j.laatst : []; } catch (e) { return []; }
+}
+function appEntBekeken(sleutel) {
+  if (!BRAIN_ENT_MOD || typeof BRAIN_ENT_MOD.bekekenBij !== 'function') return;
+  if (!appEntBekekenLaatst) appEntBekekenLaatst = new Map();
+  const nuMs = Date.now(), v = appEntBekekenLaatst.get(sleutel);
+  try { appSchrijfJson(APP_ENT_BEKEKEN, { versie: 1, laatst: BRAIN_ENT_MOD.bekekenBij(appEntBekekenLees(), sleutel, new Date(nuMs).toISOString()) }); }   // altijd (review ZOU 1: A → B → A)
+  catch (e) { logError('entiteiten-bekeken.json', e); }
+  if (typeof v === 'number' && nuMs - v >= 0 && nuMs - v < 60000) return;   // alleen de teller ontdubbelt binnen een minuut
+  appEntBekekenLaatst.set(sleutel, nuMs);
+  try {
+    const L = appVastModule();
+    if (L && typeof L.telOpen === 'function') {
+      const u = L.telOpen(appAppsTelling(L), 'entiteit-kaart', appAppsVandaag(), nuMs, new Map());
+      if (u.ok && u.geteld) appSchrijfJson(APP_APPS_GEOPEND, u.t);
+    }
+  } catch (e) { logError('apps-geopend entiteit-kaart', e); }
+}
 async function appBrainEntiteiten(req, res, a, route) {
   const B = brainEntMaak();
   if (!B) return appWeiger(res, 404, 'Entiteiten & Personen zit niet in deze versie van de pod', 'brain-entiteiten ontbreekt');
@@ -25502,7 +25527,7 @@ async function appBrainEntiteiten(req, res, a, route) {
     const id = route.slice('GET /app/brain/entiteit/'.length);   // sleutel uit de lijst (12 hex; APP_ROUTE_RE laat geen knoop-id door)
     if (!/^[0-9a-f]{12}$/.test(id)) return appWeiger(res, 400, 'geen geldige sleutel', 'brain-entiteit sleutel');
     const r = await B.detail(id);
-    if (r.status === 200) res._app.stil = true; else res._app.reden = 'brain-entiteit ' + r.status;
+    if (r.status === 200) { res._app.stil = true; appEntBekeken(id); } else res._app.reden = 'brain-entiteit ' + r.status;
     return appStuur(res, r.status, r.j);
   } catch (e) { logError('app-brain-entiteiten', e); return appWeiger(res, 503, 'het register is nu niet te lezen', 'brain-entiteiten fout'); }
 }

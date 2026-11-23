@@ -796,6 +796,9 @@ jobs:
       - name: "brain-entiteiten (wv1734, OVIS M5: Brain › Entiteiten & Personen)"
         if: ${{ !cancelled() }}
         run: bash test/brain-entiteiten.sh
+      - name: "brain-entiteiten-stukken (wv3938, 3C22/3C45/3C50: stukken uit Intake, hoofdpagina, tegels)"
+        if: ${{ !cancelled() }}
+        run: bash test/brain-entiteiten-stukken.sh
       - name: "entiteit-nu (wv3715, 3C165: per eigen entiteit elke nacht Nu)"
         if: ${{ !cancelled() }}
         run: bash test/entiteit-nu.sh

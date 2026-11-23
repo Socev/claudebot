@@ -90,7 +90,9 @@ const isAppId = function (x) { return typeof x === 'string' && APP_IDS.indexOf(x
 // wv3747 (besluitenpagina nr 506 = 3C206, David Ja 21-11-2026 13:14): het kiezen van een werkruimte telt mee in dezelfde openingsteller,
 // als 'werkruimte:<id>' (geen nieuwe opslag). "Meest gebruikt" kijkt alleen naar App-id's; werkruimteTelling geeft het totaal per werkruimte.
 const WR_TEL = 'werkruimte:';
-const isTelId = function (x) { return isAppId(x) || (typeof x === 'string' && x.indexOf(WR_TEL) === 0 && WERKRUIMTE_IDS.indexOf(x.slice(WR_TEL.length)) >= 0); };
+// wv3938 (3C45): Brain › Entiteiten (scherm geopend) en een partijkaart geopend tellen ook mee; geen App-id, dus niet in "Meest gebruikt"
+const SCHERM_TEL = ['entiteiten', 'entiteit-kaart'];
+const isTelId = function (x) { return isAppId(x) || SCHERM_TEL.indexOf(x) >= 0 || (typeof x === 'string' && x.indexOf(WR_TEL) === 0 && WERKRUIMTE_IDS.indexOf(x.slice(WR_TEL.length)) >= 0); };
 function idLijst(l) {   // van schijf: alleen bekende id's, zonder dubbele, hooguit VOLGORDE_MAX
   const uit = [];
   (Array.isArray(l) ? l : []).forEach(function (x) { if (isAppId(x) && uit.indexOf(x) < 0 && uit.length < VOLGORDE_MAX) uit.push(x); });

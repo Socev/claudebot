@@ -90,7 +90,16 @@ function paginaTekst(ruw, opties) {
   let t = String(ruw).replace(/\r\n?/g, '\n');
   if (t.indexOf('---\n') === 0) { const e = t.indexOf('\n---', 4); if (e > 0) t = t.slice(t.indexOf('\n', e + 1) + 1 || t.length); }
   t = t.replace(/<!-- ovis:blok (?:begin|eind)[^>]*-->\n?/g, '');
-  t = t.replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2').replace(/\[\[([^\]]+)\]\]/g, function (m, p) { return String(p).split('/').pop().replace(/\.md$/, ''); });
+  // wv3938 (3C50): met opties.link (doel → vol vaultpad of null) blijft een wikilink naar een bestaande pagina staan als [[vol pad|tekst]]
+  // (de app maakt er een tikbare link van; een partij opent haar kaart); onbekend doel en ![[insluiting]] worden gewone tekst, zoals eerder.
+  const link = typeof o.link === 'function' ? o.link : null;
+  const plat = function (p) { const n = String(p).split('#')[0].split('/').pop().replace(/\.md$/, ''); return n || String(p).split('#').slice(1).join('#').trim(); };   // [[#Kop]] = de kopnaam (review ZOU 3)
+  t = t.replace(/(!?)\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g, function (m, uit, doel, tekst) {
+    const lab = tekst != null ? tekst : plat(doel);
+    if (uit || !link) return lab;
+    const vol = link(doel);
+    return vol ? '[[' + vol + '|' + String(lab).replace(/[|[\]]/g, ' ').trim() + ']]' : lab;
+  });
   t = masker(t);
   t = t.replace(/\n{3,}/g, '\n\n').trim();
   return t.length > MAX_TEKST ? t.slice(0, MAX_TEKST) + '\n\n…' : t;
@@ -150,6 +159,47 @@ function leesSqlite(pad, sql, args) {
 const BANK_PARTIJ = (function () { try { return require('./bank-partij.js'); } catch (e) { return null; } })();
 const BANK_CACHE_MS = 300000;
 
+// ── wv3938 (besluitenpagina nr 322/345/350 = 3C22/3C45/3C50, David Ja 22-11-2026 18:18): stukken uit Intake, hoofdpagina, tegels ──
+// Stukken: intake.sqlite (alleen lezen) › uitvoering (wat Intake waar neerlegde; doel = de code van de eigen entiteit) + stuk (onderwerp,
+// ontvangen, bron). Bij een eigen entiteit op doel, bij een andere partij op het afzenderadres tegen haar kenmerken mailadres/domein.
+// Niet gefilterd (Davids eigen scherm, wv3675). Een verwerkt stuk staat niet meer in raw_input: het pad komt dan uit het bronnenregister
+// (Bronnen/_register.md: archiefnaam naast raw_input/<naam> of het stuk-id) of uit Bronnen/Intake/<naam>; niet terug te vinden = geen tik.
+const STUK_TOON = 60;              // zoveel stukken gaan mee naar de app (de app toont er 8, "Alle N" de rest)
+const STUK_CACHE_MS = 60000;
+const STUK_NIEUW_DAGEN = 7;        // "nieuw" op de tegel
+const DEADLINE_TEGEL_DAGEN = 30;   // deadlines op de tegel: vandaag t/m 30 dagen
+const BEKEKEN_MAX = 20, BEKEKEN_TOON = 5;
+const BRON_WOORD = { gmail: 'mail', outlook: 'Outlook', whatsapp: 'WhatsApp', signal: 'Signal', teams: 'Teams', scanner: 'scan', app: 'app', web: 'web', contacten: 'contacten' };
+function bronWoord(b) { const k = String(b || '').split(':')[0]; return BRON_WOORD[k] || k || null; }
+function adresVan(van) {
+  const v = String(van || '');
+  const m = /<([^<>\s]+@[^<>\s]+)>/.exec(v) || /([^\s<>"',;[\]]+@[^\s<>"',;[\]]+)/.exec(v);
+  return m ? m[1].toLowerCase() : null;
+}
+function metaVan(t) { try { const j = JSON.parse(String(t || '{}')); return j && typeof j === 'object' ? j : {}; } catch (e) { return {}; } }
+// Bronnenregister → Map: 'bn:<naam in raw_input>' en 'sid:<stuk-id>' → vaultpad van het archiefstuk (eerste cel; "x.md + y.pdf" = x.md)
+function registerIndex(tekst, wortel) {
+  const uit = new Map();
+  String(tekst || '').split('\n').forEach(function (r) {
+    if (r.charAt(0) !== '|') return;
+    const cel = r.replace(/^\|/, '').split('|')[0].trim().replace(/^`|`$/g, '');
+    if (!cel || /^[-: ]+$/.test(cel)) return;
+    const wl = /^\[\[([^\]|\\]+)/.exec(cel);
+    let doel = wl ? wl[1].trim() : wortel + 'Bronnen/' + cel.split(' + ')[0].trim();
+    if (wl && !/\.[a-z0-9]{2,5}$/i.test(doel)) doel += '.md';
+    if (doel.split('/').indexOf('..') >= 0) return;
+    const bn = /raw_input\/([^`|]+?)`/.exec(r), sid = /(stk_[0-9]{8}_[0-9a-f]{8})/.exec(r);
+    if (bn && !uit.has('bn:' + bn[1].trim())) uit.set('bn:' + bn[1].trim(), doel);
+    if (sid && !uit.has('sid:' + sid[1])) uit.set('sid:' + sid[1], doel);
+  });
+  return uit;
+}
+// Laatst bekeken: nieuwste eerst, elke sleutel één keer, hooguit BEKEKEN_MAX
+function bekekenBij(lijst, sleutel, iso) {
+  const l = (Array.isArray(lijst) ? lijst : []).filter(function (x) { return x && /^[0-9a-f]{12}$/.test(String(x.s)) && x.s !== sleutel; });
+  return [{ s: sleutel, t: iso }].concat(l).slice(0, BEKEKEN_MAX);
+}
+
 function maak(o) {
   const rpc = o.rpc, lees = o.lees, vault = o.vault, facturenPad = o.facturenPad || null;
   const bankPad = o.bankPad || null;   // wv3298: privébank (bank-archief transacties.sqlite), alleen lezen
@@ -167,6 +217,148 @@ function maak(o) {
   const masker = typeof o.masker === 'function' ? o.masker : geenMasker;   // sleutelmasker (grondwet 2), op alle tekst
   const kaart = typeof o.kaart === 'function' ? o.kaart : function () { return null; };   // [{p, s, m}] uit de Second Brain-kaart
   let cache = null, priveCache = null;
+  const intakePad = o.intakePad || null;   // wv3938: intake.sqlite (alleen lezen)
+  const bekeken = typeof o.bekeken === 'function' ? o.bekeken : function () { return []; };   // wv3938: [{ s: sleutel, t: iso }], nieuwste eerst
+  let stukCache = null, kIdx = null;
+
+  // Kaart als index: bestaat dit pad, en welk vol pad hoort bij [[naam]] (uniek op bestandsnaam, of op achtervoegsel bij map/naam)
+  function kaartIndex() {
+    const b = kaart();
+    if (!Array.isArray(b)) return null;
+    if (kIdx && kIdx.b === b) return kIdx;
+    const paden = new Set(), opNaam = new Map();
+    b.forEach(function (x) {
+      if (!x || typeof x.p !== 'string') return;
+      paden.add(x.p);
+      const n = x.p.split('/').pop().toLowerCase();
+      (opNaam.get(n) || opNaam.set(n, []).get(n)).push(x.p);
+    });
+    kIdx = { b: b, paden: paden, opNaam: opNaam };
+    return kIdx;
+  }
+  function linkVan(doel) {
+    const ki = kaartIndex();
+    if (!ki) return null;
+    let d = String(doel || '').split('#')[0].trim().replace(/^\/+/, '');
+    if (!d || d.split('/').indexOf('..') >= 0) return null;
+    if (!/\.[a-z0-9]{2,5}$/i.test(d)) d += '.md';
+    if (ki.paden.has(d)) return d;
+    let l = ki.opNaam.get(d.split('/').pop().toLowerCase()) || [];
+    if (d.indexOf('/') >= 0) l = l.filter(function (p) { return p.toLowerCase().endsWith('/' + d.toLowerCase()); });
+    return l.length === 1 ? l[0] : null;
+  }
+  // [[vol pad|…]] in een paginatekst die naar een partij wijst → { pad: sleutel } (de app opent dan de kaart in plaats van de pagina)
+  function partijLinks(teksten, reg) {
+    const opPad = new Map();
+    reg.knopen.forEach(function (k) { if (zichtbaar(k) && k.vault_pagina) opPad.set(String(k.vault_pagina), sleutelVan(k.id)); });
+    const pv = prive();
+    pv.personen.concat(pv.stamboom).forEach(function (x) { if (!opPad.has(x.pad)) opPad.set(x.pad, sleutelVan(x.pad)); });
+    const uit = {};
+    teksten.forEach(function (t) {
+      const re = /\[\[([^\]|\n]+)\|/g; let m;
+      while ((m = re.exec(String(t || '')))) { const sl = opPad.get(m[1]); if (sl) uit[m[1]] = sl; }
+    });
+    return uit;
+  }
+
+  // Alle Intake-stukken, per stuk één regel (nieuwste eerst); null = geen intake.sqlite of niet te lezen
+  function stukIndex() {
+    if (!intakePad) return null;
+    if (stukCache && nu() - stukCache.t < STUK_CACHE_MS) return stukCache.v;
+    let v;
+    try {
+      const rijen = leesSqlite(intakePad, 'select u.stuk_id as id, u.doel as doel, u.pad as pad, u.tijd as tijd, s.bron as bron, s.ontvangen as ontvangen, ' +
+        's.meta as meta, s.bestandsnaam as bestandsnaam from uitvoering u join stuk s on s.stuk_id = u.stuk_id order by u.id', []);
+      if (!rijen) v = { fout: 'Intake is nu niet te lezen.' };
+      else {
+        const per = new Map();
+        rijen.forEach(function (r) {
+          let x = per.get(r.id);
+          if (!x) {
+            const m = metaVan(r.meta);
+            x = { id: r.id, doelen: new Set(), paden: [], tijd: r.tijd || '', bron: r.bron, datum: String(r.ontvangen || r.tijd || '').slice(0, 10) || null,
+              onderwerp: typeof m.onderwerp === 'string' ? m.onderwerp : (typeof m.titel === 'string' ? m.titel : ''), van: adresVan(m.van), bestandsnaam: r.bestandsnaam || '' };
+            per.set(r.id, x);
+          }
+          if (r.doel) x.doelen.add(String(r.doel));
+          if (r.pad && x.paden.indexOf(r.pad) < 0) x.paden.push(String(r.pad));
+          if (String(r.tijd || '') > x.tijd) x.tijd = String(r.tijd);
+        });
+        const lijst = Array.from(per.values());
+        lijst.sort(function (a, b) { return String(b.datum || '').localeCompare(String(a.datum || '')) || String(b.tijd).localeCompare(String(a.tijd)) || a.id.localeCompare(b.id); });
+        v = { lijst: lijst, reg: new Map() };
+      }
+    } catch (e) { v = { fout: 'Intake is nu niet te lezen.' }; }
+    stukCache = { t: nu(), v: v };
+    return v;
+  }
+  // Waar staat het stuk nu: het oude pad, het bronnenregister van die map, of Bronnen/Intake/<naam>; anders null (geen tik)
+  function stukPad(x, si) {
+    const ki = kaartIndex();
+    if (!ki) return null;
+    // review ZOU 2: elk pad van het stuk proberen (eerst de hoofdtekst, dan de bijlagen), elk met zijn archiefplekken
+    const hoofd = function (p) { return /\.md$/i.test(p) && p.indexOf('__') < 0; };
+    const paden = x.paden.filter(hoofd).concat(x.paden.filter(function (p) { return !hoofd(p); }));
+    for (const p of paden) {
+      if (ki.paden.has(p)) return p;
+      const i = p.indexOf('raw_input/');
+      if (i < 0) continue;
+      const wortel = p.slice(0, i), bn = p.slice(i + 'raw_input/'.length);
+      if (!si.reg.has(wortel)) {
+        let t = '';
+        try { if (ki.paden.has(wortel + 'Bronnen/_register.md')) t = lees(path.join(vault, wortel + 'Bronnen/_register.md')); } catch (e) { t = ''; }
+        si.reg.set(wortel, registerIndex(t, wortel));
+      }
+      const ri = si.reg.get(wortel);
+      const kand = [ri.get('bn:' + bn), ri.get('sid:' + x.id), wortel + 'Bronnen/Intake/' + bn];
+      for (const c of kand) if (c && ki.paden.has(c) && /^(10_Zakelijk|20_Prive)\//.test(c)) return c;
+    }
+    return null;
+  }
+  function stukRegel(x, si) {
+    const pad = stukPad(x, si);
+    const titel = x.onderwerp || x.bestandsnaam || (x.paden[0] ? stamVan(x.paden[0]).replace(/^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}_[a-z]+_/, '').replace(/-/g, ' ') : x.id);
+    return { id: x.id, titel: masker(String(titel).slice(0, 200)), datum: x.datum, bron: bronWoord(x.bron), pad: pad,
+      ext: pad ? (/\.([a-z0-9]+)$/i.exec(pad) || [0, ''])[1].toLowerCase() : null, bijlagen: Math.max(0, x.paden.length - 1) };
+  }
+  // Stukken van één partij: { totaal, nieuw, stukken[≤ STUK_TOON], kenmerken? } | { fout } | null (geen Intake in deze pod)
+  function stukkenVan(k, reg) {
+    const si = stukIndex();
+    if (!si) return null;
+    if (si.fout) return { totaal: 0, nieuw: 0, stukken: [], fout: si.fout };
+    let hoort;
+    if (isEigen(k)) hoort = function (x) { return x.doelen.has(String(k.id)); };
+    else {
+      const hv = (reg.handvatten[k.id] || []);
+      const mails = hv.filter(function (h) { return h.soort === 'mail'; }).map(function (h) { return String(h.waarde_norm || h.waarde || '').trim().toLowerCase(); }).filter(Boolean);
+      const domeinen = hv.filter(function (h) { return h.soort === 'domein'; }).map(function (h) { return String(h.waarde_norm || h.waarde || '').trim().toLowerCase().replace(/^@/, ''); }).filter(function (d) { return /\./.test(d); });
+      if (!mails.length && !domeinen.length) return { totaal: 0, nieuw: 0, stukken: [], kenmerken: false };
+      hoort = function (x) {
+        if (!x.van) return false;
+        const dom = x.van.split('@')[1] || '';
+        return mails.indexOf(x.van) >= 0 || domeinen.some(function (d) { return dom === d || dom.endsWith('.' + d); });
+      };
+    }
+    const l = si.lijst.filter(hoort);
+    const grens = new Date(nu() - STUK_NIEUW_DAGEN * 86400000).toISOString().slice(0, 10);
+    return { totaal: l.length, nieuw: l.filter(function (x) { return String(x.datum || '') >= grens; }).length,
+      stukken: l.slice(0, STUK_TOON).map(function (x) { return stukRegel(x, si); }), kenmerken: isEigen(k) ? undefined : true };
+  }
+  // Tegels bovenaan de lijst: per eigen entiteit de deadlines binnen 30 dagen (zelfde register als de kaart) en de stukken van de laatste 7 dagen
+  function eigenTegels(reg) {
+    const d = deadlines();
+    const dl = Array.isArray(d) ? d : null;
+    const si = stukIndex();
+    const grens = new Date(nu() - STUK_NIEUW_DAGEN * 86400000).toISOString().slice(0, 10);
+    const tegels = reg.knopen.filter(function (k) { return zichtbaar(k) && isEigen(k); }).map(function (k) {
+      const code = String(k.id);
+      return { sleutel: sleutelVan(k.id), code: code, naam: masker(k.naam),
+        deadlines: dl ? dl.filter(function (x) { return Array.isArray(x.ents) && x.ents.indexOf(code) >= 0 && x.dagen >= 0 && x.dagen <= DEADLINE_TEGEL_DAGEN; }).length : null,
+        stukken_nieuw: si && !si.fout ? si.lijst.filter(function (x) { return x.doelen.has(code) && String(x.datum || '') >= grens; }).length : null };
+    });
+    tegels.sort(function (a, b) { return (a.code === 'PRIVE' ? 1 : 0) - (b.code === 'PRIVE' ? 1 : 0) || a.naam.localeCompare(b.naam, 'nl'); });
+    return tegels;
+  }
 
   async function register() {
     if (cache && nu() - cache.t < CACHE_MS) return cache.p;
@@ -358,7 +550,12 @@ function maak(o) {
     uit.sort(function (a, b) { return (a.groep === 'eigen' ? 0 : 1) - (b.groep === 'eigen' ? 0 : 1) || a.naam.localeCompare(b.naam, 'nl'); });
     const groepen = {};
     uit.forEach(function (k) { groepen[k.groep] = (groepen[k.groep] || 0) + 1; });
-    return { ok: true, vaste_plek: false, knopen: uit, groepen: groepen, totaal: uit.length, stamboom: stamboom, prive_fout: priveFout, gemeten_op: new Date(nu()).toISOString() };
+    // wv3938 (3C45): tegels van de eigen entiteiten en de laatst bekeken partijen (alleen sleutels die in de lijst staan)
+    const inLijst = new Set(uit.map(function (k) { return k.sleutel; }));
+    let bk = []; try { bk = bekeken() || []; } catch (e) { bk = []; }
+    const laatst = []; bk.forEach(function (x) { if (x && inLijst.has(x.s) && laatst.indexOf(x.s) < 0 && laatst.length < BEKEKEN_TOON) laatst.push(x.s); });
+    return { ok: true, vaste_plek: false, knopen: uit, groepen: groepen, totaal: uit.length, stamboom: stamboom, prive_fout: priveFout, gemeten_op: new Date(nu()).toISOString(),
+      eigen_tegels: eigenTegels(reg), bekeken: laatst, tegel_dagen: { deadlines: DEADLINE_TEGEL_DAGEN, stukken: STUK_NIEUW_DAGEN } };
   }
 
   // Zoeken in de stamboom (wv1930): q = woorden zonder accenten (de app stuurt a-z, 0-9 en -), ten minste 2 tekens; treffers op naam
@@ -418,9 +615,9 @@ function maak(o) {
   const LEEG_REGISTER = { concept: false, compilatie: null, gecompileerd_op: null };
 
   // Detail van een privépersoon uit de vault (geen knoop): hele pagina, deadlines en Dossier
-  function priveDetail(x) {
+  function priveDetail(x, reg) {
     let tekst = null, paginaFout = null, ruw = '';
-    try { ruw = lees(path.join(vault, x.pad)); tekst = paginaTekst(ruw, { masker: masker }); }
+    try { ruw = lees(path.join(vault, x.pad)); tekst = paginaTekst(ruw, { masker: masker, link: linkVan }); }
     catch (e) { paginaFout = 'De pagina is nu niet te lezen.'; }
     const fm = frontmatter(ruw);
     const aliassen = x.aliassen.length ? x.aliassen : fmAliassen(fm);
@@ -429,7 +626,7 @@ function maak(o) {
     return { status: 200, j: { ok: true, vaste_plek: false,
       knoop: { id: r.id, naam: r.naam, groep: 'prive', rol: x.rol, concept: false, voor: ['PRIVE'], aliassen: aliassen.map(masker), prive: true,
         pagina_pad: paginaFout ? null : x.pad, opmerking: null, register: false },
-      tekst: tekst, pagina_fout: paginaFout,
+      tekst: tekst, pagina_fout: paginaFout, links: reg ? partijLinks([tekst], reg) : {},
       weet: { handvatten: [], kvk: null, agb: null, iban: null, facturen: null, deadlines: deadlinesVan(null, { pagina: x.pad, patronen: pat }),
         contact: null, stukken: null, register: LEEG_REGISTER, in_register: false },
       dossier: dossierVan(x.pad, pat) } };
@@ -444,7 +641,7 @@ function maak(o) {
       if (isSl) {
         const pv = prive();
         const x = pv.personen.concat(pv.stamboom).find(function (y) { return sleutelVan(y.pad) === id; });
-        if (x) return priveDetail(x);
+        if (x) return priveDetail(x, reg);
       }
       return { status: 404, j: { ok: false, fout: 'niet gevonden' } };
     }
@@ -454,8 +651,20 @@ function maak(o) {
     const rel = String(k.vault_pagina || '');
     if (!PAGINA_RE.test(rel) || rel.split('/').indexOf('..') >= 0) paginaFout = 'Geen pagina in het register.';
     else {
-      try { ruw = lees(path.join(vault, rel)); tekst = paginaTekst(ruw, { masker: masker }); }
+      try { ruw = lees(path.join(vault, rel)); tekst = paginaTekst(ruw, { masker: masker, link: linkVan }); }
       catch (e) { paginaFout = 'De pagina is nu niet te lezen.'; }
+    }
+    // wv3938 (3C50): de hoofdpagina uit de frontmatter (hoofdpagina: "[[10_Zakelijk/<map>/index]]") met tikbare verwijzingen
+    let hoofdpagina;
+    const hpVeld = fmVeld(frontmatter(ruw), 'hoofdpagina');
+    if (hpVeld) {
+      const hm = /\[\[([^\]|#]+)/.exec(hpVeld);
+      const hpPad = hm ? linkVan(hm[1]) : null;
+      if (!hpPad || !PAGINA_RE.test(hpPad) || hpPad === rel) hoofdpagina = { pad: null, tekst: null, fout: 'De hoofdpagina staat niet (meer) op die plek.' };
+      else {
+        try { const hr = lees(path.join(vault, hpPad)); hoofdpagina = { pad: hpPad, tekst: paginaTekst(hr, { masker: masker, link: linkVan }), regels: String(hr).split('\n').length }; }
+        catch (e) { hoofdpagina = { pad: null, tekst: null, fout: 'De hoofdpagina is nu niet te lezen.' }; }
+      }
     }
     const ib = geenMasker;
     const h = (reg.handvatten[k.id] || []).map(function (x) {
@@ -473,13 +682,14 @@ function maak(o) {
       deadlines: deadlinesVan(k, persoon ? { pagina: rel, patronen: pat } : null),
       contact: !persoon ? null : await googleVan(k, reg),   // wv1771
       nu: eigen ? nuVan(k.id) : undefined,   // wv3715 (3C165): bovenaan de kaart; undefined = oude pod/geen module (geen blok)
-      stukken: null,   // komt met OVIS Intake (stap 2); nu nog geen logboek per partij
+      stukken: stukkenVan(k, reg),   // wv3938 (3C22): nieuwste stukken uit Intake (null = geen intake.sqlite in deze pod)
       register: { concept: !!k.concept, compilatie: k.compilatienummer || null, gecompileerd_op: k.gecompileerd_op || null }, in_register: true };
     return { status: 200, j: { ok: true, vaste_plek: false,
       knoop: { id: k.id, naam: masker(k.naam), groep: groepVan(k), rol: ROL_WOORD[k.rol] || k.rol || null, concept: !!k.concept,
         voor: Array.isArray(k.voor) ? k.voor.slice() : [], aliassen: (k.aliassen || []).map(masker), prive: priveKant(k),
         pagina_pad: paginaFout ? null : rel, opmerking: k.opmerking ? masker(ib(String(k.opmerking))).slice(0, 400) : null, register: true },
-      tekst: tekst, pagina_fout: paginaFout, weet: weet,
+      tekst: tekst, pagina_fout: paginaFout, weet: weet, hoofdpagina: hoofdpagina,
+      links: partijLinks([tekst, hoofdpagina && hoofdpagina.tekst], reg),   // wv3938: [[pad|…]] die een partij is → haar sleutel
       dossier: !persoon ? null : dossierVan(rel, pat, (Array.isArray(k.voor) ? k.voor : []).map(function (c) {
         const e = reg.knopen.find(function (x) { return x.id === c && isEigen(x); });
         return e ? wortelVan(e.vault_pagina) : null;
@@ -498,8 +708,8 @@ function maak(o) {
     return { ok: true, tegels: tegels, aan: !!entNu };
   }
 
-  return { lijst: lijst, zoek: zoek, detail: detail, nuTegels: nuTegels, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; bankCache = null; } };
+  return { lijst: lijst, zoek: zoek, detail: detail, nuTegels: nuTegels, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; bankCache = null; stukCache = null; kIdx = null; } };
 }
 
 module.exports = { telNl: telNl, maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, zichtbaar: zichtbaar, groepVan: groepVan,
-  naamPatronen: naamPatronen, bevatNaam: bevatNaam, fmAliassen: fmAliassen };
+  naamPatronen: naamPatronen, bevatNaam: bevatNaam, fmAliassen: fmAliassen, registerIndex: registerIndex, bekekenBij: bekekenBij, adresVan: adresVan };
