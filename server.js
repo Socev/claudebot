@@ -749,7 +749,7 @@ function leesRuntime() {
   try {
     const j = JSON.parse(fs.readFileSync(RUNTIME_FILE, 'utf8'));
     if (j && RUNTIMES[j.default]) std.default = j.default;
-    if (j && RUNTIMES[j.fallback]) std.fallback = j.fallback;
+    // wv3931 (2C77): de brein-terugval is weg (0 terugvalbeurten sinds 28-10, nooit ingesteld); een oud veld fallback telt niet
     if (j && j.models && typeof j.models === 'object') {
       // Ook wat er in het bestand staat, wordt getoetst (review 23-9): een ongeldige waarde daar liet
       // anders élke beurt op een onbestaand model draaien. Die waarde valt weg en komt in /health.
@@ -788,10 +788,8 @@ function runtimeZet(d, bron) {
     if (!RUNTIMES[v]) return { fout: { error: 'onbekende-runtime', melding: 'onbekende runtime; geldig zijn: ' + RUNTIMES_LIJST.join(', '), lengte: v.length } };
     stand.default = v;
   }
-  if (d.fallback != null) {
-    const v = String(d.fallback).trim().toLowerCase();
-    if (v && !RUNTIMES[v]) return { fout: { error: 'onbekende-runtime', melding: 'onbekende fallback; geldig zijn: ' + RUNTIMES_LIJST.join(', ') + ' of leeg', lengte: v.length } };
-    stand.fallback = v;
+  if (d.fallback != null && String(d.fallback).trim()) {   // wv3931: leeg mag (niets te doen), een brein niet meer
+    return { fout: { error: 'terugval-weg', melding: 'de terugval op een ander brein bestaat niet meer (wv3931)', lengte: String(d.fallback).trim().length } };
   }
   if (d.models && typeof d.models === 'object') {
     for (const k in d.models) {
@@ -826,7 +824,7 @@ function resolveKeuze(d) {
   if (!runtime) runtime = ont.runtime || stand.default;
   let model = ont.model;
   if (!model && stand.models && typeof stand.models[runtime] === 'string') model = stand.models[runtime];
-  return { runtime: runtime, model: model, fallback: (stand.fallback && stand.fallback !== runtime) ? stand.fallback : '' };
+  return { runtime: runtime, model: model, fallback: '' };   // wv3931: geen brein-terugval meer
 }
 
 // Sessiegeheugen per brein: dezelfde chat heeft bij Claude een session_id, bij
@@ -2361,9 +2359,9 @@ function runBrein(runtime, prompt, sessionId, outdir, cwd, model, opts) {
   });
 }
 
-// Fallback op het andere brein: alleen als runtime.json dat toestaat, alleen
-// bij een limietfout, en altijd zonder sessiegeheugen (de context van het ene
-// brein is voor het andere niet leesbaar). Eén regel uitleg gaat mee.
+// Eén brein per beurt. wv3931 (2C77, David Ja 22-11 18:26): de terugval op een ander brein bij een limietfout is weg (stand fallback
+// leeg, 0 terugvalbeurten in api.log sinds 28-10, nooit gezet); bij een limiet blijft het 'limiet' (pauze in de tikker, account-terugval
+// in runBrein blijft). Wat blijft: sessie kwijt -> één keer vers op hetzelfde brein.
 function runMetFallback(keuze, prompt, sessionId, outdir, cwd, opts) {
   return runBrein(keuze.runtime, prompt, sessionId, outdir, cwd, keuze.model, opts).then(function (r) {
     if (!r.ok && r.error === 'sessie-onbekend' && sessionId) {
@@ -2372,19 +2370,7 @@ function runMetFallback(keuze, prompt, sessionId, outdir, cwd, opts) {
       schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'sessie-onbekend', runtime: keuze.runtime }));
       return runBrein(keuze.runtime, prompt, '', outdir, cwd, keuze.model, opts).then(function (r2) { r2.sessie_vernieuwd = true; return r2; });
     }
-    if (r.ok || r.error !== 'limiet' || !keuze.fallback) return r;
-    const stand = leesRuntime();
-    const fbModel = (stand.models && typeof stand.models[keuze.fallback] === 'string') ? stand.models[keuze.fallback] : '';
-    const uitleg = '[Systeem: het brein "' + keuze.runtime + '" zit aan zijn gebruikslimiet; deze beurt draait op "' + keuze.fallback +
-      '" zonder het gespreksgeheugen van vandaag. Werk vanuit 00_Systeem/actueel.md en zeg het als je context mist.]\n\n';
-    schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'fallback', van: keuze.runtime, naar: keuze.fallback }));
-    return runBrein(keuze.fallback, uitleg + prompt, '', outdir, cwd, fbModel, opts).then(function (r2) {
-      if (r2 && r2.error === 'mk-alleen-claude') return r;   // wv1001: mk-run niet op een ander brein; dan blijft het 'limiet'
-      r2.fallback_van = keuze.runtime;
-      r2.session_id_fallback = r2.session_id;   // hoort niet in het geheugen van de hoofdchat
-      delete r2.session_id;
-      return r2;
-    });
+    return r;
   });
 }
 
@@ -8043,7 +8029,6 @@ function appRolOk() {
     .then(function () { clearTimeout(t); return rolPrimair(); });
 }
 function appLopend(kanaal) {
-  if (appStaat.startend && appStaat.startend[kanaal] > 0) return true;   // wv171: beurt wacht nog op chat_log (appChatLogVoor)
   return Object.keys(jobs).some(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); });
 }
 
@@ -8058,13 +8043,8 @@ function appBeurtIds() {
   return m;
 }
 function appVragen() { return appLeesStreng(APP_VRAGEN, {}); }
-// wv292 (Fable-review wv263 #6): naar_telegram kan voorlopig zijn (naar_telegram_tot, gezet door /bericht/naar-telegram met voorlopig);
-// bevestigt n8n de Telegram-verzending niet op tijd, dan vervalt hij en heeft de app de knoppen weer (nooit nergens knoppen).
-// Fable-review wv292 #1: een gevoelige vraag (versturen, agenda, geld; rij zonder veld = gevoelig) krijgt na verloop géén knoppen terug:
-// misschien kreeg Telegram ze wél en faalde alleen de bevestiging, en een Telegram-druk kent vragen.json niet (dubbele Ja). Alleen
-// een expliciete terug geeft ze dan terug; de app zegt "staat de vraag daar niet, typ je antwoord".
-function appNaarTelegramVerlopen(x, nu) { return !!(x && x.naar_telegram && x.naar_telegram_tot && Date.parse(x.naar_telegram_tot) <= (nu || Date.now())); }
-function appNaarTelegramNu(x, nu) { return !!(x && x.naar_telegram) && !(appNaarTelegramVerlopen(x, nu) && x.gevoelig === false); }
+// wv3931 (2C77, David Ja 22-11 18:26): de wissel naar Telegram (naar_telegram, voorlopig/bevestig/terug, schaduwvraag) is weg; een
+// vraag van Socev in de app wordt altijd in de app beantwoord. Oude velden naar_telegram* in vragen.json en berichten.json tellen niet meer.
 function appVragenSchrijf(v) {
   const nu = Date.now();
   Object.keys(v).forEach(function (k) { if (!v[k] || nu - Date.parse(v[k].t || 0) > APP_LOG_MS) delete v[k]; });
@@ -8315,17 +8295,17 @@ function appKnopInRij(kanaal) {
 }
 // wv628 (ontwerp parallelle draden § 4.2 1a): in de machinekamer gaat ook een getypt bericht bij een bezig kanaal in de rij, hooguit
 // APP_RIJ_GETYPT_MAX tegelijk (eigen teller naast de knopdrukken; in appBeurt na de laatste await opnieuw geteld). De Cijfer-Meester
-// houdt de 409. wv2965 (David 12-11-2026, fase 1+): ook het hoofdkanaal; daar gaat Davids rij in chat_log pas bij de start (bijStart,
+// hield toen de 409. wv2965 (David 12-11-2026, fase 1+): ook het hoofdkanaal; daar gaat Davids rij in chat_log pas bij de start (bijStart,
 // zoals een knopdruk, wv405), en stond het bericht in de rij dan met zijn typtijd als ts, zodat de Poortwachter het nooit koppelt aan
-// een voorstel dat Socev pas na het typen deed (en het tijdens de lopende beurt nog niet als Davids laatste rij telt). Uitknop zonder
-// uitrol: bestand rij-getypt-uit in socev-app-data (of APP_RIJ_GETYPT_UIT=1) = het oude gedrag (ook voor hoofd: chat_log bij
-// binnenkomst, 409 bij een bezig kanaal); de app ziet het aan rij_getypt in de geschiedenis.
+// een voorstel dat Socev pas na het typen deed (en het tijdens de lopende beurt nog niet als Davids laatste rij telt).
+// wv3931 (2C77, David Ja 22-11 18:26): één startpad. Ook de Cijfer-Meester en OVIS NZa zetten een getypt bericht in de rij, de
+// telefoonbeurt schrijft zijn chat_log-rij pas bij de start (telHoofdStart) en de uitknop rij-getypt-uit (oude pad: chat_log bij
+// binnenkomst, startend-teller, wachtlussen) is weg. De app ziet de rij aan rij_getypt in de geschiedenis.
 const APP_RIJ_GETYPT_MAX = 3;
-const APP_RIJ_KANALEN = { machinekamer: true, hoofd: true };
+const APP_RIJ_KANALEN = { machinekamer: true, hoofd: true, 'cijfer-meester': true, 'ovis-nza': true };
 (typeof CODE_IDS === 'undefined' ? [] : CODE_IDS).forEach(function (id) { APP_RIJ_KANALEN[CODE_APPS.KANAAL_VOOR + id] = true; });   // wv3227: OVIS Code zoals de machinekamer
-const APP_RIJ_UIT = path.join(APP_DATA, 'rij-getypt-uit');
 const APP_RIJ = path.join(APP_DATA, 'rij.json');   // job -> {kanaal, apparaat, beurt_id, tekst, getypt, invoer}; alleen niet-gestarte berichten
-function appRijAan(kanaal) { return APP_RIJ_KANALEN[kanaal] === true && process.env.APP_RIJ_GETYPT_UIT !== '1' && !fs.existsSync(APP_RIJ_UIT); }
+function appRijAan(kanaal) { return APP_RIJ_KANALEN[kanaal] === true; }
 // review #6: een herhaling (zelfde beurt_id) hoort ook te horen dat het bericht nog in de rij staat
 function appWachtInRij(id) { const j = jobs[id]; return !!(j && j.app && j.status === 'pending' && !j.app.gestart && !j.app.teruggehaald); }
 function appGetyptInRij(kanaal) {
@@ -8884,17 +8864,20 @@ async function appBeurt(req, res, reg, a, s, d) {
     antwOp = await appAntwoordOpZoek(kanaal, String(d.antwoord_op));
     if (antwOp.fout) return appWeiger(res, antwOp.status, antwOp.fout, antwOp.reden);
   }
-  const rijAan = appRijAan(kanaal);   // wv628: in de machinekamer (wv2965: en het hoofdkanaal) mag een getypt bericht in de rij
+  const rijAan = appRijAan(kanaal);   // wv628: machinekamer, wv2965: hoofd, wv3931: Cijfer-Meester en NZa (OVIS Code via CODE_IDS)
   if (!(await appMagBeurt(res, kanaal, rijAan ? 'getypt' : false))) return;
-  // wv2965: chat_log pas bij de start (hoofd met rij). Schrijft een ander bericht (oude pad, [AUTO]) nog zijn rij, dan eerst dat
-  // bericht in de wachtrij en dit erachter (zoals appKnop, Fable-diffreview wv405 #2).
-  const chatlogBijStart = kanaal === 'hoofd' && rijAan;
+  // wv2965: chat_log pas bij de start (hoofd). wv3931: altijd; het oude pad (chat_log bij binnenkomst + wachtlus) is weg.
+  const chatlogBijStart = kanaal === 'hoofd';
   // Codex-review wv2965 MOET 1: ontvangsttijd en "bezig" vastleggen vóór het wachten (de job ontstaat pas daarna; een voorstel dat in die
   // wachttijd verschijnt, mag niet vóór dit bericht komen te staan)
   const ontvangen = Date.now();
-  const bezigBijOntvangst = chatlogBijStart && ((appStaat.startend && appStaat.startend[kanaal] > 0) ||
-    Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === APP_KANALEN[kanaal] && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); }));
-  if (chatlogBijStart) for (let i = 0; i < 40 && appStaat.startend && appStaat.startend[kanaal] > 0; i++) await new Promise(function (r) { setTimeout(r, 100); });
+  const bezigBijOntvangst = chatlogBijStart &&
+    Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === APP_KANALEN[kanaal] && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
+  // L4 (review hoofdkanaal 20-11): na de awaits hierboven ook beurtStartend opnieuw (zelfde beurt_id van een tweede verzoek)
+  if (appStaat.beurtStartend && appStaat.beurtStartend[bh]) {
+    const jid = await appStaat.beurtStartend[bh];
+    if (jid) { res._app.reden = 'herhaling ' + jid; return appStuur(res, 200, { ok: true, job_id: jid, al: true, in_rij: appWachtInRij(jid) }); }
+  }
   const ids = appBeurtIds();
   if (ids[bh]) { res._app.reden = 'herhaling ' + ids[bh].job; return appStuur(res, 200, { ok: true, job_id: ids[bh].job, al: true, in_rij: appWachtInRij(ids[bh].job) }); }   // tweede kwam tijdens de rolcheck
   const namen = upload ? upload.lijst.map(function (x) { return x.doel; }) : [];
@@ -8911,9 +8894,8 @@ async function appBeurt(req, res, reg, a, s, d) {
       return (antwOp && kanaal === 'hoofd' ? [{ rol: 'socev', ts: tsD - 1, tekst: String(antwOp.x.antwoord || '') }] : [])
         .concat([{ rol: 'david', ts: tsD, bevestiging: 'getypt', tekst: tekst ? appOntmasker(tekst) : '[' + upload.lijst.length + ' bestand(en)]' }]);
     };
-    // wv2965: met chatlogBijStart schrijft bijStart de rijen (en zet de systeemregel als het niet lukt); hier dan niets
-    const gelogd = chatlogBijStart ? true
-      : await appChatLogStart(kanaal, chatRijen(antwOp && kanaal === 'hoofd' ? Math.max(Date.now(), (appStaat.chatlogLaatsteTs || 0) + 2) : Date.now()));
+    // wv2965: in het hoofdkanaal schrijft bijStart de rijen (en zet de systeemregel als het niet lukt); de andere kanalen hebben geen chat_log
+    const gelogd = true;
     // wv628: [ANTWOORD OP] vóór Davids tekst; is het geciteerde bericht een open gevoelige vraag, dan een regel dat getypt niet telt
     const kop = antwOp ? appAntwoordOpRegel(antwOp.x) + '\n' : '';
     const staartOp = antwOp && antwOp.gevoeligOpen ? '\n' + APP_ANTWOORD_OP_GEVOELIG : '';
@@ -8934,8 +8916,8 @@ async function appBeurt(req, res, reg, a, s, d) {
         // wv628 (§ 4.2 1a/1b): rijregel en tussendoor-regel pas bij de start (wat er dan afrondde of binnenkwam)
         bijStart: kanaal === 'machinekamer' ? function () { return appRijStaart(jidRef, kanaal, !!antwOp); }
           : codeIdVanKanaal(kanaal) ? function () { return appRijStaart(jidRef, kanaal, !!antwOp, true); }   // wv3227
-          : chatlogBijStart ? function () { return appHoofdStart(jidRef, inRij || bezigBijOntvangst, chatRijen, ontvangen); }   // wv2965
-          : kanaal === 'hoofd' ? function () { return typeof zoekSnelStaart === 'function' ? zoekSnelStaart() : ''; } : undefined });   // wv1252: wat David intussen via Zoek snel vroeg
+          : chatlogBijStart ? function () { return appHoofdStart(jidRef, inRij || bezigBijOntvangst, chatRijen, ontvangen); }   // wv2965 (met Zoek snel, wv1252)
+          : undefined });
       jidRef = st.job_id || null;
     }
   } finally { delete appStaat.beurtStartend[bh]; klaarJob(st && st.job_id || null); }
@@ -9119,7 +9101,7 @@ function appKnopRijZet(sleutel, jobId, f) {
   } catch (e) { logError('app-vragen', e); }
 }
 function appDoorbouwVraag(jobId, vraag, bericht) {   // wv3810: zie doorbouwVraagVeld
-  try { const v = appVragen()[jobId + ':' + vraag.hash]; return v && !appNaarTelegramNu(v) ? doorbouwVraagVeld(v, vraag.tekst, bericht) : undefined; } catch (e) { return undefined; }
+  try { const v = appVragen()[jobId + ':' + vraag.hash]; return v ? doorbouwVraagVeld(v, vraag.tekst, bericht) : undefined; } catch (e) { return undefined; }
 }
 function appVraagGevoelig(jobId, hash) {
   try { const v = appVragen()[jobId + ':' + hash]; return !v || v.gevoelig !== false; } catch (e) { return true; }
@@ -9209,8 +9191,6 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   if (appAntwoord(rij)) { res._app.reden = 'al beantwoord'; return al(appAntwoord(rij)); }
   // wv350 (Fable #4): een oude vraag die via zoeken weer in beeld kwam, start geen beurt meer (de sessie weet er niets meer van)
   if (Date.now() - Date.parse(rij.t || 0) > APP_VRAAG_GELDIG_MS) { res._app.reden = 'vraag verlopen'; return appStuur(res, 410, { ok: false, fout: 'deze vraag is verlopen (ouder dan 3 dagen); typ je antwoord als het nog speelt', verlopen: true }); }
-  // wv263 (§ 4.3): bericht naar Telegram gegaan met knoppen -> daar antwoorden, niet ook hier (één antwoordplek)
-  if (appNaarTelegramNu(rij)) { res._app.reden = 'naar telegram'; return appStuur(res, 409, { ok: false, fout: 'deze vraag beantwoord je in Telegram', naar_telegram: true }); }
   // wv135 (§ 4.4d): Ja op een gevoelige vraag (versturen, verwijderen, agenda, geld; rij zonder veld = gevoelig) eist een verse
   // vingerafdruk met de passkey van dit apparaat, en verbruikt hem: controleren én verbruiken vóór de eerste await, zodat twee
   // tabbladen niet twee gevoelige Ja's op één vingerafdruk krijgen (Fable-ontwerpreview wv135 #5). Start er niets, dan terug.
@@ -9228,16 +9208,13 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   if (doorbouw && !kaart && !(luik && typeof doorbouwLuikKan === 'function' && doorbouwLuikKan(rij, vb.tekst, vb.bericht))) { terug(); return appWeiger(res, 400, '"Ja, en bouw door" kan alleen onder de vraag om iets op de werklijst te zetten; kies Ja', 'doorbouw geen luik'); }   // wv3692
   if (doorbouw && gevoeligJa) { terug(); return appWeiger(res, 400, 'bij versturen, verwijderen, geld of agenda kan "bouw door" niet; kies Ja', 'doorbouw gevoelig'); }
   if (!(await appMagBeurt(res, rij.kanaal, true))) return terug();
-  // Fable-diffreview wv405 #2: een getypt bericht dat nog zijn chat_log-rij schrijft (startend, hooguit APP_CHATLOG_WACHT_MS)
-  // staat nog niet in de wachtrij; eerst dat bericht erin, dan pas deze druk erachter (anders draait het getypte bericht met
-  // deze druk als Davids laatste rij in chat_log).
-  for (let i = 0; i < 40 && appStaat.startend && appStaat.startend[rij.kanaal] > 0; i++) await new Promise(function (r) { setTimeout(r, 100); });
-  // opnieuw lezen ná het wachten: een tweede druk die intussen binnenkwam, wint niet. Vanaf hier geen await meer tot de
+  // wv3931: de wachtlus op een getypt bericht dat nog bij binnenkomst zijn chat_log-rij schreef (Fable-diffreview wv405 #2) is weg:
+  // elke beurt schrijft zijn rij nu pas bij de start, in de volgorde van de wachtrij.
+  // opnieuw lezen ná de awaits: een tweede druk die intussen binnenkwam, wint niet. Vanaf hier geen await meer tot de
   // beurt in de rij staat (wv405: chat_log gaat pas bij de start, in bijStart).
   try { v = appVragen(); } catch (e) { logError('app-vragen', e); terug(); return appWeiger(res, 503, 'vragenregister onleesbaar; vraag de machinekamer', 'vragen kapot'); }
   if (!v[sleutel]) { terug(); return appWeiger(res, 404, 'deze vraag ken ik niet (meer)', 'onbekende vraag'); }
   if (appAntwoord(v[sleutel])) { terug(); res._app.reden = 'al beantwoord'; return al(appAntwoord(v[sleutel])); }
-  if (appNaarTelegramNu(v[sleutel])) { terug(); return appStuur(res, 409, { ok: false, fout: 'deze vraag beantwoord je in Telegram', naar_telegram: true }); }
   if (appKnopInRij(rij.kanaal) >= APP_KNOP_RIJ_MAX) { terug(); return appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol'); }   // Fable #4: na de awaits opnieuw
   const tijd = appKlok();
   const kanaalNaam = ({ hoofd: 'het hoofdkanaal', machinekamer: 'de machinekamer', 'cijfer-meester': 'de Cijfer-Meester', 'ovis-nza': 'OVIS NZa' })[rij.kanaal] ||
@@ -9338,8 +9315,8 @@ async function appGeschiedenisRuw(kanaal, lees) {
       bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
   });
   // wv628 (§ 4.2 1a): in de machinekamer op typtijd, zodat een bericht uit de rij niet ónder rapporten staat die binnenkwamen terwijl
-  // het wachtte (het log krijgt de beurt pas na afloop). wv2965: ook het hoofdkanaal (rij aan); de Cijfer-Meester blijft op afloop.
-  const sk = kanaal === 'machinekamer' || (kanaal === 'hoofd' && appRijAan(kanaal)) ? function (x) { return String(x.getypt && x.getypt < x.t ? x.getypt : x.t); } : function (x) { return String(x.t); };
+  // het wachtte (het log krijgt de beurt pas na afloop). wv2965: ook het hoofdkanaal; wv3931: ook Cijfer-Meester en NZa (rij).
+  const sk = kanaal === 'machinekamer' || kanaal === 'hoofd' || kanaal === 'cijfer-meester' || kanaal === 'ovis-nza' ? function (x) { return String(x.getypt && x.getypt < x.t ? x.getypt : x.t); } : function (x) { return String(x.t); };
   items.sort(function (a, b) { return sk(a).localeCompare(sk(b)); });
   return { items: items, fout: fout };
 }
@@ -9386,9 +9363,8 @@ async function appGeschiedenis(req, res, reg, a, pad) {
     const verlopen = x.vraag_hash && !(b && b.antwoord) && agNu - Date.parse((b && b.t) || x.t) > APP_VRAAG_GELDIG_MS;
     return { t: x.t, getypt: x.getypt || undefined, antwoord_op: x.antwoord_op || undefined, eigen: x.soort === 'rij-verloren' ? x.apparaat === a.id : undefined,   // wv628
       job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, invoer: Array.isArray(x.invoer) ? x.invoer : [], antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
-      vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, naar_telegram: appNaarTelegramNu(b),
-        naar_telegram_onzeker: appNaarTelegramNu(b) && appNaarTelegramVerlopen(b) || undefined, verlopen: verlopen || undefined,
-        doorbouw: !verlopen && !appNaarTelegramNu(b) && typeof doorbouwVraagVeld === 'function' ? doorbouwVraagVeld(bRij, (appVraagUit(x.antwoord) || {}).tekst, x.antwoord) : undefined }   // wv3810
+      vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, verlopen: verlopen || undefined,
+        doorbouw: !verlopen && typeof doorbouwVraagVeld === 'function' ? doorbouwVraagVeld(bRij, (appVraagUit(x.antwoord) || {}).tekst, x.antwoord) : undefined }   // wv3810
         : tv ? { hash: tv.hash, tekst: tv.tekst, beantwoord: null, gevoelig: true, naar_telegram: true, verlopen: agNu - Date.parse(x.t) > APP_VRAAG_GELDIG_MS || undefined } : null,
       bestanden: bnamen, bron: bericht ? x.bron || null : undefined, klasse: bericht ? x.klasse || null : undefined, agent_job: bericht ? x.agent_job || null : undefined,
       reactie: reacties && reacties[kanaal + ':' + x.job_id] ? reacties[kanaal + ':' + x.job_id].duim : null,
@@ -11172,12 +11148,7 @@ function appChatLog(kanaal, rijen) {
 // APP_CHATLOG_WACHT_MS; de schrijfpoging (met herkansing) loopt daarna gewoon door. Machinekamer: niets te schrijven = goed.
 const APP_CHATLOG_WACHT_MS = 3000;
 const APP_CHATLOG_NIET = '\n(Systeem: dit bericht kon niet tijdig in het logboek van de Poortwachter; doe in deze beurt geen agenda-actie, de Poortwachter ziet het niet. Vraag David het zo nodig opnieuw.)';
-// Zolang er gewacht wordt, telt het kanaal als bezig (appLopend): tussen appMagBeurt en appStartBeurt zat eerst geen await.
-async function appChatLogStart(kanaal, rijen) {
-  appStaat.startend = appStaat.startend || {};
-  appStaat.startend[kanaal] = (appStaat.startend[kanaal] || 0) + 1;
-  try { return await appChatLogVoor(kanaal, rijen); } finally { appStaat.startend[kanaal]--; }
-}
+// wv3931: appChatLogStart (schrijven bij binnenkomst met de startend-teller) is weg; elke beurt schrijft zijn rij pas bij de start.
 function appChatLogVoor(kanaal, rijen) {
   if (kanaal !== 'hoofd') return Promise.resolve(true);
   let t = null;
@@ -11635,24 +11606,7 @@ async function appNieuwRoute(req, res, a) {
   }
   const gd = appGezienDavid();   // wv804 (ontwerp § 2): door David gezien, voor fase 4 (nu informatief)
   appStuur(res, 200, { ok: true, nu: new Date(nu).toISOString(), tabs: tabs, laatst: laatst, gezien: gezien, seintje: appSeintjeTab(a.id), fouten: fouten, telegram: telegram,
-    naar_telegram: appNaarTelegramWissels(nu), telegram_bezig: appTelegramBezig(), david: gd ? { tabs: gd.tabs, punten_n: Object.keys(gd.punten).length } : null, zacht: zacht });
-}
-// wv292 (Fable wv263 #14): per gesprek het jongste moment waarop een vraag van Socev naar Telegram ging, terugkwam of zijn voorlopige
-// Telegram-stand verliep; de app herlaadt het open gesprek als dit verandert (anders staan er knoppen die 409 geven, of juist niet).
-function appNaarTelegramWissels(nu) {
-  const uit = {};
-  let v;
-  try { v = appVragen(); } catch (e) { return uit; }
-  Object.keys(v).forEach(function (k) {
-    const r = v[k];
-    if (!r || r.soort !== 'socev' || APP_KNOP_KANALEN[r.kanaal] !== true) return;
-    let w = Date.parse(r.naar_telegram_wissel || '') || 0;
-    const tot = Date.parse(r.naar_telegram_tot || '') || 0;
-    if (r.naar_telegram && tot && tot <= nu) w = Math.max(w, tot);
-    if (w && (!uit[r.kanaal] || w > uit[r.kanaal])) uit[r.kanaal] = w;
-  });
-  Object.keys(uit).forEach(function (k) { uit[k] = new Date(uit[k]).toISOString(); });
-  return uit;
+    telegram_bezig: appTelegramBezig(), david: gd ? { tabs: gd.tabs, punten_n: Object.keys(gd.punten).length } : null, zacht: zacht });
 }
 // wv292 (Fable wv277 spiegel #6): loopt er een Telegram-beurt (bron telegram, zoals appTelegramSpiegel) in hoofd of machinekamer?
 // Alleen of en sinds wanneer, nooit inhoud: wat David in Telegram typte, komt pas na afloop via de spiegel in het app-log.
@@ -12622,7 +12576,7 @@ function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs
       }
       if (x.vraag_hash) {
         const id = x.job_id + ':' + x.vraag_hash, r = vragen && vragen[id];
-        if (!r || (r.soort && r.soort !== 'socev') || r.kanaal !== kanaal || appAntwoord(r) || appNaarTelegramNu(r, nu)) return;
+        if (!r || (r.soort && r.soort !== 'socev') || r.kanaal !== kanaal || appAntwoord(r)) return;
         if (!(nu - Date.parse(r.t || x.t) < APP_VRAAG_GELDIG_MS)) return;
         const v = appVraagUit(x.antwoord);
         if (!v || v.hash !== x.vraag_hash || gekoppeld[id]) return;
@@ -12995,7 +12949,7 @@ function appVjAfleidUit(kaarten, perKanaal, vragen, kaartJobs, nu) {
       const prod = [x.agent_job, x.job_id, x.bron_job].map(String).filter(function (j) { return klus[j]; });
       if (!prod.length) return;
       const t = Date.parse(x.t), id = x.job_id + ':' + x.vraag_hash, r = vragen && vragen[id];
-      if (!isFinite(t) || !r || (r.soort && r.soort !== 'socev') || r.kanaal !== kanaal || appNaarTelegramNu(r, nu)) return;
+      if (!isFinite(t) || !r || (r.soort && r.soort !== 'socev') || r.kanaal !== kanaal) return;
       if (!(nu - Date.parse(r.t || x.t) < APP_VRAAG_GELDIG_MS)) return;
       const v = appVraagUit(x.antwoord);
       if (!v || v.hash !== x.vraag_hash) return;
@@ -13103,7 +13057,7 @@ function appVjKnopStand(p, rv, afgeleid) {
   // wv2347: een kaart die de grondregels raakt (vlag van werkvoorraad.py --voor-jou, via mk_voor_jou_van_wv in herkomst) is altijd gevoelig
   if (gev === null && p.herkomst && typeof p.herkomst === 'object' && p.herkomst.grondwet === true) gev = 'grondwet';
   // gekoppeld en bruikbaar: de druk loopt via die vraag (ook de knoppen onder het oorspronkelijke bericht tonen dan beantwoord)
-  const gekBruik = !!(gekRij && !appNaarTelegramNu(gekRij) && Date.now() - Date.parse(gekRij.t || 0) <= APP_VRAAG_GELDIG_MS);
+  const gekBruik = !!(gekRij && Date.now() - Date.parse(gekRij.t || 0) <= APP_VRAAG_GELDIG_MS);
   // wv1018 (Fable diffreview #2): appKnop eist een vingerafdruk zodra de chatvraag gevoelig is (rij zonder gevoelig: false); zeg het de app vooraf
   if (gev === null && gekBruik && gekRij.gevoelig !== false) gev = gekRij.gevoelig_reden || 'versturen';
   let elders = null, waaromNiet = null;
@@ -13112,7 +13066,6 @@ function appVjKnopStand(p, rv, afgeleid) {
   if (!beantwoord) {
     if (p.status !== 'open' && p.status !== 'later') elders = { t: p.gesloten_op ? appVjDag(appYmd(Date.parse(p.gesloten_op))) + ' ' + appKlok(p.gesloten_op) : null, stand: p.status === 'gedaan' ? 'afgehandeld' : p.status === 'samengevoegd' ? 'samengevoegd met een ander punt' : 'niet meer nodig' };
     else if (q && q.elders) elders = q.elders;
-    else if (gekRij && appNaarTelegramNu(gekRij)) elders = { t: null, stand: 'beantwoorden in Telegram' };
   }
   if (!vragenOk) waaromNiet = 'de knoppen zijn nu niet te gebruiken; probeer het straks of antwoord in het gesprek';
   else if (rv && !rv.leesbaar) waaromNiet = 'de vraag is nu niet te lezen; probeer het straks';
@@ -13726,8 +13679,6 @@ async function appAnders(req, res, reg, a, s, d) {
     reden = 'anders ' + (sms ? 'sms ' : 'agenda ') + id + ' -> ' + kanaal;
   }
   if (!(await appMagBeurt(res, kanaal, true))) return;
-  // wv405-volgorde (Opus-review wv1821 ZOU 2): een getypt bericht dat nog zijn chat_log-rij schrijft, gaat eerst de rij in
-  for (let i = 0; i < 40 && appStaat.startend && appStaat.startend[kanaal] > 0; i++) await new Promise(function (r) { setTimeout(r, 100); });
   if (appKnopInRij(kanaal) >= APP_KNOP_RIJ_MAX) return appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol');
   if (ah && appStaat.andersIds[ah]) {   // tweede kwam tijdens het lezen (Opus-review KAN 4: staat de beurt er al, dan die)
     const x = appStaat.andersIds[ah];
@@ -16490,14 +16441,9 @@ function appModellenZet(req, res, reg, a, s, d) {
     if (uit[rt]) return appWeiger(res, 409, naam(rt) + ' kan nu niet: ' + uit[rt], 'runtime uit');
     if (rt === info.default) return appStuur(res, 200, Object.assign(appModellenStand(), { al: true }));
     zet = { default: rt };
-    tekst = 'standaard ' + info.default + ' -> ' + rt + (info.fallback === rt ? ' (terugval vervalt)' : '');
+    tekst = 'standaard ' + info.default + ' -> ' + rt;
   } else if (wat === 'terugval') {
-    if (rt && !RUNTIMES[rt]) return appWeiger(res, 400, 'onbekende runtime', 'runtime');
-    if (rt && uit[rt]) return appWeiger(res, 409, naam(rt) + ' kan nu niet: ' + uit[rt], 'runtime uit');
-    if (rt && rt === info.default) return appWeiger(res, 400, 'de terugval moet een ander brein zijn dan de standaard', 'terugval = standaard');
-    if (rt === (info.fallback || '')) return appStuur(res, 200, Object.assign(appModellenStand(), { al: true }));
-    zet = { fallback: rt };
-    tekst = 'terugval ' + (info.fallback || 'geen') + ' -> ' + (rt || 'geen');
+    return appWeiger(res, 410, 'de terugval op een ander brein bestaat niet meer', 'terugval weg');   // wv3931
   } else if (wat === 'model') {
     if (!RUNTIMES[rt]) return appWeiger(res, 400, 'onbekende runtime', 'runtime');
     const m = String(d.model == null ? '' : d.model);
@@ -17185,7 +17131,7 @@ async function appNaastRoute(req, res) {
 //   POST /bericht              {kanaal, bron, klasse, tekst, knoppen, sleutel, agent_job} -> {ok, id, push, uitgesteld, app_actief}
 //   POST /bericht/bestand      {id, naam, base64} per bestand (≤ 20 MB); 413 voor alleen dat bestand
 //   POST /bericht/stand        {id} -> {verstuurd, push_klaar, gezien_pixel, getikt, beantwoord, ...}
-//   POST /bericht/naar-telegram {id} -> de vraag wordt in Telegram beantwoord; de app toont "beantwoord in Telegram"
+//   POST /bericht/naar-telegram {id} -> sinds wv3931 altijd 409 {weg: true}: de vraag blijft in de app
 // Het bericht is één regel in het app-log met een gewoon id van 16 hex (soort "socev"; "bericht" is al Davids getypte beurt), zodat /app/knop en /app/bestand
 // er zonder uitzondering mee werken (Fable § 8 #1). NIET fail-open: lukt het schrijven niet, dan 500 en n8n stuurt het naar
 // Telegram. De pod antwoordt direct; het seintje (bestaande soort "antwoord", reden "antwoord <kanaal>", Fable § 8 #2) gaat
@@ -17264,7 +17210,6 @@ const BERICHT_KIJKT_MARGE_MS = 8 * 1000;     // na de volgende poll heeft de app
 const BERICHT_INVOER_MS = 2 * 60 * 1000;     // wv804 (ontwerp § 2): echte invoer op een ander apparaat < 2 min = David is bezig
 const BERICHT_BEZIG_MAX = 3;                 // wv804 Fable M1: bezig aan het eind van een bundel = hooguit 3× opnieuw plannen
 const BERICHT_CONTROLE_MARGE_MS = 90 * 1000; // wv292 (Fable wv263 #7): n8n kijkt na een uitgesteld seintje opnieuw (controle_na)
-const BERICHT_VOORLOPIG_MS = 5 * 60 * 1000;  // wv292 (Fable wv263 #6): voorlopig naar Telegram, zonder bevestiging weer knoppen in de app
 const BERICHT_RE = /^\/bericht(\/(bestand|stand|naar-telegram|sms-pas|sms-ingang))?$/;   // wv3664: sms-pas = n8n toetst de pas van Davids sms-tik terug; wv3668: sms-ingang = handtekening van een binnenkomende sms
 
 function berichtIsPad(req) { return BERICHT_RE.test(reqPath(req)); }
@@ -17588,8 +17533,7 @@ async function berichtNieuw(res, d) {
   if (al0) return stuurDubbel(al0);
   const id = crypto.randomBytes(8).toString('hex'), t = new Date(nu).toISOString();
   // Vraag eerst (anders staat er een bericht in de app waarvan de knoppen niet werken); dan het log; lukt dat niet, de vraag weg.
-  // knoppen:false (schaduwfase, terugval 2): de vraag wél vastleggen, maar met naar_telegram, zodat de app "Beantwoord in Telegram"
-  // toont en /app/knop weigert (Fable-review wv263 #8).
+  // wv3931: ook bij knoppen:false (vroeger de schaduwfase) staan de knoppen in de app; de wissel naar Telegram is weg.
   // wv315: bij een agendaknop geen vraagregistratie, ook niet als de tekst een VRAAG AAN DAVID-regel heeft (de knop is ✅/❌)
   let vraag = ag ? null : appVraagVan(kanaal, tekst);
   const agentJob = d.agent_job ? String(d.agent_job) : undefined;
@@ -17617,7 +17561,7 @@ async function berichtNieuw(res, d) {
   const soort = meldSoort(kanaal, bron, klasse, !!vraag, !!ag, opKaart && d.soort === 'vraag' ? undefined : d.soort), seintje = meldSeintje(kanaal, soort);   // wv804 (ontwerp § 1)
   if (vraag) {
     const gev = appGevoelig(vraag.tekst);
-    try { const v = appVragen(); v[vsl] = { kanaal: kanaal, t: t, antwoord: null, gevoelig: !!gev, gevoelig_reden: gev || undefined, soort: 'socev', naar_telegram: d.knoppen === true ? undefined : t }; appVragenSchrijf(v); }
+    try { const v = appVragen(); v[vsl] = { kanaal: kanaal, t: t, antwoord: null, gevoelig: !!gev, gevoelig_reden: gev || undefined, soort: 'socev' }; appVragenSchrijf(v); }
     catch (e) { logError('bericht-vragen', e); return berichtStuur(res, 500, { ok: false, fout: 'vragenregister niet schrijfbaar', terugval: true }); }
   }
   // wv315: eerst de knop, dan het log (zoals de vraag): een bericht in de app waarvan de knop niet werkt, mag er niet staan
@@ -17649,7 +17593,7 @@ async function berichtNieuw(res, d) {
     if (ag) { delete agk[id]; appAgendaKnoppenBewaar(); }   // wv315
     return berichtStuur(res, 500, { ok: false, fout: 'app-log niet schrijfbaar', terugval: true });
   }
-  idx[id] = { t: t, kanaal: doelKanaal, bron: bron, klasse: klasse, soort: soort, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, push: null, getikt: null, naar_telegram: vraag && d.knoppen !== true ? t : null, knoppen: d.knoppen === true };
+  idx[id] = { t: t, kanaal: doelKanaal, bron: bron, klasse: klasse, soort: soort, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, push: null, getikt: null, knoppen: d.knoppen === true };
   const plan = berichtPushPlan(id, kanaal, klasse, seintje);   // bewaart de index
   if (!idx[id].push) berichtIndexBewaar();
   const gewenst = berichtPushGewenst();
@@ -17810,11 +17754,11 @@ async function berichtBestand(res, d) {
 function berichtStandVan(id) {
   const b = berichtIndex()[id];
   if (!b) return null;
-  let beantwoord = false, vraagNaarTelegram = false;
-  if (b.vraag_hash) { try { const r = appVragen()[id + ':' + b.vraag_hash]; beantwoord = !!appAntwoord(r); vraagNaarTelegram = appNaarTelegramNu(r); } catch (e) {} }
+  let beantwoord = false;
+  if (b.vraag_hash) { try { const r = appVragen()[id + ':' + b.vraag_hash]; beantwoord = !!appAntwoord(r); } catch (e) {} }
   const p = b.push || {};
   // wv292 (Fable wv263 #10): noodstop = de app staat uit; wat er nog niet uit was, haalt David daar niet. Voor n8n dan: seintje klaar,
-  // 0 bezorgd (en app_uit), zodat de bestaande stap "geen seintje bezorgd" het bericht met knoppen naar Telegram zet.
+  // 0 bezorgd (en app_uit), zodat n8n een kopie (sinds wv3931 zonder knoppen) naar Telegram stuurt.
   const uit = fs.existsSync(APP_UIT);
   const klaar = uit || p.klaar === true;
   return { ok: true, id: id, kanaal: b.kanaal, bron: b.bron, klasse: b.klasse, t: b.t,
@@ -17824,7 +17768,6 @@ function berichtStandVan(id) {
     // wv804: gezien_pixel = door David gezien (naam blijft, n8n leest hem); gezien_ergens = een apparaat zette de tab op gezien
     gezien_pixel: berichtGezienDoorDavid(b.kanaal, Date.parse(b.t)), gezien_ergens: berichtGezienErgens(b.kanaal, Date.parse(b.t)),
     soort: b.soort || null, seintje: b.soort ? meldSeintje(b.kanaal, b.soort) : null, getikt: !!b.getikt, beantwoord: beantwoord, vraag: !!b.vraag_hash,
-    naar_telegram: b.vraag_hash ? vraagNaarTelegram : !!b.naar_telegram, naar_telegram_voorlopig: !!(b.naar_telegram_tot && Date.parse(b.naar_telegram_tot) > Date.now()),
     app_uit: uit, app_actief: !uit && berichtAppActief() };
 }
 function berichtStand(res, d) {
@@ -17834,51 +17777,19 @@ function berichtStand(res, d) {
   if (!s) return berichtStuur(res, 404, { ok: false, fout: 'onbekend bericht' });
   berichtStuur(res, 200, s);
 }
-// Terugval 2/3 (§ 4.3): het bericht staat in de app, maar de vraag wordt in Telegram beantwoord (daar mét knoppen). De app toont
-// dan "beantwoord in Telegram" en /app/knop weigert. Al in de app beantwoord: dan niet (n8n stuurt zonder knoppen).
-// wv292 (Fable-review wv263 #6): n8n roept dit aan vóór de Telegram-verzending; faalt die, dan stonden de knoppen nergens. Daarom:
-//   {id}                 definitief (zoals sinds wv263)
-//   {id, voorlopig: true | seconden (30–1800, standaard 300)}  vervalt vanzelf: dan heeft de app de knoppen weer
-//   {id, bevestig: true} na een geslaagde verzending mét knoppen: definitief
-//   {id, terug: true}    verzending mislukt of zonder knoppen: de app krijgt de knoppen terug (niet bij een schaduwvraag, knoppen:false)
-// Elke wissel zet naar_telegram_wissel; /app/nieuw geeft per gesprek de jongste, zodat een open app herlaadt (Fable wv263 #14).
+// wv3931 (2C77, David Ja 22-11 18:26): de wissel naar Telegram is weg. Vroeger zette n8n hier een vraag op "beantwoord in Telegram"
+// (voorlopig, bevestig, terug); gebruikt 1× in 25 dagen. Nu altijd 409 {weg: true}: n8n (AI - Bericht aan David, knoop "Knoppen in
+// Telegram?", neverError) stuurt dan een kopie ZONDER knoppen met "Staat ook in de app; antwoord daar" en rondt niets af.
+// Codex-review wv3931 ZOU 1: al in de app beantwoord -> ook al_beantwoord, dan stuurt n8n niets meer (knoop geeft [] terug).
 function berichtNaarTelegram(res, d) {
-  const id = String(d.id || '');
-  if (!APP_JOB_RE.test(id)) return berichtStuur(res, 400, { ok: false, fout: 'ongeldig id' });
-  const opties = ['voorlopig', 'bevestig', 'terug'].filter(function (x) { return d[x] !== undefined && d[x] !== false; });
-  if (opties.length > 1) return berichtStuur(res, 400, { ok: false, fout: 'kies één van voorlopig, bevestig, terug' });
-  const soort = opties[0] || 'definitief';
-  let duur = BERICHT_VOORLOPIG_MS;
-  if (soort === 'voorlopig' && d.voorlopig !== true) {
-    if (typeof d.voorlopig !== 'number' || !(d.voorlopig >= 30 && d.voorlopig <= 1800)) return berichtStuur(res, 400, { ok: false, fout: 'voorlopig is true of 30–1800 seconden' });
-    duur = Math.round(d.voorlopig * 1000);
+  const id = String(d && d.id || '');
+  res._log = { bericht: APP_JOB_RE.test(id) ? id : undefined, naar_telegram: 'weg' };
+  let al = false;
+  if (APP_JOB_RE.test(id)) {
+    try { const b = berichtIndex()[id]; if (b && b.vraag_hash) al = !!appAntwoord(appVragen()[id + ':' + b.vraag_hash]); } catch (e) { logError('bericht-vragen', e); }
   }
-  if ((soort === 'bevestig' || soort === 'terug') && d[soort] !== true) return berichtStuur(res, 400, { ok: false, fout: soort + ' is true' });
-  const idx = berichtIndex(), b = idx[id];
-  if (!b) return berichtStuur(res, 404, { ok: false, fout: 'onbekend bericht' });
-  const t = new Date().toISOString();
-  // schaduwvraag (knoppen:false): vanaf aankomst in Telegram; terug zou de app een tweede antwoordplek geven
-  if (soort === 'terug' && b.vraag_hash && (b.knoppen === false || (b.knoppen === undefined && b.naar_telegram === b.t))) return berichtStuur(res, 409, { ok: false, fout: 'schaduwvraag: de knoppen blijven in Telegram', schaduw: true });
-  const zet = function (x) {
-    if (soort === 'terug') { if (!x.naar_telegram && !x.naar_telegram_tot) return false; x.naar_telegram = null; delete x.naar_telegram_tot; }
-    else if (soort === 'bevestig') { if (appNaarTelegramNu(x) && !x.naar_telegram_tot) return false; x.naar_telegram = appNaarTelegramNu(x) ? x.naar_telegram : t; delete x.naar_telegram_tot; }
-    else if (soort === 'voorlopig') { if (appNaarTelegramNu(x) && !x.naar_telegram_tot) return false; x.naar_telegram = appNaarTelegramNu(x) ? x.naar_telegram : t; x.naar_telegram_tot = new Date(Date.now() + duur).toISOString(); }
-    else { if (appNaarTelegramNu(x) && !x.naar_telegram_tot) return false; x.naar_telegram = appNaarTelegramNu(x) ? x.naar_telegram : t; delete x.naar_telegram_tot; }
-    x.naar_telegram_wissel = t;
-    return true;
-  };
-  let nt = null;
-  if (b.vraag_hash) {
-    try {
-      const v = appVragen(), r = v[id + ':' + b.vraag_hash];
-      if (appAntwoord(r)) return berichtStuur(res, 409, { ok: false, fout: 'al beantwoord in de app', al_beantwoord: true });
-      if (r && zet(r)) appVragenSchrijf(v);
-      if (r) nt = appNaarTelegramNu(r);
-    } catch (e) { logError('bericht-vragen', e); return berichtStuur(res, 500, { ok: false, fout: 'vragenregister niet schrijfbaar' }); }
-  }
-  if (zet(b)) berichtIndexBewaar();
-  res._log = { bericht: id, naar_telegram: soort };
-  berichtStuur(res, 200, { ok: true, id: id, vraag: !!b.vraag_hash, naar_telegram: nt === null ? !!b.naar_telegram : nt, tot: b.naar_telegram_tot || null });
+  berichtStuur(res, 409, al ? { ok: false, fout: 'al beantwoord in de app', al_beantwoord: true, weg: true }
+    : { ok: false, fout: 'de wissel naar Telegram bestaat niet meer; de vraag blijft in de app', weg: true });
 }
 
 // Aangeroepen door de server vóór handleRequest. Volgorde van weigeren: methode, noodstop (503), body, geheim (401), rol (409).
@@ -18889,11 +18800,19 @@ function telBeurt(req, res, t) {
 }
 
 // De gewone Socev-beurt uit de auto: chat_log-rij met [AUTO] en de beurt in het hoofdkanaal (ook de terugval van de keuze-microfoon, wv3878).
+// wv3931 (2C77): de chat_log-rij gaat pas bij de start (bijStart), zoals een getypt bericht (wv2965): liep er een beurt, dan met de
+// ontvangsttijd als ts (de Poortwachter koppelt hem dan nooit aan een voorstel dat pas na het inspreken kwam), anders ná de laatste rij.
 async function telBeurtStart(t, tekst) {
   const veilig = appOntmasker(tekst, 'gesproken');
-  const gelogd = await appChatLogStart('hoofd', [{ rol: 'david', ts: Date.now(), bevestiging: 'gesproken', tekst: '[AUTO] ' + veilig }]);
-  return appStartBeurt({ id: t.app_apparaat || t.id }, 'hoofd', '[AUTO] ' + veilig + (gelogd ? '' : APP_CHATLOG_NIET),
-    { beurt_id: null, soort: 'tel', tekst: '[AUTO] ' + tekst, tel: t.id });
+  const ontvangen = Date.now();
+  const bezig = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === APP_KANALEN.hoofd && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
+  return appStartBeurt({ id: t.app_apparaat || t.id }, 'hoofd', '[AUTO] ' + veilig,
+    { beurt_id: null, soort: 'tel', tekst: '[AUTO] ' + tekst, tel: t.id, bijStart: function () { return telHoofdStart(bezig, veilig, ontvangen); } });
+}
+function telHoofdStart(wachtte, veilig, ontvangen) {
+  const ts = wachtte ? ontvangen : Math.max(Date.now(), (appStaat.chatlogLaatsteTs || 0) + 2);
+  return appChatLogVoor('hoofd', [{ rol: 'david', ts: ts, bevestiging: 'gesproken', tekst: '[AUTO] ' + veilig }])
+    .then(function (g) { return g ? '' : APP_CHATLOG_NIET; }, function (e) { logError('app-chatlog', e); return APP_CHATLOG_NIET; });
 }
 
 function telUitRoute(req, res, t) {
