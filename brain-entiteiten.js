@@ -376,20 +376,25 @@ function maak(o) {
   }
 
   // Facturen per knoop, uit de Facturen-app (factuur) en het FV2-archief (factuur_archief): leverancier.knoop_id, anders een unieke
-  // naam/alias-match (zelfde regel als rekeningenPerDoel in ovis-register.js); een eigen entiteit telt de facturen op haar naam. Alleen
-  // telling, datum, bedrag (in centen, zoals in de Facturen-app) en status: geen leveranciersnaam (bij een eigen entiteit kan dat een persoon zijn). Regels met een
-  // patiëntkenmerk tellen sinds wv3675 (2C12, David 21-11) gewoon mee. Alleen-eigenaar-regels tellen mee: de app is van David (de eigenaar); op een vaste plek komt dit blok er niet.
+  // naam/alias-match (zelfde regel als rekeningenPerDoel in ovis-register.js); een eigen entiteit telt de facturen op haar naam. Regels met een
+  // patiëntkenmerk tellen sinds wv3675 (2C12, David 21-11) gewoon mee. Alleen-eigenaar-regels tellen mee: de app is van David (de eigenaar).
+  // wv3944 (besluitenpagina nr 357/390 = 3C57/3C90, David Ja 22-11-2026 18:18): ook de interne facturen van een eigen entiteit tellen mee (Davids
+  // eigen scherm laat niets weg); per regel id, herkomst en nummer (tik = die factuur in Facturen); alle id's (ids/archief_ids, voor "Open Facturen"
+  // gefilterd op deze partij) en per jaar het gefactureerde totaal. Facturen worden niet bij de bank opgeteld (geen dubbeltelling).
+  const FAC_IDS_MAX = 1000;
   function facturenVan(k, reg) {
     const ENT = { TG: 'tolgaarde', GH: 'groenhouten', HOLD: 'holding', KM: 'kostenmaatschap', POT: 'pot', PHBV: 'praktijkhouders_bv', PRIVE: 'prive', SLOEL: 'sloel',
       HAGRO: 'hagro', SEL: 'sel', DBH: 'dbh', GHAWA: 'ghawa' };
     let rijen = [];
+    const app = function (x) { return (x || []).map(function (f) { return Object.assign({ herkomst: 'app' }, f); }); };
+    const arch = function (x) { return (x || []).map(function (f) { return Object.assign({ herkomst: 'archief' }, f); }); };
     try {
       if (isEigen(k)) {
         const e = ENT[String(k.id).toUpperCase()];
-        if (!e) return { aantal: 0, laatste: [] };
-        const a = leesSqlite(facturenPad, 'select factuurdatum, incl_eur as bedrag, status from factuur where lower(entiteit) = ? and coalesce(intern,0) = 0', [e]);
+        if (!e) return { aantal: 0, laatste: [], ids: [], archief_ids: [], jaren: [], intern: 0 };
+        const a = leesSqlite(facturenPad, 'select id, nummer, factuurdatum, incl_eur as bedrag, status, coalesce(intern,0) as intern from factuur where lower(entiteit) = ?', [e]);
         if (a === null) return null;
-        rijen = a.concat(leesSqlite(facturenPad, 'select factuurdatum, incl as bedrag, status from factuur_archief where lower(entiteit) = ?', [e]) || []);
+        rijen = app(a).concat(arch(leesSqlite(facturenPad, 'select id, nummer, factuurdatum, incl as bedrag, status from factuur_archief where lower(entiteit) = ?', [e])));
       } else {
         const lev = leesSqlite(facturenPad, 'select id, naam, knoop_id from leverancier', []);
         if (lev === null) return null;
@@ -401,15 +406,29 @@ function maak(o) {
         });
         const hoort = function (naam) { const s = opNaam[norm(naam)]; return !!(s && s.size === 1 && s.has(k.id)); };
         const ids = lev.filter(function (l) { return l.knoop_id ? l.knoop_id === k.id : hoort(l.naam); }).map(function (l) { return l.id; });
-        if (ids.length) rijen = leesSqlite(facturenPad, 'select factuurdatum, incl_eur as bedrag, status from factuur where leverancier in (' + ids.map(function () { return '?'; }).join(',') + ')', ids) || [];
-        const arch = leesSqlite(facturenPad, 'select leverancier_naam, factuurdatum, incl as bedrag, status from factuur_archief', []) || [];
-        rijen = rijen.concat(arch.filter(function (f) { return hoort(f.leverancier_naam); }));
+        if (ids.length) rijen = app(leesSqlite(facturenPad, 'select id, nummer, factuurdatum, incl_eur as bedrag, status from factuur where leverancier in (' + ids.map(function () { return '?'; }).join(',') + ')', ids));
+        const ar = leesSqlite(facturenPad, 'select id, nummer, leverancier_naam, factuurdatum, incl as bedrag, status from factuur_archief', []) || [];
+        rijen = rijen.concat(arch(ar.filter(function (f) { return hoort(f.leverancier_naam); })));
       }
     } catch (e) { return null; }
-    rijen.sort(function (x, y) { return String(y.factuurdatum || '').localeCompare(String(x.factuurdatum || '')); });
-    return { aantal: rijen.length, laatste: rijen.slice(0, 5).map(function (f) {
-      return { datum: f.factuurdatum || null, bedrag_cent: typeof f.bedrag === 'number' ? Math.round(f.bedrag) : null, status: f.status || null };
-    }) };
+    rijen.sort(function (x, y) { return String(y.factuurdatum || '').localeCompare(String(x.factuurdatum || '')) || String(x.id).localeCompare(String(y.id)); });
+    const jr = new Map();
+    rijen.forEach(function (f) {
+      const j = /^\d{4}/.exec(String(f.factuurdatum || ''));
+      const key = j ? j[0] : '';
+      if (!jr.has(key)) jr.set(key, { n: 0, cent: 0 });
+      const y = jr.get(key); y.n++; if (typeof f.bedrag === 'number') y.cent += Math.round(f.bedrag);
+    });
+    const idVan = function (h) { return rijen.filter(function (f) { return f.herkomst === h && /^[0-9a-f]{16}$/.test(String(f.id)); }).slice(0, FAC_IDS_MAX).map(function (f) { return String(f.id); }); };
+    return { aantal: rijen.length, intern: rijen.filter(function (f) { return f.intern; }).length,
+      laatste: rijen.slice(0, 5).map(function (f) {
+        return { id: /^[0-9a-f]{16}$/.test(String(f.id)) ? String(f.id) : null, herkomst: f.herkomst, nummer: f.nummer ? masker(String(f.nummer)).slice(0, 40) : null,
+          datum: f.factuurdatum || null, bedrag_cent: typeof f.bedrag === 'number' ? Math.round(f.bedrag) : null, status: f.status || null };
+      }),
+      ids: idVan('app'), archief_ids: idVan('archief'),
+      jaren: Array.from(jr.entries()).filter(function (e) { return e[0]; }).sort(function (a, b) { return b[0].localeCompare(a[0]); })
+        .map(function (e) { return { jaar: Number(e[0]), facturen: e[1].n, incl_cent: e[1].cent }; }),
+      zonder_datum: jr.has('') ? jr.get('').n : 0 };
   }
 
   // wv3298: blok Bank — aantal posten, eerste en laatste datum en de schrijfwijzen per kant (zakelijk uit de Facturen-app, privé uit het
@@ -419,13 +438,37 @@ function maak(o) {
     if (!bankMod || isEigen(k) || (!facturenPad && !bankPad)) return null;
     try {
       if (!bankCache || nu() - bankCache.t >= BANK_CACHE_MS) {
-        bankCache = { t: nu(), idx: bankMod.index({ facturenPad: facturenPad, bankPad: bankPad, knopen: reg.knopen, handvatten: reg.handvatten, isEigen: isEigen }) };
+        bankCache = { t: nu(), idx: bankMod.index({ facturenPad: facturenPad, bankPad: bankPad, knopen: reg.knopen, handvatten: reg.handvatten, isEigen: isEigen, nu: nu() }) };
       }
       const b = bankMod.blokVoor(bankCache.idx, k.id);
       if (!b) return null;
       [b.zakelijk, b.prive].forEach(function (x) { if (x && x.schrijfwijzen) x.schrijfwijzen = x.schrijfwijzen.map(function (n) { return masker(n); }); });
       return b;
     } catch (e) { return null; }
+  }
+
+  // wv3944 (3C57): geld van een eigen entiteit — haar eigen bankposten per jaar, laatste post, gemiddelde en de vijf grootste tegenpartijen
+  // (12 maanden), tegenpartij met precies één knoop = haar sleutel (tik = haar kaart). Niets weggelaten (Davids eigen scherm). 5 minuten bewaard.
+  const EIGEN_BANK = { TG: 'tolgaarde', GH: 'groenhouten', HOLD: 'holding', KM: 'kostenmaatschap', POT: 'pot', PHBV: 'praktijkhouders_bv', PRIVE: 'prive', SLOEL: 'sloel',
+    SEL: 'sel', GHAWA: 'ghawa' };
+  let eigenCache = new Map();
+  function eigenGeldVan(k, reg) {
+    if (!bankMod || typeof bankMod.eigenGeld !== 'function' || !isEigen(k)) return undefined;
+    const ent = EIGEN_BANK[String(k.id).toUpperCase()];
+    if (!ent) return { bron: null, posten: 0, geld: null, leveranciers: [] };
+    const c = eigenCache.get(ent);
+    if (c && nu() - c.t < BANK_CACHE_MS) return c.x;
+    let x;
+    try {
+      const live = bankMod.naamIndex(reg.knopen, reg.handvatten, isEigen);
+      x = bankMod.eigenGeld({ facturenPad: facturenPad, bankPad: bankPad, entiteit: ent, live: live, nu: nu() });
+      if (x) x.leveranciers = x.leveranciers.map(function (l) {
+        const kn = l.knoop ? reg.knopen.find(function (y) { return y.id === l.knoop && zichtbaar(y); }) : null;
+        return { naam: masker(String((kn && kn.naam) || l.naam || '')) || null, af_cent: l.af_cent, betalingen: l.betalingen, sleutel: kn ? sleutelVan(kn.id) : null };
+      });
+    } catch (e) { x = null; }
+    eigenCache.set(ent, { t: nu(), x: x });
+    return x;
   }
 
   // wv1771: contactgegevens uit Google voor een persoon met een Google-koppeling → null (geen koppeling) of { bron, voorgesteld, mailadressen,
@@ -679,6 +722,7 @@ function maak(o) {
       iban: !k.iban ? null : masker(String(k.iban)),
       facturen: facturenVan(k, reg),
       bank: bankVan(k, reg),   // wv3298
+      eigen_geld: eigenGeldVan(k, reg),   // wv3944 (3C57): alleen bij een eigen entiteit (undefined = andere partij of oude bank-partij.js)
       deadlines: deadlinesVan(k, persoon ? { pagina: rel, patronen: pat } : null),
       contact: !persoon ? null : await googleVan(k, reg),   // wv1771
       nu: eigen ? nuVan(k.id) : undefined,   // wv3715 (3C165): bovenaan de kaart; undefined = oude pod/geen module (geen blok)
@@ -708,7 +752,7 @@ function maak(o) {
     return { ok: true, tegels: tegels, aan: !!entNu };
   }
 
-  return { lijst: lijst, zoek: zoek, detail: detail, nuTegels: nuTegels, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; bankCache = null; stukCache = null; kIdx = null; } };
+  return { lijst: lijst, zoek: zoek, detail: detail, nuTegels: nuTegels, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; bankCache = null; stukCache = null; kIdx = null; eigenCache = new Map(); } };
 }
 
 module.exports = { telNl: telNl, maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, zichtbaar: zichtbaar, groepVan: groepVan,

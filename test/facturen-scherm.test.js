@@ -167,3 +167,31 @@ test('(e) zoek: naam, nummer, bedrag (exact en hele euro\'s), archief alleen voo
   assert.equal(z('x').status, 400);
   assert.equal(z('y'.repeat(61)).status, 400);
 });
+
+// wv3944 (besluitenpagina nr 390 = 3C90): "Open Facturen" bij een partij — zoeken op de id's die de kaart meegeeft, zelfde rolfilters
+test('(g) zoek op id\'s: precies die facturen, archief alleen voor de eigenaar, geen afkapping, grenzen', () => {
+  const t = opzet();
+  const a = nieuweFactuur(t, { incl: 4100, velden: { leverancier_naam: 'Partij Gamma' } });
+  const b = nieuweFactuur(t, { incl: 4200, velden: { leverancier_naam: 'Partij Gamma' } });
+  nieuweFactuur(t, { incl: 4300, velden: { leverancier_naam: 'Andere Partij' } });
+  const aid = D.nieuwId();
+  t.fdb.db.prepare("INSERT INTO factuur_archief (id, herkomst, extern_id, entiteit, leverancier_naam, nummer, factuurdatum, incl, valuta, status, aangemaakt_op) VALUES (?, 'fv2', 'x9', 'tolgaarde', 'Partij Gamma', 'OUD-9', '2024-03-01', 1000, 'EUR', 'betaald', '2026-11-01T00:00:00Z')").run(aid);
+  const z = (d, x) => t.call('POST', 'zoek', d, x);
+  let r = z({ ids: [a.id, b.id, a.id], archief_ids: [aid] });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(r.j.aantal, 3);
+  assert.deepEqual(r.j.facturen.filter((x) => x.herkomst === 'app').map((x) => x.id).sort(), [a.id, b.id].sort());
+  assert.equal(r.j.facturen[r.j.facturen.length - 1].id, aid, 'oudste (archief 2024) onderaan');
+  assert.equal(r.j.afgekapt, false);
+  r = z({ ids: [a.id], archief_ids: [aid] }, { rol: t.pm() });
+  assert.equal(r.status, 200);
+  assert.ok(r.j.facturen.every((x) => x.herkomst === 'app'), 'praktijkmanager: geen archief');
+  assert.equal(z({ ids: [] }).j.aantal, 0, 'lege lijst = 0, geen tekstzoek');
+  assert.equal(z({ ids: ['x'] }).status, 400);
+  assert.equal(z({ ids: 'abc' }).status, 400);
+  assert.equal(z({ ids: Array.from({ length: 1001 }, (_, i) => i.toString(16).padStart(16, '0')) }).status, 400);
+  // 60 facturen: allemaal terug (de tekstzoek kapt op 50)
+  const veel = Array.from({ length: 60 }, (_, i) => nieuweFactuur(t, { incl: 5000 + i, velden: { leverancier_naam: 'Veel Partij' } }).id);
+  r = z({ ids: veel });
+  assert.equal(r.j.aantal, 60); assert.equal(r.j.facturen.length, 60);
+});

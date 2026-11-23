@@ -99,6 +99,8 @@ db.exec('CREATE TABLE leverancier (id INTEGER PRIMARY KEY, naam TEXT, knoop_id T
 db.exec("INSERT INTO leverancier VALUES (1, 'Voorbeeld Energie Levering', NULL), (2, 'Iets Anders', 'org:voorbeeld-energie'), (3, 'Niemand', NULL), (4, 'Piet Verzonnen', 'per:piet-verzonnen')");
 db.exec("INSERT INTO factuur VALUES (9, 4, 'tolgaarde', '2026-10-02', 300000, 'beslist', 0, 0, 0), (1, 1, 'tolgaarde', '2026-10-01', 12345, 'beslist', 0, 0, 0), (2, 2, 'tolgaarde', '2026-10-05', 500, 'beslist', 0, 0, 1), (3, 1, 'tolgaarde', '2026-10-06', 999, 'beslist', 1, 0, 0), (4, 3, 'tolgaarde', '2026-10-07', 1, 'beslist', 0, 0, 0)");
 db.exec("INSERT INTO factuur_archief VALUES (1, 'VE Zakelijk', 'tolgaarde', '2026-05-01', 700, 'beslist', 1), (2, 'Niemand', 'tolgaarde', '2026-05-02', 1, 'beslist', 1)");
+db.exec('ALTER TABLE factuur ADD COLUMN nummer TEXT; ALTER TABLE factuur_archief ADD COLUMN nummer TEXT;');   // wv3944: nummer per regel
+db.exec("INSERT INTO factuur VALUES (10, 3, 'tolgaarde', '2025-02-01', 100, 'beslist', 0, 1, 0, 'INT-1')");   // wv3944: interne factuur telt bij de eigen entiteit mee
 db.close();
 
 const deadlines = () => [
@@ -258,7 +260,11 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   const bankStub = { index: () => ({}), blokVoor: () => ({ zakelijk: { posten: 1, schrijfwijzen: ['Proefleverancier ' + IBAN, 'Proef nl11 test 0000 1111 22', 'sk-' + 'b'.repeat(40)] }, prive: null }) };
   const T3 = B.maak({ rpc: rpc3, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturenPad: fpad, bankPad: fpad, bankPartij: bankStub, masker, nu: () => Date.parse('2026-10-27T12:00:00Z') });
   const tg = await T3.detail('TG', false);
-  toets('24 wv3675: eigen entiteit telt de factuur met patiëntkenmerk mee', tg.status === 200 && tg.j.weet.facturen && tg.j.weet.facturen.aantal === 7 && tg.j.weet.facturen.laatste.some((x) => x.bedrag_cent === 999), tg.j.weet && tg.j.weet.facturen);
+  toets('24 wv3675: eigen entiteit telt de factuur met patiëntkenmerk mee', tg.status === 200 && tg.j.weet.facturen && tg.j.weet.facturen.aantal === 8 && tg.j.weet.facturen.laatste.some((x) => x.bedrag_cent === 999), tg.j.weet && tg.j.weet.facturen);
+  const tf = tg.j.weet.facturen;
+  toets('24c wv3944: interne factuur telt mee; per jaar het gefactureerde totaal; herkomst per regel; id alleen als 16 hex', tf.intern === 1 &&
+    tf.jaren.map((j) => `${j.jaar}:${j.facturen}:${j.incl_cent}`).join(',') === '2026:7:' + (300000 + 12345 + 500 + 999 + 1 + 700 + 1) + ',2025:1:100' &&
+    tf.laatste.every((x) => x.herkomst === 'app' && x.id === null) && Array.isArray(tf.ids) && tf.ids.length === 0 && tf.zonder_datum === 0, tf);
   const pb = await T3.detail('org:proefbank', false), sw = pb.j && pb.j.weet && pb.j.weet.bank && pb.j.weet.bank.zakelijk.schrijfwijzen;
   toets('24b wv3675: rekeningnummers in de schrijfwijzen onverkort, sleutel nog wel gemaskeerd', Array.isArray(sw) && sw[0].includes(IBAN) && /nl11 test 0000 1111 22/.test(sw[1]) && !JSON.stringify(sw).includes('b'.repeat(40)) && !/\[rekeningnummer\]/.test(JSON.stringify(pb.j)), pb.j && pb.j.weet);
 

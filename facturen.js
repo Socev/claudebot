@@ -521,7 +521,30 @@ function zoekBedrag(t) {
   const c = Math.round(x * 100);
   return heel ? [c, c + 99] : [c, c];
 }
+// wv3944 (besluitenpagina nr 390 = 3C90, David Ja 22-11-2026 18:18): "Open Facturen" bij een partij in Brain › Entiteiten geeft de id's van haar
+// facturen mee ({ ids, archief_ids }: de pod rekende ze uit, zelfde set als de telling op de kaart). Dezelfde rolfilters en dezelfde regels als zoeken;
+// het archief alleen voor de eigenaar. Hooguit 1000 id's per soort, alleen 16 hex; de hele lijst terug (geen afkapping op 50).
+const ZOEK_IDS_MAX = 1000;
+function zoekOpIds(fdb, r, d) {
+  const lijst = function (x) {
+    if (x === undefined || x === null) return [];
+    if (!Array.isArray(x) || x.length > ZOEK_IDS_MAX || x.some((i) => typeof i !== 'string' || !/^[0-9a-f]{16}$/.test(i))) weiger(400, 'ids: hooguit ' + ZOEK_IDS_MAX + ' id\'s van 16 hex');
+    return Array.from(new Set(x));
+  };
+  const ids = lijst(d.ids), aids = lijst(d.archief_ids);
+  const [ff, fp] = factuurFilter(r, 'f');
+  const app = ids.length ? fdb.db.prepare('SELECT f.*, l.naam AS lev_naam, (SELECT max(o.opgehaald_op) FROM opdracht o WHERE o.factuur = f.id AND o.status IN (\'opgehaald\',\'gelukt\')) AS naar_boekhouding_op ' +
+    'FROM factuur f LEFT JOIN leverancier l ON l.id = f.leverancier WHERE f.id IN (SELECT value FROM json_each(?)) AND ' + ff).all(JSON.stringify(ids), ...fp)
+    .map((f) => Object.assign(factuurKort(f, f.lev_naam), { herkomst: 'app', binnen_op: f.aangemaakt_op, bevestigd_op: f.bevestigd_op || null,
+      naar_boekhouding_op: f.naar_boekhouding_op || null, betaald_gezien_op: f.betaald_gezien_op || null })) : [];
+  const archief = isEig(r) && aids.length ? fdb.db.prepare('SELECT a.id, a.entiteit, a.leverancier_naam, a.nummer, a.factuurdatum, a.vervaldatum, a.incl, a.valuta, a.betaalwijze, a.status FROM factuur_archief a WHERE a.id IN (SELECT value FROM json_each(?))')
+    .all(JSON.stringify(aids)).map((a) => ({ id: a.id, herkomst: 'archief', status: a.status || null, leverancier_naam: a.leverancier_naam, nummer: a.nummer,
+      factuurdatum: a.factuurdatum, vervaldatum: a.vervaldatum, incl: a.incl, valuta: a.valuta || 'EUR', entiteit: a.entiteit, betaalwijze: a.betaalwijze || null })) : [];
+  const alle = app.concat(archief).sort((a, b) => String(b.factuurdatum || '').localeCompare(String(a.factuurdatum || '')) || String(a.id).localeCompare(String(b.id)));
+  return { aantal: alle.length, facturen: alle, afgekapt: false, gevraagd: ids.length + (isEig(r) ? aids.length : 0) };
+}
 function zoekFacturen(fdb, r, d) {
+  if (d && (d.ids !== undefined || d.archief_ids !== undefined)) return zoekOpIds(fdb, r, d);
   const tekst = String(d && d.tekst || '').replace(/\s+/g, ' ').trim();
   if (tekst.length < 2 || tekst.length > 60) weiger(400, 'zoektekst van 2 tot 60 tekens');
   const bedrag = zoekBedrag(tekst);

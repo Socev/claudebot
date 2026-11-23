@@ -7,7 +7,10 @@
 // dan eerst de filiaalregel (voorvoegsel van de betaalterminal, filiaalnummer en plaats eraf, bekende ketens op één naam) en dan dezelfde
 // naam/alias-match. Een groep gaat in zijn geheel naar een knoop als alle herkende namen in die groep dezelfde knoop noemen en de groep geen
 // betaaldienst is; anders telt elke post alleen op zijn eigen naam (een IBAN van CCV, Mollie of PayPal draagt veel winkels).
-// Uitvoer per knoop: aantal posten, eerste en laatste datum, de meest voorkomende schrijfwijzen. Geen bedragen, geen IBAN.
+// Uitvoer per knoop: aantal posten, eerste en laatste datum, de meest voorkomende schrijfwijzen. Geen IBAN.
+// wv3944 (besluitenpagina nr 357 = 3C57, David Ja 22-11-2026 18:18): ook de bedragen — per jaar af en bij, de laatste post met bedrag en het
+// gemiddelde per afschrijving over de laatste 12 maanden; voor een eigen entiteit (eigenGeld) hetzelfde over haar eigen rekeningen plus de vijf
+// grootste tegenpartijen. Alleen bankposten: facturen tellen hier niet mee (geen dubbeltelling van bankpost en factuur).
 const fs = require('fs');
 
 function nrm(s) { return String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
@@ -63,20 +66,21 @@ function groepeer(rijen) {
   rijen.forEach(function (r) {
     const key = r.iban ? 'I:' + r.iban : 'N:' + nrm(r.naam);
     if (!g.has(key)) g.set(key, { sleutel: key, iban: !!r.iban, posten: [] });
-    g.get(key).posten.push({ naam: r.naam || '', datum: String(r.datum || '').slice(0, 10) });
+    g.get(key).posten.push({ naam: r.naam || '', datum: String(r.datum || '').slice(0, 10), cent: typeof r.cent === 'number' ? r.cent : null });
   });
   return Array.from(g.values());
 }
 
-function zakelijkeRijen(pad) {
+// ent: alleen de posten van die entiteit (eigenGeld, ook POT); zonder ent alles behalve POT (blok Bank van een andere partij)
+function zakelijkeRijen(pad, ent) {
   const eigen = leesAlles(pad, 'select iban from rekening');
   if (eigen === null) return null;
   const eig = new Set(eigen.map(function (r) { return r.iban; }));
-  const r = leesAlles(pad, "select tegenpartij_iban as iban, tegenpartij_naam as naam, omschrijving as oms, boekdatum as datum from bank_transactie where entiteit <> 'pot' and verwijderd_op is null") || [];
-  return r.filter(function (x) { return !(x.iban && eig.has(x.iban)); }).map(function (x) {
+  const r = leesAlles(pad, "select tegenpartij_iban as iban, tegenpartij_naam as naam, omschrijving as oms, boekdatum as datum, bedrag_centen as cent, entiteit from bank_transactie where verwijderd_op is null") || [];
+  return r.filter(function (x) { return !(x.iban && eig.has(x.iban)) && (ent ? x.entiteit === ent : x.entiteit !== 'pot'); }).map(function (x) {
     let naam = x.naam;
     if (!x.iban && !String(naam || '').trim()) { const m = PIN.exec(String(x.oms || '')); if (m) naam = m[1]; }   // pinbetaling: winkel uit de omschrijving
-    return { iban: x.iban || null, naam: naam || '', datum: x.datum };
+    return { iban: x.iban || null, naam: naam || '', datum: x.datum, cent: typeof x.cent === 'number' ? Math.round(x.cent) : null };
   });
 }
 
@@ -85,18 +89,41 @@ function priveRijen(pad) {
   if (reks === null) return null;
   const eigenaar = new Map(), eigenIban = new Set();
   reks.forEach(function (r) { eigenaar.set(r.rek, String(r.eigenaar || '').toLowerCase()); if (r.iban) eigenIban.add(r.iban); });
-  const r = leesAlles(pad, "select t.rek, t.tegenpartij as naam, t.tegen_iban as iban, t.datum, v.type as typ, v.categorie as cat from transacties t left join verrijking v on v.nr = t.nr" +
+  const r = leesAlles(pad, "select t.rek, t.tegenpartij as naam, t.tegen_iban as iban, t.datum, t.bedrag, v.type as typ, v.categorie as cat from transacties t left join verrijking v on v.nr = t.nr" +
     " where t.vervangen_door is null and t.status <> 'pending'") || [];
   return r.filter(function (x) {
     const e = eigenaar.get(x.rek) || '';
     return !(['pot', 'extern', 'gambia-hulp', 'kind'].indexOf(e) >= 0 || x.typ === 'intern' || (x.iban && eigenIban.has(x.iban)) || x.cat === 'contant geld' || x.cat === 'Gambia-hulp');
-  }).map(function (x) { return { iban: x.iban || null, naam: x.naam || '', datum: x.datum }; });
+  }).map(function (x) { return { iban: x.iban || null, naam: x.naam || '', datum: x.datum, cent: typeof x.bedrag === 'number' ? Math.round(x.bedrag * 100) : null }; });
+}
+
+// ── wv3944 (3C57): bedragen. Per jaar af (negatief, als positief getal) en bij; de laatste post (datum, bedrag met teken); gemiddelde
+// afschrijving over de laatste 12 maanden (365 dagen tot nu). Bedragen in centen. Een post zonder bedrag telt wel als post, niet in de som.
+function grensVan(nu) { const t = typeof nu === 'number' ? nu : Date.now(); return new Date(t - 365 * 86400000).toISOString().slice(0, 10); }
+function geldNieuw() { return { jaren: new Map(), laatste: null, af12: 0, n12: 0 }; }
+function geldTel(g, p, grens) {
+  if (typeof p.cent !== 'number' || !p.datum) return;
+  const j = p.datum.slice(0, 4);
+  if (!g.jaren.has(j)) g.jaren.set(j, { af: 0, bij: 0, n: 0 });
+  const y = g.jaren.get(j);
+  y.n++;
+  if (p.cent < 0) y.af += -p.cent; else y.bij += p.cent;
+  if (!g.laatste || p.datum > g.laatste.datum) g.laatste = { datum: p.datum, cent: p.cent };
+  if (p.cent < 0 && p.datum >= grens) { g.af12 += -p.cent; g.n12++; }
+}
+function geldUit(g) {
+  if (!g) return null;
+  const jaren = Array.from(g.jaren.entries()).sort(function (a, b) { return b[0].localeCompare(a[0]); })
+    .map(function (e) { return { jaar: Number(e[0]), af_cent: e[1].af, bij_cent: e[1].bij, posten: e[1].n }; });
+  return { jaren: jaren, laatste: g.laatste ? { datum: g.laatste.datum, bedrag_cent: g.laatste.cent } : null,
+    gemiddeld: g.n12 ? { af_cent: Math.round(g.af12 / g.n12), betalingen: g.n12, af_totaal_cent: g.af12 } : null };
 }
 
 // Koppel de groepen van één bron aan knopen. → { per: Map(id → { posten, eerste, laatste, namen: Map(naam → n), filiaal }), telling }
 function koppel(groepen, live, opt) {
   const metFiliaal = !(opt && opt.zonderFiliaal);   // zonderFiliaal: alleen de naam/alias-regel (voor de voor/na-meting)
   const per = new Map();
+  const grens = grensVan(opt && opt.nu);
   const telling = { groepen: groepen.length, posten: 0, groepen_ingang: 0, posten_ingang: 0, groepen_naam: 0, groepen_filiaal: 0, nieuw: [] };
   const naar = function (naam) {
     const l = live(naam); if (l) return { id: l, soort: 'naam' };
@@ -117,9 +144,10 @@ function koppel(groepen, live, opt) {
       const m = opNaam.get(p.naam), id = heel || (m && m.id);
       if (!id) return;
       geteld++;
-      if (!per.has(id)) per.set(id, { posten: 0, eerste: null, laatste: null, namen: new Map(), filiaal: false });
+      if (!per.has(id)) per.set(id, { posten: 0, eerste: null, laatste: null, namen: new Map(), filiaal: false, geld: geldNieuw() });
       const x = per.get(id);
       x.posten++;
+      geldTel(x.geld, p, grens);
       if (p.datum && (!x.eerste || p.datum < x.eerste)) x.eerste = p.datum;
       if (p.datum && (!x.laatste || p.datum > x.laatste)) x.laatste = p.datum;
       if (p.naam) x.namen.set(p.naam, (x.namen.get(p.naam) || 0) + 1);
@@ -141,8 +169,8 @@ function koppel(groepen, live, opt) {
 function index(o) {
   const live = naamIndex(o.knopen, o.handvatten, o.isEigen || function () { return false; });
   const uit = { zakelijk: null, prive: null };
-  try { const z = zakelijkeRijen(o.facturenPad); if (z) uit.zakelijk = koppel(groepeer(z), live); } catch (e) { uit.zakelijk_fout = String(e && e.message || e).slice(0, 120); }
-  try { const p = priveRijen(o.bankPad); if (p) uit.prive = koppel(groepeer(p), live); } catch (e) { uit.prive_fout = String(e && e.message || e).slice(0, 120); }
+  try { const z = zakelijkeRijen(o.facturenPad); if (z) uit.zakelijk = koppel(groepeer(z), live, { nu: o.nu }); } catch (e) { uit.zakelijk_fout = String(e && e.message || e).slice(0, 120); }
+  try { const p = priveRijen(o.bankPad); if (p) uit.prive = koppel(groepeer(p), live, { nu: o.nu }); } catch (e) { uit.prive_fout = String(e && e.message || e).slice(0, 120); }
   return uit;
 }
 
@@ -155,9 +183,57 @@ function blokVoor(idx, id) {
     if (!x) return { posten: 0 };
     const namen = Array.from(x.namen.entries()).sort(function (p, q) { return q[1] - p[1]; });
     return { posten: x.posten, eerste: x.eerste, laatste: x.laatste, schrijfwijzen: namen.slice(0, 3).map(function (n) { return String(n[0]).slice(0, 60); }),
-      meer: Math.max(0, namen.length - 3), filiaal: x.filiaal };
+      meer: Math.max(0, namen.length - 3), filiaal: x.filiaal, geld: geldUit(x.geld) };
   };
   return { zakelijk: kant(idx.zakelijk), prive: kant(idx.prive) };
 }
 
-module.exports = { zakelijkeRijen: zakelijkeRijen, priveRijen: priveRijen, nrm: nrm, schoon: schoon, naamIndex: naamIndex, groepeer: groepeer, koppel: koppel, index: index, blokVoor: blokVoor, BETAALDIENST: BETAALDIENST };
+// wv3944 (3C57): geld van een eigen entiteit — haar eigen bankposten (zakelijk: bank_transactie op entiteit, ook POT; 'prive': het bank-archief
+// met de uitsluitingen van priveRijen), zonder overboekingen tussen eigen rekeningen. Per jaar af/bij, laatste post, gemiddelde, en de vijf
+// grootste tegenpartijen naar afschrijving in de laatste 12 maanden (groep = IBAN, anders de naam; naam = de meest voorkomende schrijfwijze;
+// knoop = naam/alias van precies één partij, voor de tik naar haar kaart). o: { facturenPad, bankPad, entiteit, live, nu }
+// → null (bron niet te lezen) of { bron, posten, geld, leveranciers: [{ naam, af_cent, betalingen, knoop }] }.
+const LEV_TOON = 5;
+function eigenGeld(o) {
+  const prive = o.entiteit === 'prive';
+  const rijen = prive ? priveRijen(o.bankPad) : zakelijkeRijen(o.facturenPad, o.entiteit);
+  if (rijen === null) return null;
+  const grens = grensVan(o.nu);
+  const live = typeof o.live === 'function' ? o.live : function () { return null; };
+  const naar = function (naam) { const l = live(naam); if (l) return l; const sc = schoon(naam); return sc ? live(sc.naam) : null; };
+  // groep: een partij (naam/alias of filiaal → knoop) gaat voor. Een IBAN-groep neemt alleen een knoop over als ál haar herkende namen dezelfde
+  // knoop noemen en er geen betaaldienst of terminalvoorvoegsel in zit (de regel van koppel; review MOET 1). Een betaaldienst-IBAN groepeert
+  // nooit: een onherkende post daarop telt op zijn eigen naam (review MOET 2).
+  const ibanInfo = new Map();   // iban → { knopen: Set, dienst }
+  rijen.forEach(function (r) {
+    if (!r.iban) return;
+    if (!ibanInfo.has(r.iban)) ibanInfo.set(r.iban, { knopen: new Set(), dienst: false });
+    const x = ibanInfo.get(r.iban);
+    if (BETAALDIENST.test(String(r.naam || '')) || VOORV.test(String(r.naam || '').trim())) x.dienst = true;
+    const kn = naar(r.naam); if (kn) x.knopen.add(kn);
+  });
+  const ibanKnoop = function (iban) { const x = ibanInfo.get(iban); return x && !x.dienst && x.knopen.size === 1 ? x.knopen.values().next().value : null; };
+  const ibanDienst = function (iban) { const x = ibanInfo.get(iban); return !!(x && x.dienst); };
+  const g = geldNieuw(), tp = new Map();
+  rijen.forEach(function (r) {
+    const p = { naam: r.naam || '', datum: String(r.datum || '').slice(0, 10), cent: r.cent };
+    geldTel(g, p, grens);
+    if (typeof p.cent !== 'number' || p.cent >= 0 || p.datum < grens) return;
+    const kn = naar(p.naam) || (r.iban ? ibanKnoop(r.iban) : null);
+    const sc = schoon(p.naam);
+    const key = kn ? 'K:' + kn : r.iban && !ibanDienst(r.iban) ? 'I:' + r.iban : 'N:' + nrm(sc ? sc.naam : p.naam);
+    if (key === 'N:') return;
+    if (!tp.has(key)) tp.set(key, { af: 0, n: 0, namen: new Map(), knoop: kn || null });
+    const t = tp.get(key);
+    t.af += -p.cent; t.n++;
+    const toon = sc && sc.soort === 'keten' ? sc.naam : p.naam;
+    if (toon) t.namen.set(toon, (t.namen.get(toon) || 0) + 1);
+  });
+  const lev = Array.from(tp.values()).sort(function (a, b) { return b.af - a.af; }).slice(0, LEV_TOON).map(function (t) {
+    const namen = Array.from(t.namen.entries()).sort(function (p, q) { return q[1] - p[1]; });
+    return { naam: namen.length ? String(namen[0][0]).slice(0, 60) : null, af_cent: t.af, betalingen: t.n, knoop: t.knoop };
+  });
+  return { bron: prive ? 'prive' : 'zakelijk', posten: rijen.length, geld: geldUit(g), leveranciers: lev };
+}
+
+module.exports = { eigenGeld: eigenGeld, geldUit: geldUit, zakelijkeRijen: zakelijkeRijen, priveRijen: priveRijen, nrm: nrm, schoon: schoon, naamIndex: naamIndex, groepeer: groepeer, koppel: koppel, index: index, blokVoor: blokVoor, BETAALDIENST: BETAALDIENST };
