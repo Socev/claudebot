@@ -54,6 +54,28 @@ function nawStand(r) {
 }
 
 /*
+ * wv3900 (besluit 2C83, punt a): betalingen uit een betaalbestand (sepa_regel) aan een bekende waarnemersrekening tellen in de rekenregel nog niet
+ * mee (2B43: de bank toont één batchregel). Alleen een TELLER zodat het scherm eerlijk kan zeggen dat het bedrag nog oploopt; het bedrag zelf
+ * verandert niet. Een regel met een losse bankregel (zelfde rekening, zelfde bedrag, geboekt vanaf 5 dagen vóór de uitvoerdatum) telt al mee en
+ * valt hier weg. → Map entiteit → { n, centen }, of null als facturen.sqlite (nog) geen sepa_regel heeft.
+ */
+function batchNietGeteld(dp, fac, jaar) {
+  const ibans = dp.prepare('SELECT iban FROM rekening').all().map((r) => r.iban);
+  const uit = new Map();
+  if (!ibans.length) return uit;
+  let rijen;
+  try {
+    rijen = fac.prepare("SELECT b.entiteit AS entiteit, count(*) AS n, sum(r.centen) AS centen FROM sepa_regel r JOIN sepa_batch b ON b.id = r.batch"
+      + " WHERE b.entiteit IN ('tolgaarde', 'groenhouten') AND r.uitvoerdatum >= ? AND r.uitvoerdatum < ? AND r.iban IN (" + ibans.map(() => '?').join(',') + ')'
+      + ' AND NOT EXISTS (SELECT 1 FROM bank_transactie t WHERE t.verwijderd_op IS NULL AND t.entiteit = b.entiteit AND t.tegenpartij_iban = r.iban'
+      + "   AND t.bedrag_centen = -r.centen AND t.boekdatum >= date(r.uitvoerdatum, '-5 days'))"
+      + ' GROUP BY b.entiteit').all(jaar + '-01-01', (Number(jaar) + 1) + '-01-01', ...ibans);
+  } catch (e) { return null; }   // oud bestand zonder sepa-tabellen: niet te zeggen (geen 0 verzinnen)
+  for (const r of rijen) uit.set(r.entiteit, { n: Number(r.n) || 0, centen: Number(r.centen) || 0 });
+  return uit;
+}
+
+/*
  * opgaaf(dp, fac, jaar, nu, maanden) → { jaar, praktijken, jaren, rooster }. maanden = rijen van sb_dienst_maanden [{pr, obj, maand, dagen}] of
  * null (rooster niet te lezen). Puur: alleen SELECT op de twee verbindingen.
  */
@@ -63,6 +85,7 @@ function opgaaf(dp, fac, jaar, nu, maanden) {
   const personen = new Map(dp.prepare('SELECT object_id, naam FROM persoon').all().map((r) => [r.object_id, r.naam]));
   const rollen = new Set(dp.prepare('SELECT object_id, praktijk FROM rol').all().map((r) => r.object_id + '|' + r.praktijk));
   const roosterOk = Array.isArray(maanden);
+  const batch = batchNietGeteld(dp, fac, jaar);   // wv3900
   // dagen per (persoon, praktijk): in het jaar, in de controleperiode (1-11 vorig jaar t/m 31-12), en per maand van het jaar
   const dagJaar = new Map(), dagRuim = new Map(), perMaand = new Map();
   const vanRuim = (Number(jaar) - 1) + '-11';
@@ -106,7 +129,9 @@ function opgaaf(dp, fac, jaar, nu, maanden) {
     return { code: p.code, entiteit: p.entiteit, naam: p.naam, tm_bankdag: tm, jaar_compleet: !!tm && tm >= jaar + '-12-31',
       personen: alle, n_betaald: echt.length, som_centen: p.som_centen, af_n: p.af_n, terug_n: p.terug_n, terug_centen: p.terug_centen,
       naw_compleet: echt.filter((r) => r.naw.stand === 'compleet').length, naw_onvolledig: echt.filter((r) => r.naw.stand !== 'compleet').length,
-      vragen: alle.filter((r) => r.vraag).length };
+      vragen: alle.filter((r) => r.vraag).length,
+      // wv3900: null = niet vast te stellen (geen sepa-tabellen); anders aantal en som van batchbetalingen die nog niet meetellen
+      batch_niet_geteld: batch ? (batch.get(p.entiteit) || { n: 0, centen: 0 }) : null };
   });
   const dit = Number(dagAmsterdam(nu).slice(0, 4));
   const jaren = [];

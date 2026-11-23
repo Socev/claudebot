@@ -181,3 +181,24 @@ test('route: rooster-RPC faalt → 200 met rooster "niet te lezen"; kapotte fact
   const c = await route({ openDocplan: () => null }).r.app({ methode: 'GET', pad: '/app/facturen/jaaropgaaf', rol: EIG, primair: true, nu: NU });
   assert.strictEqual(c.j.leeg, true);
 });
+
+// wv3900 (besluit 2C83 punt a): teller voor betalingen uit een betaalbestand die de rekenregel (nog) niet meetelt; het bedrag zelf verandert niet
+test('batch_niet_geteld: sepa-regels aan een waarnemersrekening zonder losse bankregel; null zonder sepa-tabellen', () => {
+  const zonder = M.opgaaf(docplan(), facturen(), '2026', NU, MAANDEN);
+  assert.ok(zonder.praktijken.every((p) => p.batch_niet_geteld === null), 'oud bestand zonder sepa_regel: niet vast te stellen, geen 0');
+  const fac = facturen();
+  fac.exec('create table sepa_batch (id text primary key, entiteit text); create table sepa_regel (id integer primary key, batch text, uitvoerdatum text, centen integer, iban text)');
+  fac.exec("insert into sepa_batch values ('b1', 'tolgaarde'), ('b2', 'groenhouten'), ('b3', 'pot')");
+  const r = fac.prepare('insert into sepa_regel (batch, uitvoerdatum, centen, iban) values (?, ?, ?, ?)');
+  r.run('b1', '2026-11-05', 40000, 'NL00TEST0000000011');   // telt niet mee (geen losse bankregel)
+  r.run('b1', '2026-11-05', 60000, 'NL00TEST0000000021');   // telt niet mee
+  r.run('b1', '2026-11-05', 9999, 'NL00TEST0000000099');    // geen waarnemersrekening: weg
+  r.run('b1', '2025-12-20', 7000, 'NL00TEST0000000011');    // ander jaar: weg
+  r.run('b2', '2026-05-01', 30000, 'NL00TEST0000000011');   // staat al als losse bankregel (GH 1-5, -30000): telt al mee
+  r.run('b3', '2026-11-05', 5000, 'NL00TEST0000000011');    // andere entiteit: weg
+  const j = M.opgaaf(docplan(), fac, '2026', NU, MAANDEN);
+  const tg = j.praktijken.find((p) => p.code === 'TG'), gh = j.praktijken.find((p) => p.code === 'GH');
+  assert.deepStrictEqual(tg.batch_niet_geteld, { n: 2, centen: 100000 });
+  assert.deepStrictEqual(gh.batch_niet_geteld, { n: 0, centen: 0 });
+  assert.strictEqual(tg.som_centen, 350000, 'het bedrag zelf blijft de rekenregel van Waarnemers');
+});
