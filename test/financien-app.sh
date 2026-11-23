@@ -157,6 +157,24 @@ toets('stroom: externe rekening met zijn naam en extern: true (wv1957), eigen re
 toets('buffer: drie volledige maanden, lopende maand apart', uit.buffer && uit.buffer.per_maand.length === 3 && uit.buffer.per_maand[2].maand === F.maandPlus(mNu, -1) && uit.buffer.lopend.maand === mNu, uit.buffer);
 toets('deze maand: in en uit als positieve getallen', uit.deze_maand.uit >= 0 && uit.deze_maand.in >= 0 && uit.deze_maand.maand === mNu, uit.deze_maand);
 
+// ── wv3964: tweede niet-bunq-rekening (Enable Banking, eigenaar David, zoals sinds 4-11-2026): buffer en dekking blijven op de vaste-lastenrekening ──
+{
+  const BD4 = path.join(W, 'bank4'), a4 = A.open(BD4);
+  A.rekeningenSync(a4, Object.assign({}, REK, { eb: { uid: 'u9', bank: 'Rabobank', naam: 'Eigen betaal', iban: 'NL66RABO0000000006', sessie: 's9' } }));
+  A.corrigeer(a4, { rek: 'eb', eigenaar: 'David' }); A.corrigeer(a4, { rek: 'el', eigenaar: 'extern' });
+  const laatste = VL.reduce((m, x) => (x.datum > m ? x.datum : m), '');
+  const VL4 = VL.map((x, i) => Object.assign({}, x, { id: 'b4' + x.id }, x.datum === laatste && i === VL.map((y) => y.datum).lastIndexOf(laatste) ? { saldo_na: 1 } : {}));
+  A.bij(a4, 'vl', VL4, { volledigVanaf: mnd[0] + '-01' }); A.bij(a4, 'pr', PR.map((x) => Object.assign({}, x, { id: 'b4' + x.id })), {});
+  A.bij(a4, 'el', EL.map((x) => Object.assign({}, x, { id: 'b4' + x.id })), {});
+  A.bij(a4, 'eb', [p('eb:1', dg(mNu, 1), -20, 'Albert Heijn 9', 'boodschappen')], {});
+  const u4 = F.bereken(A, a4, { vault: VAULT }), b4 = F.briefing(A, a4, { vault: VAULT });
+  toets('wv3964: twee niet-bunq-rekeningen → buffer gevuld, dezelfde rekening als de vaste lasten', u4.buffer && u4.buffer.per_maand.length === 3 && u4.vaste_lasten &&
+    u4.buffer.rekening === u4.vaste_lasten.rekening && u4.buffer.rekening === 'Vaste lasten' && u4.fouten.length === 0, [u4.buffer, u4.fouten]);
+  toets('wv3964: dekking gerekend (saldo 1 dekt de hypotheek op de 1e niet) en als signaal in de App', u4.buffer && u4.buffer.dekking && u4.buffer.dekking.genoeg === false &&
+    u4.signalen.some((x) => x.soort === 'dekking'), u4.buffer && u4.buffer.dekking);
+  toets('wv3964: geld-briefing ziet de buffer weer (buffer_ruim bij stortingen > uitgaven), zonder fout', b4.stand.buffer_ruim === true && b4.fouten.length === 0, [b4.stand, b4.fouten]);
+  a4.db.close();
+}
 // ── koppeling midden in de maand (zoals de echte ABN-koppeling op 30-4): die maand is onvolledig ──
 {
   const BD2 = path.join(W, 'bank2'), a2 = A.open(BD2);

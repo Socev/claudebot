@@ -343,7 +343,8 @@ function blokVasteLasten(A, a, nu, links, signalen, pp) {
     vaste_storting: (vl.vaste_storting || []).map(function (s) { return { van: veilig(s.van, 30) || 'eigen rekening', bedrag: getal(s.bedrag), dag: s.dag | 0 }; }) };
 }
 function blokStroom(A, a, m) {
-  const s = A.stroom(a, { maand: m });
+  // wv3964: rek meegeven; stroom() zonder rek vindt sinds 4-11-2026 (tweede niet-bunq-rekening) geen vaste-lastenrekening → buffer leeg
+  const s = A.stroom(a, { maand: m, rek: vasteRekening(a) || undefined });
   return { maand: m, peildatum: s.peildatum, paren: (s.overboekingen || []).slice(0, 40).map(function (o) {
     return { van: rekNaam(o.van, false), naar: rekNaam(o.naar, !!o.extern), extern: o.extern ? true : undefined, aantal: o.aantal | 0, som: getal(o.som),
       vast: (o.vast || []).slice(0, 6).map(function (v) { return { bedrag: getal(v.bedrag), dag: v.dag | 0 }; }),
@@ -576,7 +577,7 @@ function briefing(A, a, o) {
   const stortingen = blok('storting', function () { return A.vasteLasten(a, { rek: rek, maand: maandPlus(M, -1) }).vaste_storting || []; }) || [];
   const dagD = Number(D.slice(8, 10)), stortingVoorbij = stortingen.every(function (s) { return (s.dag | 0) + 2 < dagD; });
   blok('buffer', function () {
-    const b1 = A.stroom(a, { maand: maandPlus(M, -1) }).buffer, b2 = A.stroom(a, { maand: maandPlus(M, -2) }).buffer;
+    const b1 = A.stroom(a, { maand: maandPlus(M, -1), rek: rek }).buffer, b2 = A.stroom(a, { maand: maandPlus(M, -2), rek: rek }).buffer;   // wv3964: rek mee
     const krap = !!(b1 && b2 && b1.rollend_3_maanden < 0 && b2.rollend_3_maanden < 0);
     uit.stand.buffer_krap = krap;
     uit.stand.buffer_ruim = !!(b1 && b1.rollend_3_maanden > 0);   // pas dan mag een volgende krapte weer gemeld worden
@@ -585,7 +586,7 @@ function briefing(A, a, o) {
       sig.push({ soort: 'buffer', sleutel: 'buffer', naam: 'Vaste-lastenrekening', ernst: 'wacht',
         zin: 'De vaste-lastenrekening loopt leeg: ' + mndJaar(per[0].maand + '-01') + ' t/m ' + mndJaar(per[per.length - 1].maand + '-01') + ' ging er ' + eur(-b1.rollend_3_maanden) + ' meer af dan de stortingen (ook de maand ervoor al negatief).' });
     }
-    const nu = A.stroom(a, { maand: M }).buffer, dk = nu && nu.dekking;
+    const nu = A.stroom(a, { maand: M, rek: rek }).buffer, dk = nu && nu.dekking;
     if (dk && !dk.genoeg && dk.nog_af_tot && stortingVoorbij) sig.push({ soort: 'dekking', sleutel: 'dekking|' + M, naam: 'Vaste-lastenrekening', ernst: 'fout', kaart: 'dekking',
       bedrag: getal(dk.vaste_lasten_nog_af - dk.saldo), tot: dk.nog_af_tot,
       zin: 'Het saldo van de vaste-lastenrekening dekt de vaste lasten tot en met ' + dk.nog_af_tot.split('-').reverse().map(Number).join('-') + ' niet: er komt nog ' + eur(dk.vaste_lasten_nog_af) + ' af.' });
