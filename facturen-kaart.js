@@ -93,7 +93,10 @@ async function bijwerken(x, io) {
 const ONBETAALD = /^facturen-onbetaald-([0-9a-f]{16})$/;
 const ONBETAALD_DAGEN = 7;
 const MAX_ONBETAALD = 5;
-const OPEN_SPOREN = ['te_betalen', 'ingevoerd', 'incasso_verwacht', 'betaald_vooraf'];
+// wv3981 (David 23-11-2026: "Ik wil geen waarschuwingen dat iemand niet incasseert - dat is hun probleem; ze incasseren altijd rond de 17e tot 23e, geduld dus"):
+// een incasso_verwacht-factuur krijgt nooit een kaart "betaling nakijken". Een kaart die er al was gaat dicht (door agent, met dat bewijs).
+const OPEN_SPOREN = ['te_betalen', 'ingevoerd', 'betaald_vooraf'];
+const INCASSO_BEWIJS = 'David 23-11: incasso uitblijven niet melden (hun probleem, ze incasseren rond de 17e tot 23e).';
 function isoPlus(iso, dagen) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
   if (!m) return null;
@@ -119,7 +122,7 @@ function onbetaald(fdb) {
     "FROM kaart k WHERE f.leverancier IS NOT NULL AND EXISTS (SELECT 1 FROM kaart_regel kr WHERE kr.kaart = k.id AND kr.leverancier = f.leverancier)) AS kaart_tot " +
     "FROM factuur f LEFT JOIN leverancier l ON l.id = f.leverancier LEFT JOIN entiteit e ON e.sleutel = f.entiteit " +
     "WHERE f.status IN ('in_wachtrij','wordt_verstuurd','concept_klaar','verstuurd','verzending_mislukt','concept_verwijderd') AND f.entiteit IS NOT NULL AND f.entiteit <> 'prive' " +
-    "AND f.soort = 'factuur' AND f.incl > 0 AND f.betaalspoor IN ('te_betalen','ingevoerd','incasso_verwacht','betaald_vooraf') " +
+    "AND f.soort = 'factuur' AND f.incl > 0 AND f.betaalspoor IN ('te_betalen','ingevoerd','betaald_vooraf') " +
     "AND (SELECT count(*) FROM koppeling k WHERE k.factuur = f.id AND coalesce(k.methode, '') <> 'sepa_terug') <= " +
     "(SELECT count(*) FROM koppeling k WHERE k.factuur = f.id AND k.methode = 'sepa_terug') " +
     "AND NOT EXISTS (SELECT 1 FROM voorstel v WHERE v.status = 'open' AND EXISTS (SELECT 1 FROM json_each(v.facturen) j WHERE j.value = f.id)) " +
@@ -130,11 +133,15 @@ function onbetaald(fdb) {
     "(SELECT max(t) FROM (SELECT coalesce(kr.koppeling_op, kr.aangemaakt_op) AS t FROM kaart_regel kr WHERE kr.factuur = f.id " +
     "UNION ALL SELECT coalesce(pr.koppeling_op, pr.aangemaakt_op) FROM paypal_regel pr WHERE pr.factuur = f.id)))").all();
 }
+// wv3981: de ids van facturen die op incasso_verwacht staan (geen kaart; een bestaande kaart voor zo'n factuur gaat dicht met INCASSO_BEWIJS).
+function incassoIds(fdb) {
+  return new Set(fdb.db.prepare("SELECT id FROM factuur WHERE betaalspoor = 'incasso_verwacht'").all().map(function (r) { return r.id; }));
+}
 function onbetaaldKaart(r, grens, nuKort) {
   const naam = String(r.naam || 'onbekende leverancier').slice(0, 50);
   const cc = !!r.kaart_tot;   // wv2959: leverancier betaalt (ook) via de creditcard: beide bronnen genoemd, de oudste stand telt
   const tot = cc && r.kaart_tot < r.bank_tot ? r.kaart_tot : r.bank_tot;
-  const wat = r.betaalspoor === 'betaald_vooraf' ? 'staat als al betaald, maar ' : r.betaalspoor === 'incasso_verwacht' ? 'zou geïncasseerd worden, maar ' :
+  const wat = r.betaalspoor === 'betaald_vooraf' ? 'staat als al betaald, maar ' :
     r.betaalspoor === 'ingevoerd' ? 'staat als ingevoerd in de bank, maar ' : '';
   return { sleutel: 'facturen-onbetaald-' + r.id, soort: 'doen', waar: 'overal', prive: false, duur_min: 5, volgorde: 30,
     titel: ('Factuur ' + naam + ' — betaling nakijken').slice(0, 90),
@@ -149,8 +156,8 @@ function onbetaaldKaart(r, grens, nuKort) {
     herkomst: { module: MODULE, handmatig: 'facturen', doel: { scherm: 'facturen', focus: 'factuur:' + r.id } } };
 }
 /*
- * onbetaaldPlan({ rijen, punten, vandaag, nuKort }) → { zet: [kaart], dicht: [{ sleutel, van, bewijs }], wacht_op_bank: n, wacht_op_kaart: n }
- *   rijen: onbetaald(fdb); punten: mk_voor_jou_lijst (alle, ook gesloten): [{ sleutel, status }].
+ * onbetaaldPlan({ rijen, punten, vandaag, nuKort, incasso }) → { zet: [kaart], dicht: [{ sleutel, van, bewijs, reden? }], wacht_op_bank: n, wacht_op_kaart: n }
+ *   rijen: onbetaald(fdb); punten: mk_voor_jou_lijst (alle, ook gesloten): [{ sleutel, status }]; incasso: incassoIds(fdb) (Set, optioneel).
  */
 function onbetaaldPlan(x) {
   const punten = (x.punten || []).filter(function (p) { return p && ONBETAALD.test(String(p.sleutel)); });
@@ -175,10 +182,13 @@ function onbetaaldPlan(x) {
   }
   for (const p of punten) {
     if ((p.status === 'open' || p.status === 'later') && !nog.has(p.sleutel)) {
-      uit.dicht.push({ sleutel: p.sleutel, van: p.status, bewijs: ((x.nuKort ? x.nuKort + ': ' : '') + 'de factuur is nu aan een betaling gekoppeld of staat niet meer open.') });
+      const incasso = !!x.incasso && x.incasso.has(String(p.sleutel).slice('facturen-onbetaald-'.length));
+      const nu = x.nuKort ? x.nuKort + ': ' : '';
+      uit.dicht.push(incasso ? { sleutel: p.sleutel, van: p.status, bewijs: nu + INCASSO_BEWIJS, reden: 'facturen-onbetaald: incasso uitblijven wordt niet gemeld (David 23-11)' }
+        : { sleutel: p.sleutel, van: p.status, bewijs: nu + 'de factuur is nu aan een betaling gekoppeld of staat niet meer open.' });
     }
   }
   return uit;
 }
 
-module.exports = { MODULE, SLEUTEL, herkomst, kaart, bijwerken, teBeoordelen, ONBETAALD, onbetaald, onbetaaldPlan, onbetaaldKaart };
+module.exports = { MODULE, SLEUTEL, herkomst, kaart, bijwerken, teBeoordelen, ONBETAALD, onbetaald, incassoIds, onbetaaldPlan, onbetaaldKaart, INCASSO_BEWIJS };

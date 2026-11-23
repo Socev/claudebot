@@ -633,7 +633,7 @@ test('zelf betaald én geïncasseerd → signaal dubbel betaald; terugvraagtekst
   assert.deepEqual(soorten(controle({ transacties: [i1, i2], facturen: [f2] })), ['geen_factuur']);
 });
 
-test('incasso niet gezien (> 14 dagen na vervaldatum), te betalen niet betaald, ingevoerd niet gezien (bank voorbij 2 werkdagen; wv2057)', () => {
+test('te betalen niet betaald, ingevoerd niet gezien (bank voorbij 2 werkdagen; wv2057); een uitblijvende incasso geeft sinds wv3981 geen signaal meer', () => {
   const fx = [
     fac({ id: 'i1', leverancier: 'lc', nummer: 'C-20', incl: 5000, betaalwijze: 'incasso', betaalspoor: 'incasso_verwacht', factuurdatum: '2026-09-01', vervaldatum: '2026-09-20' }),
     fac({ id: 'i2', leverancier: 'lc', nummer: 'C-21', incl: 5100, betaalwijze: 'incasso', betaalspoor: 'incasso_verwacht', factuurdatum: '2026-10-01', vervaldatum: '2026-10-15' }),
@@ -647,30 +647,29 @@ test('incasso niet gezien (> 14 dagen na vervaldatum), te betalen niet betaald, 
   // termijn t/m 20-10) nog niet te beoordelen
   const bij = tx({ boekdatum: '2026-10-19', bedrag_centen: -12345, tegenpartij_iban: LEV.BD, tegenpartij_naam: 'Gemeente' });   // een afschrijving: de rekening is actief
   const r = controle({ transacties: [bij], facturen: fx });
-  assert.deepEqual(r.signalen.map((s) => [s.soort, s.facturen[0]]).sort(), [['incasso_niet_gezien', 'i1'], ['ingevoerd_niet_gezien', 'g1'], ['te_betalen_niet_betaald', 'p1']]);
-  assert.deepEqual(soorten(controle({ transacties: [], facturen: fx })), ['incasso_niet_gezien', 'te_betalen_niet_betaald'], 'zonder bankgegevens geen "niet gezien"');
+  // wv3981 (David 23-11-2026: "geen waarschuwingen dat iemand niet incasseert"): i1 en i2 staan ver na hun vervaldatum, maar geen signaal
+  assert.deepEqual(r.signalen.map((s) => [s.soort, s.facturen[0]]).sort(), [['ingevoerd_niet_gezien', 'g1'], ['te_betalen_niet_betaald', 'p1']]);
+  assert.deepEqual(soorten(controle({ transacties: [], facturen: fx })), ['te_betalen_niet_betaald'], 'zonder bankgegevens geen "niet gezien"');
+  for (const vandaag of ['2026-10-22', '2026-11-30', '2027-03-01'])
+    assert.deepEqual(soorten(B.bankcontrole({ vandaag, leveranciers: LEVS, rekeningen: REKENINGEN, transacties: [bij], facturen: [fx[0], fx[1]] })).filter((x) => x !== 'geen_factuur'), [], 'incasso uitgebleven: nooit een signaal, ook na maanden (' + vandaag + ')');
   assert.equal(B.werkdagenTussen('2026-10-13', '2026-10-22'), 7);
   assert.equal(B.werkdagenTussen('2026-10-16', '2026-10-22'), 4);
-  const s = r.signalen.find((x) => x.soort === 'incasso_niet_gezien');
+  // de soort bestaat nog voor oude rijen: de knoppen blijven werken (Toch zelf betalen, Afwachten)
+  const s = B.maakSignaal('incasso_niet_gezien', { facturen: ['i1'], entiteit: fx[0].entiteit, leverancier: 'lc', bedrag_centen: 5000, datum: '2026-09-20' });
   const a = B.afhandelSignaal(s, 'afwachten', { wie: 'eigenaar', nu: '2026-10-22T10:00:00Z' });
   assert.equal(a.signaal.sluimer_tot, '2026-11-05');
-  // na de sluimer komt hij terug; ervoor niet; een gewoon afgehandeld signaal nooit
-  const voor = controle({ transacties: [], facturen: fx, bestaandeSignalen: [a.signaal] });
-  assert.equal(voor.signalen.filter((x) => x.soort === 'incasso_niet_gezien').length, 0);
-  assert.deepEqual(voor.heropenen, []);
+  // ook een sluimerend oud signaal komt niet meer terug (geen nieuwe gebeurtenis meer): niets heropenen, niets nieuws
   const na = B.bankcontrole({ vandaag: '2026-11-05', leveranciers: LEVS, rekeningen: REKENINGEN, transacties: [], facturen: [fx[0]], bestaandeSignalen: [a.signaal] });
-  assert.deepEqual(na.signalen, []);   // geen tweede rij met dezelfde sleutel: de bestaande gaat weer open
-  assert.deepEqual(na.heropenen, [{ sleutel: a.signaal.sleutel, soort: 'incasso_niet_gezien' }]);
-  // staat dezelfde sleutel er ook open, dan wint open: niets heropenen
-  assert.deepEqual(B.bankcontrole({ vandaag: '2026-11-05', leveranciers: LEVS, rekeningen: REKENINGEN, transacties: [], facturen: [fx[0]], bestaandeSignalen: [s, a.signaal] }).heropenen, []);
+  assert.deepEqual(na.signalen, []);
+  assert.deepEqual(na.heropenen, []);
   const zelf = B.afhandelSignaal(s, 'toch_zelf_betalen', { wie: 'eigenaar', nu: '2026-10-22T10:00:00Z' });
   assert.deepEqual(zelf.gevolgen, [{ actie: 'betaalspoor', factuur: 'i1', gebeurtenis: 'toch_zelf_betalen' }]);
-  assert.equal(controle({ transacties: [], facturen: fx, bestaandeSignalen: [zelf.signaal] }).signalen.filter((x) => x.soort === 'incasso_niet_gezien').length, 0);
-  // open signaal met dezelfde sleutel → niet nog eens
-  assert.equal(controle({ transacties: [], facturen: fx, bestaandeSignalen: r.signalen }).signalen.length, 0);
+  // een factuur die David alsnog zelf betaalt (te_betalen) krijgt wél het gewone "te betalen, niet betaald"
+  const alsnog = Object.assign({}, fx[0], { betaalspoor: 'te_betalen' });
+  assert.deepEqual(soorten(B.bankcontrole({ vandaag: '2026-10-22', leveranciers: LEVS, rekeningen: REKENINGEN, transacties: [bij], facturen: [alsnog] })), ['te_betalen_niet_betaald']);
 });
 
-test('incasso niet gezien → toch gevonden: incasso van een bekende incassant komt binnen → gekoppeld, geen signaal', () => {
+test('incasso uitgebleven → toch gevonden: incasso van een bekende incassant komt binnen → gekoppeld, geen signaal', () => {
   const f = fac({ id: 'i1', leverancier: 'lc', nummer: 'C-20', incl: 5000, betaalwijze: 'incasso', betaalspoor: 'incasso_verwacht', factuurdatum: '2026-09-01', vervaldatum: '2026-09-20' });
   const t = tx({ boekdatum: '2026-10-20', bedrag_centen: -5000, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000301', tegenpartij_iban: LEV.C });
   const r = controle({ transacties: [t], facturen: [f] });
@@ -1304,7 +1303,7 @@ test('wv1415 diffreview: terugboeking + handbetaling in één upload → betaald
   const fi = Object.assign({}, f, { betaalwijze: 'incasso', betaalspoor: 'incasso_verwacht', uitvoer_op: null });
   const sig = (vandaag, fx) => soorten(controle({ vandaag, transacties: [af1, terug], facturen: [fx], sepa: [p1], koppelingen: kop, bestaandeSignalen: [{ sleutel: sl, status: 'afgehandeld' }] }));
   assert.deepEqual(sig('2026-10-20', fi), [], 'incasso: nog binnen de termijn');
-  assert.deepEqual(sig('2026-10-31', fi), ['incasso_niet_gezien']);
+  assert.deepEqual(sig('2026-10-31', fi), [], 'wv3981: een uitblijvende incasso geeft geen signaal meer, ook ver na de terugboeking');
   const ft = Object.assign({}, f, { betaalspoor: 'te_betalen', uitvoer_op: null });
   assert.deepEqual(sig('2026-10-15', ft), []);
   assert.deepEqual(sig('2026-10-17', ft), ['te_betalen_niet_betaald']);

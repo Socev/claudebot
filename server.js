@@ -21493,12 +21493,12 @@ async function facturenKaartRonde() {
       facturenKaartStaat.onbetaaldOp = Date.now();   // hooguit eens per half uur (de ronde loopt ook na elke schrijvende Facturen-route)
       try {
         const alle = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
-        const plan = facturenKaartMod.onbetaaldPlan({ rijen: facturenKaartMod.onbetaald(fdb), vandaag: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }),
+        const plan = facturenKaartMod.onbetaaldPlan({ rijen: facturenKaartMod.onbetaald(fdb), incasso: typeof facturenKaartMod.incassoIds === 'function' ? facturenKaartMod.incassoIds(fdb) : null, vandaag: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }),
           nuKort: bankNuKort(), punten: ((alle && alle.punten) || []).map(function (p) { return { sleutel: p.sleutel, status: p.status }; }) });
         const ob = { gezet: 0, dicht: 0, wacht_op_bank: plan.wacht_op_bank, wacht_op_kaart: plan.wacht_op_kaart || 0, fouten: 0 };
         for (const k of plan.zet) { try { const r = await appSbRpc('mk_voor_jou_zet', { p: k }); if (r && r.sleutel) ob.gezet++; else ob.fouten++; } catch (e) { ob.fouten++; logError('facturen-onbetaald', e); } }
         for (const d of plan.dicht) {
-          try { await appSbRpc('mk_voor_jou_status', { p_sleutel: d.sleutel, p_van: d.van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: d.bewijs, p_reden: 'facturen-onbetaald: betaling gekoppeld of niet meer open' }); ob.dicht++; }
+          try { await appSbRpc('mk_voor_jou_status', { p_sleutel: d.sleutel, p_van: d.van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: d.bewijs, p_reden: d.reden || 'facturen-onbetaald: betaling gekoppeld of niet meer open' }); ob.dicht++; }
           catch (e) { ob.fouten++; logError('facturen-onbetaald', e); }
         }
         if (ob.gezet || ob.dicht) appStaat.vjCache = null;

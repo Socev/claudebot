@@ -508,6 +508,17 @@ test('wv2959 onbetaald: kaartleverancier krijgt de creditcardstand; kaart_regel.
   D.voegToe(t.fdb, 'leverancier', { id: bankLev, naam: 'Bankbetaald Proef B.V.', genormaliseerd: 'bankbetaald proef b v', aangemaakt_op: '2026-01-01T00:00:00Z' });
   const bank = factuur(bankLev, 'Bankbetaald Proef B.V.', '2026-05-04', 1210);
   const rij = (id) => KA.onbetaald(t.fdb).find((r) => r.id === id);
+  // wv3981 (David 23-11-2026: "ik wil geen waarschuwingen dat iemand niet incasseert"): een incasso_verwacht-factuur is nooit kandidaat voor "betaling nakijken";
+  // een kaart die er al was gaat dicht met dat bewijs (door agent), ook als er niets gekoppeld is en de bank ver voorbij de grens loopt
+  const inc = factuur(bankLev, 'Bankbetaald Proef B.V.', '2026-05-04', 777);
+  t.fdb.db.prepare("UPDATE factuur SET betaalwijze = 'incasso', betaalspoor = 'incasso_verwacht' WHERE id = ?").run(inc);
+  assert.equal(rij(inc), undefined, 'incasso: geen kandidaat');
+  assert.ok(KA.incassoIds(t.fdb).has(inc) && !KA.incassoIds(t.fdb).has(bank));
+  const pi = KA.onbetaaldPlan({ rijen: KA.onbetaald(t.fdb), incasso: KA.incassoIds(t.fdb), punten: [{ sleutel: 'facturen-onbetaald-' + inc, status: 'open' }, { sleutel: 'facturen-onbetaald-' + bank, status: 'open' }], vandaag: '2027-01-01', nuKort: '1-1 08:00' });
+  assert.deepEqual(pi.zet, [], 'geen nieuwe kaarten: de bankfactuur heeft er al een, de incassofactuur krijgt er geen');
+  assert.deepEqual(pi.dicht.map((d) => d.sleutel), ['facturen-onbetaald-' + inc], 'alleen de incassokaart gaat dicht; de bankkaart blijft staan')
+  assert.match(pi.dicht[0].bewijs, /David 23-11: incasso uitblijven niet melden/);
+  assert.match(pi.dicht[0].reden, /incasso uitblijven/);
   assert.equal(rij(wolk).kaart_tot, '2026-04-20', 'kaartstand = periode_tot van het overzicht');
   assert.equal(rij(wolk).bank_tot, '2026-06-30');
   assert.equal(rij(bank).kaart_tot, null, 'bankleverancier: geen kaartstand');

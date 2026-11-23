@@ -190,7 +190,8 @@ test('wv1917 onbetaald: is de factuur gekoppeld of niet meer open, dan gaat een 
 test('wv1917 onbetaald: koppeling in server.js (eens per half uur, eigen schakelaar FACTUREN_KAART)', () => {
   const server = fs.readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /facturenKaartMod\.onbetaaldPlan\(\{ rijen: facturenKaartMod\.onbetaald\(fdb\)/);
-  assert.match(server, /p_reden: 'facturen-onbetaald: betaling gekoppeld of niet meer open'/);
+  assert.match(server, /p_reden: d\.reden \|\| 'facturen-onbetaald: betaling gekoppeld of niet meer open'/);
+  assert.match(server, /incasso: typeof facturenKaartMod\.incassoIds === 'function'/);
 });
 
 test('wv1917 diffreview: in een batch met latere uitvoerdatum telt de grens vanaf die datum', () => {

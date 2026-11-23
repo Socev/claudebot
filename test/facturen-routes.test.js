@@ -2286,6 +2286,14 @@ test('wv2057 failsafe: batch van drie met één ontbrekende betaling → precies
     .run(D.nieuwId(), 'ingevoerd_niet_gezien:|' + h + '|v=2026-10-01', JSON.stringify([h]), JSON.stringify({ verwacht: '2026-10-01' }), new Date(N2).toISOString());
   F.bankcontroleToepassen(t.fdb, N2 + 240000);
   assert.equal(t.fdb.db.prepare("SELECT afhandeling FROM signaal WHERE sleutel = ?").get('ingevoerd_niet_gezien:|' + h + '|v=2026-10-01').afhandeling, 'niet_meer_ingevoerd');
+  // wv3981 (David 23-11-2026): een nog open "incasso niet gezien" (van vóór het besluit) gaat bij de volgende controle vanzelf dicht: niet_meer_gemeld; auditrij erbij
+  const oud = D.nieuwId();
+  t.fdb.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, entiteit, facturen, details, aangemaakt_op) VALUES (?, ?, 'incasso_niet_gezien', 'Incasso niet gezien', 'tolgaarde', ?, NULL, ?)")
+    .run(oud, 'incasso_niet_gezien:|' + h, JSON.stringify([h]), new Date(N2).toISOString());
+  F.bankcontroleToepassen(t.fdb, N2 + 300000);
+  assert.deepEqual({ ...t.fdb.db.prepare("SELECT status, afhandeling, wie FROM signaal WHERE id = ?").get(oud) }, { status: 'afgehandeld', afhandeling: 'niet_meer_gemeld', wie: 'bankcontrole' });
+  assert.ok(t.fdb.db.prepare("SELECT 1 FROM audit WHERE wat = 'signaal_niet_meer_gemeld' AND object_id = ?").get(oud), 'auditrij');
+  assert.match(B.leerRegel({ soort: 'incasso_niet_gezien', afhandeling: 'niet_meer_gemeld', aantal: 2 }), /2 meldingen "incasso niet gezien" vervielen/);
 });
 
 // ───────────────────────────── wv2061: het oranje (te bekijken) aanklikbaar ─────────────────────────────

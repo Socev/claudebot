@@ -1954,7 +1954,7 @@ function bankcontrole(inv) {
   for (const f of facturen) {
     const deels = NIET_OPEN.includes(f.status) ? null : deelsVan(f);
     if (NIET_OPEN.includes(f.status) || (gekoppeld(f) && !deels) || f.entiteit === 'prive' || !zichtbaar.has(f.entiteit)) continue;
-    // een creditnota vraagt geen betaling: nooit "te betalen, niet betaald" of "incasso niet gezien" (wv855, overdracht F3 #1)
+    // een creditnota vraagt geen betaling: nooit "te betalen, niet betaald" (wv855, overdracht F3 #1; "incasso niet gezien" bestaat sinds wv3981 niet meer)
     if (f.soort === 'creditnota' || (Number.isSafeInteger(Number(f.incl)) && Number(f.incl) < 0)) continue;
     // wv1415: na een terugboeking spreekt eerst dat signaal; is het afgehandeld, dan het gewone factuursignaal met een eigen sleutel (een
     // eerder afgehandeld "te betalen, niet betaald" van vóór de batch houdt het anders tegen; grondwet 10 telt per gebeurtenis)
@@ -1975,8 +1975,10 @@ function bankcontrole(inv) {
           details: { nummer: f.nummer, deels: { betaald_centen: deels.betaald_centen, rest_centen: deels.rest_centen, factuur_centen: teBetalen(f) }, verval } })));
       continue;
     }
-    if (f.betaalspoor === 'incasso_verwacht' && verval && dagenTussen(verval, vandaag) > 14) signalen.push(maakSignaal('incasso_niet_gezien', basis));
-    else if (f.betaalspoor === 'te_betalen' && verval && vandaag > verval) signalen.push(maakSignaal('te_betalen_niet_betaald', basis));
+    // wv3981 (David 23-11-2026: "Ik wil geen waarschuwingen dat iemand niet incasseert - dat is hun probleem; ze incasseren altijd rond de 17e tot
+    // 23e, geduld dus"): een incasso_verwacht-factuur geeft geen signaal "incasso niet gezien" meer (de soort blijft bestaan voor oude rijen;
+    // facturen.js sluit de open ones met afhandeling niet_meer_gemeld)
+    if (f.betaalspoor === 'te_betalen' && verval && vandaag > verval) signalen.push(maakSignaal('te_betalen_niet_betaald', basis));
     // wv1405: een betaling die in een batch met een latere uitvoerdatum staat, telt pas vanaf die datum (anders een vals signaal per regel).
     // wv2057: niet meer "> 5 werkdagen na vandaag" maar op de bank zelf: de rekening is bijgewerkt tot ná de termijn (2 bankwerkdagen) en de
     // betaling staat er niet. Zonder verse bankgegevens geen signaal (de lijst in Betalen zegt dan "bank nog niet zo ver"). De datum hoort in
@@ -2179,6 +2181,7 @@ const AFHANDELING_TEKST = {
   transactie_verwijderd: (n) => n + (n === 1 ? ' melding verviel' : ' meldingen vervielen') + ': de bankregel was dubbel binnengekomen en is weggehaald.',
   vals_signaal: (n) => n + (n === 1 ? ' melding was' : ' meldingen waren') + ' vals alarm en is gesloten.',   // wv2047
   vanzelf_gezien: (n) => n + (n === 1 ? ' betaling kwam' : ' betalingen kwamen') + ' alsnog op de bank; de melding is vanzelf gesloten.',   // wv2057
+  niet_meer_gemeld: (n) => n + (n === 1 ? ' melding "incasso niet gezien" verviel' : ' meldingen "incasso niet gezien" vervielen') + ': een uitblijvende incasso melden we niet meer (hun zaak; ze incasseren rond de 17e tot 23e).',   // wv3981
   niet_meer_ingevoerd: (n) => n + (n === 1 ? ' melding "niet gezien" verviel' : ' meldingen "niet gezien" vervielen') + ': de betaling is teruggezet naar te betalen.',   // wv2057
 };
 function leerRegel(g) {

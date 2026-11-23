@@ -3596,7 +3596,9 @@ function bankcontroleToepassen(fdb, nu) {
         na: { status: 'afgehandeld', soort: s.soort }, wanneer });
       continue;
     }
+    // wv3981: "incasso niet gezien" wordt niet meer gemaakt (David 23-11-2026); een nog open signaal van die soort gaat vanzelf dicht
     const af = fids.every((id) => netto.get(id).j === 1) ? 'vanzelf_gezien'
+      : s.soort === 'incasso_niet_gezien' ? 'niet_meer_gemeld'
       : s.soort === 'ingevoerd_niet_gezien' && (fids.every((id) => { const x = spoor.get(id); return !x || (x.betaalspoor !== 'ingevoerd' && x.betaalspoor !== 'betaald_gezien'); }) ||
         andereDatum(s, fids)) ? 'niet_meer_ingevoerd' : null;
     if (!af) continue;
