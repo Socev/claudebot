@@ -216,6 +216,14 @@ Tekst onder de tabel.
   claudeAntwoord = { ok: true, data: { kaarten: veel } };
   u = await M.ronde();
   toets('4 hooguit 3 per item en 15 per ronde', u.kaarten === 15 && u.ongeldig === 17, u);
+  // wv3933 (nr 185 a): het zondagseintje noemt de titels (hooguit 8, de rest als aantal) en linkt meteen naar de Harvester
+  const stBew = JSON.parse(fs.readFileSync(path.join(DIR, 'staat.json'), 'utf8'));
+  toets('4 wv3933 bewaarde uitkomst heeft de 15 titels (na een herstart leesbaar)', Array.isArray(stBew.uitkomst.titels) && stBew.uitkomst.titels.length === 15 && stBew.uitkomst.titels[0] === 'Idee 1-0', stBew.uitkomst);
+  const M15 = H.maak({ vault: VAULT, dir: DIR, klok, lookup, request, claude: async () => claudeAntwoord });   // nieuwe instantie = pod na herstart
+  const reg15 = M15.rondeUitkomst().j.regel || '';
+  toets('4 wv3933 seintje: aantal, 8 titels, "en nog 7", link naar de Harvester', /^Harvester: 15 nieuwe ideeën uit 8 berichten:\n- Idee 1-0\n/.test(reg15) && (reg15.match(/\n- Idee /g) || []).length === 8 &&
+    /\n- en nog 7\n/.test(reg15) && /\nOpen de Harvester: https:\/\/app\.socev\.dev\/\?app=harvester(\n|$)/.test(reg15) && !/Open Apps › Harvester/.test(reg15), reg15);
+  toets('4 wv3933 uitkomst voor n8n: titels alleen in de regel, niet in het uitkomstblok', !('titels' in M15.rondeUitkomst().j.uitkomst));
 
   // ── 5. Naar Broedstoof ──
   const lijst = M.lijst();
@@ -332,6 +340,15 @@ Tekst onder de tabel.
 
   // ── 8. GET-lijst ──
   const g = await M.app('GET /app/harvester', {});
+  // wv3933 (nr 185 d): opbrengst per bron; (b) teller = aantal nieuw
+  const pr = g.j.bronnen.find((b) => b.id === 'proef');
+  const kProef = g.j.kaarten.filter((k) => k.bron === 'proef');
+  toets('8 wv3933 opbrengst per bron: kaarten, gehaald, weg, aangeboden met begindatum', pr && pr.opbrengst && pr.opbrengst.kaarten === kProef.length && pr.opbrengst.gehaald === kProef.filter((k) => k.status === 'broedstoof').length &&
+    pr.opbrengst.weg === kProef.filter((k) => k.status === 'weg').length && Number.isInteger(pr.opbrengst.aangeboden) && pr.opbrengst.aangeboden >= 10 && typeof pr.opbrengst.sinds === 'string', pr && pr.opbrengst);
+  const kp = g.j.bronnen.find((b) => b.id === 'kapot');
+  toets('8 wv3933 bron zonder geslaagde lezing: 0 kaarten, aangeboden onbekend (null, geen verzonnen 0)', kp && kp.opbrengst.kaarten === 0 && kp.opbrengst.aangeboden === null, kp && kp.opbrengst);
+  const tl = await M.app('GET /app/harvester/teller', {});
+  toets('8 wv3933 teller = aantal kaarten met status nieuw', tl.status === 200 && tl.j.nieuw === g.j.kaarten.filter((k) => k.status === 'nieuw').length && M.teller() === tl.j.nieuw, tl.j);
   toets('8 GET: kaarten, bronnen met fout per bron, X nog niet', g.status === 200 && g.j.kaarten.length > 10 && g.j.bronnen.find((b) => b.id === 'kapot').fouten_op_rij >= 3 && g.j.x.stand === 'nog niet', g.j.bronnen);
 
   // ── 9. eerste vulling (vul) ──
@@ -344,7 +361,7 @@ Tekst onder de tabel.
   const s1 = src.indexOf('// ── Harvester (wv820'), s2 = src.indexOf('// ── einde harvester ──');
   toets('10 server.js: blok Harvester gevonden', s1 > 0 && s2 > s1);
   toets('10 server.js: tellers harvester en harvester-bron bestaan in appStaat (anders faalt appTeller)', /tellers: \{[^}]*harvester: \[\], 'harvester-bron': \[\][,} ]/.test(src));
-  toets('10 server.js: dispatch, glijdroutes, /smal-grens, health, ronde-ingang', /route === 'GET \/app\/harvester' \|\| route\.indexOf\('POST \/app\/harvester\/'\) === 0\) return typeof appHarvester === 'function' \? appHarvester/.test(src) &&
+  toets('10 server.js: dispatch, glijdroutes, /smal-grens, health, ronde-ingang', /route === 'GET \/app\/harvester' \|\| route === 'GET \/app\/harvester\/teller' \|\| route\.indexOf\('POST \/app\/harvester\/'\) === 0\) return typeof appHarvester === 'function' \? appHarvester/.test(src) &&
     /'POST \/app\/harvester\/broedstoof', 'POST \/app\/harvester\/weg'/.test(src) && /'harvester\/kaart': 8[,} ]/.test(src) && /harvester: harvesterInfo\(\)/.test(src) &&
     /req\.url === '\/harvester-ronde' \|\| req\.url === '\/harvester-ronde\/uitkomst'/.test(src) && /if \(actie === 'harvester\/kaart'\)/.test(src));
   const nep = path.join(W, 'nep-claude.js');
@@ -371,6 +388,10 @@ let invoer=''; process.stdin.on('data',c=>invoer+=c); process.stdin.on('end',()=
   const rs = { _app: {} };
   const gg = await S.appHarvester({}, rs, { soort: 'mee' }, {}, 'GET /app/harvester');
   toets('10 GET via server.js: 200 en stil', gg.st === 200 && rs._app.stil === true, gg.st);
+  ctx.__primair = false;
+  const rst = { _app: {} }; const gt = await S.appHarvester({}, rst, { soort: 'mee' }, {}, 'GET /app/harvester/teller');
+  toets('10 wv3933 teller via server.js: 200, stil, ook op de reservekant (alleen lezen)', gt.st === 200 && rst._app.stil === true && Number.isInteger(gt.j.nieuw), gt);
+  ctx.__primair = true;
   ctx.__primair = false;
   const pp = await S.appHarvester({}, { _app: {} }, { soort: 'mee' }, { id: 'k0000000000' }, 'POST /app/harvester/weg');
   toets('10 POST op de reservekant = 409', pp.st === 409, pp);

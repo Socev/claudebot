@@ -34,6 +34,7 @@ const GRENS = { titel: 70, kort: 300, waarom: 140, naam: 60, adres: 500, item_te
 const OPHAAL_MS = 20000, OPHAAL_TOTAAL_MS = 60000, RONDE_FEEDS_MS = 10 * 60000;
 // Bron aix (wv942, AIX-bouwplan § 8): kaarten van andere winkels op aix.socev.dev die David in de App AIX zag; alleen lezen via de pod.
 const AIXB = { per_ronde: 10, link: 'https://app.socev.dev/?app=ideeen' };
+const APP_LINK = 'https://app.socev.dev/?app=harvester';   // wv3933: link in het zondagseintje (dezelfde als /smal)
 const UA = 'OVIS-Harvester/1 (+https://socev.dev)';
 
 // ── tekst ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -499,8 +500,13 @@ function maak(deps) {
     const k = kaartenLees(), bus = busLees();
     const s = staatLees();
     const b = bronnenStand();
-    const telBron = {};
-    k.forEach(function (x) { telBron[x.bron] = (telBron[x.bron] || 0) + (x.status === 'nieuw' ? 1 : 0); });
+    const telBron = {}, opBron = {};
+    k.forEach(function (x) {
+      telBron[x.bron] = (telBron[x.bron] || 0) + (x.status === 'nieuw' ? 1 : 0);
+      // wv3933 (nr 185 d): opbrengst per bron — kaarten (alle standen; Weg ouder dan GRENS.weg_dagen is opgeruimd) en hoeveel naar de Broedstoof
+      const o = opBron[x.bron] = opBron[x.bron] || { kaarten: 0, gehaald: 0, weg: 0 };
+      o.kaarten++; if (x.status === 'broedstoof') o.gehaald++; else if (x.status === 'weg') o.weg++;
+    });
     return {
       kaarten: k.map(function (x) {
         const uit = Object.assign({}, x);
@@ -514,6 +520,7 @@ function maak(deps) {
         const st = s.bronnen[y.id] || {};
         return { id: y.id, naam: y.naam, soort: y.soort, adres: y.adres, host: y.adres ? host(y.adres) : '', aan: y.aan, aan_tekst: y.aan_tekst,
           gelezen: st.gelezen || null, fout: st.fout || null, fouten_op_rij: st.fouten_op_rij || 0, nieuw: telBron[y.id] || 0,
+          opbrengst: Object.assign({ kaarten: 0, gehaald: 0, weg: 0 }, opBron[y.id] || {}, { aangeboden: Number.isInteger(st.aangeboden) ? st.aangeboden : null, sinds: st.aangeboden_sinds || null }),
         };
       }),
       bronnen_fout: b.ok ? (b.fouten || []) : [b.fout], bronnen_dicht: b.dicht || (b.ok && !b.schrijfbaar ? 'de kop van de bronnentabel wijkt af (nodig: id, naam, soort, adres, aan)' : null),
@@ -691,9 +698,12 @@ function maak(deps) {
       const k = kaartenLees().concat(nieuweKaarten);
       kaartenSchrijf(k);
       uit.kaarten = nieuweKaarten.length;
+      uit.titels = nieuweKaarten.map(function (x) { return x.titel; });   // wv3933 (nr 185 a): titels in het zondagseintje
     }
     // alles wat aangeboden is, telt als gezien (ook zonder kaart; Fable #3)
-    nu.forEach(function (x) { const bs = bronStaat(s, x.bron.id); bs.gezien.push(sleutel(x.bron.id, x.item.id)); bs.gezien = bs.gezien.slice(-GRENS.gezien_bron); });
+    nu.forEach(function (x) { const bs = bronStaat(s, x.bron.id); bs.gezien.push(sleutel(x.bron.id, x.item.id)); bs.gezien = bs.gezien.slice(-GRENS.gezien_bron);
+      // wv3933 (nr 185 d): berichten die het oogstmodel van deze bron kreeg, vanaf de eerste ronde met deze teller (geen schatting achteraf)
+      bs.aangeboden = (bs.aangeboden || 0) + 1; if (!bs.aangeboden_sinds) bs.aangeboden_sinds = begin; });
     s.mislukt = {};
     uit.ok = true; uit.geslaagd = true;
     staatBewaar(s, ids, uit);
@@ -710,6 +720,7 @@ function maak(deps) {
     vers.mislukt = s.mislukt || {};
     vers.ronde = rondeSamen(u);
     vers.uitkomst = { geslaagd: u.geslaagd, bronnen: u.bronnen, items: u.items, kaarten: u.kaarten, ongeldig: u.ongeldig, uitgesteld: u.uitgesteld, overgeslagen: u.overgeslagen || 0,
+      titels: (u.titels || []).slice(0, GRENS.kaarten_ronde),
       bronnen_fout: (u.bronnen_fout || []).map(function (b) { return { id: b.id, naam: b.naam, fout: b.fout, op_rij: b.op_rij }; }), fout: u.fout, begin: u.begin, eind: new Date(klok()).toISOString() };
     schrijfJson(P.staat, vers);
   }
@@ -732,7 +743,13 @@ function maak(deps) {
     try { u = l ? l.uitkomst : (staatLees().uitkomst || null); }
     catch (e) { if (!e || e.code !== 'KAPOT') throw e; u = { geslaagd: false, fout: e.message }; }   // B137: een kapotte staat is een mislukte ronde
     let regel = null;
-    if (u && u.kaarten > 0) regel = 'Harvester: ' + u.kaarten + (u.kaarten === 1 ? ' nieuw idee' : ' nieuwe ideeën') + ' uit ' + u.items + (u.items === 1 ? ' bericht' : ' berichten') + '. Open Apps › Harvester.';
+    if (u && u.kaarten > 0) {
+      // wv3933 (nr 185 a): de titels erin (hooguit 8, de rest als aantal) en een link die meteen de Harvester opent
+      const t = Array.isArray(u.titels) ? u.titels.filter(function (x) { return typeof x === 'string' && x; }) : [];
+      regel = 'Harvester: ' + u.kaarten + (u.kaarten === 1 ? ' nieuw idee' : ' nieuwe ideeën') + ' uit ' + u.items + (u.items === 1 ? ' bericht' : ' berichten') + (t.length ? ':' : '.') +
+        t.slice(0, 8).map(function (x) { return '\n- ' + schoon(x, GRENS.titel); }).join('') + (t.length > 8 ? '\n- en nog ' + (t.length - 8) : '') +
+        '\nOpen de Harvester: ' + APP_LINK;
+    }
     const lang = u && (u.bronnen_fout || []).filter(function (b) { return b.op_rij >= 3; });
     if (lang && lang.length) regel = (regel ? regel + '\n' : '') + 'Harvester: bron ' + lang.map(function (b) { return b.naam + ' (' + b.fout + ', ' + b.op_rij + ' keer op rij)'; }).join(', ') + ' is niet te lezen.';
     if (u && !u.geslaagd) regel = 'Harvester-ronde mislukt: ' + String(u.fout || 'onbekend').slice(0, 200);
@@ -747,6 +764,7 @@ function maak(deps) {
   function vind(k, id) { return typeof id === 'string' && /^k[0-9a-f]{10}$/.test(id) ? k.find(function (x) { return x.id === id; }) : null; }
   async function app(route, d) {
     if (route === 'GET /app/harvester') return { status: 200, j: Object.assign({ ok: true }, lijst()) };
+    if (route === 'GET /app/harvester/teller') return { status: 200, j: { ok: true, nieuw: teller() } };   // wv3933 (nr 185 b): getal op de tegel
     const actie = route.slice('POST /app/harvester/'.length);
     if (['broedstoof', 'weg', 'terug'].indexOf(actie) >= 0) {
       const k = kaartenLees(), x = vind(k, d.id);
@@ -833,7 +851,7 @@ function maak(deps) {
     smalDag.n++;
     kaartenSchrijf(l.concat([k]));
     spiegel();
-    return { status: 200, j: { ok: true, id: k.id, link: 'https://app.socev.dev/?app=harvester' } };
+    return { status: 200, j: { ok: true, id: k.id, link: APP_LINK } };
   }
 
   // Eerste vulling en proef: kaart rechtstreeks (machinekamer; zelfde controle). status 'broedstoof' + idee_nr mag (Fable #5).
@@ -851,13 +869,15 @@ function maak(deps) {
     return n;
   }
 
+  // wv3933: aantal nieuwe kaarten (tegel Harvester, regel in de Broedstoof); alleen kaarten.json, geen bus of bronnenpagina
+  function teller() { return kaartenLees().filter(function (x) { return x.status === 'nieuw'; }).length; }
   function health() {
     const s = staatLees(), b = bronnenStand(), k = kaartenLees();
     return { aan: true, bronnen: (b.bronnen || []).filter(function (x) { return x.aan; }).length, bronnen_dicht: !!b.dicht || !b.ok,
       kaarten_nieuw: k.filter(function (x) { return x.status === 'nieuw'; }).length, ronde: s.ronde ? { eind: s.ronde.eind, geslaagd: s.ronde.geslaagd } : null, bezig: rondeBezig };
   }
 
-  return { app: app, smal: smal, rondeStart: rondeStart, rondeUitkomst: rondeUitkomst, ronde: ronde, vul: vul, health: health, mkdir: mkdir, lijst: lijst, spiegel: spiegel, vindFeed: vindFeed };
+  return { app: app, teller: teller, smal: smal, rondeStart: rondeStart, rondeUitkomst: rondeUitkomst, ronde: ronde, vul: vul, health: health, mkdir: mkdir, lijst: lijst, spiegel: spiegel, vindFeed: vindFeed };
 }
 
 module.exports = { maak: maak, leesFeed: leesFeed, leesAix: leesAix, AIXB: AIXB, feedInHtml: feedInHtml, isPubliek: isPubliek, veiligHaal: veiligHaal, leesBronnen: leesBronnen, leesBus: leesBus,

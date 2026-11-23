@@ -9660,7 +9660,12 @@ async function appBroedstoof(req, res, a) {
   const tk = db && db.tikker ? { aan: db.tikker.aan !== false, reden: String(db.tikker.reden || '').slice(0, 160), laatste_tik: db.tikker.laatste_tik || null,
     starts_vandaag: Number(db.tikker.starts_vandaag) || 0, max_dag: Number(db.tikker.max_dag) || 0, alleen_doorwerk: db.tikker.alleen_doorwerk === true } : null;
   appStuur(res, 200, { ok: true, ideeen: ideeen, bus_bijgewerkt: bus.bijgewerkt, ruimte: ru, tikker: tk, fout: fout,
-    stil_gemeten: appStaat.broedStil.t_ok, stil_fout: stil ? null : 'de stilstandmeting lukte nu niet' });   // wv3731
+    stil_gemeten: appStaat.broedStil.t_ok, stil_fout: stil ? null : 'de stilstandmeting lukte nu niet',   // wv3731
+    harvester_nieuw: appBroedHarvester() });   // wv3933 (nr 185 b): "3 nieuw in de Harvester →"; null = niet te lezen (dan geen regel)
+}
+// wv3933: aantal nieuwe Harvester-kaarten voor de regel in de Broedstoof; geen Harvester of onleesbaar = null, nooit een verzonnen 0
+function appBroedHarvester() {
+  try { return harvester && typeof harvester.teller === 'function' ? harvester.teller() : null; } catch (e) { return null; }
 }
 async function appBroedstoofVoorrang(req, res, reg, a, s, d) {
   const idee = d.idee, actie = String(d.actie || '');
@@ -16216,7 +16221,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
         if (route === 'POST /app/werkers/schakel') return typeof appWerkerSchakel === 'function' ? appWerkerSchakel(req, res, a, s, d) : appWeiger(res, 404, 'onbekend', 'schakel');   // wv1733 (OVIS M4b): schakelaar per werker
-        if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
+        if (route === 'GET /app/harvester' || route === 'GET /app/harvester/teller' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
         if (route === 'GET /app/ideeen' || /^GET \/app\/ideeen\/(plaatje\/[1-9][0-9]{0,11}\/[0-2]|proefplaatje\/k\d{2,3}\/[0-2]|kaart\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||
           route === 'POST /app/ideeen/naar-ideeenbus' || /^POST \/app\/ideeen\/kaart\/[ka]\d{2,3}\/(deel|niet|plaats)$/.test(route))   // wv942: AIX lezen, Deel/Niet per kaart of antwoord; wv3072: Plaats (verse vingerafdruk)
           return typeof appIdeeen === 'function' ? appIdeeen(req, res, a, d, route, s) : appWeiger(res, 404, 'onbekend', 'ideeen');   // wv761: App AIX (was Ideeën van buitenaf)
@@ -23265,7 +23270,7 @@ function harvesterInfo() {
 }
 async function appHarvester(req, res, a, d, route) {
   if (!harvester) return appWeiger(res, 404, 'Harvester zit niet in deze versie van de pod', 'harvester ontbreekt');
-  if (route === 'GET /app/harvester') res._app.stil = true;
+  if (route === 'GET /app/harvester' || route === 'GET /app/harvester/teller') res._app.stil = true;   // wv3933: teller = alleen lezen
   else {
     if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
     if (!appTeller('harvester', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens harvester');
