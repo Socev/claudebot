@@ -12246,7 +12246,14 @@ function appVjRegel2(p, vandaag) {
   return delen.join(' · ');
 }
 // Zichtbaar = open, of later met een datum die vandaag of eerder is (K5: later -> vanzelf weer open)
-function appVjZichtbaar(p, vandaag) { return p.status === 'open' || (p.status === 'later' && !(String(p.later_tot || '') > vandaag)); }
+// wv3967 (David 22-11 "Less is more ... slechts op vaste momenten bijvullen"): en niet meer wachtend op een vast moment (toon_vanaf in de
+// toekomst; null = meteen). Geldt overal waar de pod 'zichtbaar' gebruikt: lijst, telling, Onderweg.
+function appVjZichtbaar(p, vandaag, nu) {
+  if (Date.parse(p.toon_vanaf || '') > (nu == null ? Date.now() : nu)) return false;
+  return p.status === 'open' || (p.status === 'later' && !(String(p.later_tot || '') > vandaag));
+}
+// wv3967: wacht deze open kaart nog op een vast moment?
+function appVjWacht(p, nu) { return p.status === 'open' && Date.parse(p.toon_vanaf || '') > nu; }
 function appVjDichtbij(p, vandaag) { return /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) && p.deadline <= appYmdPlus(vandaag, 1); }   // deadline ≤ 48 u: vandaag, morgen of al over tijd
 // wv1706 (OVIS M3b, ontwerplijnen § 3.4/§ 4.1): het doel van een kaart naar de app — module = catalogus-id, doel = { scherm, focus }.
 // Alleen vaste vormen (id's van kleine letters, focus "<soort>:<waarde>" zonder spaties, hooguit 100 tekens); al het andere = geen doel
@@ -12446,6 +12453,22 @@ function appVjVoorwaardeStart(poging) {
   if (t && t.unref) t.unref();
 }
 if (APP_ECHT) appVjVoorwaardeStart(0);
+// wv3967: de momentstap. Elke minuut: valt het volgende vaste moment binnen 6 minuten, dan kiest mk_voor_jou_moment welke wachtende
+// kaarten om dat moment in Voor jou komen (hooguit 5 erbij, hooguit 8 in beeld, de machinekamer-bundel als één punt); de rest schuift
+// door. Alleen de actieve kant; één keer per moment (na een herstart nog eens: de stap is idempotent).
+async function appVjMomentTik(nu) {
+  if (!vjMoment) return null;
+  const m = vjMoment.stapMoment(nu, appStaat.vjMomentGedaan);
+  if (m == null || !(await appRolOk())) return null;
+  appStaat.vjMomentGedaan = m;
+  let r;
+  try { r = await appSbRpc('mk_voor_jou_moment', { p_moment: new Date(m).toISOString() }); } catch (e) { appStaat.vjMomentGedaan = null; logError('voor-jou-moment', e); return null; }
+  appStaat.vjCache = null;
+  appStaat.vjMomentLaatst = { op: new Date(nu).toISOString(), moment: new Date(m).toISOString(), r: r };
+  console.log('[voor-jou-moment] ' + JSON.stringify({ moment: new Date(m).toISOString(), gekozen: r && r.gekozen, doorgeschoven: r && r.doorgeschoven, zichtbaar_was: r && r.zichtbaar_was, wacht: r && r.wacht, spoed_7d: r && r.spoed_7d }));
+  return r;
+}
+if (APP_ECHT) { const t = setInterval(function () { appVjMomentTik(Date.now()).catch(function (e) { logError('voor-jou-moment', e); }); }, 60 * 1000); if (t && t.unref) t.unref(); }
 function appVjKort(p, vandaag) {
   return { id: p.id, soort: ['doen', 'besluit', 'proef'].indexOf(p.soort) >= 0 ? p.soort : 'doen', titel: appKort(appVjGewoon(p.titel), 120), regel2: appVjRegel2(p, vandaag),
     deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) ? p.deadline : null, dichtbij: appVjDichtbij(p, vandaag),
@@ -12490,7 +12513,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   let vr = {};
   try { vr = appVragen(); } catch (e) { vr = {}; }
   const af = await appVjAfgeleid(punten, nu);   // wv1018: vóór de lijst (beantwoord leest de afgeleide koppeling ook)
-  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), appVjDoel(p, a), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map), auto: p.soort === 'besluit' && typeof telVoorstelKort === 'function' ? telVoorstelKort(p.id) : undefined }); });   // wv1706: module + doel; wv3771: klaargezet in de auto (alleen weergave)
+  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), appVjDoel(p, a), { bundel: vjMoment && vjMoment.isMk(p.herkomst) ? 'machinekamer' : undefined, terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map), auto: p.soort === 'besluit' && typeof telVoorstelKort === 'function' ? telVoorstelKort(p.id) : undefined }); });   // wv1706: module + doel; wv3771: klaargezet in de auto (alleen weergave)
   // wv3100 (David 14-11 23:28, "inbox zero"): wat David vandaag zelf afhandelde (Gedaan, Niet meer nodig, Ja / Nee / Anders op de kaart) en
   // niet meer in de lijst staat, voor de ingeklapte regel "Afgehandeld vandaag" onderaan Voor jou. De app haalt beantwoorde en net gekozen
   // punten zelf uit de lijst; dit is alleen de terugvindplek. Geen lijst van de ronde of een agent (gesloten_door david), hooguit 30.
@@ -12502,12 +12525,23 @@ async function appVoorJouRoute(req, res, a, kanaal) {
     .map(function (p) { return { id: p.id, titel: appKort(p.titel, 120), status: p.status, t: p.gesloten_op, beantwoord: appVjBeantwoordKort(p, vr, af.map) }; });
   // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten).
   // wv926 (Fable-diffreview #1): alleen op GET /app/voor-jou/kanaal (sinds wv946 de enige weg van de app); /app/voor-jou blijft zoals main.
+  // wv3967: wat nog op een vast moment wacht (kaarten; in het kanaal ook de uitgestelde machinekamer-vragen), met het eerstvolgende moment
+  const wachtend = eigen.filter(function (p) { return appVjWacht(p, nu); });
+  const wacht = { n: wachtend.length, moment: null, tekst: null };
   const basisAntwoord = { ok: true, punten: lijst, later: later, afgehandeld: afgehandeld, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5),
-    bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null };
-  if (!kanaal) return appStuur(res, 200, basisAntwoord);
+    bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null, wacht: wacht };
+  const wachtMoment = function () {
+    const eerst = wachtend.reduce(function (m, p) { const t = Date.parse(p.toon_vanaf); return t < m ? t : m; }, Infinity);
+    const m = wacht.n ? (Number.isFinite(eerst) && wachtend.length === wacht.n ? eerst : vjMoment ? vjMoment.volgendMoment(nu) : eerst) : null;
+    wacht.moment = Number.isFinite(m) ? new Date(m).toISOString() : null;
+    wacht.tekst = wacht.moment && vjMoment ? vjMoment.momentTekst(m, nu) : null;
+  };
+  if (!kanaal) { wachtMoment(); return appStuur(res, 200, basisAntwoord); }
   let moet = null, moetFout = null;
+  const uitgesteld = { n: 0 };
   // review wv594 #1: ontdubbelen tegen ALLE kaarten
-  try { moet = await appMoetIets(punten, nu, af); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
+  try { moet = await appMoetIets(punten, nu, af, uitgesteld); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
+  wacht.n += uitgesteld.n; wachtMoment();
   const sleutels = [];
   lijst.forEach(function (p) { sleutels.push('k:' + p.id); if (p.deadline && p.deadline < vandaag) sleutels.push('k:' + p.id + ':over'); });
   (moet || []).forEach(function (m) { sleutels.push(m.punt); });
@@ -12553,6 +12587,7 @@ function appStilWeerTerug(tekst, stilte, t) {
 const APP_AGENDA_PROEF_RE = /SOCEV PROEF|\bDavids proefagenda\b/;   // wv3828
 function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs, afgeleid, stilte, opties) {
   const weg = (opties && opties.weg) || {}, factuurKlaar = (opties && opties.factuurKlaar) || {};   // wv2560
+  const momentSinds = opties && Number.isFinite(opties.momentSinds) ? opties.momentSinds : null, uitgesteld = opties && opties.uitgesteld;   // wv3967
   const vandaag = appYmd(nu), gekoppeld = {}, kaartWv = {}, kaartJob = {};
   // tot = tot wanneer gestelde vragen wijken: open of later (review wv594 #1: ook geparkeerd) = altijd, dicht = tot gesloten_op
   const totZet = function (o, k, tot) { if (!(o[k] >= tot)) o[k] = tot; };
@@ -12594,6 +12629,9 @@ function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs
         let wv = false;
         v.tekst.replace(APP_MOET_WV_RE, function (m, n) { if (t < kaartWv[n]) wv = true; return m; });   // alleen de vraagzin: een rapport noemt vaak tientallen wv-nummers
         if (wv || (x.agent_job && t < kaartJob[x.agent_job])) return;
+        // wv3967 (David 22-11, vaste momenten): een vraag uit een machinekamer-klus komt pas in Voor jou na het eerstvolgende vaste moment
+        // (07:15, 12:30, 17:15); in het machinekamer-gesprek staat hij meteen. Davids eigen getypte beurt (soort bericht) wacht niet.
+        if (kanaal === 'machinekamer' && x.soort === 'socev' && momentSinds != null && t > momentSinds) { if (uitgesteld) uitgesteld.n++; return; }
         uit.push(Object.assign({ punt: 'v:' + id, soort: 'vraag', hash: x.vraag_hash, tekst: v.tekst, gevoelig: r.gevoelig !== false, bericht: appMoetBericht(x.antwoord), afgekapt: appMoetAf(x.antwoord),
           doorbouw: (typeof doorbouwLuikKan === 'function' && doorbouwLuikKan(r, v.tekst, x.antwoord)) || undefined }, basis));   // wv3692
         return;
@@ -12621,7 +12659,7 @@ async function appMoetLog(kanaal) {
   appStaat.moetLog[kanaal] = { mtime: st.mtimeMs, size: st.size, op: Date.now(), items: items };
   return items;
 }
-async function appMoetIets(kaarten, nu, af) {
+async function appMoetIets(kaarten, nu, af, uitgesteld) {
   let per = af && af.per;   // wv1018: al gelezen door appVjAfgeleid
   if (!per) {
     per = {};
@@ -12643,7 +12681,8 @@ async function appMoetIets(kaarten, nu, af) {
   const fb = (per.hoofd || []).filter(function (x) { return x && x.bron === 'facturen-bank' && APP_JOB_RE.test(String(x.job_id || '')) && appYmd(Date.parse(x.t)) === vandaag; });
   let factuurKlaar = null;
   try { factuurKlaar = fb.length && typeof appMoetFactuurKlaar === 'function' ? appMoetFactuurKlaar(fb) : null; } catch (e) { logError('facturen-betaalmelding-klaar', e); }
-  return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu, jobs, af && af.map, stilNodig ? await appStilteNu() : null, { weg: weg, factuurKlaar: factuurKlaar });
+  return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu, jobs, af && af.map, stilNodig ? await appStilteNu() : null,
+    { weg: weg, factuurKlaar: factuurKlaar, momentSinds: vjMoment ? vjMoment.laatsteMoment(nu) : null, uitgesteld: uitgesteld });   // wv3967
 }
 // wv2317: stilte_state voor Moet iets, 60 s bewaard (Voor jou en de draden vragen elke paar seconden). Onleesbaar: de laatste stand
 // van hooguit 10 min, anders null (dan blijft het bericht gewoon staan, zoals vóór wv2317).
@@ -12668,6 +12707,9 @@ async function appStilteNu() {
 // David per gesprek; punten: in beeld geweest, voor het getal) en te-lezen.json (afgevinkt, bewaard; alleen ids en tijden).
 // Ontbreekt te-lezen.js in de release, dan geen te_lezen in /app/voor-jou/kanaal en 404 op POST /app/te-lezen.
 const teLezenMod = (function () { try { if (typeof __dirname !== 'string') return null; return require(path.join(__dirname, 'te-lezen.js')); } catch (e) { if (!(e && e.code === 'MODULE_NOT_FOUND')) logError('te-lezen-module', e); return null; } })();
+// wv3967: de vaste momenten van Voor jou (vj-moment.js, puur). Ontbreekt hij: geen momentstap en geen uitstel (de databank laat een
+// kaart dan om het moment zelf zien: faalt open, er raakt niets kwijt).
+const vjMoment = (function () { try { if (typeof __dirname !== 'string') return null; return require(path.join(__dirname, 'vj-moment.js')); } catch (e) { if (!(e && e.code === 'MODULE_NOT_FOUND')) logError('vj-moment-module', e); return null; } })();
 const APP_TE_LEZEN = path.join(APP_DATA, 'te-lezen.json');
 const APP_TE_LEZEN_KLUS_MS = 30 * 60 * 1000;
 const APP_TE_LEZEN_FOUT_MS = 2 * 60 * 1000;
@@ -12725,11 +12767,11 @@ async function appTeLezenPer() {
 // Voor GET /app/voor-jou/kanaal. moet = de punten van Moet iets (die tonen we hier niet nog eens).
 async function appTeLezen(a, moet, nu) {
   const per = await appTeLezenPer();
-  const klussen = await appTeLezenKlussen(teLezenMod.klusJobs(per, nu));
+  const klussen = {};   // wv3967: machinekamer-klusrapporten niet meer in Te lezen (mkKlussen false), dus geen herkomst nodig
   const g = appGezienDavid();
   const moetJobs = new Set((moet || []).map(function (m) { return m.job_id; }));
   const uit = teLezenMod.uit({ per: per, klussen: klussen, staat: appTeLezenStaat(), tabs: g ? g.tabs : {}, inBeeld: g ? g.punten : {},
-    vraag: appTeLezenVraag, moet: moetJobs, nu: nu });
+    vraag: appTeLezenVraag, moet: moetJobs, nu: nu, mkKlussen: false, momentSinds: vjMoment ? vjMoment.laatsteMoment(nu) : null });   // wv3967
   // gezien-david.json onleesbaar: dan geen tabtijden, dus antwoorden die David misschien al zag; zeg dat (de app toont geen getal)
   return Object.assign(uit, { fout: klussen === null ? 'de rapporten van je klussen zijn nu niet te lezen' : null, gezien_bekend: !!g });
 }

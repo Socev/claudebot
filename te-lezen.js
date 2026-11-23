@@ -11,6 +11,9 @@
 //              fout of een bestand (wv3093, knopTelt).
 //   bewaard  — wat David in het gesprek bewaarde (14 dagen na het bewaren).
 // Nooit: een bericht met een vraag (die staat in Moet iets of als kaart), Telegram-beurten, zoekvragen.
+// wv3967 (David 22-11-2026 "Less is more", Ja 22:31): met o.mkKlussen === false (zo roept server.js het aan) geen klusrapporten uit de
+// machinekamer meer (die blijven in het machinekamer-gesprek); met o.momentSinds (ms, vj-moment.js) een klusrapport pas na het eerstvolgende
+// vaste moment (07:15, 12:30, 17:15). Antwoord op Davids eigen beurt en bewaard: meteen.
 
 const DAG = 86400000;
 const AUTO_MS = 7 * DAG;          // vanzelf erin: 7 dagen (± 17 per dag; 14 dagen zou ± 240 punten worden)
@@ -125,10 +128,11 @@ function uit(o) {
       if (!vraag(x, kanaal) && nu - t < AUTO_MS && t >= sinds) {
         if (x.soort === 'socev') {
           if (kanaal === 'hoofd' && x.bron === 'agentrapport-david') soort = 'klus';
-          else if (kanaal === 'machinekamer' && x.bron === 'agentrapport' && o.klussen && klusTelt(o.klussen[x.agent_job])) {
+          else if (kanaal === 'machinekamer' && o.mkKlussen !== false && x.bron === 'agentrapport' && o.klussen && klusTelt(o.klussen[x.agent_job])) {
             soort = 'klus';
             titel = kort(o.klussen[x.agent_job].titel || '', 200) || null;
           }
+          if (soort === 'klus' && Number.isFinite(o.momentSinds) && t > o.momentSinds) { soort = null; titel = null; }   // wv3967
         } else if (x.soort === 'bericht' || (x.soort === 'knop' && knopTelt(x))) {
           if (!(tijd(tabs[kanaal]) >= t)) soort = 'antwoord';   // David zag het gesprek ná het antwoord: dan niet (meer)
         }

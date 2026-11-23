@@ -2324,6 +2324,16 @@ async function bewijs(o) {
       toets('9d wv926 Fable #6: een doe-kaart met hetzelfde wv-nummer verbergt de vraag niet (alleen een besluitkaart)', mDoe.some((x) => x.punt.includes(J(2))), JSON.stringify(mDoe.map((x) => x.punt)));
       const leeg = H.appMoetIetsUit({}, {}, {}, [], nu);
       toets('9d wv594: zonder gegevens een lege lijst', Array.isArray(leeg) && leeg.length === 0);
+      // wv3967 (David 22-11, vaste momenten): een vraag van een machinekamer-klus komt pas in Moet iets na het laatste vaste moment
+      {
+        const k2 = kaarten.filter((k) => k.id !== 3), u = { n: 0 }, u2 = { n: 0 };
+        const zonder = H.appMoetIetsUit({ hoofd: hoofd, machinekamer: mk }, vragen, ag, k2, nu).map((x) => x.punt);
+        const voor = H.appMoetIetsUit({ hoofd: hoofd, machinekamer: mk }, vragen, ag, k2, nu, {}, undefined, null, { momentSinds: nu - 2 * uur, uitgesteld: u }).map((x) => x.punt);
+        const na = H.appMoetIetsUit({ hoofd: hoofd, machinekamer: mk }, vragen, ag, k2, nu, {}, undefined, null, { momentSinds: nu - 60000, uitgesteld: u2 }).map((x) => x.punt);
+        toets('9d wv3967: machinekamer-klusvraag van na het laatste vaste moment wacht (telt in uitgesteld); Davids eigen machinekamerbeurt en het hoofdgesprek niet',
+          zonder.some((s) => s.includes(J(8))) && !voor.some((s) => s.includes(J(8))) && u.n === 1 && voor.some((s) => s.includes(J(9))) && voor.some((s) => s.includes(J(1)))
+          && na.some((s) => s.includes(J(8))) && u2.n === 0, JSON.stringify({ zonder: zonder, voor: voor, na: na, u: u }));
+      }
       // wv3828 (David 21-11 20:12 "Wat moet ik met deze enorme lijst??"): een proefvoorstel van een machinekamer-klus komt niet in Moet iets; een echt voorstel wel
       {
         const mkA = [
