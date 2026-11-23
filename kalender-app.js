@@ -188,6 +188,7 @@ function gevondenRegel(r) {
     precisie: ['minuut', 'dag', 'week', 'maand', 'kwartaal', 'jaar'].includes(r.datum_precisie) ? r.datum_precisie : 'dag',
     staat_er: (Array.isArray(b.staat_er) ? b.staat_er : []).filter((x) => STAAT_ER.includes(x)),
     gevonden_op: dagVan(r.aangemaakt), stuk_pad: null, zin: null, nu_in: null,
+    regel: typeof b.regel === 'string' && /^[a-z0-9_.@+-]{1,80}$/i.test(b.regel) ? b.regel : null,   // wv3978: detectorregel (rel.weekdag = weekdag zonder datum)
   };
 }
 

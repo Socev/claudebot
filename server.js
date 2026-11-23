@@ -26533,6 +26533,15 @@ const agendaPotlood = (function () {
       gevonden: async function (nu) { const u = await kalenderApp.app({ methode: 'GET', pad: '/app/kalender/gevonden', nu: nu }); return u && u.status === 200 ? u.body : null; },
       oordeel: function (id, oordeel) { return kalenderApp.app({ methode: 'POST', pad: '/app/kalender/gevonden', nu: Date.now(), body: { id: id, oordeel: oordeel } }); },
       luik: socevAgendaLuik,
+      // wv3978: het stuk (vaultpad, al gecontroleerd door stukLink) en één modelvraag per kandidaat (harvesterClaude: Sonnet, abonnement, geen gereedschap;
+      // geen patiëntfilter: Davids afspraak). Haiku is in de pod nergens beproefd: niet gekozen (een stille modelfout = nooit meer een potlood).
+      lees: function (pad) {
+        // review MOET 2: realpath, zodat een symlink in de vault nooit een bestand erbuiten laat lezen
+        const v = fs.realpathSync(VAULT), f = fs.realpathSync(path.resolve(v, String(pad)));
+        if (f.indexOf(v + path.sep) !== 0 || !/\.md$/.test(f) || !fs.statSync(f).isFile()) return null;
+        return fs.readFileSync(f, 'utf8').slice(0, 20000);
+      },
+      model: function (systeem, prompt, schema) { return harvesterClaude(systeem, prompt, schema, { timeoutMs: 120000 }); },
       agenda: function (body) { return appAgendaApi(body, { timeoutMs: 60000 }); },
       afwijzingen: async function (filters) {
         const set = new Set();
@@ -26544,7 +26553,8 @@ const agendaPotlood = (function () {
       },
       staatPad: path.join(KLOKKEN_DIR, 'agenda-potlood.json'),
       log: function (x) { schrijfLog(nu() + ' agenda-potlood ' + velden({ ok: x.ok, nieuw: x.nieuw, weg: x.weg, overgenomen: x.overgenomen, verlopen: x.verlopen, kaart: x.kaart, kaart_fout: x.kaart_fout, fout: x.fout || 0, mutaties: x.mutaties,
-        afgewezen: x.afgewezen || 0, blok_nieuw: x.blok_nieuw || 0, blok_weg: x.blok_weg || 0, blok_vervallen: x.blok_vervallen || 0, agenda_fout: x.agenda_fout || 0, afwijs_fout: x.afwijs_fout || 0 })); },
+        afgewezen: x.afgewezen || 0, blok_nieuw: x.blok_nieuw || 0, blok_weg: x.blok_weg || 0, blok_vervallen: x.blok_vervallen || 0, agenda_fout: x.agenda_fout || 0, afwijs_fout: x.afwijs_fout || 0,
+        niet_david: x.niet_david || 0, model: x.model || 0, model_fout: x.model_fout || 0 })); },
     });
   } catch (e) { logError('agenda-potlood', e); return null; }
 })();

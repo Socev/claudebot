@@ -12,7 +12,13 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 node - "$HIER" "$TMP" <<'EINDE'
 'use strict';
 const path = require('path'), fs = require('fs');
-const M = require(process.env.AP_MOD || path.join(process.argv[2], 'agenda-potlood.js'));
+const M0 = require(process.env.AP_MOD || path.join(process.argv[2], 'agenda-potlood.js'));
+// wv3978: standaard een nep-stuk en een nep-model dat "ja" zegt (titel = onderwerp van de detector), zodat de v1/v2-gevallen blijven gelden
+const NEPSTUK = '---\novis_stuk: stk_proef\nafzender: "Proefsecretariaat <info@proef.invalid>"\n---\n\n# Proef\n\nGraag zien we je dan.\n';
+const MODELVRAGEN = [];
+const NEP = { lees: () => NEPSTUK, model: async (sys, pr, sc) => { MODELVRAGEN.push({ sys, pr, sc }); const m = /Onderwerp volgens de detector: (.*)/.exec(pr);
+  return { ok: true, data: { oordeel: 'ja', wat: 'Proefoverleg met het bestuur over de begroting, in het proefgebouw.', titel: m ? m[1] : 'Proef' } }; } };
+const M = Object.assign({}, M0, { maak: (o) => M0.maak(Object.assign({}, NEP, o)) });
 const TMP = process.argv[3];
 let ok = 0, fout = 0;
 function toets(naam, waar, x) { if (waar) { ok++; console.log('ok   ' + naam); } else { fout++; console.log('FOUT ' + naam + ' ' + JSON.stringify(x)); } }
@@ -282,6 +288,96 @@ fs.writeFileSync(REG, JSON.stringify({ rijen: [{ id: 'agenda-socev-potlood', sta
     const u = await m.ronde({ nu: NU });
     const pl = acties(L, 'socev_plaatsen');
     toets('proef: blokken SOCEV PROEF ✏️', u.blok_nieuw === 2 && pl.every((x) => x.titel.indexOf('SOCEV PROEF ✏️ ') === 0), pl.map((x) => x.titel));
+  }
+
+  // ── wv3978: alleen afspraken waar David zelf bij moet zijn (verzonnen namen en stukken) ──────────────────────────────────────
+  {
+    const ROOSTER = '---\novis_stuk: stk_r\nonderwerp: "RE: Nieuwe medewerker: Fenna Proefmans per 1-12-2026"\nafzender: "David Schaap <d.schaap@gmail.com>"\n---\n\n# RE\n\n## Mailtekst\n\nHoi Mirte,\n\nFenna werkt op dinsdag, woensdag en\ndonderdag, van 8 tot 17 uur (3 x 8,5 uur).\n\nMet vriendelijke groet,\nDavid\n';
+    const ARBO = '---\novis_stuk: stk_a\nonderwerp: "Uitnodiging online spreekuur"\nafzender: "Arbodienst Proef <noreply@arbo.invalid>"\n---\n\n# Uitnodiging online spreekuur\n\nBeste mevrouw Proefstra,\n\nIn verband met uw ziekmelding nodigen wij u uit voor een online spreekuur.\nDatum en tijd: 25-11-2026 om 13:00 uur\n';
+    const ECHT = '---\novis_stuk: stk_e\nonderwerp: "Uitnodiging overleg zorggroep"\nafzender: "Zorggroep Proef <secretariaat@zorggroep.invalid>"\n---\n\n# Uitnodiging\n\nBeste David,\n\nGraag nodigen we je uit voor een gesprek over de nieuwe contracten op 1-12-2026 om 14:00 uur, bij ons kantoor in Proefstad.\n';
+    const STUK = { 'r.md': ROOSTER, 'a.md': ARBO, 'e.md': ECHT };
+    const RR = [
+      r(201, '2026-11-26', { hele_dag: false, begin: '08:00', eind: '17:00', precisie: 'minuut', onderwerp: 'RE: Nieuwe medewerker: Fenna Proefmans per 1-12-2026', regel: 'rel.weekdag@1+rol.toekomst_met_tijd',
+        stuk_pad: '10_Zakelijk/Proef/Bronnen/r.md', zin: { voor: 'Fenna werkt op dinsdag, woensdag en ', treffer: 'donderdag, van 8 tot 17 uur', na: ' (3 x 8,5 uur).' } }),
+      r(202, '2026-11-25', { hele_dag: false, begin: '13:00', eind: null, precisie: 'minuut', onderwerp: 'Uitnodiging online spreekuur', regel: 'num.d_m_jjjj@1+rol.toekomst_met_tijd',
+        stuk_pad: '10_Zakelijk/Proef/Bronnen/Medewerkers/a.md', zin: { voor: 'Datum en tijd: ', treffer: '25-11-2026 om 13:00 uur', na: '' } }),
+      r(203, '2026-12-01', { hele_dag: false, begin: '14:00', eind: null, precisie: 'minuut', onderwerp: 'RE: Uitnodiging overleg zorggroep', regel: 'num.d_m_jjjj@1+rol.toekomst_met_tijd',
+        stuk_pad: '10_Zakelijk/Proef/Bronnen/e.md', zin: { voor: 'Graag nodigen we je uit voor een gesprek over de nieuwe contracten op ', treffer: '1-12-2026 om 14:00 uur', na: ', bij ons kantoor in Proefstad.' } }),
+    ];
+    // nietVoorDavid, puur
+    const k = M.kandidaten(RR, '2026-11-23');
+    const kk = (id) => k.find((x) => x.ids.indexOf(id) >= 0);
+    toets('rooster/weekdag: geen afspraak van David', M.nietVoorDavid(kk(201), ROOSTER) === 'weekdag', M.nietVoorDavid(kk(201), ROOSTER));
+    toets('weekdag zonder detectorregel: treffer zonder datum', M.nietVoorDavid(Object.assign({}, kk(201), { bronregels: [] }), ROOSTER) === 'weekdag');
+    toets('rooster: "elke dinsdag" ook mét datum', M.nietVoorDavid({ bronregels: [], zin: { voor: 'Vanaf 1-12 elke dinsdag ', treffer: '1-12-2026 om 9:00', na: '' } }, null) === 'rooster');
+    toets('rooster: "maandagen"', M.nietVoorDavid({ bronregels: [], zin: { voor: 'Zij werkt op maandagen en ', treffer: '2-12 om 9:00', na: '' } }, null) === 'rooster');
+    toets('brief aan medewerker: map Medewerkers', M.nietVoorDavid(kk(202), ARBO) === 'medewerker', M.nietVoorDavid(kk(202), ARBO));
+    toets('brief aan ander: aanhef "Beste mevrouw X" (ook buiten Medewerkers)', M.nietVoorDavid(Object.assign({}, kk(202), { stuk_pad: '10_Zakelijk/Proef/a.md' }), ARBO) === 'aan_ander');
+    toets('echte uitnodiging aan David: geen harde nee', M.nietVoorDavid(kk(203), ECHT) === null, M.nietVoorDavid(kk(203), ECHT));
+    toets('Davids eigen mail met aanhef aan ander: harde regel laat het aan het model', M.nietVoorDavid({ bronregels: [], zin: { voor: 'Zullen we ', treffer: '2-12-2026 om 10:00', na: ' afspreken?' } },
+      '---\nafzender: "David Schaap <d.schaap@gmail.com>"\n---\n\nHoi Mirte,\n\nZullen we 2-12-2026 om 10:00 afspreken?\n') === null);
+    toets('aanhef "Beste klant"/"Beste HCE-leden"/voornaam: geen harde nee', ['klant', 'HCE-leden', 'contactpersoon', 'Mirte', 'heer/mevrouw'].every((n) => M.nietVoorDavid({ bronregels: [] }, '---\nafzender: "x"\n---\n\nBeste ' + n + ',\n\nOverleg 2-12.\n') === null));
+    toets('aanhef "Geachte heer Proef": harde nee', M.nietVoorDavid({ bronregels: [] }, '---\nafzender: "x"\n---\n\nGeachte heer Proef,\n\nOverleg 2-12.\n') === 'aan_ander');
+    toets('groepsaanhef "Beste collega\'s": geen harde nee', M.nietVoorDavid({ bronregels: [] }, '---\nafzender: "x"\n---\n\nBeste collega\'s,\n\nOverleg 2-12.\n') === null);
+    toets('zonderRe', M.zonderRe('RE: Fwd: AW: Overleg') === 'Overleg' && M.zonderRe('Antw: Re[2]: x') === 'x');
+    toets('modelUit fail-closed', M.modelUit(null) === null && M.modelUit({ ok: false }) === null && M.modelUit({ ok: true, data: { oordeel: 'misschien' } }) === null
+      && M.modelUit({ ok: true, data: { oordeel: 'twijfel', wat: 'x', titel: 'y' } }).v === 'nee' && M.modelUit({ ok: true, data: { oordeel: 'ja', wat: '', titel: 'Overleg' } }).v === 'nee'
+      && M.modelUit({ ok: true, data: { oordeel: 'ja', wat: 'Gesprek met de zorggroep.', titel: 'RE: Gesprek zorggroep' } }).titel === 'Gesprek zorggroep');
+
+    // ronde: rooster en arbobrief → geen kaart, geen modelvraag; echte uitnodiging → kaart met wat-zin
+    const vragen = [];
+    const model = async (sys, pr, sc) => { vragen.push(pr); return /zorggroep/.test(pr) ? { ok: true, data: { oordeel: 'ja', wat: 'Gesprek met de zorggroep over de nieuwe contracten, op hun kantoor in Proefstad.', titel: 'Gesprek zorggroep over contracten' } }
+      : { ok: true, data: { oordeel: 'nee', wat: 'niet voor David', titel: 'x' } }; };
+    let L = nepLuik();
+    let m = maak(() => RR, L, { naam: 'david', mutatiesRonde: 10, lees: (p) => STUK[path.basename(p)] || null, model });
+    let u = await m.ronde({ nu: NU });
+    let pl = acties(L, 'socev_plaatsen'), kd = acties(L, 'david_plaatsen');
+    toets('alleen de echte uitnodiging wordt potlood + kaart', u.nieuw === 1 && pl.length === 1 && kd.length === 1 && u.niet_david === 2, u);
+    toets('rooster en arbobrief: geen modelvraag (harde regel)', vragen.length === 1 && /zorggroep/.test(vragen[0]), vragen.length);
+    toets('kaart: titel van het model, zonder RE:', kd[0] && kd[0].titel === 'Gesprek zorggroep over contracten', kd[0] && kd[0].titel);
+    toets('kaart: wat-zin in de omschrijving, dan het stuk', kd[0] && /^Gesprek met de zorggroep over de nieuwe contracten, op hun kantoor in Proefstad\.\nStuk: https:\/\/app\.socev\.dev\//.test(kd[0].omschrijving), kd[0] && kd[0].omschrijving);
+    toets('potlood: wat-zin bovenaan, titel met ✏️', pl[0] && pl[0].titel === '✏️ Gesprek zorggroep over contracten' && /^Gesprek met de zorggroep/.test(pl[0].omschrijving), pl[0]);
+    toets('modelvraag noemt datum, tijd en zin', /dinsdag 1-12-2026 om 14:00/.test(vragen[0]) && /\[1-12-2026 om 14:00 uur\]/.test(vragen[0]), vragen[0].slice(0, 300));
+    u = await m.ronde({ nu: NU + UUR });
+    toets('tweede ronde: nee onthouden, niets opnieuw gevraagd of gezet', u.nieuw === 0 && vragen.length === 1 && acties(L, 'david_plaatsen').length === 1, { u, n: vragen.length });
+    const st2 = fs.readFileSync(path.join(TMP, 'david.json'), 'utf8');
+    toets('oordelen in het register zonder titels of namen', !/zorggroep|Fenna|Proefstra|spreekuur/i.test(st2) && /"weekdag"/.test(st2) && /"medewerker"/.test(st2), st2.slice(0, 300));
+
+    // model zegt nee / twijfel → geen kaart; modelfout → nu niet, na 3 fouten nee; geen model → fail-closed
+    L = nepLuik(); vragen.length = 0;
+    m = maak(() => [RR[2]], L, { naam: 'david-nee', lees: () => ECHT, model: async (s2, pr) => { vragen.push(pr); return { ok: true, data: { oordeel: 'twijfel', wat: 'onduidelijk', titel: 'x' } }; } });
+    u = await m.ronde({ nu: NU });
+    toets('model twijfel → geen potlood', u.nieuw === 0 && acties(L, 'socev_plaatsen').length === 0 && u.niet_david === 1, u);
+    L = nepLuik(); let n = 0;
+    m = maak(() => [RR[2]], L, { naam: 'david-fout', lees: () => ECHT, model: async () => { n++; return { ok: false, fout: 'claude weg' }; } });
+    u = await m.ronde({ nu: NU });
+    toets('modelfout → geen potlood, model_fout geteld', u.nieuw === 0 && u.model_fout === 1 && acties(L, 'socev_plaatsen').length === 0, u);
+    await m.ronde({ nu: NU + UUR }); await m.ronde({ nu: NU + 2 * UUR }); u = await m.ronde({ nu: NU + 3 * UUR });
+    toets('na 3 modelfouten: nee, niet meer gevraagd', n === 3 && u.model === 0 && acties(L, 'socev_plaatsen').length === 0, { n, u });
+    L = nepLuik(); n = 0;
+    m = maak(() => [RR[2], Object.assign({}, RR[2], { id: 204, van: '2026-12-02', onderwerp: 'Tweede uitnodiging' })], L, { naam: 'david-storing', mutatiesRonde: 10, lees: () => ECHT, model: async () => { n++; return { ok: false, fout: 'geen ruimte' }; } });
+    u = await m.ronde({ nu: NU });
+    toets('storing: na de eerste modelfout geen vragen meer deze ronde', n === 1 && u.model === 1, { n, u });
+    L = nepLuik();
+    m = M0.maak({ registerPad: REG, gevonden: async () => ({ ok: true, regels: [RR[2]] }), luik: L.f, oordeel: async () => ({}), staatPad: path.join(TMP, 'david-geen.json'), lees: () => ECHT });
+    u = await m.ronde({ nu: NU });
+    toets('zonder model: fail-closed, geen potlood', u.nieuw === 0 && acties(L, 'socev_plaatsen').length === 0 && u.model_fout === 1, u);
+    L = nepLuik();
+    m = maak(() => [RR[2]], L, { naam: 'david-geenstuk', lees: () => { throw new Error('weg'); } });
+    u = await m.ronde({ nu: NU });
+    toets('stuk onleesbaar: fail-closed', u.nieuw === 0 && acties(L, 'socev_plaatsen').length === 0, u);
+    // HAGRO: wat-zin niet in de omschrijving (gedeelde agenda), wel in de titel van het model
+    L = nepLuik();
+    m = maak(() => [Object.assign({}, RR[2], { stuk_pad: '10_Zakelijk/HAGRO/e.md' })], L, { naam: 'david-hagro', lees: () => ECHT, model });
+    u = await m.ronde({ nu: NU });
+    kd = acties(L, 'david_plaatsen');
+    toets('HAGRO-kaart: alleen stuklink in de omschrijving', kd.length === 1 && kd[0].agenda === 'hagro' && /^Stuk: https:\/\/app\.socev\.dev\/10_Zakelijk\/HAGRO\//.test(kd[0].omschrijving) && !/zorggroep over de nieuwe/.test(kd[0].omschrijving), kd[0]);
+    // modelaantal per ronde begrensd
+    L = nepLuik(); let nm = 0;
+    const veel2 = Array.from({ length: 12 }, (_, i) => r(300 + i, '2026-12-0' + (1 + (i % 8)), { onderwerp: 'Vraag ' + i }));
+    m = maak(() => veel2, L, { naam: 'david-max', mutatiesRonde: 40, plafondDag: 40, model: async () => { nm++; return { ok: true, data: { oordeel: 'nee', wat: 'x', titel: 'x' } }; } });
+    u = await m.ronde({ nu: NU });
+    toets('hooguit 6 modelvragen per ronde', nm === 6 && u.model === 6, { nm, u });
   }
   // geen titels in de staat
   const st = fs.readFileSync(path.join(TMP, 'p.json'), 'utf8');
