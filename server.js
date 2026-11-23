@@ -4708,7 +4708,7 @@ function handleRequest(req, res) {
       vastgoed: typeof vastgoedInfo === 'function' ? vastgoedInfo() : { aan: false },
       nza: typeof nzaInfo === 'function' ? nzaInfo() : { aan: false },   // wv3099: OVIS NZa scherm (alleen of het aan staat + telling)   // wv3085: OVIS Vastgoed (alleen aantallen: objecten, feiten, stukken, aanroepen)
       beleggen: typeof beleggenInfo === 'function' ? beleggenInfo() : { aan: false },
-      strateeg: typeof strateegApp !== 'undefined' && strateegApp ? Object.assign(strateegApp.info(), { segment: typeof segmentApp !== 'undefined' && segmentApp ? segmentApp.info() : { aan: false } }) : { aan: false },   // wv3993: Strateeg (fictief geld): stand, opzet, modus, laatste tik, aantal orders
+      strateeg: typeof strateegApp !== 'undefined' && strateegApp ? Object.assign(strateegApp.info(), { segment: typeof segmentApp !== 'undefined' && segmentApp ? segmentApp.info() : { aan: false }, ideeen: typeof ideeenApp !== 'undefined' && ideeenApp ? ideeenApp.info() : { aan: false } }) : { aan: false },   // wv3993: Strateeg (fictief geld): stand, opzet, modus, laatste tik, aantal orders
       personeelsscherm: typeof personeelsschermInfo === 'function' ? personeelsschermInfo() : { aan: false },   // wv2991: OVIS Personeelsscherm (gekoppeld, laatst gezien, volgnr; nooit token, code of IP)
       imagine: typeof imagineInfo === 'function' ? imagineInfo() : { aan: false },   // wv2984: OVIS Imagine (aantallen, schijf, nog te wissen; geen titels of beelden)   // wv2982: OVIS Beleggen (aantallen rijen, vault_ok; geen bedragen)
       ghawa: typeof ghawaInfo === 'function' ? ghawaInfo() : { aan: false },   // wv2877: OVIS GHAWA (databank aanwezig?, laatste scherm en of het sluit; geen inhoud)
@@ -16282,7 +16282,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking
         if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk' || route === 'GET /app/nza/punten') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen); wv3676: tab Punten
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
-        if (route === 'GET /app/beleggen/strateeg' || route === 'GET /app/beleggen/strateeg/backtest' || route === 'POST /app/beleggen/strateeg/stand') return typeof appStrateeg === 'function' ? appStrateeg(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'strateeg');   // wv3993: Strateeg (fictief)
+        if (route === 'GET /app/beleggen/strateeg' || route === 'GET /app/beleggen/strateeg/backtest' || route === 'POST /app/beleggen/strateeg/stand' || route === 'POST /app/beleggen/strateeg/idee') return typeof appStrateeg === 'function' ? appStrateeg(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'strateeg');   // wv3993: Strateeg (fictief)
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || route === 'GET /app/beleggen/teller' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze|past)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
         if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0 || route === 'POST /app/kalender/gevonden') return typeof appKalender === 'function' ? appKalender(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv3679: POST = Klopt niet / terug   // wv2333: OVIS Calendar (alleen lezen)
         if (route.indexOf('GET /app/promedico/') === 0) return typeof appPromedico === 'function' ? appPromedico(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'promedico');   // wv3143: Promedico-laag in Calendar (alleen lezen)
@@ -23318,7 +23318,7 @@ async function harvesterClaude(systeem, prompt, schema, o) {
     HARVESTER_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
     if (tok) env.CLAUDE_CODE_OAUTH_TOKEN = tok;
     const args = ['-p', '--output-format', 'json', '--restricted', '--strict-mcp-config', '--tools', '', '--permission-mode', 'acceptEdits',
-      '--permission-prompts', 'none', '--no-session-persistence', '--model', (o && o.model) || HARVESTER_MODEL, '--effort', 'low', '--system-prompt', systeem,
+      '--permission-prompts', 'none', '--no-session-persistence', '--model', (o && o.model) || HARVESTER_MODEL, '--effort', (o && ['low', 'medium', 'high'].includes(o.effort)) ? o.effort : 'low', '--system-prompt', systeem,
       '--json-schema', JSON.stringify(schema)];
     let k, uit = '', fout = '';
     try { k = metOomEerst(function () { return spawn(HARVESTER_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); }); }
@@ -27142,11 +27142,19 @@ async function appStrateeg(req, res, a, route, d) {
   const post = req.method === 'POST';
   if (post && !appTeller('beleggen-schrijf', 200, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens beleggen-schrijf');
   let u;
+  if (route === 'POST /app/beleggen/strateeg/idee') {   // wv4012: Davids idee voor het Ideeënboek (alleen opslaan; het uitzoeken loopt los)
+    if (!ideeenApp) return appWeiger(res, 404, 'het Ideeënboek zit niet in deze versie van de pod', 'ideeen ontbreekt');
+    if (!appTeller('strateeg-idee', 10, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens strateeg-idee');
+    try { u = ideeenApp.idee(d || {}); } catch (e) { logError('strateeg-ideeen', new Error('idee faalde')); return appWeiger(res, 503, 'het idee kon nu niet worden opgeslagen; probeer het zo opnieuw', 'ideeen fout'); }
+    res._app.reden = String(u.reden || 'idee').slice(0, 80);
+    return appStuur(res, u.status, u.body);
+  }
   try { u = strateegApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
   catch (e) { logError('strateeg', new Error('route faalde')); return appWeiger(res, 503, 'de Strateeg is nu niet te lezen; probeer het zo opnieuw', 'strateeg fout'); }
   if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'strateeg').slice(0, 80);
   if (u.status === 200 && !post && route === 'GET /app/beleggen/strateeg' && u.body && typeof u.body === 'object') {   // wv4002: vijfde boek Segment erbij
     try { u.body.segment = segmentApp ? segmentApp.overzicht() : null; } catch (e) { u.body.segment = null; logError('strateeg-segment', new Error('overzicht faalde')); }
+    try { u.body.ideeen = ideeenApp ? ideeenApp.overzicht() : null; } catch (e) { u.body.ideeen = null; logError('strateeg-ideeen', new Error('overzicht faalde')); }   // wv4012
   }
   return appStuur(res, u.status, u.body);
 }
@@ -27281,6 +27289,26 @@ const segmentApp = (function () {
       log: function (o) { schrijfLog(nu() + ' strateeg ' + velden(o)); } });
   } catch (e) { logError('strateeg-segment', new Error('laden faalde')); return null; }
 })();
+// wv4012 (David app 23-11 22:57 "Het leek mij juist dat je zou gaan voorspellen op basis van nieuws en ideeën"): zesde boek Ideeën (fictief) —
+// handelt op stellingen (gebeurtenis, uiterste datum, eigen kans tegen wat de markt inprijst), niet op koerspatronen. Eigen module en regels
+// (strateeg-ideeen.js/.json, ontwerp Fable 5.2 mk-scripts/wv4012/ontwerp.md); eigen tabellen idee_*, raakt de vijf andere boeken niet.
+// Denkwerk via harvesterClaude (abonnement, geen tools) los van de minuuttik, met een harde grens per dag en maand in de module.
+const ideeenApp = (function () {
+  const p = path.join(__dirname, 'strateeg-ideeen.js');
+  if (!strateegApp || !fs.existsSync(p) || typeof strateegApp._db !== 'function') return null;
+  try {
+    const H = require(path.join(__dirname, 'harvester.js'));
+    const S = require(path.join(__dirname, 'strateeg.js'));
+    return require(p).maak({ db: strateegApp._db, wereldIsin: S.UNIVERSUM.index.isin, tarieven: S.REGELS.tarieven, beurzen: S.REGELS.beurzen, leesFeed: H.leesFeed,
+      bekendeIsins: S.UNIVERSUM.instrumenten.map((i) => i.isin),
+      strateegStand: function () { return strateegApp._M.get('stand'); },
+      claude: function (systeem, prompt, schema, opt) { return harvesterClaude(systeem, prompt, schema, opt); },
+      haal: async function (url, soort) {
+        const ua = soort === 'sec' ? BELEGGEN_UA : BELEGGEN_KOERS_UA;
+        const r = await H.veiligHaal(url, { ua: ua }, soort === 'rss' ? undefined : 'application/json, text/plain;q=0.9, */*;q=0.5'); return r.body; },
+      log: function (o) { schrijfLog(nu() + ' strateeg ' + velden(o)); } });
+  } catch (e) { logError('strateeg-ideeen', new Error('laden faalde')); return null; }
+})();
 let strateegBezig = false;
 async function strateegTik() {
   if (!strateegApp || !SERVER_ECHT || !rolPrimair() || strateegBezig) return;
@@ -27288,8 +27316,11 @@ async function strateegTik() {
   let uit = null;
   try { uit = await strateegApp.tik(); }
   catch (e) { logError('strateeg', new Error('tik faalde')); }   // geen inhoud in de log
-  try { if (segmentApp && uit) await segmentApp.tik(uit); }
+  let segUit = null;
+  try { if (segmentApp && uit) segUit = await segmentApp.tik(uit); }
   catch (e) { logError('strateeg-segment', new Error('tik faalde')); }
+  try { if (ideeenApp) await ideeenApp.tik(uit, segUit); }   // wv4012: start zelf zijn denkwerk los; voert alleen uit als de andere twee niets deden
+  catch (e) { logError('strateeg-ideeen', new Error('tik faalde')); }
   finally { strateegBezig = false; }
 }
 if (strateegApp && SERVER_ECHT) { setInterval(function () { strateegTik(); }, 60000).unref(); }
