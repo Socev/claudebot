@@ -672,8 +672,7 @@ srv.listen(0, '127.0.0.1', async () => {
     Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
     r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: TK3 });
     toets('8 voorjou met een Tasker-sleutel: 404', r.status === 404, r.j);
-    r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: OW2 });
-    toets('8 voorjou zonder app-sessie: 423', r.status === 423 && /Socev-app/.test(r.j.fout), r.j);
+    // wv3976: Onderweg zonder app-sessie toetst § 8x
     r = await tel('GET', '/tel/uit?lijst=iets', { sleutel: OW2 });
     toets('8 onbekende lijst: 400', r.status === 400, r.j);
     sessie(PIXEL, 'credP', false);
@@ -719,8 +718,7 @@ srv.listen(0, '127.0.0.1', async () => {
     r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: TK3 });
     toets('8b dagbericht met een Tasker-sleutel: 404', r.status === 404, r.j);
     Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
-    r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: OW2 });
-    toets('8b dagbericht zonder app-sessie: 423', r.status === 423 && /Socev-app/.test(r.j.fout), r.j);
+    // wv3976: Onderweg zonder app-sessie toetst § 8x
     sessie(PIXEL, 'credP', false);
     const ymd = (t) => new Date(t).toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
     const HOOFD = path.join(LOGDIR, 'hoofd.jsonl');
@@ -782,8 +780,7 @@ srv.listen(0, '127.0.0.1', async () => {
     r = await vst(11, { keuze: 'ja', tekst_id: TID }, TK3);
     toets('8c voorstel met een Tasker-sleutel: 404', r.status === 404, r.j);
     Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
-    r = await vst(11, { keuze: 'ja', tekst_id: TID });
-    toets('8c voorstel zonder app-sessie: 423', r.status === 423 && /Socev-app/.test(r.j.fout), r.j);
+    // wv3976: Onderweg zonder app-sessie toetst § 8x
     const sP8 = sessie(PIXEL, 'credP', false);
     r = await vst(11, { keuze: 'misschien', tekst_id: TID });
     toets('8c onbekende keuze: 400', r.status === 400, r.j);
@@ -824,8 +821,7 @@ srv.listen(0, '127.0.0.1', async () => {
     r = await tel('GET', '/tel/uit?lijst=kaartstem&id=11', { sleutel: TK3 });
     toets('8c kaartstem met een Tasker-sleutel: 404', r.status === 404, r.j);
     Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
-    r = await tel('GET', '/tel/uit?lijst=kaartstem&id=11', { sleutel: OW2 });
-    toets('8c kaartstem zonder app-sessie: 423', r.status === 423, r.j);
+    // wv3976: Onderweg zonder app-sessie toetst § 8x
     sessie(PIXEL, 'credP', false);
     const ttsVoor = st.tts.length;
     r = await tel('GET', '/tel/uit?lijst=kaartstem&id=11', { sleutel: OW2 });
@@ -953,8 +949,7 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('8s Zoek snel uit: 409 met zin, Whisper niet aangeroepen', r.status === 409 && /Zoek snel staat uit/.test(r.j.fout) && st.stt.length === sttS, { r: r.j, stt: st.stt.length - sttS });
     zsAan = true;
     Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
-    r = await telS({});
-    toets('8s snel zonder app-sessie: 423', r.status === 423, r.j);
+    // wv3976: Onderweg zonder app-sessie toetst § 8x
     sessie(PIXEL, 'credP', false);
     st.sttTekst = 'Wat is mijn kenteken';
     let vrij; zsWacht = new Promise((ok) => { vrij = ok; });
@@ -1020,8 +1015,7 @@ srv.listen(0, '127.0.0.1', async () => {
     r = await tel('GET', '/tel/uit?lijst=telezen', { sleutel: TK3 });
     toets('8s telezen met een Tasker-sleutel: 404', r.status === 404, r.j);
     Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
-    r = await tel('GET', '/tel/uit?lijst=telezen', { sleutel: OW2 });
-    toets('8s telezen zonder app-sessie: 423', r.status === 423, r.j);
+    // wv3976: Onderweg zonder app-sessie toetst § 8x
     sessie(PIXEL, 'credP', false);
     r = await tel('GET', '/tel/uit?lijst=telezen', { sleutel: OW2 });
     const tl = r.j.telezen || [];
@@ -1109,9 +1103,9 @@ srv.listen(0, '127.0.0.1', async () => {
     Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
     r = await tel('GET', '/tel/uit?lijst=uitdaging', { sleutel: TKV });
     toets('8v uitdaging met een Tasker-sleutel: 404', r.status === 404, r.j);
+    // wv3976: de hele JA met vingerafdruk hieronder loopt ZONDER app-sessie (David hoeft de Socev-app niet te openen)
     r = await tel('GET', '/tel/uit?lijst=uitdaging', { sleutel: OWV });
-    toets('8v uitdaging zonder app-sessie: 423', r.status === 423, r.j);
-    sessie(PIXEL, 'credP', false);
+    toets('8v uitdaging zonder app-sessie: 200 (wv3976)', r.status === 200 && /^[a-f0-9]{32}$/.test(String(r.j.uitdaging)), r.j);
     const uitd = async () => (await tel('GET', '/tel/uit?lijst=uitdaging', { sleutel: OWV })).j.uitdaging;
     let U = await uitd();
     toets('8v uitdaging: 32 hex, 2 minuten', /^[a-f0-9]{32}$/.test(String(U)) && Math.abs(H.telStaat.uitdaging[OWVid].tot - Date.now() - 120000) < 2000, H.telStaat.uitdaging);
@@ -1272,8 +1266,7 @@ srv.listen(0, '127.0.0.1', async () => {
     r = await tel('GET', '/tel/uit?lijst=agenda', { sleutel: TKV });
     toets('8w agenda met een Tasker-sleutel: 404', r.status === 404, r.j);
     Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
-    r = await tel('GET', '/tel/uit?lijst=agenda', { sleutel: OWV });
-    toets('8w agenda zonder app-sessie: 423, agenda niet gelezen', r.status === 423 && agN === 0, { r: r.j, agN });
+    // wv3976: Onderweg zonder app-sessie toetst § 8x
     sessie(PIXEL, 'credP', false);
     st.ttsTraag = 200;
     const ttsW = st.tts.length;
@@ -1371,6 +1364,40 @@ srv.listen(0, '127.0.0.1', async () => {
       /const gelogd = stil \? false : await appLogSchrijf\('hoofd'/.test(src) && /if \(!stil\) zoekSnelRegelZet\(r\);/.test(src));
     toets('8w tel-audit zonder vraag of antwoord (kies)', !/proefkenteken|ZZ-99-ZZ|Proefvraag/.test(audit()) && /kies /.test(audit()));
     toets('8w geen onverwachte fouten (agenda, kies)', !logs.some((l) => /tel-agenda|tel-kies/.test(l) && !/luik weg|: stuk/.test(l)), logs.filter((l) => /tel-agenda|tel-kies/.test(l)));
+    // ── 8x. wv3976 (David 23-11 06:23, rijdend): Onderweg werkt zonder app-sessie; Tasker houdt de eis; zonder sleutel of Access dicht ──
+    H.appStaat.tellers['tel-alles'] = []; H.appStaat.tellers['tel-beurt'] = []; H.appStaat.tellers['tel-beurtdag'] = []; H.appStaat.tellers['tel-agenda'] = [];
+    H.appStaat.tellers['tel-dagbericht'] = []; H.appStaat.tellers['tel-voorjou'] = []; H.appStaat.tellers['tel-telezen'] = [];
+    await rond();
+    Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
+    zsAan = true; delete (H.appStaat.zoekSnel || { bezig: {} }).bezig[PIXEL];
+    agD = { vandaag: ymdNu, morgen: ymdMo, fouten: [], op: Date.now(), agenda: { vandaag: [], morgen: [] } }; agFout = null;
+    const a423 = () => audit().split('\n').filter((l) => /geen app-sessie/.test(l)).length;
+    const n423 = a423();
+    for (const lijst of ['dagbericht', 'agenda', 'voorjou', 'telezen']) {
+      r = await tel('GET', '/tel/uit?lijst=' + lijst, { sleutel: OWV });
+      toets('8x ' + lijst + ' met Onderweg-sleutel zonder app-sessie: 200', r.status === 200 && r.j.ok !== false, { status: r.status, j: r.j });
+    }
+    r = await tel('GET', '/tel/uit?lijst=dagbericht&audio=1', { sleutel: OWV });
+    toets('8x dagbericht-audio zonder app-sessie: geen 423 (200 mp3 of 404 "nog geen")', r.status === 200 || r.status === 404, { status: r.status, j: r.j });
+    const gX = gestart.length;
+    r = await tel('POST', '/tel/beurt', { sleutel: OWV, ct: 'text/plain', body: 'Proefvraag zonder app-sessie' });
+    toets('8x beurt met Onderweg-sleutel zonder app-sessie: 202 met id', r.status === 202 && /^[0-9a-f]{16}$/.test(String(r.j.id)), r.j);
+    await tik(); await tik();
+    toets('8x die beurt start gewoon in het hoofdkanaal', gestart.length === gX + 1 && /Proefvraag zonder app-sessie/.test(gestart[gX].prompt), gestart.slice(gX).map((g) => g.prompt.slice(0, 120)));
+    if (gestart[gX] && afmaken[gestart[gX].jobId]) { afmaken[gestart[gX].jobId]('Goed.'); await tik(); }
+    const uX = await tel('GET', '/tel/uit', { sleutel: OWV }); if (uX.j.id) await tel('POST', '/tel/gespeeld/' + uX.j.id, { sleutel: OWV });
+    toets('8x geen enkele 423 "geen app-sessie" voor Onderweg', a423() === n423, audit().split('\n').filter((l) => /geen app-sessie/.test(l)).slice(-3));
+    r = await tel('POST', '/tel/beurt', { sleutel: TKV, ct: 'text/plain', body: 'Proefvraag Tasker' });
+    toets('8x Tasker zonder app-sessie: nog steeds 423 (ongewijzigd)', r.status === 423 && /Socev-app/.test(r.j.fout), r.j);
+    r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: false });
+    toets('8x zonder apparaatsleutel: 401', r.status === 401, r.j);
+    r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: OWV, jwt: false });
+    toets('8x zonder Access-bewijs: 403', r.status === 403, r.j);
+    fs.writeFileSync(TELUIT, '');
+    r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: OWV });
+    toets('8x noodstop blijft: Onderweg zonder app-sessie 503', r.status === 503, r.j);
+    fs.unlinkSync(TELUIT);
+    toets('8x telSessieOk: Onderweg-rij true, Tasker-rij zonder sessie false', H.__haal('telSessieOk')({ soort: 'onderweg', app_apparaat: PIXEL }) === true && H.__haal('telSessieOk')({ app_apparaat: PIXEL }) === false);
     toets('8 geen onverwachte fouten (wv3700)', !logs.some((l) => /tel-voorjou/.test(l) && !/databank weg/.test(l)), logs.filter((l) => /tel-voorjou/.test(l)));
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }
   srv.close();

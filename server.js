@@ -18421,7 +18421,7 @@ function berichtInfo() {
 // Sloten, in deze volgorde: noodstop (/opt/data/tel-uit of app-uit) -> 503; passieve kant -> 503; Access-bewijs van de
 // eigen Access-app (eigen aud, common_name = client-id van servicetoken "tasker-pixel") -> 403; apparaatsleutel
 // (Authorization: Bearer, alleen sha256 in tel-apparaten.json, 90 dagen) -> 401. /tel/beurt daarnaast alleen als de Pixel
-// waarmee gekoppeld is in dit dagdeel een app-sessie (vingerafdruk) heeft -> 423. Grenzen: 5 MB en 3 min audio of 4000
+// waarmee gekoppeld is in dit dagdeel een app-sessie (vingerafdruk) heeft -> 423 (sinds wv3976 alleen nog voor Tasker). Grenzen: 5 MB en 3 min audio of 4000
 // tekens; 30 beurten per uur, 150 per dag; 1 lopend + 2 wachtend; 1 open lange vraag per apparaat (een nieuwe vervangt de
 // oude, die krijgt een leeg antwoord). Een /tel-beurt is NOOIT een knopdruk: markeringen in de tekst krijgen "(gesproken)".
 // De uit-rij (tel-uit.json) staat op schijf vóór de beurt als opgehaald telt (uitrol); een open lange vraag telt niet als
@@ -18517,7 +18517,11 @@ function telApparaat(req) {
   return { t: t };
 }
 // Persoonsbinding (bouwplan § 6.3): de Pixel waarmee gekoppeld is, heeft in dit dagdeel een app-sessie (vingerafdruk).
+// wv3976 (David 23-11-2026 06:23, rijdend: "In de app moet natuurlijk alles gewoon direct werken, niks veiligheid"): een
+// Onderweg-sleutel hoeft dat niet meer; uit de auto-app naar de Socev-app wisselen voor een vingerafdruk kan niet tijdens het rijden.
+// Blijven staan: noodstop, passieve kant, Access-bewijs en de apparaatsleutel (handleTel). Tasker houdt de eis.
 function telSessieOk(t) {
+  if (telSoort(t) === 'onderweg') return true;
   const nu = Date.now();
   return Object.keys(appStaat.sessies).some(function (h) { const s = appStaat.sessies[h]; return s && s.apparaat === t.app_apparaat && nu <= s.tot; });
 }
@@ -19271,7 +19275,7 @@ function telVingerPubOk(pub, bewijs, code) {
   } catch (e) { return null; }
 }
 function telVingerTekst(apparaat, soort, doel, t, u, stil) { return [TEL_VINGER_KOP, apparaat, soort, doel, t, u, stil].join('\n'); }
-// De lopende app-sessie van het app-apparaat waarmee deze telefoon gekoppeld is (zelfde eis als telSessieOk).
+// De lopende app-sessie van het app-apparaat waarmee deze telefoon gekoppeld is (null = geen; wv3976: dan een kopie in telVingerJa).
 function telAppSessieVan(t) {
   const nu = Date.now();
   const h = Object.keys(appStaat.sessies).find(function (k) { const s = appStaat.sessies[k]; return s && s.apparaat === t.app_apparaat && nu <= s.tot; });
@@ -19327,7 +19331,8 @@ async function telVingerJa(req, res, t, q) {
   let reg, a;
   try { reg = appRegister(); } catch (e) { logError('app-register', e); return telWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'vingerja register'); }
   a = reg.apparaten.find(function (x) { return x && x.id === t.app_apparaat && x.actief && x.credential && x.credential.id; });
-  const sEcht = a ? telAppSessieVan(t) : null;
+  // wv3976: zonder lopende app-sessie een sessiekopie uit het gekoppelde app-apparaat; de vingerafdruk-handtekening hierboven is de binding
+  const sEcht = a ? (telAppSessieVan(t) || { apparaat: a.id, credential: a.credential.id, start: Date.now(), vers_tot: 0, tot: Date.now() + 60000, binding: null }) : null;
   if (!a || !sEcht) return telWeiger(res, 409, 'je telefoon is in de Socev-app niet meer gekoppeld; bevestig in de app', 'vingerja: app-apparaat');
   const sKopie = function (vers) { return Object.assign({}, sEcht, { credential: a.credential.id, vers_tot: vers ? Date.now() + 30000 : 0, onderweg: t.id }); };
   const regel = function (route, u2) { appAudit({ route: route, m: 'ONDERWEG', status: u2.status, apparaat: a.id, reden: 'via onderweg ' + t.id + ': ' + (u2.reden || '') }); };
@@ -19925,7 +19930,7 @@ function telActief() {
     })[0];
   } catch (e) { return null; }
 }
-// Zit David nu met de telefoon in de auto? Alle drie: de lus leeft, de telefoon zelf meldt plek Auto (≤ 3 min), app-sessie dit dagdeel.
+// Zit David nu met de telefoon in de auto? Alle drie: de lus leeft, de telefoon zelf meldt plek Auto (≤ 3 min), app-sessie dit dagdeel (wv3976: niet voor Onderweg).
 function telAanwezig() {
   if (telUit()) return { ok: false, reden: 'uit' };
   const t = telActief();
