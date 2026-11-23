@@ -45,6 +45,7 @@ const EXTRA_KOLOMMEN = [
   ['geldstroom', 'herkomst', "TEXT NOT NULL DEFAULT 'overdracht'"], ['geldstroom', 'referentie', 'TEXT'],
   ['fonds', 'termijn', 'TEXT'], ['fonds', 'gewijzigd_op', 'TEXT'],
   ['open_vraag', 'gewijzigd_op', 'TEXT'], ['open_vraag', 'gesloten_op', 'TEXT'], ['open_vraag', 'concept_op', 'TEXT'],   // wv3919 (2C63 a, c)
+  ['uitgave', 'herkomst', "TEXT NOT NULL DEFAULT 'overdracht'"], ['uitgave', 'bankregel', 'TEXT'], ['uitgave', 'bon', 'TEXT'],   // wv3953 (L01, Te boeken)
 ];
 const SCHEMA_BIJ = `
 CREATE TABLE IF NOT EXISTS fonds_log (nr INTEGER PRIMARY KEY, fonds TEXT NOT NULL, veld TEXT NOT NULL, oud TEXT, nieuw TEXT, op TEXT NOT NULL, door TEXT);
@@ -53,8 +54,9 @@ CREATE TABLE IF NOT EXISTS afschrift (id TEXT PRIMARY KEY, naam TEXT, formaat TE
 CREATE TABLE IF NOT EXISTS signaal (id TEXT PRIMARY KEY, soort TEXT NOT NULL, tekst TEXT NOT NULL, op TEXT NOT NULL, dicht_op TEXT);
 CREATE TABLE IF NOT EXISTS ronde (maand TEXT NOT NULL, stap TEXT NOT NULL, op TEXT NOT NULL, PRIMARY KEY (maand, stap));
 CREATE TABLE IF NOT EXISTS vraag_log (nr INTEGER PRIMARY KEY, vraag TEXT NOT NULL, veld TEXT NOT NULL, oud TEXT, nieuw TEXT, op TEXT NOT NULL, door TEXT);
+CREATE TABLE IF NOT EXISTS boeking_log (nr INTEGER PRIMARY KEY, bankregel TEXT NOT NULL, actie TEXT NOT NULL, gmd_cent INTEGER, delen TEXT, op TEXT NOT NULL, door TEXT);
 `;
-const BIJ_TABELLEN = ['fonds_log', 'afschrift', 'signaal', 'ronde', 'vraag_log'];
+const BIJ_TABELLEN = ['fonds_log', 'afschrift', 'signaal', 'ronde', 'vraag_log', 'boeking_log'];
 
 // Schema bijwerken zonder iets weg te gooien (bestaande databank van fase 1); idempotent.
 function migreer(db) {
@@ -83,6 +85,8 @@ function fase2Gegevens(db) {
   if (kol('bankregel_ecg', 'herkomst')) n += db.prepare("SELECT COUNT(*) AS n FROM bankregel_ecg WHERE herkomst <> 'overdracht'").get().n;
   if (heeft('fonds_log')) n += db.prepare('SELECT COUNT(*) AS n FROM fonds_log').get().n;
   if (heeft('vraag_log')) n += db.prepare('SELECT COUNT(*) AS n FROM vraag_log').get().n;   // wv3919: een herinvoer zou beantwoorde vragen weer openzetten
+  if (kol('uitgave', 'herkomst')) n += db.prepare("SELECT COUNT(*) AS n FROM uitgave WHERE herkomst <> 'overdracht'").get().n;   // wv3953: geboekte betalingen
+  if (heeft('boeking_log')) n += db.prepare('SELECT COUNT(*) AS n FROM boeking_log').get().n;
   return n;
 }
 
@@ -620,8 +624,161 @@ function vragenInConcept(db, ids, nu, door) {
   return { ok: true, n: ids.length };
 }
 
+// ═══════════════ 3c. Te boeken (wv3953, besluitenpagina nr 901 = L01, David Ja 22-11 18:25) ═══════════════
+// Uitgaven kwamen tot nu toe alleen uit de overdracht (datastand as_of_date). Elke cheque of leveranciersbetaling van de dalasirekening van
+// ECG daarna (afschrift ingelezen, geen uitgave eraan) staat op Te boeken met een voorgestelde begrotingsregel; David hangt hem er met zijn
+// vingerafdruk aan (de server eist die), desnoods verdeeld over een paar regels, met een bon of foto erbij. Daarna telt het bedrag mee in
+// "bouw gerealiseerd" en in "opgenomen maar niet gespecificeerd" (aansluiting D). Terugdraaien haalt precies die uitgaven weer weg.
+// Elke boeking, bon en terugdraai staat in boeking_log (met de delen); een herinvoer uit het Excel-bestand weigert daarna (fase2Gegevens).
+// Bankkosten (regel 15.1) en de eurorekening vallen hier buiten. Een cheque met een terugboeking (Reversal, zelfde chequenummer) ook: die
+// vraagt eerst uitzoeken, niet één tik.
+const TE_BOEKEN_SOORTEN = ['Cheque withdrawal', 'Payment to supplier'];
+const BON_MAX = 10 * 1024 * 1024;
+// Het doel uit een Ecobank-omschrijving: "B/O <opdrachtgever>, IFO <begunstigde>, <doel>" → "<doel>"; een cheque heeft geen doel.
+function doelUit(b) {
+  const s = schoon(b && b.omschrijving, 200);
+  if (!s || (b && b.soort === 'Cheque withdrawal')) return null;
+  const delen = s.split(',').map((x) => x.trim());
+  if (/^B\/O\b/i.test(delen[0] || '') && delen.length >= 3 && /^IFO\b/i.test(delen[1] || '')) return delen.slice(2).join(', ') || null;
+  return null;
+}
+function teBoekenOpen(bank, uitgaven, vanaf) {
+  if (!vanaf) return [];
+  const geboekt = new Set((uitgaven || []).filter((u) => u.bankregel).map((u) => u.bankregel));
+  const terug = new Set((bank || []).filter((b) => b.munt === 'GMD' && b.soort === 'Reversal' && b.cheque).map((b) => b.cheque));
+  return (bank || []).filter((b) => b.munt === 'GMD' && TE_BOEKEN_SOORTEN.indexOf(b.soort) >= 0 && b.datum > vanaf && b.bedrag_cent < 0
+    && !geboekt.has(b.id) && !(b.cheque && terug.has(b.cheque)));
+}
+// Voorstel: woorden (≥ 4 letters) uit het doel van de betaling tegen de post en de activiteit van elke regel; bij een cheque het doel van
+// de laatste omwisseling naar dalasi in de 14 dagen ervoor ("For Labour"). Geen woord dat past = geen voorstel (David kiest). Bij gelijke
+// stand wint een regel met nog open budget, dan een activiteit die nu loopt (in progress, materials bought), dan een die nog niet af is,
+// dan de volgorde van de begroting.
+const STOP = new Set(['paid', 'self', 'with', 'from', 'elite', 'care', 'group', 'ecobank', 'gambia', 'cheque', 'payment', 'account', 'transfer', 'this', 'that']);
+const woorden = (s) => String(s || '').toLowerCase().split(/[^a-z]+/).filter((w) => w.length >= 4 && !STOP.has(w));
+const past = (a, b) => a === b || (a.length >= 4 && b.length >= 4 && (a.indexOf(b) === 0 || b.indexOf(a) === 0));
+function voorstel(b, ctx) {
+  let doel = doelUit(b), waar = 'omschrijving';
+  if (!doel && b.soort === 'Cheque withdrawal') {
+    const van = new Date(Date.parse(b.datum) - 14 * 86400000).toISOString().slice(0, 10);
+    const om = (ctx.bank || []).filter((x) => x.munt === 'GMD' && x.soort === 'Conversion in' && x.datum <= b.datum && x.datum >= van && doelUit(x)).pop();
+    if (om) { doel = doelUit(om); waar = 'omwisseling van ' + om.datum.split('-').reverse().join('-'); }
+  }
+  const dw = woorden(doel);
+  if (!dw.length) return null;
+  const acts = new Map((ctx.activiteiten || []).map((a) => [a.nr, a]));
+  let best = null;
+  (ctx.regels || []).forEach((r, i) => {
+    const a = acts.get(r.activiteit) || {};
+    const pw = woorden(r.post), aw = woorden(a.naam);
+    const hitP = dw.filter((w) => pw.some((p) => past(w, p))), hitA = dw.filter((w) => aw.some((p) => past(w, p)));
+    if (!hitP.length && !hitA.length) return;
+    const st = String(a.status || '');
+    const score = 10 * hitP.length + 4 * hitA.length + ((r.open || 0) > 0 ? 2 : 0) + (/in progress|materials bought|ongoing/i.test(st) ? 2 : /^completed/i.test(st) ? 0 : 1);
+    if (!best || score > best.score) best = { score, regel: r.id, woord: (hitP[0] || hitA[0]), i };
+  });
+  return best ? { regel: best.regel, waarom: waar + ': "' + doel.slice(0, 60) + '" (past op "' + best.woord + '")' } : null;
+}
+function dagNl(iso) { return String(iso || '').slice(0, 10).split('-').reverse().join('-'); }
+function vanafUit(db) { const r = db.prepare("SELECT waarde FROM instelling WHERE sleutel = 'as_of_date'").get(); return r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.waarde)) ? r.waarde : null; }
+// Een bon of foto: alleen jpg, png, webp, heic of pdf (herkend aan de eerste bytes, niet aan de naam), hooguit 10 MB, in de bonnenmap op de
+// pod (nooit gedeeld). → bestandsnaam of { fout }
+function bonType(by) {
+  const h = (n) => by.subarray(0, n).toString('hex');
+  if (h(3) === 'ffd8ff') return 'jpg';
+  if (h(8) === '89504e470d0a1a0a') return 'png';
+  if (by.subarray(0, 4).toString('latin1') === 'RIFF' && by.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
+  if (by.subarray(0, 5).toString('latin1') === '%PDF-') return 'pdf';
+  if (by.subarray(4, 8).toString('latin1') === 'ftyp' && /^(heic|heix|mif1|msf1|hevc)$/.test(by.subarray(8, 12).toString('latin1'))) return 'heic';
+  return null;
+}
+function bonBewaar(map, bankId, bytes) {
+  if (!Buffer.isBuffer(bytes) || !bytes.length) return { fout: 'geen bestand' };
+  if (bytes.length > BON_MAX) return { fout: 'de bon is groter dan 10 MB' };
+  const t = bonType(bytes);
+  if (!t) return { fout: 'alleen een foto (jpg, png, webp, heic) of pdf' };
+  const naam = String(bankId).replace(/[^A-Za-z0-9]/g, '') + '-' + require('crypto').createHash('sha256').update(bytes).digest('hex').slice(0, 12) + '.' + t;
+  fs.mkdirSync(map, { recursive: true, mode: 0o700 });
+  const pad = path.join(map, naam);
+  if (fs.existsSync(pad)) return { naam, nieuw: false };   // zelfde inhoud = zelfde naam: nooit overschrijven, en bij een weigering niet wissen
+  fs.writeFileSync(pad, bytes, { mode: 0o600, flag: 'wx' });
+  return { naam, nieuw: true };
+}
+// Boeken: w = { delen: [{ regel, gmd_cent }], omschrijving?, bevestigd: true }, bon = bestandsnaam (al bewaard) of null.
+function boek(db, id, w, nu, door, bon) {
+  w = w || {};
+  if (w.bevestigd !== true) return { ok: false, status: 400, fout: 'bevestig de boeking' };
+  const b = db.prepare('SELECT * FROM bankregel_ecg WHERE id = ?').get(String(id || ''));
+  if (!b) return { ok: false, status: 404, fout: 'die betaling bestaat niet' };
+  const delen = Array.isArray(w.delen) ? w.delen : [];
+  if (!delen.length || delen.length > 6) return { ok: false, status: 400, fout: 'kies één tot zes begrotingsregels' };
+  const regels = new Set(db.prepare('SELECT id FROM begrotingsregel').all().map((r) => r.id));
+  let tot = 0;
+  for (const x of delen) {
+    if (!x || !regels.has(String(x.regel || ''))) return { ok: false, status: 400, fout: 'onbekende begrotingsregel' };
+    if (!Number.isSafeInteger(x.gmd_cent) || x.gmd_cent <= 0) return { ok: false, status: 400, fout: 'elk deel is een bedrag in hele bututs boven nul' };
+    tot += x.gmd_cent;
+  }
+  if (new Set(delen.map((x) => x.regel)).size !== delen.length) return { ok: false, status: 400, fout: 'elke regel één keer' };
+  if (w.omschrijving !== undefined && w.omschrijving !== null && typeof w.omschrijving !== 'string') return { ok: false, status: 400, fout: 'omschrijving als tekst' };
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const alle = db.prepare('SELECT * FROM bankregel_ecg ORDER BY volg').all();
+    const open = teBoekenOpen(alle, db.prepare('SELECT bankregel FROM uitgave WHERE bankregel IS NOT NULL').all(), vanafUit(db));
+    if (!open.some((x) => x.id === b.id)) {
+      db.exec('ROLLBACK');
+      const al = db.prepare('SELECT 1 FROM uitgave WHERE bankregel = ?').get(b.id);
+      return { ok: false, status: 409, fout: al ? 'deze betaling is al geboekt' : 'deze betaling hoort niet bij Te boeken' };
+    }
+    if (tot !== -b.bedrag_cent) { db.exec('ROLLBACK'); return { ok: false, status: 400, fout: 'de delen tellen niet op tot het bedrag van de betaling' }; }
+    const cheque = b.soort === 'Cheque withdrawal';
+    const doel = doelUit(b);
+    const eigen = schoon(w.omschrijving, 200);
+    const basis = eigen || (cheque ? 'Cheque ' + (b.cheque || '?') + ', withdrawn ' + dagNl(b.datum) : 'Supplier payment ' + dagNl(b.datum) + (doel ? ': ' + doel : ''));
+    const nieuwId = volgendId(db, 'uitgave', 'T');
+    const zet = db.prepare('INSERT INTO uitgave (id, datum, regel, omschrijving, referentie, gmd_cent, betaald_van, betaalwijze, cheque, bewijs, bron, wg_cent, wg_post, notitie, herkomst, bankregel, bon) ' +
+      "VALUES (?,?,?,?,?,?,'GMD (ECG)',?,?,?,'Te boeken (app)',NULL,NULL,NULL,'te-boeken',?,?)");
+    const uit = [];
+    delen.forEach((x, i) => {
+      const u = nieuwId();
+      zet.run(u, b.datum, x.regel, delen.length > 1 ? basis + ' (part ' + (i + 1) + ' of ' + delen.length + ')' : basis, b.referentie || null, x.gmd_cent,
+        cheque ? 'Cheque (cash withdrawal)' : 'Bank transfer', b.cheque || null, bon ? 'Receipt photo' : 'Bank statement only', b.id, bon || null);
+      uit.push({ id: u, regel: x.regel, gmd_cent: x.gmd_cent });
+    });
+    db.prepare('INSERT INTO boeking_log (bankregel, actie, gmd_cent, delen, op, door) VALUES (?,?,?,?,?,?)').run(b.id, 'geboekt', tot, JSON.stringify(uit), nu, schoon(door, 40) || null);
+    metaZet(db, 'laatste_tik', nu);
+    db.exec('COMMIT');
+    return { ok: true, id: b.id, uitgaven: uit.map((x) => x.id), gmd_cent: tot };
+  } catch (e) { try { db.exec('ROLLBACK'); } catch (e2) { /* al dicht */ } throw e; }
+}
+// Terugdraaien: precies de uitgaven die Te boeken bij deze betaling schreef weer weg; de betaling staat daarna weer op Te boeken.
+function boekTerug(db, id, w, nu, door) {
+  if (!w || w.bevestigd !== true) return { ok: false, status: 400, fout: 'bevestig het terugdraaien' };
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const rs = db.prepare("SELECT id, regel, gmd_cent, bon FROM uitgave WHERE bankregel = ? AND herkomst = 'te-boeken' ORDER BY id").all(String(id || ''));
+    if (!rs.length) { db.exec('ROLLBACK'); return { ok: false, status: 404, fout: 'deze betaling is niet via Te boeken geboekt' }; }
+    db.prepare("DELETE FROM uitgave WHERE bankregel = ? AND herkomst = 'te-boeken'").run(String(id));
+    const tot = rs.reduce((s, r) => s + r.gmd_cent, 0);
+    db.prepare('INSERT INTO boeking_log (bankregel, actie, gmd_cent, delen, op, door) VALUES (?,?,?,?,?,?)').run(String(id), 'teruggedraaid', tot, JSON.stringify(rs), nu, schoon(door, 40) || null);
+    db.exec('COMMIT');
+    return { ok: true, id: String(id), weg: rs.length, gmd_cent: tot };
+  } catch (e) { try { db.exec('ROLLBACK'); } catch (e2) { /* al dicht */ } throw e; }
+}
+// Bon of foto achteraf bij een geboekte betaling (de oude blijft in de map; het logboek noemt beide).
+function bonBij(db, id, bon, nu, door) {
+  const rs = db.prepare("SELECT id, bon FROM uitgave WHERE bankregel = ? AND herkomst = 'te-boeken'").all(String(id || ''));
+  if (!rs.length) return { ok: false, status: 409, fout: 'boek de betaling eerst' };
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.prepare("UPDATE uitgave SET bon = ?, bewijs = 'Receipt photo' WHERE bankregel = ? AND herkomst = 'te-boeken'").run(bon, String(id));
+    db.prepare('INSERT INTO boeking_log (bankregel, actie, gmd_cent, delen, op, door) VALUES (?,?,?,?,?,?)').run(String(id), 'bon', null, JSON.stringify({ oud: rs[0].bon || null, nieuw: bon }), nu, schoon(door, 40) || null);
+    db.exec('COMMIT');
+    return { ok: true, id: String(id), bon };
+  } catch (e) { try { db.exec('ROLLBACK'); } catch (e2) { /* al dicht */ } throw e; }
+}
+
 // ═══════════════ 4. Maandronde ═══════════════
-const RONDE_STAPPEN = ['afschriften', 'indelen', 'aansluiting', 'vragen', 'delen'];
+const RONDE_STAPPEN = ['afschriften', 'indelen', 'boeken', 'aansluiting', 'vragen', 'delen'];
 const AFVINKBAAR = ['aansluiting', 'vragen'];
 function maandVan(nu) { return String(nu).slice(0, 7); }
 function rondeZet(db, stap, aan, nu) {
@@ -652,4 +809,5 @@ function rondeKaart(st, nu) {
 
 module.exports = { rekeningenUit, SOORT_ONBEKEND, FONDS_STATUS, RONDE_STAPPEN, AFVINKBAAR, BIJ_TABELLEN, SCHEMA_BIJ, migreer, fase2Gegevens,
   leesFacturen, bankBij, deelInGhawa, chequeNaam, leerKaart, indelen, datumEco, centEco, leesEcgCsv, leesEcgPdfTekst, pdfNaarTekst, deelInEcg, ecgAfschrift,
-  koppelStromen, fondsZet, rondeZet, VRAAG_STATUS, vraagZet, vragenInConcept, rondeKaart, maandVan, dagen, ibanUit };
+  koppelStromen, fondsZet, rondeZet, VRAAG_STATUS, vraagZet, vragenInConcept, rondeKaart, maandVan, dagen, ibanUit,
+  TE_BOEKEN_SOORTEN, doelUit, teBoekenOpen, voorstel, bonType, bonBewaar, boek, boekTerug, bonBij };

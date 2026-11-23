@@ -203,8 +203,8 @@ test('maandronde, kaart na 35 dagen (één per maand), routes en herinvoer', () 
   let nu = '2026-11-10T10:00:00.000Z';
   const m = G.maak({ dbPad: db, bronnenMap: map, vaultMap: map, nu: () => nu });
   const r = m.app({ pad: '/app/ghawa/ronde' }).body;
-  assert.deepStrictEqual(r.stappen.map((s) => s.id), ['afschriften', 'indelen', 'aansluiting', 'vragen', 'delen']);
-  assert.strictEqual(r.stappen[3].klaar, true); assert.strictEqual(r.stappen[4].later, true);
+  assert.deepStrictEqual(r.stappen.map((s) => s.id), ['afschriften', 'indelen', 'boeken', 'aansluiting', 'vragen', 'delen']);   // wv3953: boeken erbij
+  assert.strictEqual(r.stappen[4].klaar, true); assert.strictEqual(r.stappen[5].later, true);
   assert.strictEqual(m.maandKaart(), null);   // nog nooit een afschrift via de app: de aanleverkaart dekt dit
   const y = open(db);
   B.ecgAfschrift(y, { naam: 'g.csv', bytes: eco('9990000017', 'GMD', [['23 Jul 2026', 'COMMISSION', 'I61C0001', -100, 59400]]) }, hulp, NU); y.close();

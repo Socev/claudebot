@@ -279,6 +279,7 @@ function leesData(dbPad) {
     uit.afschriften = f2 ? a('SELECT naam, formaat, munt, van, tot, regels, nieuw, al_bekend, uitkomst, fout, op FROM afschrift ORDER BY op DESC LIMIT 12') : [];
     uit.ronde = f2 ? a('SELECT maand, stap, op FROM ronde') : [];
     uit.fondsLog = f2 ? a('SELECT fonds, veld, oud, nieuw, op FROM fonds_log ORDER BY nr DESC LIMIT 50') : [];
+    uit.boekLog = heeft('boeking_log') ? a('SELECT nr, bankregel, actie, gmd_cent, delen, op, door FROM boeking_log ORDER BY nr DESC LIMIT 40') : [];   // wv3953
     uit.vraagLog = heeft('vraag_log') ? a('SELECT vraag, veld, oud, nieuw, op FROM vraag_log ORDER BY nr DESC LIMIT 300') : [];   // wv3919
     // wv3919 (2C63 c): het adres van ECG voor het Gmail-concept = de ECG-kijker van Delen met ECG (David zette hem daar zelf); nooit in de code
     uit.ecgAdres = heeft('deel_kijker') ? ((db.prepare("SELECT adres FROM deel_kijker WHERE rol = 'ecg' AND weg_op IS NULL ORDER BY op DESC LIMIT 1").get() || {}).adres || null) : null;
@@ -477,10 +478,20 @@ function bereken(d) {
 
   // wv2880: per bron tot wanneer de cijfers lopen (uitgaven en bonnen nog uit de overdracht; bank en afschriften bijgehouden)
   const vandaag = d.vandaag || new Date().toISOString().slice(0, 10);
+  // wv3953 (L01): betalingen na de overdracht die nog aan een begrotingsregel moeten. De stand "uitgaven" (in de app: bonnen en lijsten)
+  // blijft de datastand van de overdracht: een geboekte betaling heeft lang niet altijd een bon.
+  const teBoeken = require('./ghawa-bij.js').teBoekenOpen(d.bank, d.uitgaven, inst.as_of_date || null);
+  // review ronde 2: komt de terugboeking van een cheque pas binnen nadat hij geboekt is, dan blijft de uitgave staan tot David terugdraait:
+  // zichtbaar als fout (Vraagt aandacht en op Te boeken), nooit stil
+  const terugCh = new Set(d.bank.filter((b) => b.munt === 'GMD' && b.soort === 'Reversal' && b.cheque).map((b) => b.cheque));
+  const bankId = new Map(d.bank.map((b) => [b.id, b]));
+  const teruggeboekt = [...new Set(d.uitgaven.filter((u) => u.herkomst === 'te-boeken' && u.bankregel && bankId.get(u.bankregel) && bankId.get(u.bankregel).cheque
+    && terugCh.has(bankId.get(u.bankregel).cheque)).map((u) => u.bankregel))];
   const standen = { uitgaven: inst.as_of_date || null, ghawa: ghawaDatum || null, ecg_gmd: laatsteDatum.GMD, ecg_eur: laatsteDatum.EUR };
   return { koers, datastand: inst.as_of_date || null, standen, vandaag, regels, activiteiten, fasen, bouw, apotheek: apo, ecg: { eur: ecgEur, gmd: ecgGmd, keten },
     omwisselingen: omw, naar_ecg: naarEcg, naar_wg: naarWg, ghawa: { per_jaar: ghawaPerJaar, jaren, eind_jaar: ghawaEindJaar, saldo: ghawaSaldo,
-      afschrift: ghawaAfschrift, datum: ghawaDatum, geoormerkt: bijGhawaGeoormerkt }, werven, aansluiting, sluit, signalen };
+      afschrift: ghawaAfschrift, datum: ghawaDatum, geoormerkt: bijGhawaGeoormerkt }, werven, aansluiting, sluit, signalen,
+    te_boeken: { aantal: teBoeken.length, gmd: -som(teBoeken, (b) => b.bedrag_cent), ids: teBoeken.map((b) => b.id), teruggeboekt } };
 }
 
 // ── routes voor de app ──
@@ -503,6 +514,10 @@ function overzicht(d, k) {
   // wv2880 (fase 2): signalen van het bijhouden, posten om in te delen, termijnen van fondsen, AFAS-geld binnen maar nog toegezegd
   for (const s of d.signalen || []) aandacht.push({ toon: 'fout', label: s.soort === 'bank' ? 'bank' : s.soort === 'delen' ? 'delen' : 'afschrift', titel: s.tekst, sub: 'sinds ' + String(s.op).slice(0, 10), scherm: s.soort === 'delen' ? 'delen' : 'ronde' });   // wv2889: poort van Delen met ECG
   const onb = (d.ghawaBank && d.ghawaBank.onbekend) || 0;
+  if (k.te_boeken.aantal) aandacht.push({ toon: 'wacht', label: 'te boeken', titel: k.te_boeken.aantal + (k.te_boeken.aantal === 1 ? ' betaling' : ' betalingen') + ' van ECG nog aan een begrotingsregel hangen',
+    sub: 'GMD ' + Math.round(k.te_boeken.gmd / 100).toLocaleString('nl-NL') + '; pas daarna telt het mee in de bouwstand', gmd: k.te_boeken.gmd, scherm: 'teboeken' });   // wv3953
+  for (const id of k.te_boeken.teruggeboekt) { const b = d.bank.find((x) => x.id === id) || {};
+    aandacht.push({ toon: 'fout', label: 'teruggeboekt', titel: 'Cheque ' + (b.cheque || '?') + ' is teruggeboekt nadat je hem boekte', sub: 'draai de boeking terug op Te boeken', scherm: 'teboeken' }); }
   if (onb) aandacht.push({ toon: 'wacht', label: 'indelen', titel: onb + (onb === 1 ? ' bankregel' : ' bankregels') + ' van GHAWA nog in te delen', sub: 'één tik per regel; tot dan krijgt ECG geen nieuwe GHAWA-cijfers', scherm: 'indelen' });
   // wv3919 (2C63 b): een toezegging zonder verwachte datum let nergens op; één regel tot David er een datum bij zet
   for (const f of d.fondsen.filter((x) => x.status === 'Committed - not yet received' && !x.termijn)) aandacht.push({ toon: 'wacht', label: 'datum',
@@ -668,6 +683,30 @@ function indelenRoute(dbPad, vandaag) {
       recent: db.prepare(sel + "AND soort <> 'Unknown' AND datum >= ? ORDER BY datum DESC, volg DESC LIMIT 60").all(vanaf).map(vorm) };
   } finally { db.close(); }
 }
+// wv3953 (L01): Te boeken (INTERN: begunstigden bij naam, alleen in deze eigen app). Per open betaling het voorstel; daaronder wat via Te
+// boeken geboekt is (met terugdraaien), de keuzelijst van regels met hun stand en de bouwstand om "na boeken" te kunnen tonen.
+function teBoekenRoute(d, k) {
+  const BIJ = require('./ghawa-bij.js');
+  const vanaf = d.instelling.as_of_date || null;
+  const open = BIJ.teBoekenOpen(d.bank, d.uitgaven, vanaf);
+  const acts = new Map(k.activiteiten.map((a) => [a.nr, a]));
+  const ctx = { bank: d.bank, activiteiten: d.activiteiten, regels: k.regels };
+  const soort = (b) => (b.soort === 'Cheque withdrawal' ? 'cheque' : 'leverancier');
+  const vorm = (b) => ({ id: b.id, datum: b.datum, soort: soort(b), cheque: b.cheque || null, begunstigde: b.begunstigde || null, doel: BIJ.doelUit(b), bedrag: -b.bedrag_cent });
+  const perBank = new Map();
+  for (const u of d.uitgaven.filter((x) => x.herkomst === 'te-boeken' && x.bankregel)) { if (!perBank.has(u.bankregel)) perBank.set(u.bankregel, []); perBank.get(u.bankregel).push(u); }
+  const laatste = new Map(); for (const l of d.boekLog || []) if (l.actie === 'geboekt' && !laatste.has(l.bankregel)) laatste.set(l.bankregel, l.op);
+  const geboekt = [...perBank.entries()].map(([bid, us]) => {
+    const b = d.bank.find((x) => x.id === bid) || {};
+    return Object.assign(vorm(b), { op: laatste.get(bid) || null, bon: us[0].bon || null, teruggeboekt: k.te_boeken.teruggeboekt.indexOf(bid) >= 0, delen: us.map((u) => ({ id: u.id, regel: u.regel, gmd: u.gmd_cent })) });
+  }).sort((x, y) => (x.datum < y.datum ? 1 : -1));
+  return { intern: true, vanaf, open: open.map((b) => Object.assign(vorm(b), { voorstel: BIJ.voorstel(b, ctx) })), geboekt,
+    regels: k.regels.map((r) => { const a = acts.get(r.activiteit) || {}; return { id: r.id, activiteit: r.activiteit, act_naam: a.naam_nl || a.naam || '', project: a.project, post: r.post,
+      begroot: r.begroot, gerealiseerd: r.gerealiseerd, open: r.open }; }),
+    bouw: { begroot: k.bouw.begroot, gerealiseerd: k.bouw.gerealiseerd }, apotheek: { begroot: k.apotheek.begroot, gerealiseerd: k.apotheek.gerealiseerd },
+    niet_gespecificeerd: k.aansluiting.D.niet_gespecificeerd,
+    log: (d.boekLog || []).slice(0, 20).map((l) => ({ bankregel: l.bankregel, actie: l.actie, gmd: l.gmd_cent, op: l.op })) };
+}
 function rondeRoute(d, k, bijInfo) {
   const BIJ = require('./ghawa-bij.js');
   const nu = k.vandaag, maand = nu.slice(0, 7);
@@ -683,6 +722,8 @@ function rondeRoute(d, k, bijInfo) {
       tekst: 'ECG euro t/m ' + nl(k.standen.ecg_eur) + ', dalasi t/m ' + nl(k.standen.ecg_gmd) + '; GHAWA-bank vanzelf t/m ' + nl(k.standen.ghawa) +
         (spaar ? '; spaarrekening laatst in Facturen gezet op ' + nl(spaar) : '') },
     { id: 'indelen', titel: 'Onbekende posten indelen', klaar: onb === 0, tekst: onb ? onb + ' nog in te delen' : 'alles ingedeeld' },
+    { id: 'boeken', titel: 'Betalingen van ECG boeken', klaar: k.te_boeken.aantal === 0,   // wv3953 (L01)
+      tekst: k.te_boeken.aantal ? k.te_boeken.aantal + ' nog aan een begrotingsregel hangen' : 'alles geboekt' },
     { id: 'aansluiting', titel: 'Aansluiting bekijken', klaar: af.has('aansluiting'), sluit: k.sluit, tekst: k.sluit ? 'sluit op de cent' : 'een aansluiting sluit niet', afvinken: true },
     { id: 'vragen', titel: 'Open vragen als concept naar ECG', klaar: af.has('vragen'), tekst: vragenOpen + ' open vragen; jij verstuurt', afvinken: true },
     { id: 'delen', titel: 'Gedeelde stand verversen', klaar: false, later: true, tekst: 'komt met het delen met ECG (fase 5)' },
@@ -764,6 +805,7 @@ function maak(cfg) {
     else if (scherm === 'ronde') body = rondeRoute(d, k, bij);
     else if (scherm === 'donateurs') body = donateursRoute(c.dbPad);   // INTERN
     else if (scherm === 'indelen') body = indelenRoute(c.dbPad, k.vandaag);   // INTERN
+    else if (scherm === 'teboeken') body = teBoekenRoute(d, k);   // INTERN (wv3953)
     if (!body) return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'ghawa onbekend ' + scherm };
     laatste = { op: nuIso(), scherm, ms: Date.now() - t0, sluit: k.sluit };
     return { status: 200, body: Object.assign({ ok: true, invoer_op: d.meta.invoer_op || null }, body), reden: 'ghawa ' + scherm + (k.sluit ? '' : ' sluit niet') };
@@ -789,7 +831,7 @@ function maak(cfg) {
     laatste = { op: nuIso(), scherm, ms: Date.now() - t0, sluit: null };
     return { status: 200, body: Object.assign({ ok: true }, body), reden: 'ghawa ' + scherm };
   }
-  // POST /app/ghawa/{indelen,fonds,afschrift,ronde,bank}. Geen inhoud in de reden (die komt in de auditregel): alleen id's en aantallen.
+  // POST /app/ghawa/{indelen,fonds,afschrift,ronde,bank,vraag,boek,terug,bon}. Geen inhoud in de reden (die komt in de auditregel): alleen id's en aantallen.
   function schrijfRoute(scherm, b, v) {
     const nu = nuIso();
     let r;
@@ -798,6 +840,19 @@ function maak(cfg) {
     else if (scherm === 'ronde') r = schrijf((db) => BIJ.rondeZet(db, String(b.stap || ''), b.aan !== false, nu));
     else if (scherm === 'vraag') r = schrijf((db) => BIJ.vraagZet(db, b.id, { antwoord: b.antwoord, status: b.status, bevestigd: b.bevestigd }, nu, (v && v.door) || 'app'));   // wv3919 (2C63 a)
     else if (scherm === 'bank') r = Object.assign({ ok: true }, bankBij(true));
+    else if (scherm === 'boek' || scherm === 'bon') {   // wv3953 (L01): boeken (vingerafdruk eist de server) en bon of foto
+      let bon = null, bonNieuw = false;
+      if (b.bon && typeof b.bon === 'object') {
+        const b64 = typeof b.bon.bestand === 'string' ? b.bon.bestand : '';
+        if (!b64 || b64.length > 14 * 1024 * 1024 || !/^[A-Za-z0-9+/=\s]+$/.test(b64)) return { status: 400, body: { ok: false, fout: 'de bon is leeg of groter dan 10 MB' }, reden: 'ghawa bon leeg' };
+        const g = BIJ.bonBewaar(c.bonMap || path.join(path.dirname(c.dbPad), 'bonnen'), b.id, Buffer.from(b64, 'base64'));
+        if (g.fout) return { status: 400, body: { ok: false, fout: g.fout }, reden: 'ghawa bon geweigerd' };
+        bon = g.naam; bonNieuw = g.nieuw;
+      } else if (scherm === 'bon') return { status: 400, body: { ok: false, fout: 'geen bon' }, reden: 'ghawa bon leeg' };
+      r = schrijf((db) => (scherm === 'boek' ? BIJ.boek(db, b.id, { delen: b.delen, omschrijving: b.omschrijving, bevestigd: b.bevestigd }, nu, (v && v.door) || 'app', bon)
+        : BIJ.bonBij(db, b.id, bon, nu, (v && v.door) || 'app')));
+      if (bon && bonNieuw && r.ok === false) { try { fs.unlinkSync(path.join(c.bonMap || path.join(path.dirname(c.dbPad), 'bonnen'), bon)); } catch (e) { /* weg */ } }   // geweigerd: geen losse bon achterlaten (alleen een bestand dat deze aanvraag zelf schreef)
+    } else if (scherm === 'terug') r = schrijf((db) => BIJ.boekTerug(db, b.id, { bevestigd: b.bevestigd }, nu, (v && v.door) || 'app'));
     else if (scherm === 'afschrift') {
       const b64 = typeof b.bestand === 'string' ? b.bestand : '';
       if (!b64 || b64.length > 14 * 1024 * 1024 || !/^[A-Za-z0-9+/=\s]+$/.test(b64)) return { status: 400, body: { ok: false, fout: 'geen bestand (hooguit 10 MB)' }, reden: 'ghawa afschrift leeg' };
@@ -806,7 +861,7 @@ function maak(cfg) {
     } else return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'ghawa onbekend POST ' + scherm };
     const st = r.ok === false ? (r.status || 400) : 200;
     const kort = scherm === 'afschrift' ? (r.uitkomst || '') + ' ' + (r.munt || '') + ' nieuw ' + (r.nieuw || 0) : scherm === 'bank' ? (r.uitkomst || '') + ' ' + (r.nieuw || 0)
-      : scherm === 'indelen' ? String(b.id || '').slice(0, 8) : scherm === 'fonds' || scherm === 'vraag' ? String(b.id || '').slice(0, 6) : String(b.stap || '').slice(0, 12);
+      : scherm === 'indelen' || scherm === 'boek' || scherm === 'terug' || scherm === 'bon' ? String(b.id || '').slice(0, 8) : scherm === 'fonds' || scherm === 'vraag' ? String(b.id || '').slice(0, 6) : String(b.stap || '').slice(0, 12);
     const body = Object.assign({}, r); delete body.status;
     return { status: st, body: Object.assign({ ok: st === 200 }, body), reden: 'ghawa POST ' + scherm + ' ' + kort };
   }
