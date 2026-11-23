@@ -311,3 +311,12 @@ test('geen aankoop in het eerste kwartier na opening van de thuisbeurs (ook niet
   assert.ok(k, 'dag 2: ASML gekocht');
   assert.ok(R.minutenSindsOpen(S.REGELS.beurzen, 'EA', k.tijd) >= S.REGELS.niet_eerste_minuten, 'niet in het eerste kwartier na opening');
 });
+test('wat hielp (wv3999): uit meta, alleen bekende oordelen, tekst ingekort, kapot = null', async () => {
+  const N = nepModule({ start: Date.UTC(2026, 10, 30, 5, 0) });
+  await N.m.tik();
+  assert.strictEqual(N.m.app({ methode: 'GET', pad: '/app/beleggen/strateeg' }).body.wat_hielp, null);
+  N.m._M.zet('wat_hielp', JSON.stringify({ gemaakt: '2026-11-23', kop: 'k', kern: ['a'], factoren: [{ naam: 'Cijfers', oordeel: 'helpt', zin: 'z'.repeat(500) }, { naam: 'X', oordeel: 'koop nu', zin: 'y' }, { naam: '', zin: 'leeg' }], voet: ['v'] }));
+  const w = N.m.app({ methode: 'GET', pad: '/app/beleggen/strateeg' }).body.wat_hielp;
+  assert.strictEqual(w.factoren.length, 2); assert.strictEqual(w.factoren[0].zin.length, 300); assert.strictEqual(w.factoren[1].oordeel, 'geen bewijs');
+  N.m._M.zet('wat_hielp', '{kapot'); assert.strictEqual(N.m.app({ methode: 'GET', pad: '/app/beleggen/strateeg' }).body.wat_hielp, null);
+});

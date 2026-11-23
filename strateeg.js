@@ -567,6 +567,19 @@ function maak(o) {
       orders, laatste_tik: laatsteTik, tikken_vandaag: vandaagTik.map((x) => ({ reden: x.reden_code, naam: REDEN_NAAM[x.reden_code] || x.reden_code, besluit: x.besluit, n: x.n })),
       voorspellingen: { dag: vsDag, lijst: vp }, uitgekomen: { dagen: ics.length, gescoord: gesc.length, ic: ics.length ? R.gem(ics) : null, trefkans: gesc.length ? tref / gesc.length : null, brier },
       reeks, vandaag_reeks: vandaagReeks, backtest: laatsteBacktest(false), bronnen, universum: UNIVERSUM.instrumenten.length, index: UNIVERSUM.index.naam,
+      wat_hielp: watHielp(),
+    };
+  }
+  // wv3999: uitkomst van het factoronderzoek ("Wat hielp"), door mk-scripts/wv3999/zet-wat-hielp.py in meta gezet; alleen tekst, streng nagelopen
+  function watHielp() {
+    let w; try { w = JSON.parse(M.get('wat_hielp') || 'null'); } catch (e) { return null; }
+    if (!w || typeof w !== 'object' || !Array.isArray(w.factoren)) return null;
+    const tekst = (x, n) => (typeof x === 'string' ? x.slice(0, n) : null);
+    const OORDEEL = ['helpt', 'twijfel', 'geen bewijs', 'aantoonbaar niets', 'niet te toetsen'];
+    return {
+      gemaakt: tekst(w.gemaakt, 30), kop: tekst(w.kop, 400), kern: (Array.isArray(w.kern) ? w.kern : []).slice(0, 6).map((x) => tekst(x, 400)).filter(Boolean),
+      factoren: w.factoren.slice(0, 20).map((f) => ({ naam: tekst(f && f.naam, 80), oordeel: OORDEEL.includes(f && f.oordeel) ? f.oordeel : 'geen bewijs', zin: tekst(f && f.zin, 300) })).filter((f) => f.naam && f.zin),
+      voet: (Array.isArray(w.voet) ? w.voet : []).slice(0, 6).map((x) => tekst(x, 400)).filter(Boolean),
     };
   }
   function app(v) {
