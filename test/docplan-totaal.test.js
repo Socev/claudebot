@@ -236,3 +236,14 @@ test('wv4011: bank voert de batch vóór de uitvoerdatum uit; jaar = boekdatum; 
   assert.strictEqual(M.sepaBetalingen(facturen(), [A1]), null, 'oud bestand zonder sepa-tabellen: niet vast te stellen');
   assert.strictEqual(tgA(M.totaal(docplan(), facturen(), '2026', NU)).af_centen, 150000, 'zonder sepa-tabellen blijft de gewone rekenregel');
 });
+
+test('wv4011 review MOET 1: een oud, niet uitgevoerd bestand verbruikt niet de losse regel die een later uitgevoerd bestand ontdubbelt', () => {
+  const f = sepaFac();
+  f.batch('e1', 'tolgaarde', '2026-11-01', [['SOCEV-TEST-e1-1', '2026-11-03', A1, 45000], ['SOCEV-TEST-e1-1', '2026-11-03', B1, 1000]]);   // eerste versie, nooit uitgevoerd
+  f.batch('e2', 'tolgaarde', '2026-11-02', [['SOCEV-TEST-e2-1', '2026-11-03', A1, 45000], ['SOCEV-TEST-e2-1', '2026-11-03', B1, 1000]]);   // opnieuw gemaakt, uitgevoerd
+  f.tx('tolgaarde', '2026-11-03', -46000, null, { kenmerk: 'SOCEV-TEST-e2-1' });
+  f.tx('tolgaarde', '2026-11-04', -45000, A1);                                                       // dezelfde betaling ook los op de bank
+  const j = M.totaal(docplan(), f.db, '2026', NU);
+  assert.strictEqual(tgA(j).af_centen, 45000, 'één keer, niet twee keer');
+  assert.strictEqual(tgA(j).af_n, 1);
+});
