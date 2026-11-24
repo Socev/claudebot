@@ -407,6 +407,7 @@ jobs:
           t test/herstelreferentie.sh   # wv1962: SB2 fase 6a — nachtketen-stap referentie (droge reconcile op de facturendump uit de podstaat-bundel)
           t test/uitwijk-cred.sh   # wv2041: nachtketen-stap uitwijk-cred (versleutelde n8n-credentials naar de R230; nep-olares-eigen/ssh/API)
           t test/warme-staat.sh   # wv3908: warme staat naar de R230 en terug (fase 1c 'app blijft werken'; nep-ssh, nep-age in CI)
+          t test/nood-spiegel.sh   # wv3909: spiegel naar socev-nood (nep-Worker) + tweede age-ontvanger van de warme staat (fase 1f/1g; nep-age in CI)
           command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils) || echo "::warning::pdftotext niet te installeren"   # de koerier en de ICS-PDF-toets (wv2958) roepen /usr/bin/pdftotext echt aan
           t test/facturen-creditcard.sh   # wv2043: creditcard (ICS) — lezer + kaartnummerpoort, sleutels, idempotent, herkenning, incasso, aansluiting op de cent, leesroute
           t test/facturen-boekstuk.sh   # wv2316: boekstuk Google Home naar André — lezen (Play, PayPal NL/EN), voorcontrole, reservering (één verzending), terugval naar concept, onzeker nooit opnieuw, vrijgavekaart, migratie 19

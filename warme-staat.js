@@ -31,6 +31,15 @@
  * Daarnaast (alleen Olares, actief): de stand-in van de pod op de R230 draait dezelfde code (de release-map die hier draait) en
  * hetzelfde image (versies.env); wijkt een van beide af, dan zet deze module de code klaar en herstart de stand-in.
  *
+ * TWEEDE ONTVANGER (wv3909, fase 1f/1g; bouwplan § 4.3 "de bundel gaat met beide sleutels open"). Staat in
+ *   /opt/data/.socev-geheim/ontgrendel-ontvanger.txt precies één geldige age X25519-ontvanger (age1 + 58 tekens bech32, checksum klopt,
+ *   niet gelijk aan de vastgepinde), dan gaat elke kopie naar BEIDE (de vastgepinde uitwijk-identiteit altijd eerst; de tweede is de
+ *   publieke helft van de ontgrendelsleutel bij Cloudflare). Ontbreekt het bestand: precies zoals voorheen. Ongeldig: ook alleen de
+ *   vastgepinde, met een zichtbare fout (stand().ontvanger2.fout, ronde 'deels'); nooit alleen de tweede. Verandert de set ontvangers,
+ *   dan worden alle soorten opnieuw ingepakt (anders bleven oude kopieën met één ontvanger op de R230 staan).
+ * VERSE RONDE (wv3909, A2): verseRonde(maxMs) = wachten tot een lopende ronde klaar is, dan app-data zonder de 15 s-rem, n8n-tabellen
+ *   zonder de uurrem en een gewone ronde zonder de stand-in (die kan minuten duren); voor de droge geplande wissel van nood-spiegel.js.
+ *
  * Alles wat de pod raakt (ssh, age, rol, klok, log, hartslag) komt binnen via o: test/warme-staat.test.js draait het met nepgereedschap.
  */
 const fs = require('fs');
@@ -39,6 +48,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const ONTVANGER = 'age16glryc00czhxga3tra9vwqfhhnqcvd2a7ty0ehk9s8v7tzux6gts90fyln';   // /etc/uitwijk/ontvanger.txt op de R230 (gemeten 23-11)
+const ONTVANGER2_PAD = '/opt/data/.socev-geheim/ontgrendel-ontvanger.txt';   // wv3909: tweede ontvanger (publieke helft van de ontgrendelsleutel)
 const SOORT_RE = /^(app-data|app-logs|kern|geheimen|n8n-tabellen|db-[a-z0-9]{2,24})$/;
 // Witte lijst van de nachtbundel (bin/podstaat-offsite.sh, regel "for f in .claude.json …"); test/warme-staat.test.js vergelijkt.
 const KERN_LIJST = ['.claude.json', 'chat_sessions.json', 'runtime.json', '.config/rclone/rclone.conf', '.claude/settings.json',
@@ -73,6 +83,20 @@ function globNaarRe(g) {
     else r += c.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
   }
   return new RegExp('^' + r + '$');
+}
+
+// wv3909: age X25519-ontvanger = bech32 (BIP 173, hrp 'age', data 52 tekens + 6 checksum) met precies 32 bytes sleutel
+const BECH = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+function ageOntvangerOk(t) {
+  if (typeof t !== 'string' || !/^age1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58}$/.test(t)) return false;
+  const pm = function (v) { const G = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]; let c = 1;
+    for (const x of v) { const b = c >>> 25; c = ((c & 0x1ffffff) << 5) ^ x; for (let i = 0; i < 5; i++) if ((b >>> i) & 1) c ^= G[i]; } return c >>> 0; };
+  const hrp = [3, 3, 3, 0, 1, 7, 5];   // 'age' uitgezet: hoge bits (3,3,3), 0, lage bits (1,7,5)
+  const data = Array.from(t.slice(4), function (ch) { return BECH.indexOf(ch); });
+  if (pm(hrp.concat(data)) !== 1) return false;
+  let acc = 0, bits = 0, n = 0;   // 52 × 5 bits = 260 = 32 bytes + 4 opvulbits (moeten 0 zijn)
+  for (const v of data.slice(0, -6)) { acc = (acc << 5) | v; bits += 5; while (bits >= 8) { bits -= 8; n++; acc &= (1 << bits) - 1; } }
+  return n === 32 && bits === 4 && acc === 0;
 }
 
 // Alle gewone bestanden onder wortel (relatief), zonder symlinks te volgen; uitsluiten(rel, isMap) = true slaat over.
@@ -150,6 +174,31 @@ function maak(o) {
   const tmpMap = o.tmp || '/dev/shm';
   const ageBin = o.age || path.join(werk, 'age');
   const ontvanger = o.ontvanger || ONTVANGER;
+  const ontvanger2Pad = o.ontvanger2Pad || ONTVANGER2_PAD;
+  // wv3909 (A3): de tweede ontvanger per inpakbeurt opnieuw gelezen (het bestand komt later, zonder herstart). '' = alleen de eerste.
+  let ontv2 = { w: '', fout: null };
+  function leesOntvanger2() {
+    let t;
+    try { t = fs.readFileSync(ontvanger2Pad, 'utf8'); }
+    catch (e) { ontv2 = { w: '', fout: e.code === 'ENOENT' ? null : 'ontgrendel-ontvanger onleesbaar (' + e.code + ')' }; return ontv2.w; }
+    const regels = t.split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
+    if (regels.length !== 1 || !ageOntvangerOk(regels[0])) ontv2 = { w: '', fout: 'ontgrendel-ontvanger ongeldig (geen precies één age1-ontvanger); alleen de uitwijk-identiteit gebruikt' };
+    else if (regels[0] === ontvanger) ontv2 = { w: '', fout: 'ontgrendel-ontvanger gelijk aan de uitwijk-identiteit' };
+    else ontv2 = { w: regels[0], fout: null };
+    return ontv2.w;
+  }
+  function ageArgs() { return ['-r', ontvanger].concat(ontv2.w ? ['-r', ontv2.w] : []); }
+  // Verandert de set ontvangers, dan alles opnieuw inpakken (de vinger van elke soort vergeten). Alleen olares versleutelt.
+  function ontvangersBijwerken() {
+    leesOntvanger2();
+    const set = ontvanger + (ontv2.w ? ',' + ontv2.w : '');
+    if (staat.ontvangers === undefined) staat.ontvangers = ontvanger;   // eerste keer met deze code: wat er ligt is alleen met de eerste gemaakt
+    if (staat.ontvangers !== set) {
+      for (const k of Object.keys(staat.soorten)) { staat.soorten[k].vinger = null; staat.soorten[k].inhoud = null; staat.soorten[k].geprobeerd = 0; }
+      staat.ontvangers = set; bewaar();
+      log('ontvangers gewijzigd (' + (ontv2.w ? 'twee' : 'één') + '): alle soorten opnieuw ingepakt');
+    }
+  }
   const sshBin = o.ssh || 'ssh';
   const sshArgs = o.sshArgs || ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=30', '-o', 'ControlMaster=auto',
     '-o', 'ControlPath=' + path.join(werk, 'ssh-%C'), '-o', 'ControlPersist=600', 'r230'];
@@ -189,9 +238,9 @@ function maak(o) {
     // Codex MOET 2 (r3): geen --ignore-failed-read: elke leesfout (ook een bestand dat tussen lijst en tar verdwijnt) breekt af; de volgende
     // peiling/ronde probeert opnieuw en de vorige kopie blijft staan.
     const sh = 'set -o pipefail; { tar -C "$W" --null --no-recursion --warning=no-file-changed -T - -cf -; r=$?; [ "$r" -le 1 ] || exit "$r"; } ' +
-      '| gzip -n -6 ' + (versleuteld ? '| "$AGE" -r "$ONTV" -o "$DOEL"' : '> "$DOEL"');
+      '| gzip -n -6 ' + (versleuteld ? '| "$AGE" -r "$ONTV" ${ONTV2:+-r "$ONTV2"} -o "$DOEL"' : '> "$DOEL"');
     const r = await draai('bash', ['-c', sh], { invoer: lijstTekst, timeout: 300000,
-      env: { PATH: env.PATH || '/usr/local/bin:/usr/bin:/bin', W: wortel, AGE: ageBin, ONTV: ontvanger, DOEL: tmp } });
+      env: { PATH: env.PATH || '/usr/local/bin:/usr/bin:/bin', W: wortel, AGE: ageBin, ONTV: ontvanger, ONTV2: ontv2.w, DOEL: tmp } });
     if (r.code !== 0) { try { fs.unlinkSync(tmp); } catch (e) { /* */ } throw new Error(soort + ': inpakken faalde (' + r.code + ' ' + r.stderr.slice(0, 80) + ')'); }
     return klaarzetten(soort, tmp, doel, bronTijd, vinger, lijst.length);
   }
@@ -262,6 +311,7 @@ function maak(o) {
     let lijst;
     try { lijst = appLijst(false); } catch (e) { (staat.soorten['app-data'] = staat.soorten['app-data'] || {}).fout = String(e.message).slice(0, 120); return 'fout'; }
     if (!fs.existsSync(appData)) return 'geen';
+    if (olares()) ontvangersBijwerken();   // wv3909 (A3)
     const vinger = vingerVan(appData, lijst);
     const s = staat.soorten['app-data'];
     if (s && s.vinger === vinger && (!olares() || s.gedeeld === s.sha256)) { if (s.fout) { s.fout = null; bewaar(); } return 'gelijk'; }   // Codex ZOU 1 (r5)
@@ -302,8 +352,8 @@ function maak(o) {
       if (r.code !== 0) throw new Error(soort + ': dump faalde (' + r.code + ' ' + r.stderr.slice(0, 60) + ')');
       const versleuteld = olares();
       const doel = path.join(uitMap, soort + (versleuteld ? '.age' : '.gz')), tmp = doel + '.tmp' + process.pid;
-      const z = await draai('bash', ['-c', 'set -o pipefail; nice -n 10 gzip -n -6 -c "$D" ' + (versleuteld ? '| "$AGE" -r "$ONTV" -o "$DOEL"' : '> "$DOEL"')],
-        { timeout: 300000, env: { PATH: env.PATH || '/usr/bin:/bin', D: dump, AGE: ageBin, ONTV: ontvanger, DOEL: tmp } });
+      const z = await draai('bash', ['-c', 'set -o pipefail; nice -n 10 gzip -n -6 -c "$D" ' + (versleuteld ? '| "$AGE" -r "$ONTV" ${ONTV2:+-r "$ONTV2"} -o "$DOEL"' : '> "$DOEL"')],
+        { timeout: 300000, env: { PATH: env.PATH || '/usr/bin:/bin', D: dump, AGE: ageBin, ONTV: ontvanger, ONTV2: ontv2.w, DOEL: tmp } });
       if (z.code !== 0) { try { fs.unlinkSync(tmp); } catch (e) { /* */ } throw new Error(soort + ': inpakken faalde (' + z.code + ')'); }
       klaarzetten(soort, tmp, doel, t0, vinger, 1, { bron_bytes: sd.size });
     } catch (e) { (staat.soorten[soort] = staat.soorten[soort] || {}).fout = String(e.message || e).slice(0, 120); bewaar(); return 'fout'; }
@@ -343,7 +393,7 @@ function maak(o) {
     const s = staat.soorten.geheimen;
     if (s && s.inhoud === inhoud && nu() / 1000 - (s.bron_tijd || 0) < GEHEIM_MAX_MS / 1000 && !s.fout) return duw('geheimen');
     const doel = path.join(uitMap, 'geheimen.age'), tmp = doel + '.tmp' + process.pid;
-    const r = await draai(ageBin, ['-r', ontvanger, '-o', tmp], { invoer: g.tekst, timeout: 30000 });
+    const r = await draai(ageBin, ageArgs().concat(['-o', tmp]), { invoer: g.tekst, timeout: 30000 });
     if (r.code !== 0) { try { fs.unlinkSync(tmp); } catch (e) { /* */ } (staat.soorten.geheimen = s || {}).fout = 'age ' + r.code; bewaar(); return 'fout'; }
     const k = klaarzetten('geheimen', tmp, doel, nu(), inhoud, g.namen.length, { namen: g.namen, in_kluiskopie: g.in_kluiskopie, mist: g.mist });
     k.inhoud = inhoud; k.namen = g.namen; k.in_kluiskopie = g.in_kluiskopie; k.mist = g.mist; bewaar();
@@ -384,8 +434,8 @@ function maak(o) {
       tekst = JSON.stringify({ generatedAt: new Date(t0).toISOString(), bron: 'pod warme-staat.js (wv4005)', count: tabellen.length, dataTables: tabellen });
     } catch (e) { staat.soorten['n8n-tabellen'].fout = 'n8n-API: ' + String(e.message || e).slice(0, 100); bewaar(); return 'fout'; }
     const doel = path.join(uitMap, 'n8n-tabellen.age'), tmp = doel + '.tmp' + process.pid;
-    const z = await draai('bash', ['-c', 'set -o pipefail; nice -n 10 gzip -n -6 | "$AGE" -r "$ONTV" -o "$DOEL"'],
-      { invoer: tekst, timeout: 300000, env: { PATH: env.PATH || '/usr/bin:/bin', AGE: ageBin, ONTV: ontvanger, DOEL: tmp } });
+    const z = await draai('bash', ['-c', 'set -o pipefail; nice -n 10 gzip -n -6 | "$AGE" -r "$ONTV" ${ONTV2:+-r "$ONTV2"} -o "$DOEL"'],
+      { invoer: tekst, timeout: 300000, env: { PATH: env.PATH || '/usr/bin:/bin', AGE: ageBin, ONTV: ontvanger, ONTV2: ontv2.w, DOEL: tmp } });
     tekst = null;
     if (z.code !== 0) { try { fs.unlinkSync(tmp); } catch (e) { /* */ } staat.soorten['n8n-tabellen'].fout = 'inpakken faalde (' + z.code + ')'; bewaar(); return 'fout'; }
     const vinger = crypto.createHash('sha256').update(String(n) + ':' + rijen + ':' + t0).digest('hex');
@@ -480,7 +530,7 @@ function maak(o) {
   }
 
   // ── ronde (elke 5 min vanuit server.js; en vaker na een wijziging is niet nodig) ──
-  async function ronde() {
+  async function ronde(opt) {
     if (st.bezig) return { uitkomst: 'bezig' };
     const k = kant();
     if (k !== 'olares' && k !== 'vps') return { uitkomst: 'stil' };
@@ -493,6 +543,7 @@ function maak(o) {
     try {
       mappen();
       if (k === 'olares' && !fs.existsSync(ageBin)) { st.fout = 'age ontbreekt'; return { uitkomst: 'fout', fout: st.fout }; }
+      if (k === 'olares') ontvangersBijwerken();   // wv3909 (A3)
       for (const [soort, wortel, lijstVan] of [['app-logs', appData, function () { return appLijst(true); }], ['kern', thuis, function () { return kernLijst(k !== 'olares'); }]]) {
         const sx = staat.soorten[soort];
         try {
@@ -506,11 +557,12 @@ function maak(o) {
       if (k === 'olares') {
         try { uit.geheimen = await geheimenStroom(); } catch (e) { (staat.soorten.geheimen = staat.soorten.geheimen || {}).fout = String(e.message).slice(0, 120); uit.geheimen = 'fout'; }
         if (primair()) { try { uit['n8n-tabellen'] = await n8nStroom(); } catch (e) { (staat.soorten['n8n-tabellen'] = staat.soorten['n8n-tabellen'] || {}).fout = String(e.message).slice(0, 120); uit['n8n-tabellen'] = 'fout'; } }
-        if (o.standin !== false) { try { uit.standin = await standinRonde(); } catch (e) { uit.standin = 'fout'; } }
+        if (o.standin !== false && !(opt && opt.standin === false)) { try { uit.standin = await standinRonde(); } catch (e) { uit.standin = 'fout'; } }
       }
       bewaar();
       const fouten = Object.keys(staat.soorten).filter(function (s) { return staat.soorten[s].fout; });
       if (uit.standin === 'fout' || (st.standin && st.standin.fout)) fouten.push('stand-in');   // Codex ZOU 1 (r2/r3): ook tijdens de wachttijd
+      if (k === 'olares' && ontv2.fout) fouten.push('ontvanger2');   // wv3909 (A3): ongeldig tweede-ontvangerbestand = zichtbaar, geen hartslag
       st.fout = fouten.length ? fouten.join(', ') : null;
       if (!fouten.length && o.hartslag && k === 'olares' && nu() - (st.hartslagOp || 0) > 30 * 60e3) {
         st.hartslagOp = nu(); try { await o.hartslag({ n: Object.keys(staat.soorten).length, bevindingen: 0 }); } catch (e) { /* hartslag is bijzaak */ }
@@ -518,6 +570,23 @@ function maak(o) {
       return { uitkomst: fouten.length ? 'deels' : 'ok', soorten: uit, fout: st.fout };
     } finally { st.bezig = false; }
   }
+
+  // ── wv3909 (A2): verse ronde voor de droge geplande wissel (nood-spiegel.js). Wacht hooguit maxMs (echte klok) op een lopende ronde,
+  // dan app-data zonder de 15 s-rem, n8n-tabellen zonder de uurrem en een ronde zonder de stand-in. De aanroeper begrenst de totale tijd.
+  async function verseRonde(maxMs) {
+    const eind = Date.now() + (maxMs || 90000);
+    while ((st.bezig || st.appBezig) && Date.now() < eind) await new Promise(function (k) { setTimeout(k, 200); });
+    if (st.bezig || st.appBezig) return { uitkomst: 'bezig', staat_sha256: appDataDuw() };
+    if (!primair()) return { uitkomst: 'rol', staat_sha256: appDataDuw() };
+    st.appLaatst = 0;
+    let app;
+    try { app = await appTik(); } catch (e) { app = 'fout'; }
+    const nt = staat.soorten['n8n-tabellen']; if (nt) nt.geprobeerd = 0;
+    const r = await ronde({ standin: false });
+    return { uitkomst: r.uitkomst, app: app, fout: r.fout || null, staat_sha256: appDataDuw() };
+  }
+  // sha256 van de laatste app-data-kopie die de R230 bevestigde (olares); null = (nog) geen gedeelde kopie
+  function appDataDuw() { const s = staat.soorten['app-data']; return s && /^[0-9a-f]{64}$/.test(s.sha256 || '') && s.gedeeld === s.sha256 ? s.sha256 : null; }
 
   function stand() {
     const t = Math.floor(nu() / 1000), s = {};
@@ -528,10 +597,10 @@ function maak(o) {
     const terug = {}; for (const k of Object.keys(st.terug)) if (SOORT_RE.test(k)) terug[k] = { leeftijd_s: t - (st.terug[k].bron_tijd || 0) };
     for (const k of Object.keys(st.terug.fouten || {})) terug[k] = Object.assign(terug[k] || {}, { fout: st.terug.fouten[k] });
     return { kant: kant(), actief: primair(), rondes: st.rondes, fout: st.fout, soorten: s, terug: Object.keys(terug).length ? terug : undefined,
-      terug_fout: st.terug.fout || undefined, standin: st.standin && st.standin.gemeten_op ? { code: st.standin.code, hier: st.standin.hier, image_gelijk: st.standin.image_gelijk, gezond: st.standin.gezond, fout: st.standin.fout } : undefined };
+      terug_fout: st.terug.fout || undefined, ontvanger2: kant() === 'olares' && (ontv2.w || ontv2.fout) ? { aan: !!ontv2.w, fout: ontv2.fout || undefined } : undefined, standin: st.standin && st.standin.gemeten_op ? { code: st.standin.code, hier: st.standin.hier, image_gelijk: st.standin.image_gelijk, gezond: st.standin.gezond, fout: st.standin.fout } : undefined };
   }
 
-  return { appTik: appTik, ronde: ronde, stand: stand, _kernLijst: kernLijst, _appLijst: appLijst, _geheimenTekst: geheimenTekst };
+  return { appTik: appTik, ronde: ronde, stand: stand, verseRonde: verseRonde, appDataDuw: appDataDuw, _kernLijst: kernLijst, _appLijst: appLijst, _geheimenTekst: geheimenTekst };
 }
 
-module.exports = { maak: maak, KERN_LIJST: KERN_LIJST, GEHEUGEN: GEHEUGEN, DBS: DBS, ONTVANGER: ONTVANGER, globNaarRe: globNaarRe, chartWaarde: chartWaarde };
+module.exports = { maak: maak, KERN_LIJST: KERN_LIJST, GEHEUGEN: GEHEUGEN, DBS: DBS, ONTVANGER: ONTVANGER, ONTVANGER2_PAD: ONTVANGER2_PAD, ageOntvangerOk: ageOntvangerOk, globNaarRe: globNaarRe, chartWaarde: chartWaarde };

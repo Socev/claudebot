@@ -52,7 +52,7 @@ function opzet() {
   const rel = path.join(T, 'release/abcdef123456'); fs.mkdirSync(rel, { recursive: true }); fs.writeFileSync(path.join(rel, 'server.js'), '// code');
   const s = { kant: 'olares', primair: true, standVps: false, klok: Date.now() };
   const opties = function (meer) {
-    return Object.assign({ thuis: thuis, werk: path.join(thuis, 'uitwijk-warm'), tmp: T, age: age, ontvanger: ontv, ssh: ssh, sshArgs: ['r230'], tsv: tsv, chart: chart,
+    return Object.assign({ thuis: thuis, werk: path.join(thuis, 'uitwijk-warm'), tmp: T, age: age, ontvanger: ontv, ontvanger2Pad: path.join(T, 'geen-ontvanger2.txt'), ssh: ssh, sshArgs: ['r230'], tsv: tsv, chart: chart,
       env: { PATH: process.env.PATH, HOME: thuis, AGENT_WEBHOOK_SECRET: GEHEIM }, dbs: { een: 'db/een.sqlite' },
       kant: function () { return s.kant; }, primair: function () { return s.primair; }, standVps: function () { return s.standVps; }, nu: function () { return s.klok; },
       releaseSha: function () { return 'abcdef123456'; }, releaseDir: function () { return rel; } }, meer || {});

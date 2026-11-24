@@ -459,8 +459,23 @@ const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || '5', 10) || 5;
 // zonder geldige "tot" of verlopen = MAX_AGENTS. Een expliciete env MAX_AGENTS (toetsen) gaat altijd voor. Gemeten 19-11: podgrens 16 GB /
 // 4 cores, anon 2,3 GB, agent ± 330 MB rss.
 const MAX_AGENTS_PAD = process.env.MAX_AGENTS_PAD || '/opt/data/max-agents.json';
+// ── wv3909 (fase 1h; bouwplan 'App blijft werken als Olares plat ligt' § 4.2 punt 6): SPAARSTAND op kant vps ──
+// WAAROM. Op de R230 (uitwijk) draait de volle pod naast de databankreserve en n8n op kleinere hardware zonder GPU. Dan geldt een vaste
+// set grenzen: hooguit 1 achtergrondagent tegelijk (ook Terra telt mee), geen browser naast een agent (de agent zelf krijgt geen
+// browser-tools, een beurt alleen als er geen agent loopt; /ophalen en de winkelbrowser wachten), en de GPU-stromen (Studio, Imagine:
+// ComfyUI/FlowStudio op Olares) geven 503 "ligt stil". WhatsApp, Signal en het Outlook/Teams-meelezen starten niet in de pod (n8n en
+// apps op Olares; gemeten 25-11): daar is hier niets uit te zetten, ze staan alleen in de lijst voor /health en de app.
+// Niet op de stand-in (SOCEV_ALTIJD_PASSIEF=1): die doet al niets. /health.uitwijk.spaarstand = {aan, grenzen}.
+const SPAARSTAND = String(process.env.SOCEV_KANT || 'olares') === 'vps' && process.env.SOCEV_ALTIJD_PASSIEF !== '1';
+const SPAAR_GRENZEN = { agents: 1, terra_telt_mee: true, browser: 'niet naast een agent', gpu: ['Studio', 'Imagine'],
+  stil_buiten_pod: ['WhatsApp', 'Signal', 'meelezen Outlook/Teams'] };
+const SPAAR_STIL_TEKST = 'Dit ligt stil zolang Socev op de andere kant draait; het komt terug als Socev weer op Olares draait.';
+function spaarInfo() { return { aan: SPAARSTAND, grenzen: SPAARSTAND ? SPAAR_GRENZEN : null }; }
+// Browser dicht: in spaarstand voor elke agent, en voor al het andere zolang er een agent loopt
+function spaarBrowserDicht(isAgent) { return SPAARSTAND && (!!isAgent || agentInfo().lopend > 0); }
 let maxAgentsCache = { mtime: -1, max: null, tot: 0 };
 function maxAgents() {
+  if (SPAARSTAND) return SPAAR_GRENZEN.agents;   // wv3909: gaat vóór env en max-agents.json
   if (process.env.MAX_AGENTS) return MAX_AGENTS;
   let st; try { st = fs.statSync(MAX_AGENTS_PAD); } catch (e) { return MAX_AGENTS; }
   if (st.mtimeMs !== maxAgentsCache.mtime) {
@@ -1672,7 +1687,9 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     if (sessionId) args.push('--resume', sessionId);
     else args.push('--session-id', eigenId);
     // Beperkte agent (spraakkastje, 4-10-2026): verboden tools gelden ook onder bypassPermissions (gemeten 4-10).
-    if (opts && opts.disallowedTools) args.push('--disallowedTools', opts.disallowedTools);
+    // wv3909 (spaarstand, kant vps): geen browser-tools voor een agent, en voor een beurt niet zolang er een agent loopt
+    const verboden = [opts && opts.disallowedTools, spaarBrowserDicht(!!(opts && opts.env && opts.env[EIND_MARKER])) ? 'mcp__playwright' : ''].filter(Boolean).join(' ');
+    if (verboden) args.push('--disallowedTools', verboden);
     if (opts && opts.advisor) args.push('--advisor', opts.advisor);   // wv479: alleen achtergrondagents, waarde al getoetst (ontleedAdviseur)
     args.push.apply(args, mkTekstArgs(opts));   // wv1001: welke instructiebestanden en welk geheugen (opts.tekst mk | smal)
     args.push('--', prompt);
@@ -5084,6 +5101,7 @@ function handleRequest(req, res) {
       };
       if (typeof ophalen === 'undefined' || !ophalen) return stuur(404, { ok: false, fout: 'ophalen zit niet in deze versie van de pod' });
       if (typeof d.url !== 'string' || d.url.length > 2000) return stuur(400, { ok: false, fout: 'url ontbreekt of is te lang' });
+      if (spaarBrowserDicht(false)) return stuur(200, { ok: false, spaarstand: true, fout: 'spaarstand: geen browser terwijl er een achtergrondagent loopt; probeer het later' });   // wv3909
       ophalen.haal(d.url, { pdfs: d.pdfs, geenCache: d.geen_cache === true }).then(function (r) { stuur(200, r); })
         .catch(function (e) { logError('ophalen', e); stuur(500, { ok: false, fout: 'ophalen faalde in de pod' }); });
     });
@@ -5230,9 +5248,13 @@ function handleRequest(req, res) {
           res.writeHead(429, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ ok: false, error: 'terra-loopt', uitleg: 'er loopt al een Terra-bundel' }));
         }
-      } else if (agentInfo().lopend - terraLopend() >= maxAgents()) {
+        if (SPAARSTAND && agentInfo().lopend >= maxAgents()) {   // wv3909: in spaarstand telt Terra mee
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ ok: false, error: 'max-agents', spaarstand: true, uitleg: 'Spaarstand (Socev draait op de andere kant): er loopt al een achtergrondagent (maximum ' + maxAgents() + ').' }));
+        }
+      } else if (agentInfo().lopend - (SPAARSTAND ? 0 : terraLopend()) >= maxAgents()) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ ok: false, error: 'max-agents', uitleg: 'Er lopen al ' + (agentInfo().lopend - terraLopend()) + ' achtergrondagents (maximum ' + maxAgents() + '); wacht tot er één klaar is.' }));
+        return res.end(JSON.stringify({ ok: false, error: 'max-agents', spaarstand: SPAARSTAND || undefined, uitleg: 'Er lopen al ' + (agentInfo().lopend - (SPAARSTAND ? 0 : terraLopend())) + ' achtergrondagents (maximum ' + maxAgents() + (SPAARSTAND ? ', spaarstand' : '') + '); wacht tot er één klaar is.' }));
       }
       const wsFout = workspaceFout(d.workspace);
       if (wsFout) return weigerWorkspace(res, wsFout, '/agent');
@@ -8306,7 +8328,7 @@ function appStartFout(res, st) {
   if (st.fout === 'bestanden') return appWeiger(res, 500, 'de bestanden konden op de pod niet klaargezet worden; probeer het opnieuw', 'bestanden klaarzetten');
   if (st.fout === 'draad') return appWeiger(res, 409, st.melding || 'doorvragen lukt nu niet', 'draad (na wachten)');   // wv3156
   if (st.fout === 'rij vol') return appWeiger(res, 429, 'er staan al ' + APP_RIJ_GETYPT_MAX + ' berichten in de rij; wacht tot Socev er een heeft opgepakt', 'getypt rij vol (na wachten)');   // wv628
-  return appWeiger(res, 503, 'Socev kan nu geen beurt starten; gebruik Telegram', 'start ' + st.fout);
+  return appWeiger(res, 503, 'Socev kan nu geen beurt starten; probeer het zo opnieuw', 'start ' + st.fout);
 }
 // Gemeenschappelijke voorwaarden voor alles wat een beurt start (bericht, knop).
 // wv405: een knopdruk (rij) mag bij een bezig kanaal in de rij, hooguit APP_KNOP_RIJ_MAX tegelijk per kanaal; een getypt
@@ -8413,7 +8435,7 @@ function appLopendSpawn(jobId, i) {
 }
 
 async function appMagBeurt(res, kanaal, rij) {
-  if (!(await appRolOk())) { appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik Telegram', 'rol passief'); return false; }
+  if (!(await appRolOk())) { appWeiger(res, 409, 'Socev draait nu op de andere kant; probeer het zo opnieuw', 'rol passief'); return false; }
   if (!rij && appLopend(kanaal)) { appWeiger(res, 409, 'Socev is in dit kanaal nog bezig; wacht op het antwoord', 'kanaal bezig'); return false; }
   if (rij === 'getypt' && appGetyptInRij(kanaal) >= APP_RIJ_GETYPT_MAX) { appWeiger(res, 429, 'er staan al ' + APP_RIJ_GETYPT_MAX + ' berichten in de rij; wacht tot Socev er een heeft opgepakt', 'getypt rij vol'); return false; }   // wv628
   if (rij === true && appKnopInRij(kanaal) >= APP_KNOP_RIJ_MAX) { appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol'); return false; }
@@ -12187,7 +12209,7 @@ async function appVandaagRoute(req, res, a) {
 // wv424: Knop (app) van Agenda-knoppen en Voorwerk-knoppen heeft een eigen sleutel die alleen server.js gebruikt (n8n kent de
 // sha256). Daarvoor was het N8N_WEBHOOK_SOCEV_AGENDA, die elke Socev-sessie heeft voor zijn agendavoorstellen: zo'n sessie kon
 // dus zelf een app-knopdruk nadoen. Bestand (0600, buiten socev-app-data), gemaakt door de machinekamer; ontbreekt het, dan
-// geven de knoppen 503 (gebruik Telegram). Dekt niet: dezelfde uid kan het bestand lezen (zie MK_SESSIES).
+// geven de knoppen 503. Dekt niet: dezelfde uid kan het bestand lezen (zie MK_SESSIES).
 const APP_KNOP_SLEUTEL_PAD = process.env.APP_KNOP_SLEUTEL_PAD || '/opt/data/.socev-geheim/knop-app.key';
 function appKnopSleutel() {
   try { const k = fs.readFileSync(APP_KNOP_SLEUTEL_PAD, 'utf8').trim(); return /^[0-9a-f]{64}$/.test(k) ? k : ''; } catch (e) { return ''; }
@@ -12225,9 +12247,8 @@ async function appActieRoute(req, res, a, d) {
   try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, APP_PORTIE_LEES); } catch (e) { logError('app-actie', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen; probeer het zo opnieuw', 'actie lezen'); }
   const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
   if (!rij || !/^[0-9a-f]{32}$/.test(String(rij.nonce || ''))) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'actie onbekend');
-  // wv456 (Fable KAN 1a): op de reservekant alleen naar Telegram verwijzen als het lijstje daar met knoppen staat (message_id > 0:
-  // de pod was om 07:05 al passief, dus AI - Voorwerk koos de Telegram-route); anders bestaan die knoppen in Telegram niet
-  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; ' + (Number(rij.message_id) > 0 ? 'het lijstje van vandaag staat ook in Telegram, tik daar' : 'probeer het later opnieuw'), 'rol passief');
+  // wv456 verwees hier naar Telegram; sinds wv3909 (fase 1h, bouwplan § 4.2 punt 6) is Telegram geen noodingang meer: gewone taal
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de andere kant; probeer het zo opnieuw', 'rol passief');
   // wv452: message_id 0 = het lijstje ging alleen naar de app (geen Telegram-bericht om bij te werken); n8n toetst nonce en status zelf
   const mid = Number(rij.message_id) > 0 ? Number(rij.message_id) : 0;
   let j;
@@ -16411,6 +16432,10 @@ function handleApp(req, res) {
       // wv3873 (Codex MOET 2): de rol kan tijdens het aanleveren van een trage body gewisseld zijn; vlak vóór de route nog eens (synchroon,
       // de lease in rolPrimair() telt mee). Ruwe uploads lezen de stroom in hun route: ook die starten pas na deze controle.
       if (!rolPrimair()) { req.resume(); return appPassiefAntwoord(req, res, p); }
+      // wv3909 (spaarstand, kant vps): de GPU-stromen (Studio, Imagine) maken niets; lezen (GET) mag
+      if (SPAARSTAND && req.method === 'POST' && (p.indexOf('/app/studio/') === 0 || p.indexOf('/app/imagine/') === 0)) {
+        req.resume(); return appStuur(res, 503, { ok: false, spaarstand: true, fout: SPAAR_STIL_TEKST });
+      }
       let reg;
       try { reg = appRegister(); } catch (e) { logError('app-register', e); return appWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'register kapot'); }
       const route = req.method + ' ' + p;
@@ -19056,7 +19081,7 @@ function handleTel(req, res) {
   const route = req.method + ' ' + p;
   if (!TEL_ROUTE_RE.test(p) || !/^(GET \/tel\/(uit|deel\/)|POST \/tel\/(koppel|beurt|gespeeld\/))/.test(route)) return weg(404, 'onbekend', 'pad/methode');
   appRolOk().then(function (primair) {
-    if (!primair) return weg(503, 'Socev draait op de reserve, gebruik Telegram', 'rol passief');
+    if (!primair) return weg(503, 'Socev draait nu op de andere kant; probeer het zo opnieuw', 'rol passief');
     if (route === 'POST /tel/koppel') return telKoppel(req, res);
     const cfg = telConfig();
     return appAccessOk(req, cfg).then(function (afwijzing) {
@@ -19205,7 +19230,7 @@ function telBeurt(req, res, t) {
       }
       if (!tekst || !/[\p{L}\p{N}]/u.test(tekst)) return telWeiger(res, 422, 'ik heb je niet verstaan', 'niets verstaan');
       if (telUit()) return telWeiger(res, 503, 'de telefoonkoppeling staat uit (noodstop)', 'uit (tijdens het verzoek)');
-      if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve, gebruik Telegram', 'rol passief (tijdens)');
+      if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait nu op de andere kant; probeer het zo opnieuw', 'rol passief (tijdens)');
       if (snel) return telSnelStart(res, t, tekst, k);   // wv3826
       if (kies && telKiesSnelMag(t, tekst)) return telKiesStart(res, t, tekst, k);   // wv3878; anders meteen een gewone beurt
       if (kies) k.kies = 'socev';
@@ -19216,7 +19241,7 @@ function telBeurt(req, res, t) {
         extra = bv.extra; k.bij = 'ja';
       }
       const st = await telBeurtStart(t, tekst, extra);
-      if (!st.job_id) return telWeiger(res, 503, 'Socev kan nu geen beurt starten; gebruik Telegram', 'start ' + st.fout);
+      if (!st.job_id) return telWeiger(res, 503, 'Socev kan nu geen beurt starten; probeer het zo opnieuw', 'start ' + st.fout);
       k.tekens_in = tekst.length;
       telRij().push({ id: st.job_id, apparaat: t.id, soort: 'bezig', t_start: Date.now(), tot: Date.now() + TEL_TTL_MS, k: k });
       telRijBewaar();
@@ -28845,7 +28870,7 @@ const shopper = (function () {
   };
   const lezerScriptAlleen = lezer;
   if (lezer && winkelBrowser && winkelBrowser.info().aan) lezer = async function (url) {
-    if (!browserMag(url)) return lezerScriptAlleen(url);
+    if (!browserMag(url) || spaarBrowserDicht(false)) return lezerScriptAlleen(url);   // wv3909: spaarstand, geen browser naast een agent
     const r = await winkelBrowser.lees(url);
     // geen browserwinkel (bv. Tweakers, lezen: browser maar een vergelijker): het leesscript geeft zijn eigen uitleg
     return r && r.blokkade && /^browserroute alleen voor /.test(r.blokkade) ? lezerScriptAlleen(url) : r;
@@ -30674,6 +30699,8 @@ function rolInfo() {
     // Olares-tunneltoken nog in de omgeving). naar-vps eist hier 'vps' vóór de eerste beurt (review 6d #5).
     fetch_secrets_kant: process.env.FETCH_SECRETS_KANT || null,
     warm: warmeStaat ? warmeStaat.stand() : null,   // wv3908: warme staat naar/van de R230 (leeftijd per soort)
+    nood: noodSpiegel ? noodSpiegel.stand() : { ingericht: false },   // wv3909: spiegel naar socev-nood (hartslag, passkeys, push, bundelhash)
+    spaarstand: spaarInfo(),   // wv3909: grenzen op kant vps
     n8n_3b: ROL_KANT === 'olares' ? { laatste_iso: u3b.laatste_iso, laatste_uitkomst: u3b.laatste_uitkomst, aanroepen: u3b.aanroepen,
       bezig: u3b.bezig, box_wacht: fs.existsSync(U3B_WACHT) } : null };
 }
@@ -30783,6 +30810,44 @@ if (warmeStaat && SERVER_ECHT === true) {
   const warmRonde = function () { warmeStaat.ronde().then(function (r) { if (r && (r.uitkomst === 'deels' || r.uitkomst === 'fout')) schrijfLog(nu() + ' warm ' + velden({ uitkomst: r.uitkomst, fout: String(r.fout || '').slice(0, 160) })); })
     .catch(function (e) { logError('warm-ronde', e); }); };
   setTimeout(warmRonde, 2 * 60 * 1000).unref(); setInterval(warmRonde, 5 * 60 * 1000).unref();
+}
+
+// wv3909 (fase 1f/1g, bouwplan § 4.1 punt 4/6, § 4.3; contract mk-scripts/wv3909/contract.md): spiegel naar de Worker socev-nood (logica en
+// waarom in nood-spiegel.js). Elke 60 s een hartslag; als primair de publieke passkeys, push-adressen en de bundelhash bij een wijziging
+// (peiling elke 10 s) of elke 6 u; een droge geplande wissel ('proef') krijgt op Olares een verse warme staat en de handtekening.
+// Zonder /opt/data/.socev-geheim/nood-pod.key geen enkele aanroep. Niet op de stand-in en nooit in de toetsen (SERVER_ECHT).
+function noodLsn() {   // volgnummer van de eigen databank (zelfde route als dbReserveVraag); null als het niet lukt
+  return new Promise(function (klaar) {
+    try {
+      const k = require('child_process').execFile('/app/sb-sql', [], { timeout: 8000, maxBuffer: 16 * 1024 }, function (err, uit) {
+        if (err) return klaar(null);
+        let r = null; try { r = JSON.parse(uit)[0]; } catch (e) { r = null; }
+        klaar(r && typeof r.lsn === 'string' && /^[0-9A-F]{1,8}\/[0-9A-F]{1,8}$/.test(r.lsn) ? r.lsn : null);
+      });
+      k.stdin.on('error', function () {});
+      k.stdin.end('select pg_current_wal_lsn()::text as lsn');
+    } catch (e) { klaar(null); }
+  });
+}
+var noodSpiegel = (function () {   // var: rolInfo() hierboven leest hem (zie warmeStaat)
+  const p = path.join(__dirname, 'nood-spiegel.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const u = String(process.env.NOOD_URL || '').trim();
+    return require(p).maak({ standIn: ROL_ALTIJD_PASSIEF, url: u || undefined,
+      kant: function () { return ROL_KANT; }, primair: function () { return rolPrimair(); },
+      versie: function () { return process.env.RELEASE_SHA || process.env.IMAGE_SHA || 'onbekend'; },   // zelfde als /health.versie
+      register: appRegister, push: appPushLees, pushOk: appPushEndpointOk,
+      warmVers: warmeStaat ? function (ms) { return warmeStaat.verseRonde(ms); } : null,
+      staatSha: warmeStaat ? function () { return warmeStaat.appDataDuw(); } : null,
+      lsn: noodLsn,
+      log: function (t) { schrijfLog(nu() + ' nood ' + velden({ melding: String(t).slice(0, 160) })); } });
+  } catch (e) { logError('nood-spiegel', e); return null; }
+})();
+if (noodSpiegel && SERVER_ECHT === true && !ROL_ALTIJD_PASSIEF) {
+  const noodTik = function () { noodSpiegel.tik().catch(function (e) { logError('nood-tik', e); }); };
+  setTimeout(noodTik, 30 * 1000).unref(); setInterval(noodTik, 60 * 1000).unref();
+  setInterval(function () { Promise.resolve(noodSpiegel.peil()).catch(function (e) { logError('nood-peil', e); }); }, 10 * 1000).unref();
 }
 
 // Direct bij de processtart: het bestand van het vorige proces telt niet meer (review stap 3, #7).
