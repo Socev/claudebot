@@ -737,6 +737,78 @@ function rondeRoute(d, k, bijInfo) {
 }
 const STICHTING = new Set(['doelen', 'stichting', 'overleg', 'mensen']);   // wv2886
 const SOORT = { md: 'tekst', pdf: 'pdf', xlsx: 'Excel', docx: 'Word', html: 'webpagina', jpg: 'foto', jpeg: 'foto', png: 'foto', csv: 'csv' };
+// ── wv3955 (besluitenpagina nr 902 = L02, David Ja 22-11 18:25): "de app komt naar jou toe" ──
+// standVan = momentopname van wat David wil merken (geen bankregels, geen namen van donateurs: alleen fondsen van organisaties, sommen,
+// vraagstatussen, mijlpalen en de id's van open voorstellen). verschil(oud, nieuw) = wat er tussen twee opnames veranderde, in gewone taal,
+// elk met het scherm waar het staat. De server legt elke ochtend een opname vast (ochtend: één regel in "Uit je Apps" als er iets
+// veranderde, anders niets) en Overzicht vergelijkt met de opname van het vorige bezoek ("Sinds je vorige bezoek").
+// Bewust niet: een nieuwe of herschreven mijlpaal (tekst anders) en een gewijzigd begrotingsbedrag; dat zou elke vaultbewerking melden.
+const STAND_V = 1;
+const ONTVANGEN = /^Received/;
+const FONDS_NL = { 'Committed - not yet received': 'toegezegd', 'Received by GHAWA NL': 'binnen bij GHAWA', 'Received by ECG': 'binnen bij ECG',
+  'Expected per year': 'verwacht per jaar', Withdrawn: 'ingetrokken' };
+function kortHash(s) { let h = 2166136261; for (const ch of String(s || '')) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619) >>> 0; } return h.toString(16); }
+function standVan(d, k, mijl, voorstellen) {
+  const giften = ((k.ghawa && k.ghawa.per_jaar) || []).filter((r) => r.groep === 'opgehaald').reduce((s, r) => s + (r.totaal || 0), 0);
+  const ecgTot = [k.standen && k.standen.ecg_gmd, k.standen && k.standen.ecg_eur].filter(Boolean).sort().pop() || null;
+  return { v: STAND_V,
+    fondsen: Object.fromEntries((d.fondsen || []).map((f) => [f.id, { gever: String(f.gever || '').slice(0, 80), status: f.status || null, eur: f.eur_cent || 0 }])),
+    vragen: Object.fromEntries((d.vragen || []).map((v) => [v.id, { status: v.status || null, a: v.antwoord ? kortHash(v.antwoord) : null }])),
+    ecg_tot: ecgTot, ecg_in: (k.ecg && k.ecg.eur && k.ecg.eur.ontvangen) || 0, giften,
+    mijl: (mijl || []).map((m) => ({ t: String(m.tekst || '').slice(0, 200), w: m.wanneer || null, e: m.einde || null, s: m.stand || null })),
+    voorstellen: (voorstellen || []).slice(0, 200) };
+}
+const euro = (cent) => '€ ' + Math.round(cent / 100).toLocaleString('nl-NL');
+const dagNl = (x) => (x && /^\d{4}-\d{2}-\d{2}/.test(x) ? Number(x.slice(8, 10)) + '-' + Number(x.slice(5, 7)) : String(x || ''));
+const kortTekst = (t, n) => { const s = String(t || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1).replace(/[\s,;:.]+$/, '') + '…' : s; };
+// → [{ soort, tekst, scherm }] in vaste volgorde: geld, fondsen, ECG, mijlpalen, voorstellen. Zonder (geldige) oude opname: [] (eerste keer = stil).
+function verschil(oud, nieuw) {
+  if (!oud || oud.v !== STAND_V || !nieuw || nieuw.v !== STAND_V) return [];
+  const uit = [];
+  for (const id of Object.keys(nieuw.fondsen)) {
+    const n = nieuw.fondsen[id], o = oud.fondsen[id], naam = dossierVan(n.gever);
+    if (!o) { if (n.status !== 'Withdrawn') uit.push({ soort: 'fonds', tekst: 'nieuw fonds ' + naam + (n.eur ? ' (' + euro(n.eur) + ')' : '') + ', ' + (FONDS_NL[n.status] || 'zonder status'), scherm: 'fondsen' }); continue; }
+    if (o.status === n.status) continue;
+    if (ONTVANGEN.test(n.status || '') && !ONTVANGEN.test(o.status || '')) uit.push({ soort: 'fonds', tekst: naam + ' betaald' + (n.eur ? ' (' + euro(n.eur) + ')' : '') + ', ' + FONDS_NL[n.status], scherm: 'fondsen' });
+    else uit.push({ soort: 'fonds', tekst: naam + ': ' + (FONDS_NL[o.status] || o.status || 'zonder status') + ' → ' + (FONDS_NL[n.status] || n.status || 'zonder status'), scherm: 'fondsen' });
+  }
+  if (nieuw.giften > oud.giften) uit.push({ soort: 'geld', tekst: euro(nieuw.giften - oud.giften) + ' aan giften binnen op de GHAWA-rekening', scherm: 'geld' });
+  if (nieuw.ecg_in > oud.ecg_in) uit.push({ soort: 'geld', tekst: euro(nieuw.ecg_in - oud.ecg_in) + ' binnen bij ECG', scherm: 'geld' });
+  if (nieuw.ecg_tot && (!oud.ecg_tot || nieuw.ecg_tot > oud.ecg_tot)) uit.push({ soort: 'ecg', tekst: 'nieuwe afschriften van ECG, cijfers nu t/m ' + dagNl(nieuw.ecg_tot), scherm: 'geld' });
+  const beantwoord = Object.keys(nieuw.vragen).filter((id) => {
+    const n = nieuw.vragen[id], o = oud.vragen[id];
+    if (!o) return false;
+    return (STATUS_OPEN.test(o.status || '') && !/^open$/i.test(n.status || '') && n.status !== o.status) || (!!n.a && n.a !== o.a);
+  }).sort();
+  if (beantwoord.length) uit.push({ soort: 'ecg', tekst: (beantwoord.length === 1 ? 'antwoord van ECG op vraag ' : 'antwoord van ECG op ' + beantwoord.length + ' vragen (') +
+    (beantwoord.length === 1 ? beantwoord[0] : beantwoord.slice(0, 4).join(', ') + (beantwoord.length > 4 ? ', …' : '') + ')'), scherm: 'vragen' });
+  const nieuwV = Object.keys(nieuw.vragen).filter((id) => !oud.vragen[id] && STATUS_OPEN.test(nieuw.vragen[id].status || ''));   // review ZOU 1
+  if (nieuwV.length) uit.push({ soort: 'ecg', tekst: nieuwV.length === 1 ? 'nieuwe open vraag ' + nieuwV[0] : nieuwV.length + ' nieuwe open vragen', scherm: 'vragen' });
+  for (const m of nieuw.mijl) {
+    const o = oud.mijl.find((x) => x.t === m.t);
+    if (!o) continue;
+    if (GEHAALDE.test(m.s || '') && !GEHAALDE.test(o.s || '')) uit.push({ soort: 'mijlpaal', tekst: 'mijlpaal ' + (m.s === 'gehaald' ? 'gehaald' : m.s) + ': ' + kortTekst(m.t, 70), scherm: 'doelen' });
+    else if ((m.e !== o.e || (!m.e && m.w !== o.w)) && !GEHAALDE.test(m.s || '')) uit.push({ soort: 'mijlpaal', tekst: 'mijlpaal verschoven: ' + kortTekst(m.t, 60) + ' (' + (o.w || dagNl(o.e) || '?') + ' → ' + (m.w || dagNl(m.e) || '?') + ')', scherm: 'doelen' });
+  }
+  const oudV = new Set(oud.voorstellen || []);
+  const nv = (nieuw.voorstellen || []).filter((id) => !oudV.has(id)).length;
+  if (nv) uit.push({ soort: 'voorstel', tekst: (nv === 1 ? 'één voorstel' : nv + ' voorstellen') + ' uit WhatsApp klaar om Ja of Nee te zeggen', scherm: 'voorstellen' });
+  return uit;
+}
+const APP_LINK = 'https://app.socev.dev/?app=ghawa';
+// één regel voor het ochtendbericht (zonder "GHAWA:", dat zet het loket ervoor): hooguit drie punten, de rest als aantal; link naar het
+// scherm als alles op één scherm staat, anders naar Overzicht (daar staat "Sinds je vorige bezoek" met alles)
+function ochtendRegel(items) {
+  if (!items || !items.length) return null;
+  const schermen = Array.from(new Set(items.map((x) => x.scherm)));
+  const scherm = schermen.length === 1 ? schermen[0] : 'overzicht';
+  const t = items.slice(0, 3).map((x) => x.tekst);
+  if (items.length > 3) t.push('en nog ' + (items.length - 3) + ' (Overzicht)');
+  const tekst = t.join('; ');
+  return { tekst: tekst.charAt(0).toUpperCase() + tekst.slice(1) + '.', scherm, link: APP_LINK + '&ghscherm=' + scherm };   // review MOET 1: ook overzicht expliciet (een open GHAWA blijft anders op zijn scherm)
+}
+const BEZOEK_GAT_MS = 3600000;   // langer dan een uur niets op Overzicht = een nieuw bezoek
+
 function documentenRoute(bronnenMap, vaultMap) {
   const uit = [];
   if (!bronnenMap || !fs.existsSync(bronnenMap)) return { map: null, stukken: [] };
@@ -805,6 +877,7 @@ function maak(cfg) {
       const nv = voorstellenOpen();   // wv3920: voorstellen uit WhatsApp bovenaan Vraagt aandacht
       body.voorstellen_open = nv;
       if (nv && Array.isArray(body.aandacht)) body.aandacht.unshift({ toon: 'info', label: 'WhatsApp', titel: nv === 1 ? 'Eén voorstel uit WhatsApp' : nv + ' voorstellen uit WhatsApp', sub: 'Ja of Nee met één tik', scherm: 'voorstellen' });
+      try { body.sinds = sindsBezoek(d, k); } catch (e) { body.sinds = null; if (c.fout) c.fout(e); }   // wv3955: een fout hier laat Overzicht staan
     }
     else if (scherm === 'bouw') body = bouwRoute(d, k, 'Building');
     else if (scherm === 'apotheek') body = bouwRoute(d, k, 'Pharmacy');
@@ -1027,6 +1100,35 @@ function maak(cfg) {
     return { koers: k.koers, datastand: k.datastand, bouw_gmd: Math.round(k.bouw.begroot / 100),
       fasen: k.fasen.map((f) => ({ naam: f.naam, omschrijving: f.omschrijving || '', gmd: Math.round(f.begroot / 100), posten: posten.get(f.id) || [] })) };
   }
+  // wv3955 (L02): de opname van nu, het verschil met het vorige bezoek (Overzicht) en met de vorige ochtend (één regel in "Uit je Apps")
+  function voorstelIds() {
+    if (!c.dbPad || !fs.existsSync(c.dbPad)) return [];
+    return schrijf((db) => (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='voorstel'").get() ? db.prepare("SELECT id FROM voorstel WHERE staat = 'open' ORDER BY id LIMIT 200").all().map((r) => r.id) : []));
+  }
+  function standNu(d, k) { return standVan(d, k, require('./ghawa-stichting.js').mijlpalenMet(mijlLijst(), k.vandaag), voorstelIds()); }   // mijlpalenMet zet einde
+  function metaJson(d, sl) { try { return d.meta[sl] ? JSON.parse(d.meta[sl]) : null; } catch (e) { return null; } }
+  function metaZet(paren) { schrijf((db) => { const z = db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)'); for (const [sl, v] of paren) z.run(sl, JSON.stringify(v)); }); }
+  // Overzicht: een nieuw bezoek (langer dan een uur stil) schuift de opname van het vorige bezoek door; binnen een bezoek blijft "vorig" staan
+  function sindsBezoek(d, k) {
+    const cur = standNu(d, k), nu = nuIso(), b = metaJson(d, 'stand:bezoek');
+    let vorig = metaJson(d, 'stand:bezoek-vorig');
+    const nieuwBezoek = !b || !b.op || !(Date.parse(nu) - Date.parse(b.op) < BEZOEK_GAT_MS);
+    if (nieuwBezoek && b && b.stand) vorig = b;
+    metaZet(nieuwBezoek && b && b.stand ? [['stand:bezoek-vorig', b], ['stand:bezoek', { op: nu, stand: cur }]] : [['stand:bezoek', { op: nu, stand: cur }]]);
+    if (!vorig || !vorig.stand) return null;
+    return { op: vorig.op, items: verschil(vorig.stand, cur) };
+  }
+  // Ochtend: vergelijk met de opname van de vorige ochtend. bewaar() pas na een gelukte melding (of als er niets te melden is), zodat een
+  // mislukte of te late ochtend morgen alsnog meldt. Eerste keer (geen opname): niets melden, alleen vastleggen.
+  function ochtend(dag) {
+    if (!c.dbPad || !fs.existsSync(c.dbPad)) return { geen_databank: true };
+    if (!gemigreerd) schrijf(() => null);
+    bankBij(false);
+    const d = lees(), k = bereken(d), cur = standNu(d, k), o = metaJson(d, 'stand:ochtend');
+    if (o && o.dag === dag) return { al_gedaan: true };
+    const items = o && o.stand ? verschil(o.stand, cur) : [];
+    return { eerste: !(o && o.stand), items, regel: ochtendRegel(items), bewaar: () => metaZet([['stand:ochtend', { dag, op: nuIso(), stand: cur }]]) };
+  }
   function voorstellenOpen() { if (!c.dbPad || !fs.existsSync(c.dbPad)) return 0; try { return schrijf((db) => VS.aantalOpen(db)); } catch (e) { return 0; } }
   // Maandronde: kaart als de ECG-cijfers ouder zijn dan 35 dagen (één per maand); de server roept dit eens per dag aan.
   function maandKaart() {
@@ -1118,10 +1220,12 @@ function maak(cfg) {
   function kaartGezet(sleutel) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('kaart:' + String(sleutel).slice(0, 60), nuIso())); }
   return { app, info, bankBij, maandKaart, kaartGezet, totalen, siteCijfersZet, siteCijfers, conceptVoor, conceptGezet, fondsKaarten, kaartDicht, kalenderItems,
     voorstelLens, voorstelZet, voorstelVan, voorstelFotos, voorstelNieuws, voorstellenOpen,   // wv3920
+    ochtend,   // wv3955
     nieuwsAanleiding, nieuwsFeiten, nieuwsZet, siteBedragen };   // wv3954
 }
 
-module.exports = { maak, invoer, leesData, bereken, csvLees, cent, SCHEMA, TABELLEN, GHAWA_SOORTEN, donateursRoute, indelenRoute, vragenPortie, fondsOpvolg };
+module.exports = { maak, invoer, leesData, bereken, csvLees, cent, SCHEMA, TABELLEN, GHAWA_SOORTEN, donateursRoute, indelenRoute, vragenPortie, fondsOpvolg,
+  standVan, verschil, ochtendRegel, STAND_V };   // wv3955
 
 if (require.main === module) {
   const [cmd, a1, a2] = process.argv.slice(2);

@@ -12300,7 +12300,7 @@ function voorwerkDeadlinesRoute(req, res) {
     }).catch(function (e) { logError('voorwerk-deadlines', e); berichtStuur(res, 500, { ok: false, fout: 'register niet te lezen' }); });
   });
 }
-if (SERVER_ECHT) { setInterval(function () { if (rolPrimair()) dlVerwerkStil('ronde'); }, 10 * 60000).unref(); }
+if (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setInterval(function () { if (rolPrimair()) dlVerwerkStil('ronde'); }, 10 * 60000).unref(); }   // wv3955: poort- en UI-toets laden dit blok zonder SERVER_ECHT
 
 // ── Herinneringen als Voor jou-kaart (wv3905, nr 356 = 3C56; waarom en werking in herinnering-kaart.js) ──
 // POST /herinnering/kaart (Socev met SOCEV_AGENT_SLEUTEL, of het pod-geheim): de heartbeat maakt van een herinnering die iets van David
@@ -12340,7 +12340,8 @@ function herinneringKaartRoute(req, res) {
     }).catch(function (e) { logError('herinnering-kaart', e); berichtStuur(res, 500, { ok: false, fout: 'kaart niet gezet: ' + String(e && e.message || e).slice(0, 160) }); });
   });
 }
-if (SERVER_ECHT) { setInterval(function () { if (rolPrimair()) hkVerwerkStil('ronde'); }, 10 * 60000).unref(); }
+if (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) {   // wv3955: poort- en UI-toets laden dit blok zonder SERVER_ECHT
+  setInterval(function () { if (rolPrimair()) hkVerwerkStil('ronde'); }, 10 * 60000).unref(); }
 
 // ── Voor jou (wv335, idee 11 fase 2; bouwplan "Voor jou - beheerde actielijst" § 2, § 4.4) ──
 // Eén beheerde lijst van wat Socev van David nodig heeft: tabel machinekamer.voor_jou (Supabase), gevuld en gemeten door de
@@ -24867,6 +24868,8 @@ const nachtketen = (function () {
       // deze stap de rij van vandaag opnieuw (uit de bewaarde standen van gisteren + lopende Laat rusten) zolang er één loopt. Niets lopend =
       // niets doen (de rij van de tik blijft zoals hij is). Een fout meldt de keten (box-rij); de briefing kent het contact dan één dag niet.
       { naam: 'briefing-rust', start_na: [6, 45], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return appBriefingRustStap(ctx); } },
+      // wv3955 (L02): GHAWA vergelijkt met de vorige ochtend; bij een verandering één regel in het loket vóór apps-editie, anders niets
+      { naam: 'ghawa-ochtend', start_na: [6, 30], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return ghawaOchtendStap(ctx); } },
       // wv3815 (2C59 fase 2): ochtendeditie "Uit je Apps" als bufferrij bron 'apps' vóór de briefing van 07:00; een fout meldt de keten (box-rij)
       { naam: 'apps-editie', start_na: [6, 50], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return loketOchtendEditie(ctx); } },
       // wv2894 (idee 19d): zondag één regel over de binnenste kring voor de briefing van 07:00; stil bij een fout (box-rij), anders al_gedaan
@@ -27488,6 +27491,24 @@ async function ghawaNieuwsConcept() {
   if (!u.ok) { logError('ghawa-nieuws', new Error('concept niet vastgelegd (' + u.status + (u.gevonden ? ', bevat ' + u.gevonden : '') + ')')); return null; }
   schrijfLog(nu() + ' ghawa-nieuws: concept ' + (u.id || '') + ' (' + a.soort + ')');
   return u.id || null;
+}
+// wv3955 (besluitenpagina nr 902 = L02, David Ja 22-11 18:25): nachtketenstap ghawa-ochtend (06:30, primaire kant, vóór apps-editie van
+// 06:50). ghawa.js legt elke ochtend een opname van de stand vast (fondsen, giften, geld bij ECG, afschriften, vragen, mijlpalen, open
+// voorstellen uit WhatsApp; geen bankregels of donateursnamen) en vergelijkt met die van de vorige ochtend. Iets veranderd: één editie-regel
+// "GHAWA: …" in het loket (→ "Uit je Apps" in het ochtendbericht, met een Open naar het scherm); niets veranderd: niets. Te laat (na 06:50)
+// of een fout bij het melden: de opname blijft de oude, zodat morgen alsnog meldt. De eerste ochtend legt alleen vast.
+async function ghawaOchtendStap(ctx, opt) {
+  const o = opt || {}, g = o.app || ghawaApp;
+  if (!g || typeof g.ochtend !== 'function' || typeof AN === 'undefined' || !AN) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+  const t = o.ams || ovisAms(), dag = ctx && ctx.datum ? ctx.datum : t.datum;
+  const u = g.ochtend(dag);
+  if (u.geen_databank) return { ok: true, al_gedaan: true, detail: { geen_databank: true } };
+  if (u.al_gedaan) return { ok: true, al_gedaan: true };
+  const laat = dag === t.datum && t.uur * 60 + t.min >= 6 * 60 + 50;
+  if (u.regel && laat) return { ok: true, detail: { veranderingen: u.items.length, te_laat: true } };
+  if (u.regel) await (o.meld || loketMeld)({ app: 'ghawa', onderwerp: 'sinds-gisteren', laan: 'editie', editie: 'ochtend', datum: dag, tekst: u.regel.tekst, link: u.regel.link, doel: { scherm: 'ghawa', focus: u.regel.scherm } });
+  u.bewaar();
+  return { ok: true, detail: { veranderingen: u.items.length, eerste: u.eerste || undefined } };
 }
 // wv2880: elk uur tussen 9 en 21 uur de GHAWA-bank bij (ook als niemand kijkt) en de maandronde: ECG-cijfers ouder dan 35 dagen = één kaart per maand.
 const GHAWA_TIKKEN = !!(ghawaApp && ((typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) || process.env.GHAWA_RONDE === '1'));

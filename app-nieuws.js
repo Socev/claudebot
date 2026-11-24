@@ -18,7 +18,10 @@ const BEWAAR_VERVALLEN_MS = 14 * 86400000;
 const BEWAAR_GEZIEN_MS = 30 * 86400000;
 const OOIT_BEWAAR_MS = 60 * 86400000;   // fase 3 (wv3882): edities.ooit
 const INHOUD = ['laan', 'tekst', 'aantal', 'datum'];
-const META = ['editie', 'vervalt', 'doel', 'taalmodel', 'buffer'];
+const META = ['editie', 'vervalt', 'doel', 'taalmodel', 'buffer', 'link'];
+// wv3955: een editie-regel mag een link naar zijn scherm in de app meegeven; alleen de app zelf (?app=…), de editie zet hem als ([open](…))
+// achter de regel (het ochtendbericht maakt daar een Open-knop van); het paneel Nieuw in je Apps gebruikt doel, niet de link
+const LINK_RE = /^https:\/\/app\.socev\.dev\/\?app=[a-z0-9-]{2,40}(?:&[a-z]{2,20}=[a-z0-9-]{1,40}){0,3}$/;
 
 function leeg() { return { versie: 1, regels: {}, instel: {}, schaduw: {}, edities: {} }; }
 function normaal(s) {
@@ -87,9 +90,11 @@ function invoer(m, nu) {
   if (m.taalmodel !== undefined && typeof m.taalmodel !== 'boolean') throw fout('taalmodel is ja/nee');
   let buffer = null;
   if (m.buffer !== undefined && m.buffer !== null) { if (laan !== 'editie' || !BRON_RE.test(String(m.buffer))) throw fout('ongeldige buffer-bron'); buffer = String(m.buffer); }
+  let link = null;
+  if (m.link !== undefined && m.link !== null) { if (laan !== 'editie' || !LINK_RE.test(String(m.link))) throw fout('ongeldige link'); link = String(m.link); }
   void nu;
   return { app: app, onderwerp: onderwerp, laan: laan, tekst: tekst, aantal: aantal, datum: datum, editie: editie, vervalt: vervalt, doel: doel,
-    taalmodel: m.taalmodel === true, buffer: buffer };
+    taalmodel: m.taalmodel === true, buffer: buffer, link: link };
 }
 
 function levend(r, nu) { return !(r.vervalt && Date.parse(r.vervalt) <= nu); }
@@ -229,7 +234,7 @@ function editieTekst(regels, max) {
   const m = max || EDITIE_MAX, uit = [], mee = [];
   for (let i = 0; i < regels.length; i++) {
     const r = regels[i];
-    const regel = '• ' + appNaam(r.app) + ': ' + String(r.tekst).replace(/\s+/g, ' ').trim();
+    const regel = '• ' + appNaam(r.app) + ': ' + String(r.tekst).replace(/\s+/g, ' ').trim() + (r.link && LINK_RE.test(r.link) ? ' ([open](' + r.link + '))' : '');
     const rest = regels.length - i - 1;
     const slot = rest > 0 ? 80 : 0;   // ruimte voor de slotregel
     if (uit.join('\n').length + regel.length + 1 + slot > m && uit.length) break;
