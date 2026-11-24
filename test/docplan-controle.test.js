@@ -78,6 +78,29 @@ test('regels (a), (b), (c) op verzonnen gegevens', () => {
   assert.match(B.signaalUitleg(per('dienst_zonder_betaling').find((s) => s.details.maand === '2026-07')), /^1,5 dagen in het rooster van Tolgaarde in juli 2026; van 1 juli 2026 t\/m 14-10-2026/);
 });
 
+// wv4011 (2B43): een betaling uit een betaalbestand, afgeschreven als één batchregel, telt als betaling voor (a) en (b)
+test('wv4011: batchbetaling dekt (a); (b) per regel in het bestand een eigen signaal op de batchregel', () => {
+  const fac = facturen();
+  fac.exec(`alter table bank_transactie add column rekening text; alter table bank_transactie add column kenmerk text; alter table bank_transactie add column omschrijving text;
+    create table sepa_batch (id text primary key, rekening text, entiteit text, msg_id text, cre_dt_tm text, aantal integer, totaal_centen integer);
+    create table sepa_regel (id integer primary key, batch text, pmtinf_id text, positie integer, uitvoerdatum text, centen integer, iban text);`);
+  fac.exec(`insert into sepa_batch values ('s1', 'rek-tg', 'tolgaarde', 'SOCEV-TEST-s1', '2026-08-09T10:00:00', 1, 30000),
+    ('s2', 'rek-gh', 'groenhouten', 'SOCEV-TEST-s2', '2026-09-01T10:00:00', 2, 30000);
+    insert into sepa_regel (batch, pmtinf_id, positie, uitvoerdatum, centen, iban) values ('s1', 'SOCEV-TEST-s1-1', 1, '2026-08-10', 30000, 'NL00TEST0000000011'),
+      ('s2', 'SOCEV-TEST-s2-1', 1, '2026-09-01', 10000, 'NL00TEST0000000021'), ('s2', 'SOCEV-TEST-s2-1', 2, '2026-09-01', 20000, 'NL00TEST0000000021');
+    insert into bank_transactie (id, entiteit, boekdatum, bedrag_centen, tegenpartij_iban, verwijderd_op, rekening, kenmerk) values
+      ('tb1', 'tolgaarde', '2026-08-10', -30000, null, null, 'rek-tg', 'SOCEV-TEST-s1-1'), ('tb2', 'groenhouten', '2026-09-01', -30000, null, null, 'rek-gh', 'SOCEV-TEST-s2-1');`);
+  const u = C.controle({ maanden: MAANDEN, lijsten: [LIJST], dp: docplan(), fac, nu: NU });
+  const a = u.signalen.filter((s) => s.soort === 'dienst_zonder_betaling').map((s) => s.details.persoon + ' ' + s.details.praktijk + ' ' + s.details.maand).sort();
+  assert.deepEqual(a, ['oid-b GH 2026-01', 'oid-b TG 2026-06'], "A's juli is betaald via het betaalbestand");
+  const b = u.signalen.filter((s) => s.soort === 'betaling_zonder_dienst');
+  assert.deepEqual(b.map((s) => s.transacties[0]).sort(), ['t4', 'tb2', 'tb2']);
+  assert.deepEqual(b.filter((s) => s.transacties[0] === 'tb2').map((s) => s.bedrag_centen).sort((x, y) => x - y), [-20000, -10000]);
+  assert.ok(b.filter((s) => s.transacties[0] === 'tb2').every((s) => s.details.betaalbestand === true));
+  assert.equal(new Set(u.signalen.map((s) => s.sleutel)).size, u.signalen.length, 'twee regels op één batchregel: eigen sleutels');
+  assert.ok(!/NL00TEST/.test(JSON.stringify(u.signalen.map((s) => s.details))));
+});
+
 test('lege invoer gooit (dan schrijft de ronde niets en sluit niets)', () => {
   assert.throws(() => C.controle({ maanden: [], lijsten: [LIJST], dp: docplan(), fac: facturen(), nu: NU }), /roostermaanden/);
   assert.throws(() => C.controle({ maanden: MAANDEN, lijsten: [{ jaar: 2026, praktijken: [] }], dp: docplan(), fac: facturen(), nu: NU }), /roosternamenlijst/);

@@ -182,23 +182,40 @@ test('route: rooster-RPC faalt → 200 met rooster "niet te lezen"; kapotte fact
   assert.strictEqual(c.j.leeg, true);
 });
 
-// wv3900 (besluit 2C83 punt a): teller voor betalingen uit een betaalbestand die de rekenregel (nog) niet meetelt; het bedrag zelf verandert niet
-test('batch_niet_geteld: sepa-regels aan een waarnemersrekening zonder losse bankregel; null zonder sepa-tabellen', () => {
+// wv3900 (besluit 2C83 punt a) → wv4011 (2B43): batchbetalingen tellen mee zodra de bank de batch afschreef; de teller noemt wat nog niet meetelt
+function metSepa(fac) {
+  fac.exec(`alter table bank_transactie add column rekening text; alter table bank_transactie add column kenmerk text; alter table bank_transactie add column omschrijving text;
+    create table sepa_batch (id text primary key, rekening text, entiteit text, msg_id text, cre_dt_tm text, aantal integer, totaal_centen integer);
+    create table sepa_regel (id integer primary key, batch text, pmtinf_id text, positie integer, uitvoerdatum text, centen integer, iban text);`);
+  fac.exec("update bank_transactie set rekening = 'rek-' || entiteit");
+  return fac;
+}
+test('batch_niet_geteld (wv4011): afgeschreven batch telt mee in bedrag en export, niet uitgevoerde batch staat in de teller; null zonder sepa-tabellen', () => {
   const zonder = M.opgaaf(docplan(), facturen(), '2026', NU, MAANDEN);
   assert.ok(zonder.praktijken.every((p) => p.batch_niet_geteld === null), 'oud bestand zonder sepa_regel: niet vast te stellen, geen 0');
-  const fac = facturen();
-  fac.exec('create table sepa_batch (id text primary key, entiteit text); create table sepa_regel (id integer primary key, batch text, uitvoerdatum text, centen integer, iban text)');
-  fac.exec("insert into sepa_batch values ('b1', 'tolgaarde'), ('b2', 'groenhouten'), ('b3', 'pot')");
-  const r = fac.prepare('insert into sepa_regel (batch, uitvoerdatum, centen, iban) values (?, ?, ?, ?)');
-  r.run('b1', '2026-11-05', 40000, 'NL00TEST0000000011');   // telt niet mee (geen losse bankregel)
-  r.run('b1', '2026-11-05', 60000, 'NL00TEST0000000021');   // telt niet mee
-  r.run('b1', '2026-11-05', 9999, 'NL00TEST0000000099');    // geen waarnemersrekening: weg
-  r.run('b1', '2025-12-20', 7000, 'NL00TEST0000000011');    // ander jaar: weg
-  r.run('b2', '2026-05-01', 30000, 'NL00TEST0000000011');   // staat al als losse bankregel (GH 1-5, -30000): telt al mee
-  r.run('b3', '2026-11-05', 5000, 'NL00TEST0000000011');    // andere entiteit: weg
+  const fac = metSepa(facturen());
+  fac.exec(`insert into sepa_batch values ('b1', 'rek-tolgaarde', 'tolgaarde', 'SOCEV-TEST-b1', '2026-10-28T10:00:00', 3, 109999),
+    ('b2', 'rek-groenhouten', 'groenhouten', 'SOCEV-TEST-b2', '2026-04-28T10:00:00', 1, 30000),
+    ('b4', 'rek-tolgaarde', 'tolgaarde', 'SOCEV-TEST-b4', '2026-10-29T10:00:00', 2, 47000)`);
+  const r = fac.prepare('insert into sepa_regel (batch, pmtinf_id, positie, uitvoerdatum, centen, iban) values (?, ?, ?, ?, ?, ?)');
+  r.run('b1', 'SOCEV-TEST-b1-1', 1, '2026-10-29', 40000, 'NL00TEST0000000011');   // afgeschreven via batchregel: telt mee
+  r.run('b1', 'SOCEV-TEST-b1-1', 2, '2026-10-29', 60000, 'NL00TEST0000000021');   // idem
+  r.run('b1', 'SOCEV-TEST-b1-1', 3, '2026-10-29', 9999, 'NL00TEST0000000099');    // geen waarnemersrekening: alleen in de som van de batch
+  r.run('b2', 'SOCEV-TEST-b2-1', 1, '2026-05-01', 30000, 'NL00TEST0000000011');   // één betaling: los op de bank (GH 1-5, -30000), telt al mee
+  r.run('b4', 'SOCEV-TEST-b4-1', 1, '2026-11-26', 40000, 'NL00TEST0000000011');   // nog niet uitgevoerd: teller
+  r.run('b4', 'SOCEV-TEST-b4-1', 2, '2026-11-26', 7000, 'NL00TEST0000000021');
+  fac.prepare("insert into bank_transactie (id, entiteit, boekdatum, bedrag_centen, tegenpartij_iban, verwijderd_op, rekening, kenmerk) values ('tb1', 'tolgaarde', '2026-10-29', -109999, null, null, 'rek-tolgaarde', 'SOCEV-TEST-b1-1')").run();
   const j = M.opgaaf(docplan(), fac, '2026', NU, MAANDEN);
   const tg = j.praktijken.find((p) => p.code === 'TG'), gh = j.praktijken.find((p) => p.code === 'GH');
-  assert.deepStrictEqual(tg.batch_niet_geteld, { n: 2, centen: 100000 });
+  assert.deepStrictEqual(tg.batch_niet_geteld, { n: 2, centen: 47000 });
   assert.deepStrictEqual(gh.batch_niet_geteld, { n: 0, centen: 0 });
-  assert.strictEqual(tg.som_centen, 350000, 'het bedrag zelf blijft de rekenregel van Waarnemers');
+  assert.strictEqual(tg.som_centen, 350000 + 100000, 'het bedrag telt de afgeschreven batch mee');
+  assert.strictEqual(tg.batch_n, 2); assert.strictEqual(gh.batch_n, 0);
+  const a = tg.personen.find((p) => p.object_id === 'oid-a');
+  assert.strictEqual(a.laatste, '2026-10-29'); assert.strictEqual(a.batch_n, 1);
+  const t = M.bladen(j).find((b) => b.naam === 'Toelichting').rijen.find((x) => x[0] === 'Betaalbestand');
+  assert.ok(/tellen mee zodra de bank de batch heeft afgeschreven/.test(t[1]) && /Hier meegeteld: 2 betalingen/.test(t[1]) && /LET OP: .*Tolgaarde 2/.test(t[1]), t[1]);
+  const blad = M.bladen(j).find((b) => b.naam === 'Tolgaarde 2026');
+  assert.ok(blad.rijen.some((x) => x[0] === 'Totaal' && x[6] === '€ 4.500,00'), 'export-totaal met de batch erbij');
 });
+

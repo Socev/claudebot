@@ -137,3 +137,102 @@ test('route: geen docplan-bestand = lege lijst; kapotte databank = 503 zonder in
   assert.deepStrictEqual(fouten, ['waarnemers:kapot']); assert.strictEqual(dicht.dp, 1);
   assert.strictEqual(route({ openFacturen: () => null }).r.app({ methode: 'GET', pad: '/app/facturen/waarnemers', rol: EIG, primair: true, nu: NU }).status, 503);
 });
+
+// ── wv4011 (actieplan 2B43): betalingen uit een betaalbestand (SEPA-batch). Verzonnen gegevens; vorm van bankregel en kenmerk zoals gemeten
+// 25-11-2026 (één afschrijving per betaalopdracht-blok, zonder tegenrekening, kenmerk = pmtinf_id).
+function sepaFac() {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`create table bank_transactie (id text primary key, entiteit text, rekening text, boekdatum text, bedrag_centen integer, tegenpartij_iban text,
+      kenmerk text, omschrijving text, verwijderd_op text);
+    create table sepa_batch (id text primary key, rekening text, entiteit text, msg_id text, cre_dt_tm text, aantal integer, totaal_centen integer);
+    create table sepa_regel (id integer primary key, batch text, pmtinf_id text, positie integer, uitvoerdatum text, centen integer, iban text);`);
+  let n = 0;
+  const t = db.prepare('insert into bank_transactie values (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+  const tx = (ent, d, c, iban, o) => { o = o || {}; const id = 't' + (++n); t.run(id, ent, o.rek || 'rek-' + ent, d, c, iban, o.kenmerk || null, o.oms || null, o.weg || null); return id; };
+  const b = db.prepare('insert into sepa_batch values (?, ?, ?, ?, ?, ?, ?)');
+  const r = db.prepare('insert into sepa_regel (batch, pmtinf_id, positie, uitvoerdatum, centen, iban) values (?, ?, ?, ?, ?, ?)');
+  const batch = (id, ent, cre, regels, o) => {
+    o = o || {};
+    b.run(id, 'rek-' + ent, ent, 'SOCEV-TEST-' + id, cre + 'T10:00:00', o.aantal || regels.length, o.totaal || regels.reduce((s, x) => s + x[3], 0));
+    regels.forEach((x, i) => r.run(id, x[0], i + 1, x[1], x[3], x[2]));
+  };
+  return { db, tx, batch };
+}
+const A1 = 'NL00TEST0000000011', B1 = 'NL00TEST0000000021';
+const tgA = (j) => j.praktijken.find((p) => p.code === 'TG').personen.find((p) => p.object_id === 'oid-a');
+
+test('wv4011 vaste toets: drie betalingen, twee in een batch met één bankregel — vóór een derde, erna het volle bedrag', () => {
+  const f = sepaFac();
+  f.tx('tolgaarde', '2026-10-01', -30000, A1);                                                       // losse betaling
+  f.tx('tolgaarde', '2026-11-02', -60000, null, { kenmerk: 'SOCEV-TEST-b1-1' });                       // batchregel: twee betalingen
+  f.tx('tolgaarde', '2026-11-20', -1000, 'NL00TEST0000000098');                                       // bankdag
+  const voor = M.totaal(docplan(), f.db, '2026', NU, null);                                          // zoals vóór wv4011: geen batch
+  assert.strictEqual(tgA(voor).af_centen, 30000, 'vóór: een derde van het bedrag');
+  f.batch('b1', 'tolgaarde', '2026-11-02', [['SOCEV-TEST-b1-1', '2026-11-02', A1, 30000], ['SOCEV-TEST-b1-1', '2026-11-02', A1, 30000]]);
+  const na = M.totaal(docplan(), f.db, '2026', NU);
+  const a = tgA(na);
+  assert.strictEqual(a.af_centen, 90000, 'erna: het volle bedrag'); assert.strictEqual(a.af_n, 3); assert.strictEqual(a.batch_n, 2);
+  assert.strictEqual(a.laatste, '2026-11-02', 'datum = boekdatum van de batchregel');
+  assert.deepStrictEqual(a.betalingen.map((x) => x.bron), ['betaalbestand', 'betaalbestand', 'bank']);
+  assert.strictEqual(na.praktijken.find((p) => p.code === 'TG').batch_n, 2);
+  // som tegen een losse som: bank + bestand = 3 × 30000
+  assert.strictEqual(na.praktijken.find((p) => p.code === 'TG').som_centen, 90000);
+});
+
+test('wv4011: batch zonder bankregel (nog niet uitgevoerd) telt niet, staat in "niet"', () => {
+  const f = sepaFac();
+  f.batch('b2', 'tolgaarde', '2026-11-20', [['SOCEV-TEST-b2-1', '2026-11-26', A1, 40000], ['SOCEV-TEST-b2-1', '2026-11-26', B1, 50000]]);
+  const s = M.sepaBetalingen(f.db, [A1, B1]);
+  assert.strictEqual(s.geteld.length, 0);
+  assert.deepStrictEqual(s.niet.map((x) => [x.iban, x.centen, x.uitvoerdatum]), [[A1, 40000, '2026-11-26'], [B1, 50000, '2026-11-26']]);
+  assert.strictEqual(M.totaal(docplan(), f.db, '2026', NU).praktijken.find((p) => p.code === 'TG').som_centen, 0);
+});
+
+test('wv4011: batch plus dezelfde betaling los op de bank telt één keer', () => {
+  const f = sepaFac();
+  f.batch('b3', 'tolgaarde', '2026-11-05', [['SOCEV-TEST-b3-1', '2026-11-05', A1, 25000], ['SOCEV-TEST-b3-1', '2026-11-05', B1, 35000]]);
+  f.tx('tolgaarde', '2026-11-05', -60000, null, { oms: 'SEPA BatchReferentie: SOCEV-TEST-b3-1Aantal opdrachten: 2' });   // bankluis-vorm
+  f.tx('tolgaarde', '2026-11-06', -25000, A1);                                                       // zelfde betaling ook los
+  f.tx('tolgaarde', '2026-03-06', -35000, B1);                                                       // vaste maandbetaling maanden eerder: géén dekking
+  const j = M.totaal(docplan(), f.db, '2026', NU);
+  const tg = j.praktijken.find((p) => p.code === 'TG');
+  assert.strictEqual(tgA(j).af_centen, 25000); assert.strictEqual(tgA(j).af_n, 1); assert.strictEqual(tgA(j).batch_n, 0);
+  const b = tg.personen.find((p) => p.object_id === 'oid-b');
+  assert.strictEqual(b.af_centen, 70000, 'maart los + november uit de batch'); assert.strictEqual(b.batch_n, 1);
+});
+
+test('wv4011: geen telling bij ander kenmerk ("-1" is geen "-10"), andere som, onvolledige batch, verwijderde of te vroege bankregel', () => {
+  const f = sepaFac();
+  f.batch('c1', 'tolgaarde', '2026-11-02', [['SOCEV-TEST-c1-1', '2026-11-02', A1, 10000], ['SOCEV-TEST-c1-1', '2026-11-02', A1, 10000]]);
+  f.tx('tolgaarde', '2026-11-02', -20000, null, { kenmerk: 'SOCEV-TEST-c1-10' });
+  f.batch('c2', 'tolgaarde', '2026-11-02', [['SOCEV-TEST-c2-1', '2026-11-02', A1, 11000], ['SOCEV-TEST-c2-1', '2026-11-02', A1, 11000]]);
+  f.tx('tolgaarde', '2026-11-02', -22100, null, { kenmerk: 'SOCEV-TEST-c2-1' });                       // som klopt niet
+  f.batch('c3', 'tolgaarde', '2026-11-02', [['SOCEV-TEST-c3-1', '2026-11-02', A1, 12000], ['SOCEV-TEST-c3-1', '2026-11-02', A1, 12000]], { aantal: 3, totaal: 36000 });
+  f.tx('tolgaarde', '2026-11-02', -24000, null, { kenmerk: 'SOCEV-TEST-c3-1' });                       // batch niet heel
+  f.batch('c4', 'tolgaarde', '2026-11-02', [['SOCEV-TEST-c4-1', '2026-11-02', A1, 13000], ['SOCEV-TEST-c4-1', '2026-11-02', A1, 13000]]);
+  f.tx('tolgaarde', '2026-11-02', -26000, null, { kenmerk: 'SOCEV-TEST-c4-1', weg: '2026-11-03T00:00:00Z' });   // verwijderd
+  f.batch('c5', 'tolgaarde', '2026-11-02', [['SOCEV-TEST-c5-1', '2026-11-02', A1, 14000], ['SOCEV-TEST-c5-1', '2026-11-02', A1, 14000]]);
+  f.tx('tolgaarde', '2026-10-20', -28000, null, { kenmerk: 'SOCEV-TEST-c5-1' });                       // vóór het bestand bestond
+  f.batch('c6', 'groenhouten', '2026-11-02', [['SOCEV-TEST-c6-1', '2026-11-02', A1, 15000], ['SOCEV-TEST-c6-1', '2026-11-02', A1, 15000]]);
+  f.tx('groenhouten', '2026-11-02', -30000, null, { kenmerk: 'SOCEV-TEST-c6-1', rek: 'rek-andere' });   // andere rekening
+  const s = M.sepaBetalingen(f.db, [A1, B1]);
+  assert.strictEqual(s.geteld.length, 0);
+  assert.strictEqual(s.niet.length, 12);
+  assert.strictEqual(M.totaal(docplan(), f.db, '2026', NU).praktijken.reduce((x, p) => x + p.som_centen, 0), 0);
+});
+
+test('wv4011: bank voert de batch vóór de uitvoerdatum uit; jaar = boekdatum; elke batchregel hoort bij één blok; geen sepa-tabellen = null', () => {
+  const f = sepaFac();
+  f.batch('d1', 'tolgaarde', '2026-10-30', [['SOCEV-TEST-d1-1', '2026-11-12', A1, 20000], ['SOCEV-TEST-d1-1', '2026-11-12', B1, 20000],
+    ['SOCEV-TEST-d1-2', '2026-11-27', A1, 5000], ['SOCEV-TEST-d1-2', '2026-11-27', A1, 5000]]);
+  f.tx('tolgaarde', '2026-10-30', -40000, null, { kenmerk: 'SOCEV-TEST-d1-1' });
+  f.batch('d2', 'tolgaarde', '2026-12-30', [['SOCEV-TEST-d2-1', '2026-12-31', A1, 7000], ['SOCEV-TEST-d2-1', '2026-12-31', A1, 7000]]);
+  f.tx('tolgaarde', '2027-01-04', -14000, null, { kenmerk: 'SOCEV-TEST-d2-1' });
+  const s = M.sepaBetalingen(f.db, [A1, B1]);
+  assert.deepStrictEqual(s.geteld.map((x) => x.boekdatum), ['2026-10-30', '2026-10-30', '2027-01-04', '2027-01-04']);
+  assert.strictEqual(s.niet.length, 2, 'blok 2 van d1 staat (nog) niet op de bank');
+  assert.strictEqual(tgA(M.totaal(docplan(), f.db, '2026', Date.parse('2027-01-10T10:00:00Z'))).af_centen, 20000);
+  assert.strictEqual(tgA(M.totaal(docplan(), f.db, '2027', Date.parse('2027-01-10T10:00:00Z'))).af_centen, 14000);
+  assert.strictEqual(M.sepaBetalingen(facturen(), [A1]), null, 'oud bestand zonder sepa-tabellen: niet vast te stellen');
+  assert.strictEqual(tgA(M.totaal(docplan(), facturen(), '2026', NU)).af_centen, 150000, 'zonder sepa-tabellen blijft de gewone rekenregel');
+});

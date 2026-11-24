@@ -11,6 +11,8 @@
  *  (b) betaling_zonder_dienst   een afschrijving (vanaf 2026) van de praktijk aan een rekening die docplan.sqlite aan een persoon koppelt,
  *                               zonder dag van die persoon in het rooster van die praktijk in de maanden van (boekdatum − 120 d) t/m de
  *                               boekdatum. Eén signaal per bankregel. Facturen zonder betaling tellen hier niet (komt met de factuurtoets).
+ *                               wv4011 (2B43): voor (a) en (b) telt ook een betaling uit een betaalbestand zodra de bank de batch afschreef
+ *                               (docplan-totaal.js sepaBetalingen); (b) dan één signaal per regel in het bestand (sleutel batchregel + sepa-regel).
  *  (c) roosternaam_zonder_koppeling  een roosternaam met dagen in het jaar (2026 t/m dit jaar) zonder alias of met status nieuw. Eén per
  *                               (praktijk, naam, jaar).
  *
@@ -42,6 +44,8 @@
  */
 const crypto = require('crypto');
 const B = require('./facturen-bank');
+// wv4011 (2B43): betalingen uit een betaalbestand tellen als betaling (zelfde regel als totaal en jaaropgaaf); ontbreekt de module, dan alleen de bank
+const T = (function () { try { return require('./docplan-totaal'); } catch (e) { return null; } })();
 // wv3898: zelfde naamregel als het scherm Rekeningen; ontbreekt de module (terugrol), dan draait alleen regel (r) niet
 const R = (function () { try { return require('./docplan-rekeningen'); } catch (e) { return null; } })();
 
@@ -281,6 +285,12 @@ function controle(o) {
       " AND entiteit IN ('tolgaarde', 'groenhouten') AND boekdatum >= ? AND tegenpartij_iban IN (" + ph + ')').all(VAN_JAAR + '-01-01', ...ibans)) {
       zet(bet, codeVan(t.entiteit) + '|' + ibanVan.get(t.iban), { datum: t.boekdatum, id: t.id, centen: Number(t.bedrag_centen) });
     }
+    // wv4011: uit een betaalbestand, afgeschreven als één batchregel (id = die bankregel; sepa = de regel in het bestand, voor een eigen sleutel)
+    const sepa = T && T.sepaBetalingen ? T.sepaBetalingen(fac, ibans) : null;
+    for (const x of sepa ? sepa.geteld : []) {
+      if (x.boekdatum < VAN_JAAR + '-01-01') continue;
+      zet(bet, codeVan(x.entiteit) + '|' + ibanVan.get(x.iban), { datum: x.boekdatum, id: x.bank_id, centen: x.bedrag_centen, sepa: x.regel_id });
+    }
     const fq = (tabel, extra) => fac.prepare('SELECT entiteit, iban, factuurdatum FROM ' + tabel + " WHERE entiteit IN ('tolgaarde', 'groenhouten') AND factuurdatum IS NOT NULL" +
       extra + ' AND iban IN (' + ph + ')').all(...ibans);
     // review MOET 2: alleen echte facturen; archief (FV2) kent beslist / geen_factuur / genegeerd (gemeten 3-11-2026)
@@ -321,8 +331,9 @@ function controle(o) {
       if (dienst) continue;
       tel[pr].b++;
       signalen.push(B.maakSignaal('betaling_zonder_dienst', { entiteit: PRAKTIJK[pr].entiteit, naam: naam.get(obj) || 'onbekende persoon', alleen_eigenaar: true,
-        transacties: [x.id], bedrag_centen: x.centen,
-        details: { regel: 'b', persoon: obj, praktijk: pr, praktijk_naam: PRAKTIJK[pr].naam, datum: x.datum, venster_van: van } }));
+        transacties: [x.id], bedrag_centen: x.centen, sleutel_extra: x.sepa != null ? 'sepa' + x.sepa : undefined,
+        details: Object.assign({ regel: 'b', persoon: obj, praktijk: pr, praktijk_naam: PRAKTIJK[pr].naam, datum: x.datum, venster_van: van },
+          x.sepa != null ? { betaalbestand: true } : {}) }));
     }
   }
   // (c) roosternaam zonder koppeling (geen alias, of David vroeg een nieuwe persoon die er nog niet is)
