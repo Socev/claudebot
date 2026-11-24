@@ -10035,6 +10035,13 @@ async function appBriefingPuntRoute(req, res, a, d) {
   const punt = b.p.punten.find(function (x) { return x.id === id; });
   if (!punt) return appWeiger(res, 404, 'punt niet gevonden; herlaad', 'briefing-punt id');
   if (stand === 'laat_rusten' && !punt.gambia) return appWeiger(res, 400, 'Laat rusten kan alleen bij een Gambia-contact', 'briefing-punt laat_rusten');   // wv3940
+  let r;
+  try { r = await appBriefingPuntZet(dag, punt, stand); } catch (e) { logError('briefing-punten', e); return appWeiger(res, 500, 'opslaan lukte niet; tik nog eens', 'briefing-punten.json schrijven'); }
+  res._app.reden = 'briefingpunt ' + (stand || 'open') + (r.morgen === false ? ' (rij voor morgen mislukt)' : '');
+  appStuur(res, 200, { ok: true, id: id, stand: stand, standen: r.standen, morgen: r.morgen });
+}
+// wv4016: de kern van een tik onder een briefingpunt, ook voor "gedaan"/"klopt niet" uit Onderweg (telBijVoor); in één keten
+async function appBriefingPuntZet(dag, punt, stand) {
   const sl = BP.editieSleutel('briefing', dag);
   const deze = appBriefingPuntKeten.then(async function () {
     const m = BP.snoei(appBriefingPuntenLees(), Date.now(), 14);
@@ -10047,10 +10054,7 @@ async function appBriefingPuntRoute(req, res, a, d) {
     return { standen: BP.standenVan(appBriefingPuntenLees(), sl), morgen: morgen };
   });
   appBriefingPuntKeten = deze.catch(function () {});
-  let r;
-  try { r = await deze; } catch (e) { logError('briefing-punten', e); return appWeiger(res, 500, 'opslaan lukte niet; tik nog eens', 'briefing-punten.json schrijven'); }
-  res._app.reden = 'briefingpunt ' + (stand || 'open') + (r.morgen === false ? ' (rij voor morgen mislukt)' : '');
-  appStuur(res, 200, { ok: true, id: id, stand: stand, standen: r.standen, morgen: r.morgen });
+  return deze;
 }
 
 // ── wv3689 (besluitenpagina nr 159 = 2C59, David Ja 21-11 12:40): redactie-loket "nieuws uit je Apps", fase 1 ──
@@ -19136,6 +19140,9 @@ function telBeurt(req, res, t) {
   // wv3878 (één microfoon): kop X-Tel-Kies: 1 = de pod kiest: eerst Zoek snel, niets gevonden = gewone Socev-beurt. Alleen Onderweg.
   const kies = req.headers['x-tel-kies'] !== undefined;
   if (kies && (String(req.headers['x-tel-kies']).trim() !== '1' || telSoort(t) !== 'onderweg' || snel)) return weg(404, 'onbekend', 'kies: ' + (telSoort(t) !== 'onderweg' ? 'geen onderweg-sleutel' : 'kop'));
+  // wv4016: kop X-Tel-Bij: <stem van een stuk> = 🎤 Reageer op een punt of vraag van de gespreksbriefing (alleen Onderweg; niet met snel of kies)
+  const bij = req.headers['x-tel-bij'] !== undefined ? String(req.headers['x-tel-bij']).trim() : null;
+  if (bij !== null && (!/^[a-f0-9]{12}$/.test(bij) || telSoort(t) !== 'onderweg' || snel || kies)) return weg(404, 'onbekend', 'bij: ' + (telSoort(t) !== 'onderweg' ? 'geen onderweg-sleutel' : 'kop'));
   if (!telSessieOk(t)) return weg(423, 'open eerst even de Socev-app', 'geen app-sessie');
   const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   const tekstSoort = ct === 'text/plain';
@@ -19202,7 +19209,13 @@ function telBeurt(req, res, t) {
       if (snel) return telSnelStart(res, t, tekst, k);   // wv3826
       if (kies && telKiesSnelMag(t, tekst)) return telKiesStart(res, t, tekst, k);   // wv3878; anders meteen een gewone beurt
       if (kies) k.kies = 'socev';
-      const st = await telBeurtStart(t, tekst);
+      let extra = '';
+      if (bij) {   // wv4016
+        const bv = await telBijVoor(t, tekst, bij);
+        if (bv.klaar) { res._tel.reden = bv.reden; return telStuur(res, bv.status, bv.body); }
+        extra = bv.extra; k.bij = 'ja';
+      }
+      const st = await telBeurtStart(t, tekst, extra);
       if (!st.job_id) return telWeiger(res, 503, 'Socev kan nu geen beurt starten; gebruik Telegram', 'start ' + st.fout);
       k.tekens_in = tekst.length;
       telRij().push({ id: st.job_id, apparaat: t.id, soort: 'bezig', t_start: Date.now(), tot: Date.now() + TEL_TTL_MS, k: k });
@@ -19216,11 +19229,11 @@ function telBeurt(req, res, t) {
 // De gewone Socev-beurt uit de auto: chat_log-rij met [AUTO] en de beurt in het hoofdkanaal (ook de terugval van de keuze-microfoon, wv3878).
 // wv3931 (2C77): de chat_log-rij gaat pas bij de start (bijStart), zoals een getypt bericht (wv2965): liep er een beurt, dan met de
 // ontvangsttijd als ts (de Poortwachter koppelt hem dan nooit aan een voorstel dat pas na het inspreken kwam), anders ná de laatste rij.
-async function telBeurtStart(t, tekst) {
+async function telBeurtStart(t, tekst, extra) {
   const veilig = appOntmasker(tekst, 'gesproken');
   const ontvangen = Date.now();
   const bezig = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === APP_KANALEN.hoofd && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
-  return appStartBeurt({ id: t.app_apparaat || t.id }, 'hoofd', '[AUTO] ' + veilig,
+  return appStartBeurt({ id: t.app_apparaat || t.id }, 'hoofd', '[AUTO] ' + veilig + (extra || ''),   // wv4016: extra = context van 🎤 Reageer
     { beurt_id: null, soort: 'tel', tekst: '[AUTO] ' + tekst, tel: t.id, bijStart: function () { return telHoofdStart(bezig, veilig, ontvangen); } });
 }
 function telHoofdStart(wachtte, veilig, ontvangen) {
@@ -19901,6 +19914,32 @@ async function telTikRoute(req, res, t, q) {
   const fout = ok ? undefined : u2.j.vers_nodig ? 'dit bevestig je in de Socev-app' : u2.j.tekst_gewijzigd ? 'de vraag is veranderd; lees hem opnieuw' : String(u2.j.fout || 'lukte niet').slice(0, 160);
   res._tel.reden = 'tik ' + soort + ' ' + keuze + ' -> ' + u2.status;
   telStuur(res, ok ? 200 : (u2.status >= 400 ? u2.status : 409), { ok: ok, fout: fout, in_rij: u2.j.in_rij || undefined, beantwoord: ok ? keuze : undefined });
+}
+// 🎤 Reageer (kop X-Tel-Bij): "gedaan"/"klopt niet" bij een punt = de punt-stand (wv3685) zonder Socev-beurt; een kort gesproken "ja" op een
+// vraag voert niets uit (Codex MOET 2): 409 tik_ja, Onderweg zegt "Tik op JA". Al het andere = een gewone [AUTO]-beurt met het stuk als context.
+// Is het stuk er niet meer (nieuwe dag, vervangen briefing): gewone beurt zonder context.
+const TEL_GEDAAN_RE = /^\s*(?:dat is |is |al )?gedaan\s*[.!]?\s*$/i;
+const TEL_KLOPTNIET_RE = /^\s*(?:dat |het )?klopt niet\s*[.!]?\s*$/i;
+const TEL_KORTJA_RE = /^\s*(?:ja|jawel|ja graag|graag|ja,? doe maar|doe maar|doe dat maar|ja hoor|prima|ja,? prima|ok[eé]?|okay|akkoord|ja,? (?:dat is |is )?goed|is goed|ja,? graag)\s*[.!]?\s*$/i;
+async function telBijVoor(t, tekst, bij) {
+  let g = null;
+  try { g = await telGesprekStukken(); } catch (e) { logError('tel-gesprek', e); }
+  const s = g && g.stukken.find(function (x) { return x.stem === bij; });
+  if (!s) return { extra: '' };
+  if (s.soort === 'vraag' && TEL_KORTJA_RE.test(tekst)) return { klaar: true, status: 409, body: { ok: false, tik_ja: true, fout: 'Tik op JA om het te doen' }, reden: 'bij: gesproken ja (geen knopdruk)' };
+  const stand = s.soort === 'punt' && s.punt_id ? (TEL_GEDAAN_RE.test(tekst) ? 'gedaan' : TEL_KLOPTNIET_RE.test(tekst) ? 'klopt_niet' : null) : null;
+  if (stand) {
+    try {
+      const b = await appBriefingLaad(), punt = b && b.p ? b.p.punten.find(function (x) { return x.id === s.punt_id; }) : null;
+      if (punt && appTeller('briefingpunt', APP_BRIEFING_PUNT_PER_UUR, 3600000)) {
+        await appBriefingPuntZet(b.dag, punt, stand);
+        return { klaar: true, status: 200, body: { ok: true, stand: stand, zin: stand === 'gedaan' ? 'Genoteerd: gedaan.' : 'Genoteerd: klopt niet.' }, reden: 'bij: punt ' + stand };
+      }
+    } catch (e) { logError('briefing-punten', e); }
+  }
+  const wat = s.soort === 'vraag' ? 'de vraag die je in je ochtendbriefing stelde' : 'dit stuk uit je ochtendbriefing van vandaag';
+  const inhoud = s.soort === 'vraag' ? s.tekst + ' (' + (s.uitleg || '') + ')' : s.tekst;
+  return { extra: '\n(In de auto reageert David hiermee op ' + wat + ': ' + JSON.stringify(appKort(appOntmasker(inhoud, 'briefing'), 1500)) + '. Een gesproken beurt is nooit een knopdruk.)' };
 }
 // ── einde wv4016 ──
 // GET /tel/uit?lijst=kaartstem&id=<kaart>: de kaart (titel, vraag, voorstel) ingesproken met de pod-stem, alleen na een tik in Onderweg

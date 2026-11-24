@@ -1489,6 +1489,32 @@ srv.listen(0, '127.0.0.1', async () => {
     r = await tel('GET', '/tel/uit?lijst=gesprekstem&s=' + sk[iG].stem, { sleutel: OWV });
     toets('8y gesprekstem boven het dagplafond: 429', r.status === 429 && /genoeg voorgelezen/.test(r.j.fout), r.j);
     H.appStaat.tellers['tel-gesprekstem'] = [];
+    // 🎤 Reageer: kop X-Tel-Bij
+    const bijB = (stem, tekst, o) => { o = o || {}; const k2 = { 'cf-access-jwt-assertion': jwt(), authorization: 'Bearer ' + (o.sleutel || OWV), 'content-type': 'text/plain', 'content-length': String(Buffer.byteLength(tekst)), 'x-tel-bij': stem };
+      if (o.kies) k2['x-tel-kies'] = '1'; return verzoek('POST', '/tel/beurt', k2, tekst); };
+    await rond();
+    let gBij = gestart.length;
+    r = await bijB(sk[iG].stem, 'Gedaan.');
+    await tik();
+    const bpJ = JSON.parse(fs.readFileSync(path.join(DATA, 'briefing-punten.json'), 'utf8'));
+    toets('8y Reageer "Gedaan." op een punt: 200 punt-stand gedaan, geen Socev-beurt', r.status === 200 && r.j.stand === 'gedaan' && gestart.length === gBij &&
+      ((bpJ.edities['briefing:' + dagY] || {}).punten || {})[pGarage.id] && bpJ.edities['briefing:' + dagY].punten[pGarage.id].stand === 'gedaan', { r: r.j, bpJ });
+    r = await bijB(sk[iG + 1].stem, 'Ja, graag.');
+    await tik();
+    toets('8y Reageer "Ja, graag." op een vraag: 409 tik_ja "Tik op JA", geen beurt, kaart niet beantwoord (Codex MOET 2)', r.status === 409 && r.j.tik_ja === true && /Tik op JA/.test(r.j.fout) && gestart.length === gBij &&
+      !statussen.some((x) => x.p_sleutel === z1.sleutel && x.p_naar === 'gedaan'), r.j);
+    r = await bijB(sk[iO].stem, 'Kan dat ook vrijdag?');
+    await tik(); await tik();
+    toets('8y Reageer met een zin: gewone [AUTO]-beurt met het punt als context', r.status === 202 && gestart.length === gBij + 1 && /\[AUTO\] Kan dat ook vrijdag\?/.test(gestart[gBij].prompt) &&
+      /reageert David hiermee op dit stuk uit je ochtendbriefing/.test(gestart[gBij].prompt) && gestart[gBij].prompt.includes('Proefoverleg woensdag') && /nooit een knopdruk/.test(gestart[gBij].prompt), gestart.slice(gBij).map((g) => g.prompt.slice(0, 300)));
+    await rond();
+    const uBij = await tel('GET', '/tel/uit', { sleutel: OWV }); if (uBij.j.id) await tel('POST', '/tel/gespeeld/' + uBij.j.id, { sleutel: OWV });
+    r = await bijB(sk[iG].stem, 'Gedaan.', { sleutel: TKV });
+    toets('8y Reageer met een Tasker-sleutel: 404', r.status === 404, r.j);
+    r = await bijB(sk[iG].stem, 'Gedaan.', { kies: true });
+    toets('8y Reageer samen met kies: 404', r.status === 404, r.j);
+    r = await bijB('xyz', 'Gedaan.');
+    toets('8y Reageer met een rare kop: 404', r.status === 404, r.j);
     // kaartstem zegt nu ook het waarom
     const ttsK = st.tts.length;
     r = await tel('GET', '/tel/uit?lijst=kaartstem&id=64', { sleutel: OWV });
