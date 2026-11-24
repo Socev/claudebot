@@ -955,11 +955,38 @@ function uploads(fdb, r, nu) {
     'FROM pot_afschrift a LEFT JOIN opdracht o ON o.id = (SELECT id FROM opdracht WHERE afschrift = a.id ORDER BY aangemaakt_op DESC, rowid DESC LIMIT 1) ORDER BY a.periode DESC LIMIT 6').all() : undefined;
   return { bankbestanden: bestanden, stukken: docs, rekeningen: gezondheid(fdb, r, nu).rekeningen, pot };
 }
+/*
+ * wv3973 (besluit 2C57): GET bonjacht — het blok "Lijst van <datum> (<entiteit>)" in Facturen: per lijst van de boekhouder wat gevonden is
+ * (staat in Beoordelen) en per post wat niet, met de reden en een portaallink als de leverancier die heeft. Alleen de eigenaar (de lijsten
+ * komen uit Davids eigen mail). Geen mailtekst: alleen datum, afzender en onderwerp van een treffer.
+ */
+function bonjacht(fdb, r, nu) {
+  eisEigenaar(r);
+  let lijsten;
+  try {
+    lijsten = fdb.db.prepare("SELECT l.*, e.naam_kort, e.naam AS e_naam FROM bonjacht_lijst l LEFT JOIN entiteit e ON e.sleutel = l.entiteit " +
+      "WHERE l.status IN ('bezig','klaar','onleesbaar') AND l.aangemaakt_op >= ? ORDER BY l.aangemaakt_op DESC LIMIT 8").all(nuIso(nu - 60 * 86400000));
+  } catch (e) { return { lijsten: [] }; }
+  const levs = new Map();
+  for (const l of fdb.db.prepare('SELECT naam, genormaliseerd, portaal_url FROM leverancier WHERE portaal_url IS NOT NULL').all()) levs.set(l.genormaliseerd || K.normNaam(l.naam), l.portaal_url);
+  const link = (t) => t && t.account === 'prive' && /^[0-9a-f]{10,20}$/.test(String(t.id || '')) ? 'https://mail.google.com/mail/u/0/#all/' + t.id : null;
+  return { lijsten: lijsten.map((l) => ({
+    id: l.id, ontvangen: l.ontvangen, datum_lijst: l.datum_lijst, entiteit: l.entiteit, entiteit_naam: l.naam_kort || l.e_naam || l.entiteit, status: l.status,
+    reden: l.status === 'onleesbaar' ? 'deze lijst kon ik niet lezen (' + (l.reden || 'onbekend') + ')' : null,
+    lijst_link: link({ account: l.account, id: l.message_id }),
+    regels: fdb.db.prepare("SELECT r.*, f.status AS f_status FROM bonjacht_regel r LEFT JOIN factuur f ON f.id = r.factuur WHERE r.lijst = ? ORDER BY r.nr").all(l.id).map((x) => {
+      const tr = (json(x.treffers, []) || []).slice(0, 5);
+      return { nr: x.nr, datum: x.datum, bedrag_centen: x.bedrag_centen, partij: x.partij, status: x.status, zekerheid: x.zekerheid, reden: x.reden,
+        factuur: x.factuur, factuur_status: x.f_status || null, portaal_url: x.partij ? levs.get(K.normNaam(x.partij)) || null : null,
+        treffers: x.status === 'gevonden' || x.status === 'kandidaten' ? tr.map((t) => ({ dag: t.dag, van: kort(t.van, 120), onderwerp: kort(t.onderwerp, 160), link: link(t) })) : [] };
+    }),
+  })) };
+}
 function leveranciers(fdb, r) {
   const lijst = leverancierLijst(fdb).filter((l) => magLeverancier(r, l));
   return { leveranciers: lijst.sort((a, b) => a.naam.localeCompare(b.naam, 'nl')).slice(0, 2000).map((l) => ({ id: l.id, naam: l.naam, kvk: l.kvk,
     standaard_entiteit: l.standaard_entiteit, standaard_betaalwijze: l.standaard_betaalwijze, ibans: l.ibans, mediaan: l.mediaan, alleen_portaal: !!l.alleen_portaal,
-    incasso_tolerantie_pct: l.incasso_tolerantie_pct, verzendwijze: l.verzendwijze || 'concept' })) };
+    incasso_tolerantie_pct: l.incasso_tolerantie_pct, verzendwijze: l.verzendwijze || 'concept', portaal_url: l.portaal_url || null })) };
 }
 function instellingen(fdb, r) {
   eisEigenaar(r);
@@ -1092,6 +1119,12 @@ function bevestig(fdb, r, d, nu, o) {
     // wv3372: "Laat Cynthia kiezen" legt de twijfel vast in een besluit (nbFeiten leest hem als LET OP "is misschien via incasso"), vóór de rij
     if (cynthiaKiest) besluitRij(fdb, f.id, K.besluit('betaalwijze', 'betaalwijze', 'zelf', 'mens', 'Laat Cynthia kiezen: is misschien via incasso'), r.wie, wanneer);
     if (alBetaald) besluitRij(fdb, f.id, K.besluit('betaalwijze', 'betaalwijze', 'betaald', 'mens', kort('al betaald, bewijs: ' + alBetaald.regel + (alBetaald.gekoppeld ? '' : ' (nog niet gekoppeld)'), 300)), r.wie, wanneer);
+    // wv3973 (besluit 2C57): een bon uit de bonjacht koppelt bij Bevestigen (al betaald, zelfde entiteit) aan de bankregel van de lijst; Davids
+    // klik is de bevestiging. Lukt de koppeling niet (andere entiteit, bijschrijving), dan blijft de factuur gewoon bevestigd (koppelIntern weigert vóór hij schrijft).
+    if (alBetaald && alBetaald.bron === 'bank' && alBetaald.transactie && betaalwijze === 'betaald' && alBetaald.entiteit === e.sleutel) {
+      try { const k = koppelIntern(fdb, r, alBetaald.transactie, f.id, true, nu); if (k && k.betaalspoor) spoor = k.betaalspoor; }
+      catch (x) { if (!(x instanceof RouteFout)) throw x; }
+    }
     const nogbetalen = opdracht && spoor === 'te_betalen' && o && o.nogBetalen === 'auto' ? nbReserveer(fdb, r, f.id, 'bevestigen', opdracht.verstuur_na, nu, wanneer) : null;
     if (cynthiaKiest && (!nogbetalen || nogbetalen.niet)) weiger(409, '"Laat Cynthia kiezen" kan hier niet' + (nogbetalen && nogbetalen.niet ? ': ' + nogbetalen.niet : spoor !== 'te_betalen' ? ': staat al ' + spoor : '') + '; kies zelf een betaalwijze');
     besluitRij(fdb, f.id, K.besluit('bevestigen', 'status', ov.naar, 'mens', (f.entiteit !== e.sleutel ? 'entiteit ' + (f.entiteit || '—') + ' → ' + e.sleutel + '; ' : '') +
@@ -2238,10 +2271,33 @@ function kaartPaypalBetaald(fdb, factuurId) {
  * vindt — en er moet precies één zo'n regel zijn. Twee gelijke bedragen (twee facturen of twee regels) = geen voorstel. Alleen lezen.
  * → { bron: 'kaart'|'paypal', regel, gekoppeld } of null.
  */
+/*
+ * wv3973 (besluit 2C57): een bon die de bonjacht vond bij een post van de lijst van de boekhouder. Het bewijs is de bankregel van die post
+ * (zelfde entiteit, bedrag op de cent). Zit er een betaaldienst tussen (PayPal), dan koppelt de PayPal-ronde zelf; dan alleen de regel.
+ * → { bron: 'bank', regel, gekoppeld: false, transactie?, entiteit } of null.
+ */
+function bonjachtBewijs(fdb, f) {
+  let x;
+  try {
+    x = fdb.db.prepare("SELECT r.transactie, r.invoer, r.datum, t.boekdatum, t.bedrag_centen, t.entiteit, e.naam_kort, e.naam FROM bonjacht_regel r " +
+      "JOIN bank_transactie t ON t.id = r.transactie AND t.verwijderd_op IS NULL LEFT JOIN entiteit e ON e.sleutel = t.entiteit " +
+      "WHERE r.factuur = ? AND r.status = 'gevonden' ORDER BY r.id DESC LIMIT 1").get(f.id);
+  } catch (e) { return null; }
+  if (!x) return null;
+  const inv = json(x.invoer, {}) || {};
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(x.boekdatum || ''));
+  const n = Math.abs(Number(x.bedrag_centen) || 0);
+  const bedrag = '€ ' + String(Math.floor(n / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + String(n % 100).padStart(2, '0');
+  const via = inv.achter ? 'via PayPal' + (inv.achter.partij ? ' (' + kort(inv.achter.partij, 40) + ')' : '') : null;
+  const regel = ['bank ' + (m ? Number(m[3]) + '-' + Number(m[2]) + '-' + m[1] : ''), kort(x.naam_kort || x.naam || x.entiteit, 40), via, bedrag, 'post op de lijst van de boekhouder'].filter(Boolean).join(', ');
+  return { bron: 'bank', regel, gekoppeld: false, transactie: inv.achter ? null : x.transactie, entiteit: x.entiteit };
+}
 function alBetaaldBewijs(fdb, f) {
   if (!f || !f.id || K.isCreditnota(f) || !Number.isSafeInteger(f.incl) || f.incl <= 0) return null;
   const kp = kaartPaypalBetaald(fdb, f.id);
   if (kp) return { bron: kp.bron, regel: kp.reden.replace(/^al betaald via kaart\/PayPal \((.*)\)$/, '$1'), gekoppeld: true };
+  const bj = bonjachtBewijs(fdb, f);   // wv3973
+  if (bj) return bj;
   const fd = /^\d{4}-\d{2}-\d{2}$/.test(String(f.factuurdatum || '')) ? f.factuurdatum : null;
   if (!CC || !fd) return null;
   const van = K.plusDagen(fd, -6), tot = K.plusDagen(fd, 11);
@@ -4801,6 +4857,11 @@ function leverancierRoute(fdb, r, d, nu) {
     }
     if (d.standaard_betaalwijze !== undefined) { if (![null, 'zelf', 'incasso', 'betaald'].includes(d.standaard_betaalwijze)) weiger(400, 'onbekende betaalwijze'); zet.standaard_betaalwijze = d.standaard_betaalwijze; }
     if (d.alleen_portaal !== undefined) zet.alleen_portaal = d.alleen_portaal ? 1 : 0;
+    if (d.portaal_url !== undefined) {   // wv3973: de link naar het portaal van de leverancier (alleen https), voor het bonjachtblok
+      const u = d.portaal_url === null || d.portaal_url === '' ? null : String(d.portaal_url).trim();
+      if (u !== null && (!/^https:\/\/[a-z0-9.-]+\.[a-z]{2,}(?:[/?#][^\s<>"']*)?$/i.test(u) || u.length > 500)) weiger(400, 'portaallink moet beginnen met https://');
+      zet.portaal_url = u;
+    }
     if (d.incasso_tolerantie_pct !== undefined) { const p = d.incasso_tolerantie_pct; if (p !== null && !(Number.isFinite(p) && p >= 0 && p <= 100)) weiger(400, 'tolerantie 0–100'); zet.incasso_tolerantie_pct = p; }
     const k = Object.keys(zet);
     if (!k.length) weiger(400, 'niets te wijzigen');
@@ -5001,6 +5062,7 @@ function maak(opties) {
         if ((m = /^bank\/oranje\/(\d{4})-w(\d{2})$/.exec(rest))) return ok(bankOranje(fdb, r, m[1] + '-W' + m[2], nu));
         if (rest === 'uploads') return ok(uploads(fdb, r, nu));
         if (rest === 'leveranciers') return ok(leveranciers(fdb, r));
+        if (rest === 'bonjacht') return ok(bonjacht(fdb, r, nu));   // wv3973
         if (rest === 'instellingen') return ok(instellingen(fdb, r));
         if (rest === 'validatie') return ok(validatie(fdb, r, { soort: 'overzicht' }, nu));
         if (rest === 'regels') return ok(regelsLijst(fdb, r));

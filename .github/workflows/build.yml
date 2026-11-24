@@ -293,13 +293,19 @@ jobs:
           if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|worker_threads|cluster|vm|undici|fs|fs/promises)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\(|execSync|spawnSync|\bspawn\s*\(|[^.]\bexec\s*\("; then
             echo "::error::facturen-koerier.js laadt een netwerk-, bestands- of andere procesmodule"; exit 1
           fi
-          if grep -vE '^\s*(\*|//)' facturen-koerier.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|child_process|\./facturen-kern\.js|\./facturen-db\.js|\./facturen\.js)'\)$"; then
+          if grep -vE '^\s*(\*|//)' facturen-koerier.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|child_process|\./facturen-kern\.js|\./facturen-db\.js|\./facturen\.js|\./facturen-bonjacht-ronde\.js)'\)$"; then
             echo "::error::facturen-koerier.js laadt een module buiten crypto, child_process en de Facturen-buren"; exit 1
           fi
           if [ "$(grep -vE '^\s*(\*|//)' facturen-koerier.js | grep -c 'execFile(')" != "1" ] || ! grep -q "^const PDFTOTEXT = '/usr/bin/pdftotext';$" facturen-koerier.js; then
             echo "::error::facturen-koerier.js: child_process alleen voor één execFile van /usr/bin/pdftotext"; exit 1
           fi
           echo "facturen-koerier.js: alleen pdftotext."
+          # wv3973: de bonjacht-stap van de koerier (facturen-bonjacht-ronde.js) laadt alleen de Facturen-buren; lees-luik en pdftotext krijgt hij mee
+          B=$(grep -vE '^\s*(\*|//)' facturen-bonjacht-ronde.js)
+          if echo "$B" | grep -nE "\bfetch\s*\(|process\.|import\(|execFile|execSync|spawn"; then echo "::error::facturen-bonjacht-ronde.js roept zelf iets aan"; exit 1; fi
+          if echo "$B" | grep -oE "require\([^)]*\)" | grep -vE "^require\('\./facturen-(kern|db|bonjacht|specificatie)\.js'\)$|^require\('\./facturen\.js'\)$"; then
+            echo "::error::facturen-bonjacht-ronde.js laadt een module buiten de Facturen-buren"; exit 1
+          fi
       # facturen-ingang.js (wv856, F6): de smalle ingang /fac voor de praktijkmanager. Geen netwerk- of procesmodule, geen fetch en geen
       # console (de certs van Access komen uit server.js); de gebruikers-JWT en het Access-bewijs gaan alleen naar controleerJwt, nooit
       # in een log, audit of antwoord (Fable wv856 #3).
@@ -405,6 +411,7 @@ jobs:
           t test/facturen-creditcard.sh   # wv2043: creditcard (ICS) — lezer + kaartnummerpoort, sleutels, idempotent, herkenning, incasso, aansluiting op de cent, leesroute
           t test/facturen-boekstuk.sh   # wv2316: boekstuk Google Home naar André — lezen (Play, PayPal NL/EN), voorcontrole, reservering (één verzending), terugval naar concept, onzeker nooit opnieuw, vrijgavekaart, migratie 19
           t test/facturen-bonjacht.sh   # wv3916: bonjacht op de lijsten "bon ontbreekt" van de boekhouder — xlsx/TNEF lezen, zip-bom begrensd, bankkoppeling, bedrag+partij, afgekapt = kandidaten
+          t test/facturen-bonjacht-ronde.sh   # wv3973: bonjacht stap B — lijst herkend, dubbel = één keer, zoekfout = fout, bon in Beoordelen met al betaald, Bevestigen koppelt
           t test/facturen-paypal.sh   # wv2056: PayPal zakelijk — witte lijst (alleen token + transactielijst), idempotent, koppelen op de cent, aansluiting, leesroute
           t test/abn-historie.sh   # wv1329: ABN-historie (PDF-afschriften) in de bankluis — afdekken wat de bank gaf, saldo, POT-afschrift, niet naar de datahub
           t test/facturen-koerier.sh   # wv855: koerier — wachtrij, consistentiecontrole, idempotentie (antwoord verloren → één concept), postvak, uploads

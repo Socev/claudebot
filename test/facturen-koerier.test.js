@@ -117,7 +117,7 @@ const VERSTUUR = Date.parse('2026-10-22T13:00:00Z');   // verstuur_na van een be
 test('CI-poort: de koerier laadt alleen crypto, child_process (pdftotext) en de Facturen-buren; geen fetch, geen fs', () => {
   const C = fs.readFileSync(path.join(ROOT, 'facturen-koerier.js'), 'utf8').split('\n').filter((r) => !/^\s*(\*|\/\/)/.test(r)).join('\n');
   const req = (C.match(/require\([^)]*\)/g) || []);
-  assert.deepEqual([...new Set(req)].sort(), ["require('./facturen-db.js')", "require('./facturen-kern.js')", "require('./facturen.js')", "require('child_process')", "require('crypto')"]);
+  assert.deepEqual([...new Set(req)].sort(), ["require('./facturen-bonjacht-ronde.js')", "require('./facturen-db.js')", "require('./facturen-kern.js')", "require('./facturen.js')", "require('child_process')", "require('crypto')"]);
   assert.ok(!/\bfetch\s*\(|\bspawn\s*\(|(?<!\.)\bexec\s*\(|execSync|spawnSync|writeFile|appendFile|console\.(log|error)/.test(C));
   assert.equal((C.match(/execFile\(/g) || []).length, 1, 'één execFile');
   assert.match(C, /const PDFTOTEXT = '\/usr\/bin\/pdftotext';/);

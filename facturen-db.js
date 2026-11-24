@@ -758,7 +758,8 @@ function M7(db) {
  * hun berichten en facturen blijven gewoon in de app staan.
  */
 const M15_VERVANG = [
-  ['bron', "soort IN ('verzamelpostvak','upload','bankluis')", "soort IN ('verzamelpostvak','upload','bankluis','intake')"],
+  ['bron', "soort IN ('verzamelpostvak','upload','bankluis')", "soort IN ('verzamelpostvak','upload','bankluis','intake')",
+    ["soort IN ('verzamelpostvak','upload','bankluis','intake','bonjacht')"]],   // wv3973: M32 verruimde verder = ook al verruimd
 ];
 function M15(db, vervang) { return M5(db, vervang || M15_VERVANG, 'migratie_15'); }
 
@@ -1431,6 +1432,67 @@ CREATE TABLE IF NOT EXISTS roosteroordeel (
   wanneer TEXT NOT NULL
 );
 `;
+/*
+ * wv3973 (besluitenpagina nr 157 = 2C57, David 22-11-2026 "Alleen voor de lijsten die mijn vader stuurt"; ontwerp + review vooraf
+ * mk-scripts/wv3916/ontwerp.md): bonjacht stap B. (1) bron.soort ook 'bonjacht' (zelfde weg als M15: writable_schema, één vervanging, al
+ * verruimd = overslaan), zodat een gevonden bon als bericht van zijn eigen bron in Beoordelen landt; (2) bonjacht_lijst: één rij per gelezen
+ * lijst (uniek op Gmail-id + sha256; een bericht zonder lijst krijgt één rij met sha256 '' en status geen_lijst, zodat de ronde hem niet opnieuw
+ * ophaalt); (3) bonjacht_regel: één rij per post van de lijst, met de uitkomst van de zoektocht (treffers zonder mailtekst: Gmail-id, account,
+ * datum, afzender, onderwerp, bijlagenamen); (4) leverancier.portaal_url (alleen https), voor de regel "factuur staat in het portaal".
+ * LET OP terugrol: een release van vóór wv3973 opent deze database niet meer (schema_nieuwer); lichtste terugrol is
+ * `DELETE FROM schema_migratie WHERE versie = 32` (de oude code kent de tabellen en de kolom niet en hindert ze niet; een bron 'bonjacht'
+ * zonder bijbehorende code doet niets). Herhaalbaar.
+ */
+const M32_VERVANG = [
+  ['bron', "soort IN ('verzamelpostvak','upload','bankluis','intake')", "soort IN ('verzamelpostvak','upload','bankluis','intake','bonjacht')"],
+];
+const M32_TABELLEN = `
+CREATE TABLE IF NOT EXISTS bonjacht_lijst (
+  id TEXT PRIMARY KEY ${ID('id')},
+  message_id TEXT NOT NULL CHECK (length(message_id) BETWEEN 1 AND 200),
+  draad_id TEXT CHECK (draad_id IS NULL OR length(draad_id) <= 200),
+  account TEXT NOT NULL CHECK (account IN ('prive','dm')),
+  ontvangen TEXT,
+  naam TEXT CHECK (naam IS NULL OR length(naam) <= 255),
+  sha256 TEXT NOT NULL CHECK (sha256 = '' OR (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*')),
+  entiteit TEXT REFERENCES entiteit(sleutel),
+  datum_lijst TEXT CHECK (datum_lijst IS NULL OR length(datum_lijst) <= 80),
+  status TEXT NOT NULL CHECK (status IN ('bezig','klaar','onleesbaar','geen_lijst')),
+  reden TEXT CHECK (reden IS NULL OR length(reden) <= 200),
+  aantallen TEXT ${JSONO('aantallen')},
+  aangemaakt_op TEXT NOT NULL, bijgewerkt_op TEXT NOT NULL,
+  UNIQUE (message_id, sha256)
+);
+CREATE INDEX IF NOT EXISTS bonjacht_lijst_sha ON bonjacht_lijst (sha256);
+CREATE TABLE IF NOT EXISTS bonjacht_regel (
+  id INTEGER PRIMARY KEY,
+  lijst TEXT NOT NULL REFERENCES bonjacht_lijst(id),
+  nr INTEGER NOT NULL CHECK (nr BETWEEN 1 AND 5000),
+  datum TEXT NOT NULL CHECK (length(datum) = 10),
+  bedrag_centen INTEGER NOT NULL,
+  entiteit TEXT REFERENCES entiteit(sleutel),
+  transactie TEXT REFERENCES bank_transactie(id),
+  partij TEXT CHECK (partij IS NULL OR length(partij) <= 200),
+  invoer TEXT NOT NULL ${JSONO('invoer')},
+  status TEXT NOT NULL CHECK (status IN ('open','gevonden','kandidaten','niet_gevonden','al_in_facturen','fout')),
+  zekerheid TEXT CHECK (zekerheid IS NULL OR zekerheid IN ('hoog','middel')),
+  treffers TEXT ${JSONO('treffers')},
+  factuur TEXT REFERENCES factuur(id),
+  reden TEXT CHECK (reden IS NULL OR length(reden) <= 300),
+  pogingen INTEGER NOT NULL DEFAULT 0,
+  bijgewerkt_op TEXT NOT NULL,
+  UNIQUE (lijst, nr)
+);
+CREATE INDEX IF NOT EXISTS bonjacht_regel_status ON bonjacht_regel (status);
+CREATE INDEX IF NOT EXISTS bonjacht_regel_factuur ON bonjacht_regel (factuur);
+`;
+function M32(db, vervang) {
+  M5(db, vervang || M32_VERVANG, 'migratie_32');
+  db.exec(M32_TABELLEN);
+  if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get('leverancier', 'portaal_url')) {
+    db.exec("ALTER TABLE leverancier ADD COLUMN portaal_url TEXT CHECK (portaal_url IS NULL OR (length(portaal_url) BETWEEN 9 AND 500 AND portaal_url LIKE 'https://%'))");
+  }
+}
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -1462,13 +1524,14 @@ const MIGRATIES = [
   { versie: 29, naam: 'Bevestig en verstuur per factuur: opdracht.direct_knop, vast na het aanmaken (wv3914)', fn: (db) => M29(db) },
   { versie: 30, naam: 'signaal: DocPlan, bekende waarnemer op een onbekende rekening, rekening_onbekend (wv3898)', fn: (db) => M30(db) },
   { versie: 31, naam: 'DocPlan-factuurtoets: roosteroordeel per factuur voor de regel in Facturen (wv3899)', sql: M31 },
+  { versie: 32, naam: "bonjacht op de lijsten van de boekhouder: bron 'bonjacht', bonjacht_lijst, bonjacht_regel, leverancier.portaal_url (wv3973)", fn: (db) => M32(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
   'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel', 'afzender_regel',
   'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso', 'paypal_regel', 'boekstuk_verzending', 'boekstuk_vrijgave', 'sepa_verzending',
-  'betaal_verzending', 'ontkoppeling', 'herinnering_mail', 'betaal_herinnering', 'roosteroordeel'];
+  'betaal_verzending', 'ontkoppeling', 'herinnering_mail', 'betaal_herinnering', 'roosteroordeel', 'bonjacht_lijst', 'bonjacht_regel'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 

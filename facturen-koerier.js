@@ -36,6 +36,7 @@ const { execFile } = require('child_process');
 const K = require('./facturen-kern.js');
 const D = require('./facturen-db.js');
 const F = require('./facturen.js');
+const BJ = require('./facturen-bonjacht-ronde.js');   // wv3973: bonjacht op de lijsten van de boekhouder
 
 const PDFTOTEXT = '/usr/bin/pdftotext';
 const GRENS = {
@@ -417,6 +418,13 @@ async function ronde(fdb, io, o) {
     if (klok() - start <= GRENS.rondeMs * 2) { try { uit.intake = await leesIntake(fdb, io, pdf, { klok, wie, start }); if (!uit.intake.ok) uit.ok = false; } catch (e) { fout('intake', e); } }
     else uit.intake = { overgeslagen: 'tijd' };
   }
+
+  // 5c. bonjacht (wv3973, besluit 2C57): lijsten "betaald, bon ontbreekt" van de boekhouder herkennen, de bon zoeken en in Beoordelen zetten.
+  //     Alleen lezen via het lees-luik; zonder lijst gebeurt er niets (één zoekvraag per account). Een fout raakt de rest van de ronde niet.
+  if (luikOk && klok() - start <= GRENS.rondeMs * 2) {
+    try { uit.bonjacht = await BJ.ronde(fdb, io, { klok, wie, pdf }); if (uit.bonjacht && uit.bonjacht.ok === false) fout('bonjacht', { code: (uit.bonjacht.fouten || [])[0] || 'bonjacht' }); }
+    catch (e) { fout('bonjacht', e); }
+  } else uit.bonjacht = { overgeslagen: luikOk ? 'tijd' : 'lees-luik' };
 
   // 6. hartslag (alleen soorten en aantallen)
   D.metaZet(fdb, 'koerier_ronde', JSON.stringify({ op: nuIso(start), eind: nuIso(klok()), ok: uit.ok, fout: uit.fouten.length ? uit.fouten.map((f) => f.wat + ':' + f.soort).join(', ').slice(0, 200) : null,
