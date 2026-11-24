@@ -16521,6 +16521,7 @@ function handleApp(req, res) {
         if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
+        if (route === 'GET /app/gambia') return typeof appGambia === 'function' ? appGambia(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gambia');   // wv3950: Apps › Gambia (alleen lezen)
         if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|fondsen|ronde|donateurs|teboeken|indelen|doelen|stichting|overleg|mensen|voorstellen|vbijlage\/v[0-9]{3}|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)
           || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank|vraag|gmail|boek|terug|bon|voorstel)$/.test(route)   // wv3919: vraag (antwoord/gesloten), gmail (concept); wv3953: boek, terug, bon (Te boeken)
           || /^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer|bedragen))$/.test(route)   // wv3954: bedragen (L04)
@@ -26869,6 +26870,74 @@ async function appTripper(req, res, a, route) {
   return appStuur(res, u.status, u.body);
 }
 // ── einde OVIS Tripper ──
+// ── Apps › Gambia (wv3950, besluitenpagina nr 502 = 3C202, David Ja 22-11-2026 18:23; ontwerp mk-scripts/wv3950/ontwerp.md, Codex GO-MET-WIJZIGINGEN) ──
+// Je mensen in Gambia op één scherm: per persoon het laatste contact op beide nummers (WhatsApp-dumps), de steun dit jaar en open toezeggingen
+// (steunbord van wv3949 via de bank-lezer, niets nieuws gerekend), wat er speelt (jongste gedateerde kop in het dossier) en een reisbriefing
+// vanaf 14 dagen vóór een Gambiareis uit Tripper. gambia-mensen.js rekent (puur, alleen lezen); hier alleen samenvoegen.
+//   GET /app/gambia   achter de app-sessie; een fout in steunbord of Tripper maakt alleen dat deel leeg (bron.steunbord / bron.reizen = 'fout').
+// Elk uur (9–21 u, primaire kant): ligt een Gambiareis 0–14 dagen vooruit en is (reis, vertrekdatum) nog niet gemeld, dan één editie-regel in
+// het loket (ochtendbericht, met Open naar het scherm). Staat: GAMBIA_REIS_STAND (reis-id:van → gemeld-op), pas na een gelukt loketMeld.
+// Privacy: namen en nummers alleen in het antwoord; de audit en het log noemen aantallen.
+const gambiaMensen = (function () {
+  const p = path.join(__dirname, 'gambia-mensen.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p); } catch (e) { logError('gambia-mensen', e); return null; }
+})();
+const GAMBIA_REIS_STAND = serverPad('gambia_reis', process.env.GAMBIA_REIS_STAND, '/opt/data/scripts-staat/gambia-reis.json', serverProefDeel('gambia-reis.json'));
+let gambiaSteunCache = null;   // { op, j } — het steunbord hooguit 10 min uit het geheugen (één bank-lezerkind per opening is zonde)
+appStaat.tellers.gambia = [];
+async function gambiaSteunbord() {
+  if (gambiaSteunCache && Date.now() - gambiaSteunCache.op < 10 * 60000) return gambiaSteunCache.j;
+  let r = null;
+  try { r = await bankKind(['gambia-steunbord'], {}, 60000); } catch (e) { r = null; }
+  const j = r && r.j && r.j.ok === true && Array.isArray(r.j.personen) ? r.j : null;
+  if (j) gambiaSteunCache = { op: Date.now(), j: j };
+  return j;
+}
+async function gambiaBereken(o) {
+  const opt = o || {};
+  const steun = opt.steunbord !== undefined ? opt.steunbord : await gambiaSteunbord();
+  let reizen = null;
+  try { reizen = tripper ? tripper.lijst().body.reizen : null; } catch (e) { logError('gambia-reizen', e); reizen = null; }
+  const vandaag = opt.vandaag || new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  return gambiaMensen.bereken({ vault: VAULT, steunbord: steun, steunbord_fout: !steun, reizen: reizen, vandaag: vandaag,
+    reis_tekst: function (id) { const u = tripper.reis(id); return u && u.status === 200 && u.body.reis ? u.body.reis.tekst : null; } });
+}
+async function appGambia(req, res, a, route) {
+  if (!gambiaMensen) return appWeiger(res, 404, 'Gambia zit niet in deze versie van de pod', 'gambia ontbreekt');
+  if (route !== 'GET /app/gambia') return appWeiger(res, 404, 'onbekend', 'gambia onbekend');
+  if (!appTeller('gambia', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens gambia');
+  let b;
+  try { b = await gambiaBereken(); } catch (e) { logError('gambia', e); return appWeiger(res, 503, 'Gambia is nu niet te lezen; probeer het zo opnieuw', 'gambia fout'); }
+  res._app.reden = 'gambia ' + b.personen.length + ' personen, steunbord ' + b.bron.steunbord + ', reizen ' + b.bron.reizen;
+  return appStuur(res, 200, Object.assign({ ok: true }, b));
+}
+function gambiaReisStand() { try { const j = JSON.parse(fs.readFileSync(GAMBIA_REIS_STAND, 'utf8')); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; } catch (e) { return {}; } }
+async function gambiaReisTik(o) {
+  const opt = o || {};
+  if (!gambiaMensen || typeof AN === 'undefined' || !AN) return { niets: 'niet_in_release' };
+  const b = await gambiaBereken(opt);
+  const gemeld = gambiaReisStand();
+  const r = gambiaMensen.ochtendRegel(b, gemeld);
+  if (!r) return { niets: true };
+  const dag = opt.vandaag || new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  await (opt.meld || loketMeld)({ app: 'gambia', onderwerp: r.onderwerp, laan: 'editie', editie: 'ochtend', datum: dag, tekst: r.tekst,
+    link: 'https://app.socev.dev/?app=gambia', doel: { scherm: 'gambia' } });
+  gemeld[r.sleutel] = new Date().toISOString();
+  fs.mkdirSync(path.dirname(GAMBIA_REIS_STAND), { recursive: true });
+  fs.writeFileSync(GAMBIA_REIS_STAND + '.tmp', JSON.stringify(gemeld, null, 1)); fs.renameSync(GAMBIA_REIS_STAND + '.tmp', GAMBIA_REIS_STAND);
+  schrijfLog(nu() + ' gambia-reis: briefing gemeld in het loket');
+  return { gemeld: r.sleutel };
+}
+if (gambiaMensen && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) {
+  setInterval(function () {
+    if (!rolPrimair()) return;
+    const u = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' })).getHours();
+    if (u < 9 || u >= 21) return;
+    gambiaReisTik().catch(function (e) { logError('gambia-reis', e); });
+  }, 60 * 60000).unref();
+}
+// ── einde Apps › Gambia ──
 // ── OVIS Calendar in de app (wv2333, 3-11-2026; idee 27 meetpunt 5) ──
 // De tijdlijn (Google-spiegel, deadlines, GAD-afval, roosterdiensten, reizen) leesbaar in Apps › Calendar. kalender-app.js leest
 // public.sb_kalender_tijdlijn via appSbRpc (service_role) en geeft alleen de vorm voor de app; de browser krijgt geen databanktoegang.

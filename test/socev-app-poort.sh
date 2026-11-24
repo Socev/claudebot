@@ -1366,6 +1366,11 @@ async function bewijs(o) {
     toets('9 wv2136: pad-achtige id zonder sessie -> geweigerd vóór de route (404 op de padvorm)', r.status === 404 || r.status === 401, r.status);
     r = await vraag('GET', '/app/tripper/lijst', undefined, { pot: P.jar });
     toets('9 wv2136: met sessie voorbij de poort (404 zonder appTripper in dit blok)', r.status === 404, r.status);
+    // wv3950 (Apps › Gambia): namen, nummers en steun zijn privé; zonder sessie niets
+    r = await vraag('GET', '/app/gambia', undefined, {});
+    toets('9 wv3950: /app/gambia zonder sessie -> 401', r.status === 401, r.status);
+    r = await vraag('GET', '/app/gambia', undefined, { pot: P.jar });
+    toets('9 wv3950: /app/gambia met sessie voorbij de poort (404 zonder appGambia in dit blok)', r.status === 404, r.status);
     // wv2333 (OVIS Calendar): de tijdlijn is privé (agendatitels); zonder sessie niets, ook niet met een venster
     for (const pad of ['/app/kalender', '/app/kalender/2026-11-01/2026-11-30']) {
       r = await vraag('GET', pad, undefined, {});

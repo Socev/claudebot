@@ -74,7 +74,7 @@ function pas(lijst, d) {
 // niet kent, toont de app gewoon onderaan; ordenen en favoriet maken kan pas als hij hier staat.
 const APP_IDS = ['bandjes', 'financien', 'gezondheid', 'facturen', 'docplan', 'bestanden', 'pot',
   'pot-afschriften', 'studio', 'broedstoof', 'memorylane', 'tripper', 'kalender', 'shopper', 'pakjes', 'osint', 'mediatheek', 'harvester',
-  'flock', 'verbruik', 'tokencounter', 'sleutelbos', 'mail', 'cijfer-meester', 'ghawa', 'beleggen', 'imagine', 'personeelsscherm', 'pma', 'ovis-nza', 'vastgoed', 'energie', 'besluiten'];   // besluiten: wv3588; energie: wv3586; sleutelbos: wv2481; ghawa: wv2877; beleggen: wv2982; imagine: wv2984; personeelsscherm: wv2991; pma: wv3037; ovis-nza: wv3087; vastgoed: wv3085
+  'flock', 'verbruik', 'tokencounter', 'sleutelbos', 'mail', 'cijfer-meester', 'ghawa', 'beleggen', 'imagine', 'personeelsscherm', 'pma', 'ovis-nza', 'vastgoed', 'energie', 'besluiten', 'gambia'];   // gambia: wv3950; besluiten: wv3588; energie: wv3586; sleutelbos: wv2481; ghawa: wv2877; beleggen: wv2982; imagine: wv2984; personeelsscherm: wv2991; pma: wv3037; ovis-nza: wv3087; vastgoed: wv3085
 // wv3069 (David 14-11-2026 18:53, "Projecten kan weg"): Apps die weg zijn. Staat zo'n id nog in een bewaarde volgorde, favorieten of
 // werkruimte, of stuurt een oude app hem nog mee, dan valt hij stil weg (geen 400): de rest van de stand blijft gewoon gelden.
 const APP_VERVALLEN = ['projecten', 'praktijken', 'ideeen', 'mailman'];   // wv3110 (David 15-11-2026, Ja op de kaart): MailMan is geen App meer; de instellingen staan onder het tandwiel in Mail. wv3070 (David 14-11-2026 18:53): Praktijken ging op in PMA (scherm Jaarcijfers); wv3072 (David 14-11): AIX (ideeen) is een tab van de Harvester
