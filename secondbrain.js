@@ -686,8 +686,14 @@ function maak(opt) {
     fs.mkdirSync(map, { recursive: true, mode: 0o700 });
     const naam = new Date(nu()).toISOString().replace(/[:.]/g, '-') + '-' + crypto.randomBytes(3).toString('hex') + '.md';
     fs.writeFileSync(path.join(map, naam), t, { mode: 0o600, flag: 'wx' });
-    const oud = fs.readdirSync(map).filter(function (n) { return /\.md$/.test(n); }).sort();
+    const oud = fs.readdirSync(map).filter(function (n) { return VERSIE_NAAM.test(n); }).sort();   // wv3947: alleen versies (niet door.json)
     oud.slice(0, Math.max(0, oud.length - VERSIES)).forEach(function (n) { try { fs.unlinkSync(path.join(map, n)); } catch (e) { /* weg */ } });
+    return naam;
+  }
+  // wv3947 (3C192): zou Docs deze pagina kunnen bewerken, los van de inhoud (de wachter vault-versies.js houdt alleen van die pagina's versies bij)
+  function versieKandidaat(p, grootte) {
+    const naam = String(p).split('/').pop().toLowerCase();
+    return !/^00_Systeem(\/|$)/.test(p) && ALLEEN_LEZEN_NAAM.indexOf(naam) < 0 && !isVerborgen(p) && grootte <= MAX_BEWERK;
   }
   function docsBewaar(d, ctx) {
     const md = d && d.md, versie = d && d.versie;
@@ -712,7 +718,7 @@ function maak(opt) {
   }
   // Eén schrijfstap voor bewaar en bewaar-terug: versie, bewerkbaarheid en vorige versie beslist op wat er nú staat (binnen wijzig).
   function schrijf(z, versie, ctx, maakNieuw) {
-    let uitkomst = null, nieuweVersie = null, geschreven = false;
+    let uitkomst = null, nieuweVersie = null, geschreven = false, vorigeId = null, nieuwTekst = null;
     try {
       geschreven = opt.wijzig(z.abs, function (oud) {
         if (sha(oud) !== versie) { uitkomst = 'conflict'; return null; }
@@ -720,8 +726,9 @@ function maak(opt) {
         if (reden) { uitkomst = reden; return null; }
         const nieuw = maakNieuw(oud);
         if (nieuw === oud) { uitkomst = 'gelijk'; nieuweVersie = versie; return null; }
-        bewaarVorige(z.b.p, oud);
+        vorigeId = bewaarVorige(z.b.p, oud) || null;
         nieuweVersie = sha(nieuw);
+        nieuwTekst = nieuw;
         uitkomst = 'ok';
         return nieuw;
       });
@@ -731,6 +738,8 @@ function maak(opt) {
       return { status: 500, j: { ok: false, fout: 'opslaan lukte niet; je tekst staat nog hier' }, audit: audit(z.b) };
     }
     if (uitkomst === 'conflict') return { status: 409, j: { ok: false, fout: 'deze pagina is intussen veranderd (Socev of een agent schreef erin). Je tekst staat nog hier: kopieer hem, of laad de nieuwe versie.' }, audit: audit(z.b) };
+    // wv3947: de wachter hoort het meteen (synchroon, zelfde tik): versie door David, schaduw = de nieuwe inhoud (geen dubbele 'agent'-versie)
+    if (uitkomst === 'ok' && geschreven && opt.versies && typeof opt.versies.docsGeschreven === 'function') opt.versies.docsGeschreven(z.b.p, vorigeId, nieuwTekst);
     if ((uitkomst === 'ok' && geschreven) || uitkomst === 'gelijk') return { status: 200, j: { ok: true, versie: nieuweVersie, gewijzigd: uitkomst === 'ok' }, audit: audit(z.b) };
     if (uitkomst && uitkomst !== 'ok') return { status: 403, j: { ok: false, fout: uitkomst }, audit: audit(z.b) };
     return { status: 409, j: { ok: false, fout: 'de pagina veranderde tijdens het opslaan; laad hem opnieuw. Je tekst staat nog hier.' }, audit: audit(z.b) };
@@ -748,6 +757,7 @@ function maak(opt) {
     let t;
     try { t = opt.lees ? opt.lees(z.abs) : fs.readFileSync(z.abs, 'utf8'); } catch (e) { return { status: 404, j: { ok: false, fout: 'niet te lezen' }, audit: audit(z.b) }; }
     const map = versieMap(z.b.p);
+    const door = opt.versies && typeof opt.versies.door === 'function' ? (function () { try { return opt.versies.door(z.b.p); } catch (e) { return {}; } })() : {};
     let namen = [];
     try { namen = map ? fs.readdirSync(map).filter(function (n) { return VERSIE_NAAM.test(n); }).sort().reverse() : []; } catch (e) { namen = []; }
     const lijst = [];
@@ -756,9 +766,29 @@ function maak(opt) {
       try { st = fs.lstatSync(path.join(map, n)); } catch (e) { continue; }
       if (!st.isFile()) continue;
       const m = VERSIE_NAAM.exec(n);
-      lijst.push({ id: n, op: m[1] + ':' + m[2] + ':' + m[3] + '.' + m[4] + 'Z', grootte: st.size });
+      const w = door[n];   // wv3947: wie (socev | agent | david) en de sha van de inhoud erna; oude Docs-versies zonder regel = geen door
+      lijst.push(Object.assign({ id: n, op: m[1] + ':' + m[2] + ':' + m[3] + '.' + m[4] + 'Z', grootte: st.size }, w ? { door: w.door, na: w.na, gezien: w.op } : {}));
     }
     return { status: 200, audit: audit(z.b), j: { ok: true, pad: z.b.p, versie: sha(t), bewerkbaar: !nietBewerkbaar(z, t, ctx), versies: lijst } };
+  }
+  // wv3947 (3C192) "Bekijk wat": een vorige versie (voor) en wat er nu staat (na), het hele bestand, beide gemaskeerd zoals de leesweergave
+  // van een niet-bewerkbare pagina; de app rekent het regelverschil.
+  function docsVerschil(d, ctx) {
+    const id = d && d.id;
+    if (typeof id !== 'string' || !VERSIE_NAAM.test(id)) return { status: 400, j: { ok: false, fout: 'onvolledig verzoek' }, audit: audit(null, d && d.pad) };
+    const z = zoekPad(d && d.pad, ctx);
+    if (!z || z.b.s !== 'md') return { status: 404, j: { ok: false, fout: 'deze pagina is er niet (meer)' }, audit: audit(null, d && d.pad) };
+    if (z.st.size > MAX_MD) return { status: 413, j: { ok: false, fout: 'deze pagina is te groot om hier te vergelijken' }, audit: audit(z.b) };
+    let t, voor;
+    try { t = opt.lees ? opt.lees(z.abs) : fs.readFileSync(z.abs, 'utf8'); } catch (e) { return { status: 404, j: { ok: false, fout: 'niet te lezen' }, audit: audit(z.b) }; }
+    try {
+      const vp = path.join(versieMap(z.b.p), id);
+      const st = fs.lstatSync(vp);
+      if (!st.isFile() || st.size > MAX_MD) throw new Error('geen gewoon bestand');
+      voor = fs.readFileSync(vp, 'utf8');
+    } catch (e) { return { status: 404, j: { ok: false, fout: 'deze vorige versie is er niet (meer)' }, audit: audit(z.b) }; }
+    const norm = function (x) { return masker(String(x).replace(/^\uFEFF/, '').replace(/\r\n/g, '\n')); };
+    return { status: 200, audit: audit(z.b), j: { ok: true, pad: z.b.p, id: id, versie: sha(t), voor: norm(voor), na: norm(t) } };
   }
   function docsBewaarTerug(d, ctx) {
     const versie = d && d.versie, id = d && d.id;
@@ -1458,6 +1488,7 @@ function maak(opt) {
     if (route === 'POST /app/secondbrain/bewaar') return docsBewaar(d, ctx);   // wv1378: OVIS Docs
     if (route === 'POST /app/secondbrain/versies') return docsVersies(d, ctx);   // wv1382: vorige versie terugzetten
     if (route === 'POST /app/secondbrain/bewaar-terug') return docsBewaarTerug(d, ctx);
+    if (route === 'POST /app/secondbrain/verschil') return docsVerschil(d, ctx);   // wv3947: Bekijk wat
     return { status: 404, j: { ok: false, fout: 'onbekend' } };
   }
 
@@ -1471,7 +1502,7 @@ function maak(opt) {
       schik: BS ? { laatst: schikLaatst, dag: (function () { try { const s = leesSchikking(); return s ? s.dag || null : null; } catch (e) { return null; } })() } : null };   // wv3750
   }
 
-  return { mkdir: mkdir, laadBewaard: laadBewaard, app: app, health: health, vers: vers, koppelNaam: koppelNaam, nacht: nacht, bron: bron, schikNacht: schikNacht,
+  return { versieKandidaat: versieKandidaat, mkdir: mkdir, laadBewaard: laadBewaard, app: app, health: health, vers: vers, koppelNaam: koppelNaam, nacht: nacht, bron: bron, schikNacht: schikNacht,
     _los: function (doel, bron, md) { return los(doel, bron, md, vers(false)); },
     _herkomstNu: function () { if (herkomstTimer) { clearTimeout(herkomstTimer); herkomstSchrijf(); } } };   // wv3608: alleen voor de toets
 }

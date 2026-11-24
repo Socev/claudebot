@@ -26015,6 +26015,20 @@ const brainTekst = (function () {
   if (!fs.existsSync(p) || process.env.BRAIN_TEKST === 'uit') return null;
   try { return require(p).maak({ vault: VAULT, dir: path.join(SB_DIR, 'inhoud'), fout: logError }); } catch (e) { logError('brain-tekst', e); return null; }
 })();
+// wv3947 (besluitenpagina nr 492 = 3C192, David Ja 22-11 18:17): versies van wat Socev en de agents aan een pagina veranderden. De wachter
+// (vault-versies.js) loopt elke 2 min de pagina's af die Docs kan bewerken en legt een vorige versie vast in dezelfde map als Docs-opslag
+// (SB_DIR/versies/<hmac>), zodat Versies en Terugzetten ze meteen kennen. Alleen op de primaire pod, niet tijdens onderhoud of de nachtronde.
+const sbHmac = function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); };
+const vaultVersies = (function () {
+  const p = path.join(__dirname, 'vault-versies.js');
+  if (!fs.existsSync(p) || process.env.VAULT_VERSIES === 'uit') return null;
+  let uid = null;
+  try { const r = require('child_process').spawnSync('id', ['-u', 'socev'], { timeout: 2000, encoding: 'utf8' }); if (r.status === 0 && /^\d+\s*$/.test(r.stdout)) uid = Number(r.stdout.trim()); } catch (e) { uid = null; }
+  try {
+    return require(p).maak({ vault: VAULT, versieDir: path.join(SB_DIR, 'versies'), schaduwDir: path.join(SB_DIR, 'schaduw'), hmac: sbHmac, socevUid: uid, fout: logError,
+      kandidaat: function (rel, g) { return !!(secondbrain && typeof secondbrain.versieKandidaat === 'function' && secondbrain.versieKandidaat(rel, g)); } });
+  } catch (e) { logError('vault-versies', e); return null; }
+})();
 const secondbrain = (function () {
   const p = path.join(__dirname, 'secondbrain.js');
   if (!fs.existsSync(p)) return null;
@@ -26025,6 +26039,7 @@ const secondbrain = (function () {
       // (vault-grendel vast = bisync, vault-tar of OVIS-nachtronde; Opus-review #5), vorige versies buiten de vault (0600, laatste 10)
       lees: function (p) { return VV().lees(p, 'utf8'); }, wijzig: function (p, f) { return VV().wijzig(p, f); },
       versieDir: path.join(SB_DIR, 'versies'),
+      versies: vaultVersies,   // wv3947: Docs-opslag meldt zich bij de wachter; Versies toont wie het was
       // wv2077: Brain › Zoeken zet de pagina van een partij of persoon uit Entiteiten & Personen bovenaan (zelfde grens per apparaat)
       entiteiten: function (q) { const B = brainEntMaak(); return B && typeof B.naamTreffers === 'function' ? B.naamTreffers(q) : []; },   // zonder module: geen groep, geen fout
       onderhoud: function () { try { return !!onderhoud.stand().aan; } catch (e) { return true; } },
@@ -26032,7 +26047,7 @@ const secondbrain = (function () {
         try { return require('child_process').spawnSync('flock', ['-n', ONDERHOUD_LOCK, 'true'], { timeout: 2000 }).status === 0; }
         catch (e) { return false; }
       },
-      hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
+      hmac: sbHmac,   // wv3947: dezelfde als de wachter (zelfde versiemap per pagina)
       inhoud: brainTekst,   // wv3734: pdf en docx op inhoud
       // wv3752 (3C195) Losse eindjes: Oogst dit onderwerp / Leg de links = één achtergrondklus van Socev (label socev:, rapport naar Socev,
       // zoals Shopper opnieuw). Alleen de vaste opdracht uit secondbrain.js + het grondwet-blok uit de release; stand uit het agentregister.
@@ -26090,8 +26105,21 @@ const secondbrain = (function () {
 })();
 function secondbrainInfo() {
   if (!secondbrain) return { aan: false };
-  try { const h = secondbrain.health(); if (brainTekst) h.inhoud = brainTekst.info(); return h; } catch (e) { return { aan: true, fout: true }; }
+  try { const h = secondbrain.health(); if (brainTekst) h.inhoud = brainTekst.info(); if (vaultVersies) h.versies = vaultVersies.health(); return h; } catch (e) { return { aan: true, fout: true }; }
 }
+// wv3947: de versiewachter elke 2 min (eerste na 90 s), opruimen elk uur; een ronde > 5 s of met versies komt in het log
+let vaultVersiesOpruimOp = 0;
+function vaultVersiesTik() {
+  if (!vaultVersies || !secondbrain || !SERVER_ECHT || !rolPrimair()) return;
+  try { if (onderhoud.stand().aan) return; } catch (e) { return; }
+  if (ovisLoopt.nu === 'nacht') return;
+  try {
+    const t0 = Date.now(), r = vaultVersies.ronde(), ms = Date.now() - t0;
+    if (r.versies || r.nieuw || ms > 5000) schrijfLog(nu() + ' vault-versies ' + velden({ pagina: r.pagina, nieuw: r.nieuw, versies: r.versies, wachtend: r.wachtend, ms: ms }));
+    if (Date.now() - vaultVersiesOpruimOp > 3600000) { vaultVersiesOpruimOp = Date.now(); const o = vaultVersies.opruim(); if (o.weg) schrijfLog(nu() + ' vault-versies opgeruimd ' + velden(o)); }
+  } catch (e) { logError('vault-versies-tik', e); }
+}
+if (vaultVersies && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setTimeout(vaultVersiesTik, 90000).unref(); setInterval(vaultVersiesTik, vaultVersies.RONDE_MS).unref(); }
 // wv3734: de tekstronde van brain-tekst.js, elk uur (eerste na 4 min), niet tijdens onderhoud of de OVIS-nachtronde
 async function brainTekstTik() {
   if (!brainTekst || !secondbrain || !SERVER_ECHT || !rolPrimair()) return;
