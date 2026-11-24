@@ -5335,6 +5335,22 @@ function handleRequest(req, res) {
     });
   }
 
+  // wv3711 (besluit nr 423 = 3C123, David Ja 21-11 13:10): de rijpe [jij]-deadlines met de ruwe cellen Actie en Bron, voor het
+  // werkblok-voorstel (vault-script .claude/skills/agenda-schrijven/blok.py, eerste heartbeat-tik). Alleen lezen: geen verwerk-ronde,
+  // geen schrijfactie. Ook voor Socev (SOCEV_AGENT_SLEUTEL): de heartbeat draait als socev en kan kalender_deadlines.py niet lezen.
+  if (req.method === 'POST' && req.url === '/deadlines/rijp') {
+    return readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!socevAgentSleutelOk(d.secret)) { const gst = podGeheimStatus(d.secret); if (gst) return weigerGeheim(res, gst); }
+      const stuur = function (c, j) { res.writeHead(c, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(j)); };
+      if (!dlLijstje) return stuur(404, { ok: false, fout: 'niet in deze versie van de pod' });
+      dlLijstje.deadlines(true).then(function (lijst) {
+        res._log = { deadlines: lijst.length };   // geen titels in het log
+        stuur(200, { ok: true, vandaag: appYmd(Date.now()), deadlines: lijst });
+      }, function (e) { logError('deadlines-rijp', e); stuur(500, { ok: false, fout: 'register niet te lezen' }); });
+    });
+  }
+
   // wv3689 (2C59): een n8n-bron (of de live proef met App 'proef') meldt één regel bij het redactie-loket. Alleen laan editie of teller;
   // nooit buffer (een n8n-bron schrijft niet via de pod in ochtend_buffer). Geheim zoals de andere n8n→pod-routes; geen tekst in het log.
   if (req.method === 'POST' && req.url === '/nieuws/meld') {

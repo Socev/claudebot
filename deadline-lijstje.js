@@ -69,7 +69,9 @@ function weergave(item, wat) {
 
 // De rijpe [jij]-deadlines op dag `vandaag` (JJJJ-MM-DD): seinmoment (datum − Signaleer, standaard 7) bereikt, datum hooguit 14 dagen
 // voorbij. items = --droog-uitvoer; tekst = de pagina (voor de weergavetitel).
-function rijp(items, tekst, vandaag) {
+// vol (wv3711, besluit nr 423): ook de ruwe cellen Actie en Bron (voor het werkblok-voorstel: werklast "⏱ ± 1 u" staat achteraan in Actie,
+// voorbij de 300 tekens van `actie`). Alleen voor POST /deadlines/rijp; de Voorwerk-uitvoer blijft gelijk.
+function rijp(items, tekst, vandaag, vol) {
   const v = dagNr(vandaag), regels = String(tekst || '').split('\n'), uit = [];
   if (v === null) return uit;
   for (const i of items || []) {
@@ -84,6 +86,7 @@ function rijp(items, tekst, vandaag) {
     const it = { sleutel: i.sleutel, datum: i.datum, titel: weergave(i, c[2] || ''), entiteit: String(i.bron.entiteit || '').slice(0, 120),
       signaleer: sig, actie: actie ? actie[1].slice(0, 300) : '' };
     if (VJ_MERK_RE.test(String(c[2] || ''))) it.voor_jou = true;   // wv3905: staat als herinneringskaart in Voor jou
+    if (vol) { it.actie_cel = String(c[3] || '').slice(0, 2000); it.bron_cel = String(c[5] || '').slice(0, 500); }   // wv3711
     uit.push(it);
   }
   uit.sort(function (a, b) { return a.datum.localeCompare(b.datum) || a.sleutel.localeCompare(b.sleutel); });
@@ -211,10 +214,12 @@ async function schrijf(o, t) {
 function maak(o) {
   const gedaan = new Set(), pogingen = new Map();
   let bezig = null;
-  async function deadlines() {
+  async function deadlines(vol) {
     const d = await o.droog();
-    // wv3905: een regel met een herinneringskaart in Voor jou komt niet ook in het actielijstje (één plek per herinnering)
-    return rijp(d.items, o.lees(), o.vandaag()).filter(function (i) { return !i.voor_jou; });
+    // wv3905: een regel met een herinneringskaart in Voor jou komt niet ook in het actielijstje (één plek per herinnering).
+    // wv3711: vol (werkblok-voorstel) neemt ze wel mee: een werkblok is iets anders dan de herinnering.
+    const lijst = rijp(d.items, o.lees(), o.vandaag(), !!vol);
+    return vol ? lijst : lijst.filter(function (i) { return !i.voor_jou; });
   }
   async function verwerk() {
     if (bezig) return bezig;

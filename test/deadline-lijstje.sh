@@ -55,6 +55,14 @@ toets('1d actie zonder etiket mee', r[0].actie === 'David: opgave invullen in he
 r = DL.rijp(items, REG, '2030-02-14');
 toets('1e verlopen hooguit 14 dagen: 1-2 op 14-2 nog wel, op 16-2 niet', r.some((x) => x.datum === '2030-02-01') && !DL.rijp(items, REG, '2030-02-16').some((x) => x.datum === '2030-02-01'));
 
+// wv3711: vol = ook de ruwe cellen Actie en Bron (werklast achteraan, voorbij 300 tekens); zonder vol blijft de uitvoer gelijk
+{
+  const lang = REG.replace('[jij] David: opgave invullen in het portaal', '[jij] David: opgave invullen in het portaal ' + 'x'.repeat(320) + ' ⏱ ± 1 u');
+  const v = DL.rijp(droog(lang), lang, '2030-03-05', true).find((x) => x.datum === '2030-03-10');
+  const z = DL.rijp(droog(lang), lang, '2030-03-05').find((x) => x.datum === '2030-03-10');
+  toets('1f vol: actie_cel met de werklast achteraan, bron_cel met de link', v && /⏱ ± 1 u$/.test(v.actie_cel) && /^\[\[10_Zakelijk\/Proef/.test(v.bron_cel) && v.actie.length <= 300, v);
+  toets('1g zonder vol: geen extra velden (Voorwerk-uitvoer gelijk)', z && !('actie_cel' in z) && !('bron_cel' in z), z);
+}
 const eerste = DL.rijp(items, REG, '2030-03-05')[0];
 const t0 = { sleutel: eerste.sleutel, datum: eerste.datum, titel: eerste.titel, vandaag: '2030-03-05' };
 // 2. getoond
