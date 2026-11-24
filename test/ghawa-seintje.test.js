@@ -190,7 +190,10 @@ test('8. onleesbare wachtstaat (review ZOU 1): info = fout en wacht -1, niets ov
 
 test('server.js: elke mk_werkvoorraad_zet-aanroeper van de pod zet het blok ervoor; /health.ghawa.deel.seintje; tik herhaalt', () => {
   const srv = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.strictEqual((srv.match(/appSbRpc\('mk_werkvoorraad_zet'/g) || []).length, 7, 'nieuwe aanroeper: eerst het blok regelen en deze telling aanpassen');
+  // wv3934: telling 10 — de achtste en negende (Broedstoof-instel, wv3714) kwamen er eerder bij zonder dat deze regel mee ging; nagelopen
+  // 24-11: alle tien zetten het blok (mkBlokVoor, docplanNieuwPrompt, doorgeefOpdracht). Tiende = Harvester › Laat Socev dit regelen.
+  assert.strictEqual((srv.match(/appSbRpc\('mk_werkvoorraad_zet'/g) || []).length, 10, 'nieuwe aanroeper: eerst het blok regelen en deze telling aanpassen');
+  assert.match(srv, /\/\/ wv3934 \(besluitenpagina nr 152\)[^\n]*\n\s*werkvoorraad: async function \(o\) \{\s*const z = await appSbRpc\('mk_werkvoorraad_zet', \{ p_label: o\.label, p_prompt: mkBlokVoor\(o\.prompt\)/);
   // B14 (tarieven-wachter, Fable-reviews 19-11): zevende aanroeper, zet het blok via mkBlokVoor
   assert.match(srv, /async function tarievenWachterTik[\s\S]*?appSbRpc\('mk_werkvoorraad_zet', \{ p_label: p\.label, p_prompt: mkBlokVoor\(p\.prompt\)/);
   // wv3250 (steekwoordkeuze per woord, app Voor jou): zesde aanroeper, zet het blok via mkBlokVoor (wv3256 telling bijgewerkt)
