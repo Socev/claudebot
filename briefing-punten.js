@@ -11,10 +11,18 @@
 // bestaat telt niet (geen Open die nergens heen gaat). Een verwijzing aan het eind ("([[pad]])") gaat uit de getoonde tekst.
 // Codex-review MOET 1: punten onder een kop van een blok dat n8n er letterlijk, buiten het taalmodel om, onder zet (nu: 💶 Geld deze
 // maand, met bankbedragen die nooit naar de briefingsessie mogen) zijn wel aan te tikken, maar gaan nooit mee in de correctierij.
+// wv3940 (besluitenpagina nr 346 = 3C46, David Ja 22-11 18:22): bolletjes onder de kop "Gambia-weekreview" (n8n zet dat blok op
+// zaterdag letterlijk onder het ochtendbericht) zijn Gambia-punten: punt.gambia = { contact } (de vette naam vooraan). Hun knoppen in
+// de app: Gedaan / Laat rusten / Schrijf antwoord. Extra stand 'laat_rusten' (alleen voor Gambia-punten): sluit dat contact voor die
+// week; de correctierij geeft het 6 dagen door (t/m de vrijdag erna), Gambia-punten alleen met de naam (geen bedragen of medische
+// inhoud naar de briefingsessie, die 's nachts in de vault wordt samengevat).
 const crypto = require('crypto');
 
-const STANDEN = ['gedaan', 'later', 'klopt_niet'];
-const STAND_TEKST = { gedaan: 'Gedaan', later: 'Later', klopt_niet: 'Klopt niet' };
+const STANDEN = ['gedaan', 'later', 'klopt_niet', 'laat_rusten'];
+const STAND_TEKST = { gedaan: 'Gedaan', later: 'Later', klopt_niet: 'Klopt niet', laat_rusten: 'Laat rusten' };
+const GAMBIA_KOP = /gambia-weekreview/i;
+const RUST_DAGEN = 6;   // editie van dag D telt mee in de correctierij voor D+1 .. D+6 (zaterdag -> t/m vrijdag)
+const CONTACT_RE = /^\*\*([^*\n]{1,60})\*\*/;
 const BOL_RE = /^\s*[•\-*]\s+/;
 const WIKI_RE = /\[\[([^\]|#\n]+)(?:#[^\]|\n]*)?(?:\|([^\]\n]+))?\]\]/;
 const LINK_RE = /\[([^\]\n]+)\]\(([^)\s]+)\)/;
@@ -53,11 +61,11 @@ function punten(tekst, dag, o) {
   o = o || {};
   const regels = String(tekst || '').split('\n');
   const blokken = [], uit = [], gezien = {};
-  let md = [], rubriek = null, nietDoor = false;
+  let md = [], rubriek = null, nietDoor = false, gambia = false;
   const sluit = function () { if (md.length) { const s = md.join('\n').replace(/^\n+|\n+$/g, ''); if (s) blokken.push({ md: s }); md = []; } };
   for (const ruw of regels) {
     const r = ruw.trim();
-    if (r && isKop(r)) { rubriek = plat(r).replace(/:$/, '').slice(0, 80); nietDoor = NIET_DOOR_KOP.test(rubriek); }
+    if (r && isKop(r)) { rubriek = plat(r).replace(/:$/, '').slice(0, 80); nietDoor = NIET_DOOR_KOP.test(rubriek); gambia = GAMBIA_KOP.test(rubriek); }
     if (!BOL_RE.test(ruw) || !r) { md.push(ruw); continue; }
     const zin = r.replace(BOL_RE, '');
     const p = plat(zin);
@@ -69,6 +77,12 @@ function punten(tekst, dag, o) {
     if (gezien[id] > 1) id += '-' + gezien[id];
     const punt = { id: id, tekst: getoond.slice(0, 1200), rubriek: rubriek, bron: bron };
     if (nietDoor) punt.niet_door = true;
+    if (gambia) {
+      // Codex MOET 2: alleen een vette naam vooraan telt als contact; anders naamloos ('') - nooit vrije berichttekst als naam
+      // (die zou na een tik alsnog in de correctierij naar de briefingsessie gaan)
+      const c = CONTACT_RE.exec(zin), naam = c ? plat(c[1]).replace(/[\s:—–-]+$/, '') : '';
+      punt.gambia = { contact: naam && naam.length <= 60 ? naam : '' };
+    }
     sluit();
     blokken.push({ punt: punt });
     uit.push(punt);
@@ -89,8 +103,9 @@ function zetStand(m, sleutel, punt, stand, nuMs) {
   const e = m.edities[sleutel] = m.edities[sleutel] || { punten: {} };
   e.punten = e.punten || {};
   const oud = e.punten[punt.id] ? e.punten[punt.id].stand : null;
-  // niet_door (MOET 1): de tekst wordt niet eens bewaard, alleen de stand
+  // niet_door (MOET 1): de tekst wordt niet eens bewaard, alleen de stand; Gambia-punt (wv3940): alleen de naam
   if (stand) e.punten[punt.id] = punt.niet_door ? { stand: stand, t: new Date(nuMs).toISOString(), niet_door: true }
+    : punt.gambia ? { stand: stand, t: new Date(nuMs).toISOString(), gambia: String(punt.gambia.contact || '').slice(0, 80) }
     : { stand: stand, t: new Date(nuMs).toISOString(), tekst: plat(punt.tekst).slice(0, 400) };
   else delete e.punten[punt.id];
   return oud;
@@ -101,24 +116,51 @@ function standenVan(m, sleutel) {
   if (e && e.punten) Object.keys(e.punten).forEach(function (id) { if (STANDEN.indexOf(e.punten[id].stand) >= 0) s[id] = e.punten[id].stand; });
   return s;
 }
-// de rij voor de briefing van de volgende dag: alleen Gedaan en Klopt niet (Later = gewoon open laten); '' = niets door te geven
+function dagPlus(dag, n) {
+  const d = new Date(Date.parse(dag + 'T12:00:00Z') + n * 86400000);
+  return d.toISOString().slice(0, 10);
+}
+// wv3940: lopende Laat rusten (Gambia) uit de edities van de laatste RUST_DAGEN dagen t/m dag; [{ contact, tot }] (tot = laatste dag
+// waarop de briefing hem nog kent), per contact de laatste
+function rustLopend(m, dag) {
+  const uit = {}, grens = dagPlus(dag, -(RUST_DAGEN - 1));
+  Object.keys((m && m.edities) || {}).forEach(function (k) {
+    const kd = String(k.split(':')[1] || '');
+    if (k.split(':')[0] !== 'briefing' || kd < grens || kd > dag) return;
+    const pt = (m.edities[k] && m.edities[k].punten) || {};
+    Object.keys(pt).forEach(function (id) {
+      const x = pt[id];
+      if (x && x.stand === 'laat_rusten' && x.gambia) {
+        const tot = dagPlus(kd, RUST_DAGEN);
+        if (!uit[x.gambia] || uit[x.gambia].tot < tot) uit[x.gambia] = { contact: x.gambia, tot: tot };
+      }
+    });
+  });
+  return Object.keys(uit).sort().map(function (c) { return uit[c]; });
+}
+// de rij voor de briefing van de volgende dag: alleen Gedaan en Klopt niet (Later = gewoon open laten), plus (wv3940) Gambia-contacten
+// met Gedaan van die dag en lopende Laat rusten van de laatste 6 dagen, alleen met naam; '' = niets door te geven
 function correctieTekst(m, sleutel, dag) {
   const e = m && m.edities && m.edities[sleutel];
-  if (!e || !e.punten) return '';
-  const r = { gedaan: [], klopt_niet: [] };
-  Object.keys(e.punten).forEach(function (id) { const x = e.punten[id]; if (r[x.stand] && !x.niet_door && x.tekst) r[x.stand].push(x); });
-  if (!r.gedaan.length && !r.klopt_niet.length) return '';
+  const r = { gedaan: [], klopt_niet: [] }, gGedaan = [];
+  if (e && e.punten) Object.keys(e.punten).forEach(function (id) {
+    const x = e.punten[id];
+    if ('gambia' in x) { if (x.stand === 'gedaan' && x.gambia) gGedaan.push(x.gambia); return; }
+    if (r[x.stand] && !x.niet_door && x.tekst) r[x.stand].push(x);
+  });
+  const rust = rustLopend(m, dag);
+  if (!r.gedaan.length && !r.klopt_niet.length && !gGedaan.length && !rust.length) return '';
   const regel = function (x) { return '- ' + x.tekst; };
   const delen = ['David tikte in het ochtendbericht van ' + dag + ' (zijn eigen knoppen):'];
+  // Codex ZOU (ronde 2): Gambia vooraan, zodat de afkap op 3500 tekens nooit een lopende Laat rusten wegknipt
+  if (gGedaan.length) delen.push('Gambia-weekreview, afgehandeld (niet meer als open melden):\n' + gGedaan.map(function (c) { return '- ' + c; }).join('\n'));
+  if (rust.length) delen.push('Gambia, laat rusten (David sloot dit contact voor deze week: begin niet opnieuw over wat in de review stond en vraag er niet naar; komt er iets wezenlijk nieuws, zoals een noodgeval, noem dat in een halve zin):\n' + rust.map(function (x) { return '- ' + x.contact + ' (t/m ' + x.tot + ')'; }).join('\n'));
   if (r.klopt_niet.length) delen.push('Klopt niet (niet opnieuw zo melden; is de bron vannacht veranderd, zeg dan in een halve zin wat er nieuw is):\n' + r.klopt_niet.map(regel).join('\n'));
   if (r.gedaan.length) delen.push('Gedaan (niet meer als open melden):\n' + r.gedaan.map(regel).join('\n'));
   let t = delen.join('\n\n');
   if (t.length > 3500) t = t.slice(0, 3500) + '\n…';
   return t;
 }
-function volgendeDag(dag) {
-  const d = new Date(Date.parse(dag + 'T12:00:00Z') + 86400000);
-  return d.toISOString().slice(0, 10);
-}
+function volgendeDag(dag) { return dagPlus(dag, 1); }
 
-module.exports = { STANDEN, STAND_TEKST, punten, puntId, plat, vaultPad, bronVan, editieSleutel, snoei, zetStand, standenVan, correctieTekst, volgendeDag };
+module.exports = { STANDEN, STAND_TEKST, RUST_DAGEN, punten, puntId, plat, vaultPad, bronVan, editieSleutel, snoei, zetStand, standenVan, correctieTekst, rustLopend, volgendeDag };

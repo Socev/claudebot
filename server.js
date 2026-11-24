@@ -10006,6 +10006,20 @@ async function appBriefingCorrectieDoor(dag) {
   } catch (e) { logError('briefing-punten', e); }
   return ok;
 }
+// wv3940: nachtketenstap briefing-rust (06:45). ctx.datum = de dag van vandaag (Amsterdam); de rij voor vandaag hoort bij de editie van gisteren.
+async function appBriefingRustStap(ctx) {
+  if (!BP || typeof BP.rustLopend !== 'function') return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+  const t = ovisAms(), vandaag = ctx && ctx.datum ? ctx.datum : t.datum;
+  // na 07:00 (keten liep achter) niets meer: de briefing heeft de buffer dan al gelezen
+  if (vandaag === t.datum && t.uur * 60 + t.min >= 7 * 60) return { ok: true, al_gedaan: true, detail: { te_laat: true } };
+  const gisteren = new Date(Date.parse(vandaag + 'T12:00:00Z') - 86400000).toISOString().slice(0, 10);
+  const lopend = BP.rustLopend(appBriefingPuntenLees(), gisteren);
+  if (!lopend.length) return { ok: true, al_gedaan: true, detail: { lopend: 0 } };
+  const deze = appBriefingPuntKeten.then(function () { return appBriefingCorrectieDoor(gisteren); });
+  appBriefingPuntKeten = deze.catch(function () {});
+  const ok = await deze;
+  return ok ? { ok: true, detail: { lopend: lopend.length } } : { ok: false, reden: 'correctierij briefing_correctie niet geschreven', meld: true, detail: { lopend: lopend.length } };
+}
 async function appBriefingPuntRoute(req, res, a, d) {
   if (!BP) return appWeiger(res, 503, 'nu niet beschikbaar', 'briefing-punten.js');
   const dag = String(d.dag || ''), id = String(d.id || '');
@@ -10017,11 +10031,12 @@ async function appBriefingPuntRoute(req, res, a, d) {
   if (!b || b.dag !== dag || !b.p) return appWeiger(res, 404, 'dit is niet meer de briefing van vandaag; herlaad', 'briefing-punt dag');
   const punt = b.p.punten.find(function (x) { return x.id === id; });
   if (!punt) return appWeiger(res, 404, 'punt niet gevonden; herlaad', 'briefing-punt id');
+  if (stand === 'laat_rusten' && !punt.gambia) return appWeiger(res, 400, 'Laat rusten kan alleen bij een Gambia-contact', 'briefing-punt laat_rusten');   // wv3940
   const sl = BP.editieSleutel('briefing', dag);
   const deze = appBriefingPuntKeten.then(async function () {
     const m = BP.snoei(appBriefingPuntenLees(), Date.now(), 14);
     const oud = BP.zetStand(m, sl, punt, stand, Date.now());
-    const telt = function (x) { return x === 'gedaan' || x === 'klopt_niet'; };
+    const telt = function (x) { return x === 'gedaan' || x === 'klopt_niet' || x === 'laat_rusten'; };
     const raakt = oud !== stand && (telt(oud) || telt(stand));
     if (raakt) m.edities[sl].buffer = { ok: false, t: new Date().toISOString() };
     appSchrijfJson(APP_BRIEFING_PUNTEN, m);
@@ -24848,6 +24863,10 @@ const nachtketen = (function () {
       } },
       // wv3936 (2C64): Gezondheid "Deze week" — bij een nieuwe afwijking één regel in het loket vóór apps-editie; een fout meldt de keten (box-rij)
       { naam: 'gezondheid-week', start_na: [6, 30], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return gezondheidWeekStap(ctx); } },
+      // wv3940 (3C46): Laat rusten bij een Gambia-contact geldt 6 dagen; de correctierij van een tik geldt maar één ochtend, dus schrijft
+      // deze stap de rij van vandaag opnieuw (uit de bewaarde standen van gisteren + lopende Laat rusten) zolang er één loopt. Niets lopend =
+      // niets doen (de rij van de tik blijft zoals hij is). Een fout meldt de keten (box-rij); de briefing kent het contact dan één dag niet.
+      { naam: 'briefing-rust', start_na: [6, 45], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return appBriefingRustStap(ctx); } },
       // wv3815 (2C59 fase 2): ochtendeditie "Uit je Apps" als bufferrij bron 'apps' vóór de briefing van 07:00; een fout meldt de keten (box-rij)
       { naam: 'apps-editie', start_na: [6, 50], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return loketOchtendEditie(ctx); } },
       // wv2894 (idee 19d): zondag één regel over de binnenste kring voor de briefing van 07:00; stil bij een fout (box-rij), anders al_gedaan

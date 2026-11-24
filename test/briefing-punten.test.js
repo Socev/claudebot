@@ -124,3 +124,63 @@ test('server.js: route, glijdroute, punten bij het laden, correctierij met terug
   assert.match(s, /rij na het schrijven niet teruggelezen/);
   assert.match(s, /appBriefingPuntKeten = deze\.catch/);
 });
+
+// wv3940 (3C46): Gambia-weekreview als blok onder het zaterdagse ochtendbericht. Verzonnen namen en inhoud.
+const ZAT = '2026-11-28';
+const GAMBIA = NEP.replace('VRAAG AAN DAVID', [
+  '**🇬🇲 Gambia-weekreview**',
+  '🇬🇲 Gambia-weekreview (week t/m 2026-11-28)',
+  '• **Nepcontact Een** — 4 berichten (NL 3, GM 1): vraagt hoe het gaat. 💰 Verzoek: D 1.500 voor nepschoolboeken — past bij het patroon. 👉 Advies: vriendelijk antwoorden.',
+  '• **Nepgroep Twee** — 2 berichten: foto van een nepvergadering. 👉 Advies: niets nodig.',
+  'Totaal: rustige week.',
+  '',
+  'VRAAG AAN DAVID'].join('\n'));
+
+test('wv3940: bolletjes onder de Gambia-kop zijn Gambia-punten met de naam; andere punten niet', function () {
+  const r = P.punten(GAMBIA, ZAT, { bestaat: BESTAAT }).punten;
+  const g = r.filter(function (x) { return x.gambia; });
+  assert.strictEqual(g.length, 2);
+  assert.deepStrictEqual(g.map(function (x) { return x.gambia.contact; }), ['Nepcontact Een', 'Nepgroep Twee']);
+  assert.ok(r.slice(0, 5).every(function (x) { return !x.gambia; }));
+  assert.ok(/1\.500/.test(g[0].tekst), 'de volledige tekst blijft zichtbaar (niets afgeschermd)');
+  // Codex MOET 2: zonder vette naam geen naam uit vrije tekst; tik bewaart dan niets van de tekst en geeft niets door
+  const z = P.punten('**🇬🇲 Gambia-weekreview**\n• Nepfatou heeft nepkoorts en vraagt 1500 — 1 bericht', ZAT).punten[0];
+  assert.strictEqual(z.gambia.contact, '');
+  const mz = { versie: 1, edities: {} }, slz = P.editieSleutel('briefing', ZAT);
+  P.zetStand(mz, slz, z, 'laat_rusten', Date.now());
+  assert.ok(!/nepkoorts|1500/.test(JSON.stringify(mz)));
+  assert.strictEqual(P.correctieTekst(mz, slz, ZAT), '');
+  assert.deepStrictEqual(P.rustLopend(mz, ZAT), []);
+  P.zetStand(mz, slz, z, 'gedaan', Date.now());
+  assert.strictEqual(P.correctieTekst(mz, slz, ZAT), '');
+});
+
+test('wv3940: Gambia-punten alleen met naam in opslag en correctierij; Laat rusten 6 dagen (t/m vrijdag)', function () {
+  const r = P.punten(GAMBIA, ZAT, { bestaat: BESTAAT }).punten;
+  const g = r.filter(function (x) { return x.gambia; });
+  const m = { versie: 1, edities: {} }, sl = P.editieSleutel('briefing', ZAT), t0 = Date.parse('2026-11-28T08:00:00Z');
+  P.zetStand(m, sl, g[0], 'laat_rusten', t0);
+  P.zetStand(m, sl, g[1], 'gedaan', t0);
+  assert.deepStrictEqual(P.standenVan(m, sl), { [g[0].id]: 'laat_rusten', [g[1].id]: 'gedaan' });
+  assert.ok(!/1\.500|schoolboeken|vergadering/.test(JSON.stringify(m)), 'geen inhoud bewaard, alleen de naam');
+  const t = P.correctieTekst(m, sl, ZAT);
+  assert.match(t, /afgehandeld[^\n]*\n- Nepgroep Twee/);
+  assert.match(t, /laat rusten[^\n]*\n- Nepcontact Een \(t\/m 2026-12-04\)/);
+  assert.ok(!/1\.500|schoolboeken/.test(t));
+  // de dagen erna: geen eigen tikken, wel lopend tot en met de briefing van vrijdag 4-12 (correctierij van do 3-12)
+  assert.deepStrictEqual(P.rustLopend(m, '2026-12-03'), [{ contact: 'Nepcontact Een', tot: '2026-12-04' }]);
+  assert.match(P.correctieTekst(m, P.editieSleutel('briefing', '2026-12-01'), '2026-12-01'), /Nepcontact Een/);
+  assert.deepStrictEqual(P.rustLopend(m, '2026-12-04'), [], 'de briefing van zaterdag 5-12 kent hem niet meer (nieuwe review)');
+  assert.strictEqual(P.correctieTekst(m, P.editieSleutel('briefing', '2026-12-04'), '2026-12-04'), '');
+  assert.deepStrictEqual(P.rustLopend(m, '2026-11-27'), [], 'niet vóór de tik');
+  P.zetStand(m, sl, g[0], null, t0);
+  assert.deepStrictEqual(P.rustLopend(m, '2026-12-01'), [], 'weer open = niet meer rusten');
+});
+
+test('wv3940: server.js weigert Laat rusten buiten Gambia, telt het voor de correctierij en heeft de nachtketenstap', function () {
+  const s = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(s, /stand === 'laat_rusten' && !punt\.gambia\) return appWeiger\(res, 400/);
+  assert.match(s, /x === 'klopt_niet' \|\| x === 'laat_rusten'/);
+  assert.match(s, /naam: 'briefing-rust', start_na: \[6, 45\][^\n]*appBriefingRustStap\(ctx\)/);
+  assert.match(s, /BP\.rustLopend\(appBriefingPuntenLees\(\), gisteren\)/);
+});
