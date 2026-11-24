@@ -11950,6 +11950,14 @@ function appActies(rijen, vandaag, nu) {
       later_tot: k === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(r.later_tot)) ? r.later_tot : null,
       op: k && r.getikt_op ? String(r.getikt_op).slice(0, 32) : null, blok: !!r.blok_op,
       herhaal: r.herhaal === true,
+      // wv3698 (3C36): teller en vraag uit Kies portie (AI - Voorwerk). aanbod is altijd aanwezig (null = rij van vóór wv3698): daaraan
+      // ziet de app dat deze pod de Later-keuzes en de besluitknoppen kent. vraag: 'besluit' (3e keer of vaker) | 'verlopen' (uiterlijk voorbij).
+      aanbod: Number.isInteger(Number(r.aanbod)) && Number(r.aanbod) > 0 ? Number(r.aanbod) : null,
+      aanbod_sinds: /^\d{4}-\d{2}-\d{2}$/.test(String(r.aanbod_sinds)) ? r.aanbod_sinds : null,
+      vraag: r.vraag === 'besluit' || r.vraag === 'verlopen' ? r.vraag : null,
+      gisteren: r.gisteren === true,
+      hard: /^\d{4}-\d{2}-\d{2}$/.test(String(r.hard)) ? r.hard : null,
+      notitie: k === 'later' && (r.notitie === 'wacht op iemand' || r.notitie === 'doorgegeven') ? r.notitie : null,
       // wv452: geen Telegram-message_id meer nodig (het lijstje van 07:05 staat sinds 12-10 alleen in de app; Rij toetsen eist hem alleen bij een tik in Telegram)
       knoppen: stand === 'open' && /^[0-9a-f]{32}$/.test(String(r.nonce || '')),
       terug_tot: terugTot };
@@ -12064,7 +12072,9 @@ function appKnopSleutel() {
   try { const k = fs.readFileSync(APP_KNOP_SLEUTEL_PAD, 'utf8').trim(); return /^[0-9a-f]{64}$/.test(k) ? k : ''; } catch (e) { return ''; }
 }
 const APP_VOORWERK_KNOP_WF = process.env.APP_VOORWERK_KNOP_WF || 'SLYiYwqAabFlC8H3';   // AI - Voorwerk-knoppen
-const APP_ACTIE_KEUZE = { gedaan: 'g', later: 'l', laten_vallen: 'w', terug: 'o', blok: 'b' };
+// wv3698 (3C36): Later als keuze (later_morgen = volgende werkdag, later = volgende week, later_datum = d.tot, morgen t/m 90 dagen) en de
+// besluitknoppen bij de 3e aanbieding (wacht_op, geef_door: 7 dagen later met een notitie). Telegram kent alleen de eerste vijf.
+const APP_ACTIE_KEUZE = { gedaan: 'g', later: 'l', laten_vallen: 'w', terug: 'o', blok: 'b', later_morgen: 'm', later_datum: 'd', wacht_op: 'a', geef_door: 'p' };
 const APP_ACTIES_PER_UUR = 60;
 appStaat.tellers.actie = appStaat.tellers.actie || [];
 async function appVoorwerkKnop(body) {
@@ -12083,6 +12093,11 @@ async function appVoorwerkKnop(body) {
 async function appActieRoute(req, res, a, d) {
   const datum = String(d.datum || ''), positie = typeof d.positie === 'number' ? d.positie : NaN, keuze = String(d.keuze || '');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 10 || !Object.hasOwn(APP_ACTIE_KEUZE, keuze)) return appWeiger(res, 400, 'ongeldige knop', 'actie velden');   // hasOwn: geen 'constructor'
+  const tot = keuze === 'later_datum' ? String(d.tot || '') : '';
+  if (keuze === 'later_datum') {   // n8n (Rij toetsen) toetst dezelfde grens nog eens
+    const v = appYmd(Date.now());
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(tot) || !isFinite(Date.parse(tot + 'T12:00:00Z')) || appYmdPlus(tot, 0) !== tot || tot <= v || tot > appYmdPlus(v, 90)) return appWeiger(res, 400, 'kies een datum vanaf morgen en hooguit 90 dagen vooruit', 'actie datum');
+  }
   if (!appTeller('actie', APP_ACTIES_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_ACTIES_PER_UUR + '); probeer het straks opnieuw', 'grens actie');
   if (!appKnopSleutel()) return appWeiger(res, 503, 'de knoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'actie geen sleutel');
   let rijen;
@@ -12095,7 +12110,7 @@ async function appActieRoute(req, res, a, d) {
   // wv452: message_id 0 = het lijstje ging alleen naar de app (geen Telegram-bericht om bij te werken); n8n toetst nonce en status zelf
   const mid = Number(rij.message_id) > 0 ? Number(rij.message_id) : 0;
   let j;
-  try { j = await appVoorwerkKnop({ nonce: rij.nonce, keuze: APP_ACTIE_KEUZE[keuze], message_id: mid }); } catch (e) {
+  try { j = await appVoorwerkKnop(Object.assign({ nonce: rij.nonce, keuze: APP_ACTIE_KEUZE[keuze], message_id: mid }, tot ? { tot: tot } : {})); } catch (e) {
     logError('app-actie', e);
     // Bij een time-out kan de tik toch zijn doorgegaan: niet "mislukt" zeggen, wel laten nakijken
     // 503, geen 502: de app leest 502/504 als "Socev niet bereikbaar"
