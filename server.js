@@ -12236,6 +12236,46 @@ function voorwerkDeadlinesRoute(req, res) {
 }
 if (SERVER_ECHT) { setInterval(function () { if (rolPrimair()) dlVerwerkStil('ronde'); }, 10 * 60000).unref(); }
 
+// ── Herinneringen als Voor jou-kaart (wv3905, nr 356 = 3C56; waarom en werking in herinnering-kaart.js) ──
+// POST /herinnering/kaart (Socev met SOCEV_AGENT_SLEUTEL, of het pod-geheim): de heartbeat maakt van een herinnering die iets van David
+// vraagt één kaart (Gedaan / Later / Niet meer nodig) en wijst er in zijn bericht naar. De tik gaat met de sluitroute van wv3707 terug in
+// het register (na de ↩️-minuut, timer na de tik + elke 10 min); een regel die elders al afgehandeld werd, zet de open kaart dicht.
+const HK_MOD = (function () { try { return require(path.join(__dirname, 'herinnering-kaart.js')); } catch (e) { logError('herinnering-kaart', e); return null; } })();
+const hkKaart = HK_MOD && HK_MOD.maak({
+  mag: function () { return rolPrimair(); },
+  droog: dlDroog,
+  lees: function () { return VV().lees(dlRegister(), 'utf8'); },
+  wijzig: function (f) { return VV().wijzig(dlRegister(), f); },
+  lijst: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: false }); return (j && j.punten) || []; },
+  zet: async function (p) { await appSbRpc('mk_voor_jou_zet', { p: p }); appStaat.vjCache = null; },
+  status: async function (b) { const r = await appSbRpc('mk_voor_jou_status', b); appStaat.vjCache = null; return r; },
+  vandaag: function () { return appYmd(Date.now()); },
+  log: function (s) { schrijfLog(nu() + ' ' + s); },
+});
+function hkVerwerkStil(waar) { if (!hkKaart || !rolPrimair()) return Promise.resolve(null); return hkKaart.verwerk().catch(function (e) { logError('herinnering-kaart ' + waar, e); return null; }); }
+function hkNaKeuze(sleutel) { if (hkKaart && HK_MOD.SLEUTEL_RE.test(String(sleutel || ''))) setTimeout(function () { hkVerwerkStil('tik'); }, HK_MOD.RUST_MS + 10000).unref(); }
+function herinneringKaartIsPad(req) { return reqPath(req) === '/herinnering/kaart'; }
+function herinneringKaartRoute(req, res) {
+  if (req.method !== 'POST') { req.resume(); return berichtStuur(res, 405, { ok: false, fout: 'alleen POST' }); }
+  berichtBody(req, 16 * 1024, function (fout, d) {
+    if (fout === 'afgebroken') return;
+    if (fout || !d) return berichtStuur(res, 400, { ok: false, fout: 'ongeldige json' });
+    if (!(socevAgentSleutelOk(d.secret) || berichtGeheimOk(d))) return berichtStuur(res, 401, { ok: false, fout: 'niet toegestaan' });
+    if (!hkKaart) return berichtStuur(res, 503, { ok: false, fout: 'herinnering-kaart.js ontbreekt' });
+    if (!appTeller('herinnering-kaart', 60, 3600000)) return berichtStuur(res, 429, { ok: false, fout: 'te vaak dit uur (max 60)' });
+    const v = { sleutel: typeof d.sleutel === 'string' ? d.sleutel : '', datum: typeof d.datum === 'string' ? d.datum : '', titel: typeof d.titel === 'string' ? d.titel : '',
+      wat: typeof d.wat === 'string' ? d.wat : '', entiteit: typeof d.entiteit === 'string' ? d.entiteit : '', vrij: d.vrij === true };
+    appRolOk().then(async function (primair) {
+      if (!primair) return berichtStuur(res, 409, { ok: false, fout: 'passief' });
+      await hkVerwerkStil('route');
+      const u = await hkKaart.kaartVoor(v);
+      reqLogExtra(res, { reden: 'herinnering ' + (u.ok ? (u.nieuw ? 'nieuw' : u.al) : 'fout') });   // geen titels in het log
+      berichtStuur(res, u.ok ? 200 : 400, u);
+    }).catch(function (e) { logError('herinnering-kaart', e); berichtStuur(res, 500, { ok: false, fout: 'kaart niet gezet: ' + String(e && e.message || e).slice(0, 160) }); });
+  });
+}
+if (SERVER_ECHT) { setInterval(function () { if (rolPrimair()) hkVerwerkStil('ronde'); }, 10 * 60000).unref(); }
+
 // ── Voor jou (wv335, idee 11 fase 2; bouwplan "Voor jou - beheerde actielijst" § 2, § 4.4) ──
 // Eén beheerde lijst van wat Socev van David nodig heeft: tabel machinekamer.voor_jou (Supabase), gevuld en gemeten door de
 // beheerronde (07:15/17:15, skill voor-jou-beheer). De app leest de lijst (stil, 60 s in het geheugen, alle apparaten delen het)
@@ -13328,6 +13368,7 @@ async function appVoorJouKeuze(req, res, a, d) {
   if (keuze === 'terug') { delete appStaat.vjTerug[id]; clearTimeout(appStaat.vjDoorzet[id]); delete appStaat.vjDoorzet[id]; clearTimeout(appStaat.vjVrijgeef[id]); delete appStaat.vjVrijgeef[id]; }
   else appStaat.vjTerug[id] = { van: van, naar: keuze, later_tot: van === 'later' ? (p.later_tot || null) : null, tot: nu + APP_VJ_TERUG_MS, apparaat: a.id };
   if (keuze === 'vervallen') appVjDoorzetLater(id, p.sleutel);   // wv506: de klus erachter na de ↩️-minuut ook dicht
+  if (keuze !== 'terug' && typeof hkNaKeuze === 'function') hkNaKeuze(p.sleutel);   // wv3905: herinneringskaart → de tik na de ↩️-minuut in het register
   const metKlus = p.soort !== 'besluit' && !!(p.herkomst && Array.isArray(p.herkomst.wv) && p.herkomst.wv.length);   // review wv1853 #5
   if (keuze === 'gedaan' && metKlus) appVjVrijgeefLater(id, p.sleutel);   // wv1853: de klus erachter na de ↩️-minuut vrij
   Object.keys(appStaat.vjTerug).forEach(function (k) { if (appStaat.vjTerug[k].tot <= nu) delete appStaat.vjTerug[k]; });
@@ -30224,6 +30265,7 @@ const server = http.createServer(function (req, res) {
       req.resume(); res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); return res.end('{"ok":false,"uitkomst":"geweigerd","reden":"onbekend"}');
     }
     if (mailmanIsPad(req)) return mailmanRoute(req, res);
+    if (herinneringKaartIsPad(req)) return herinneringKaartRoute(req, res);   // wv3905: herinnering als Voor jou-kaart (Socev-sleutel of pod-geheim)
     if (voorwerkDeadlinesIsPad(req)) return voorwerkDeadlinesRoute(req, res);   // wv3707: n8n AI - Voorwerk leest de rijpe [jij]-deadlines (pod-geheim)
     if (promedicoAgendaIsPad(req)) return promedicoAgendaRoute(req, res);   // wv3132: ontvanger Promedico-agenda-extensie (n8n; pod-geheim + kluisgeheim), nooit door naar handleRequest   // wv1856: OVIS MailMan (n8n; eigen sleutel of pod-geheim), nooit door naar handleRequest
     if (telIsPad(req)) return handleTel(req, res);   // wv264: spraak via de telefoon (Tasker)

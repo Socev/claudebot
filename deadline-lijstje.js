@@ -20,8 +20,11 @@ const crypto = require('crypto');
 
 const TIK_RUST_MS = 150 * 1000;              // > 2 min ↩️-venster van AI - Voorwerk-knoppen
 const TERUG_DAGEN = 14;                       // verlopen [jij]-deadlines hooguit 14 dagen terug (ouder: register-opschoning, 3C86)
-const MERK_RE = /^\*\*GESEIND \d{1,2}-\d{1,2}(?: \d{2}:\d{2})? \(in je actielijstje[^)]*\)\.\*\*\s*/;
+// wv3905 (3C56): ook het merkteken van een herinneringskaart in Voor jou (herinnering-kaart.js) telt; t.plek = 'Voor jou'
+const MERK_RE = /^\*\*GESEIND \d{1,2}-\d{1,2}(?: \d{2}:\d{2})? \((?:in je actielijstje|in Voor jou)[^)]*\)\.\*\*\s*/;
 const AF_KOP = '### Afgehandeld via je actielijstje (sinds 24-11-2026, wv3707)';
+const AF_KOP_VJ = '### Afgehandeld via Voor jou (sinds 24-11-2026, wv3905)';
+const VJ_MERK_RE = /^\*\*GESEIND \d{1,2}-\d{1,2}(?: \d{2}:\d{2})? \(in Voor jou[^)]*\)\.\*\*/;
 const TABEL_KOP = '| Datum | Entiteit | Wat | Actie | Signaleer | Bron |';
 
 function dagNr(s) { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || '')); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) / 86400000 : null; }
@@ -78,8 +81,10 @@ function rijp(items, tekst, vandaag) {
     const r = regels[(Number(i.bron.regel) || 0) - 1] || '';
     const c = r.startsWith('| ' + i.datum + ' |') ? cellen(r) : [];
     const actie = /^Actie: (.*)$/m.exec(String(i.omschrijving || ''));
-    uit.push({ sleutel: i.sleutel, datum: i.datum, titel: weergave(i, c[2] || ''), entiteit: String(i.bron.entiteit || '').slice(0, 120),
-      signaleer: sig, actie: actie ? actie[1].slice(0, 300) : '' });
+    const it = { sleutel: i.sleutel, datum: i.datum, titel: weergave(i, c[2] || ''), entiteit: String(i.bron.entiteit || '').slice(0, 120),
+      signaleer: sig, actie: actie ? actie[1].slice(0, 300) : '' };
+    if (VJ_MERK_RE.test(String(c[2] || ''))) it.voor_jou = true;   // wv3905: staat als herinneringskaart in Voor jou
+    uit.push(it);
   }
   uit.sort(function (a, b) { return a.datum.localeCompare(b.datum) || a.sleutel.localeCompare(b.sleutel); });
   return uit;
@@ -118,14 +123,22 @@ function pasToe(tekst, items, t) {
   if (g.length !== 7) return { niets: 'regel heeft geen zes kolommen' };
   const wat = r.slice(g[2] + 1, g[3]).trim(), rest = wat.replace(MERK_RE, '');
   let merk;
-  if (t.keuze === 'getoond') merk = '**GESEIND ' + dm(t.vandaag) + (t.tijd ? ' ' + t.tijd : '') + ' (in je actielijstje).** ';
+  const vj = t.plek === 'Voor jou', plek = vj ? 'in Voor jou' : 'in je actielijstje', afKop = vj ? AF_KOP_VJ : AF_KOP;
+  if (t.keuze === 'getoond') merk = '**GESEIND ' + dm(t.vandaag) + (t.tijd ? ' ' + t.tijd : '') + ' (' + plek + ').** ';
   else if (t.keuze === 'later') {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(t.later_tot))) return { niets: 'later zonder datum' };
-    merk = '**GESEIND ' + dm(t.vandaag) + ' (in je actielijstje; verzet naar ' + dmj(t.later_tot) + ').** ';
+    merk = '**GESEIND ' + dm(t.vandaag) + ' (' + plek + '; verzet naar ' + dmj(t.later_tot) + ').** ';
   } else if (t.keuze === 'gedaan' || t.keuze === 'laten_vallen') {
-    merk = t.keuze === 'gedaan' ? '**AFGEHANDELD ' + dmj(t.vandaag) + ' (Gedaan in je actielijstje).** ' : '**VERVALLEN ' + dmj(t.vandaag) + ' (Hoeft niet, in je actielijstje).** ';
+    merk = t.keuze === 'gedaan' ? '**AFGEHANDELD ' + dmj(t.vandaag) + ' (Gedaan ' + plek + ').** '
+      : '**VERVALLEN ' + dmj(t.vandaag) + ' (' + (vj ? 'Niet meer nodig, ' : 'Hoeft niet, ') + plek + ').** ';
   } else return { niets: 'onbekende keuze' };
-  if (t.keuze === 'getoond' && MERK_RE.test(wat)) return { niets: 'al gemerkt' };   // getoond overschrijft nooit een verzet-merkteken
+  if (t.keuze === 'getoond' && MERK_RE.test(wat)) {   // getoond overschrijft nooit een verzet-merkteken
+    if (!vj || VJ_MERK_RE.test(wat)) return { niets: 'al gemerkt' };
+    // wv3905 Codex MOET 2: een nieuwe Voor jou-kaart neemt het lijstje-merkteken over (met een eventuele verzetdatum), zodat de regel
+    // niet ook in het actielijstje blijft komen
+    const v = /; verzet naar (\d{1,2}-\d{1,2}-\d{4})\)/.exec(wat.match(MERK_RE)[0]);
+    if (v) merk = '**GESEIND ' + dm(t.vandaag) + ' (in Voor jou; verzet naar ' + v[1] + ').** ';
+  }
   if (t.keuze === 'later' && wat.startsWith(merk.trim())) return { niets: 'al zo' };
   const nieuw = r.slice(0, g[2] + 1) + ' ' + merk + rest + ' ' + r.slice(g[3]);
   if (t.keuze === 'getoond' || t.keuze === 'later') { regels[idx] = nieuw; return { tekst: regels.join('\n'), regel: idx + 1 }; }
@@ -137,17 +150,17 @@ function pasToe(tekst, items, t) {
   let eind = af + 1;
   while (eind < regels.length && sec[eind] === 'Afgehandeld') eind++;   // eerste regel na de sectie (## Meetlog of einde)
   let kop = -1;
-  for (let i = af; i < eind; i++) if (regels[i] === AF_KOP) kop = i;
+  for (let i = af; i < eind; i++) if (regels[i] === afKop) kop = i;
   if (kop < 0) {
     let k = eind; while (k > af + 1 && regels[k - 1].trim() === '') k--;
-    regels.splice(k, 0, '', AF_KOP, '', TABEL_KOP, '|---|---|---|---|---|---|', nieuw);
+    regels.splice(k, 0, '', afKop, '', TABEL_KOP, '|---|---|---|---|---|---|', nieuw);
     return { tekst: regels.join('\n'), regel: idx + 1 };
   }
   // Laatste tabelregel onder de kop: lege regels tot de tabel, dan aaneengesloten '|'-regels
   let i = kop + 1, laatste = -1;
   while (i < regels.length && regels[i].trim() === '' && laatste < 0) i++;
   while (i < regels.length && regels[i].startsWith('|')) { laatste = i; i++; }
-  if (laatste < 0) return { niets: 'tabel onder ' + AF_KOP + ' ontbreekt' };
+  if (laatste < 0) return { niets: 'tabel onder ' + afKop + ' ontbreekt' };
   regels.splice(laatste + 1, 0, nieuw);
   return { tekst: regels.join('\n'), regel: idx + 1 };
 }
@@ -179,13 +192,29 @@ function teDoen(rijen, nu, gedaan, vandaag) {
   return uit;
 }
 
+// Eén tik veilig in het register (ook voor herinnering-kaart.js, wv3905). Codex wv3707 ronde 2 MOET 1: de regelnummers van --droog gelden
+// alleen voor de tekst die het las; lees vóór en na de droog en schrijf alleen als beide en de tekst onder de grendel gelijk zijn.
+// MOET 2: de rol ook binnen de schrijfactie, vlak vóór het schrijven. Geeft { u: uitkomst van pasToe, ok: geschreven }.
+async function schrijf(o, t) {
+  const voor = o.lees(), items = (await o.droog()).items, na = o.lees();
+  let u = null;
+  const ok = voor === na && o.wijzig(function (tekst) {
+    if (tekst !== voor) { u = { niets: 'pagina veranderde' }; return null; }
+    if (o.mag && !o.mag()) { u = { niets: 'pagina veranderde' }; return null; }
+    u = pasToe(tekst, items, t); return u.tekst || null;
+  });
+  if (voor !== na) u = { niets: 'pagina veranderde' };
+  return { u: u, ok: !!ok };
+}
+
 // Runner. o = { mag(): bool (primaire pod), droog(): Promise<{items}> of {items}, lees(): tekst, wijzig(f): bool, rijen(): Promise<portierijen>, log(s), fout(e), vandaag() }
 function maak(o) {
   const gedaan = new Set(), pogingen = new Map();
   let bezig = null;
   async function deadlines() {
     const d = await o.droog();
-    return rijp(d.items, o.lees(), o.vandaag());
+    // wv3905: een regel met een herinneringskaart in Voor jou komt niet ook in het actielijstje (één plek per herinnering)
+    return rijp(d.items, o.lees(), o.vandaag()).filter(function (i) { return !i.voor_jou; });
   }
   async function verwerk() {
     if (bezig) return bezig;
@@ -195,16 +224,7 @@ function maak(o) {
       for (const t of lijst) {
         if (!t.datum || !t.titel) { gedaan.add(t.merk); uit.niets++; continue; }
         if (o.mag && !o.mag()) { uit.niets++; break; }   // Codex MOET 2: alleen de primaire pod schrijft (rol vóór elke schrijfactie)
-        // Codex ronde 2 MOET 1: de regelnummers van --droog gelden alleen voor de tekst die het las. Lees vóór en na de droog; alleen als
-        // beide en de tekst onder de grendel gelijk zijn, schrijven. MOET 2: de rol ook binnen de schrijfactie, vlak vóór het schrijven.
-        const voor = o.lees(), items = (await o.droog()).items, na = o.lees();
-        let u = null;
-        const ok = voor === na && o.wijzig(function (tekst) {
-          if (tekst !== voor) { u = { niets: 'pagina veranderde' }; return null; }
-          if (o.mag && !o.mag()) { u = { niets: 'pagina veranderde' }; return null; }
-          u = pasToe(tekst, items, t); return u.tekst || null;
-        });
-        if (voor !== na) u = { niets: 'pagina veranderde' };
+        const { u, ok } = await schrijf(o, t);   // Codex ronde 2 MOET 1 + 2: zie schrijf()
         if (u && u.tekst && ok) { gedaan.add(t.merk); uit.gedaan++; o.log('deadline-lijstje ' + t.keuze + ' ' + t.sleutel.slice(0, 11) + ' regel ' + u.regel); }
         else if (u && u.niets && u.niets !== 'regel niet gevonden' && u.niets !== 'pagina veranderde') { gedaan.add(t.merk); uit.niets++; }
         else {
@@ -221,4 +241,4 @@ function maak(o) {
   return { deadlines: deadlines, verwerk: verwerk };
 }
 
-module.exports = { rijp, pasToe, teDoen, zoekRegel, weergave, cellen, maak, TIK_RUST_MS, AF_KOP, MERK_RE };
+module.exports = { rijp, pasToe, teDoen, zoekRegel, weergave, cellen, maak, schrijf, kaal, norm, TIK_RUST_MS, AF_KOP, AF_KOP_VJ, MERK_RE };
