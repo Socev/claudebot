@@ -53,6 +53,7 @@
  *   node bank-lezer.js paypal-bij (stdin {bewijzen, fouten, ronde})            alleen server.js: bewaren (idempotent) + koppelen
  * Ecobank-laag (wv2202, ecobank-mail.js; de twee Gambiaanse rekeningen uit de transactiemails van Ecobank, eigen tabel ecobank_tx):
  *   node bank-lezer.js gambia [--rekening GMD|EUR|1234] [--van] [--tot] [--zoek x] [--max N]   saldo per rekening + laatste posten
+ *   node bank-lezer.js gambia-steunbord [--van JJJJ-MM-DD]                    steunbord: per persoon toegezegd / betaald / open (wv3949)
  *   node bank-lezer.js ecobank-bekend                                           alleen server.js: mail-id's die al bewaard zijn
  *   node bank-lezer.js ecobank-bij (stdin {posten, fouten, ronde})             alleen server.js: bewaren (idempotent op mail-id)
  *   node bank-lezer.js ecobank-csv (stdin {bestanden: [tekst], bron})           alleen machinekamer via de CLI: CSV-exports van de website (wv2206)
@@ -667,6 +668,20 @@ function paypalModule() { if (!paypalObj) paypalObj = require(path.join(__dirnam
 // wv2202: de Ecobank-laag; zelfde database, eigen tabel. Laadt pas als een Ecobank-opdracht hem nodig heeft.
 let ecobankObj;
 function ecobankModule() { if (!ecobankObj) ecobankObj = require(path.join(__dirname, 'ecobank-mail.js')); return ecobankObj; }
+// wv3949: steunbord (gambia-steunbord.js); ook het blok steunbord in tabblad Gambia van app-financien
+function gambiaSteunbord(van) {
+  if (van != null && !isDatum(van)) throw new Weigering('--van als JJJJ-MM-DD');
+  const x = archiefOpen(), S = require(path.join(__dirname, 'gambia-steunbord.js'));
+  const v = van || (new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 4) + '-01-01');
+  const eco = ecobankModule().overzicht(x.a, { van: v, max: 500 });
+  if (eco.afgekapt) throw new Weigering('meer dan 500 Ecobank-posten sinds ' + v + '; kies een latere --van');
+  const nl = x.a.db.prepare("SELECT t.datum, t.bedrag, t.valuta, t.tegenpartij, t.omschrijving FROM transacties t JOIN verrijking v ON v.nr = t.nr" +
+    " WHERE t.status = 'booked' AND t.vervangen_door IS NULL AND v.categorie = 'Gambia-hulp' AND t.bedrag < 0 AND t.datum >= ? ORDER BY t.datum").all(v);
+  const d = S.leesDossiers(process.env.VAULT_DIR || '/opt/data/AI_SecondBrain');
+  const b = S.bereken({ ecobank: eco.transacties, nl: nl, dossiers: d.dossiers, van: v });
+  return Object.assign({ ok: true, bron: 'ecobank-mail+archief+dossiers' }, b, { md: S.md(b), fouten_dossier: d.fouten.length ? d.fouten : undefined,
+    ecobank_ronde_op: eco.ronde_op, let_op: 'Betaald = wat de bank laat zien. Xpress Cash en Taptap noemen geen ontvanger: die staan als niet zeker (dossierspoor) of niet toe te wijzen. GMD en EUR nooit opgeteld.' });
+}
 function archiefFilter(a, s) {
   const o = a.opt, f = {};
   ['van', 'tot'].forEach(function (k) { if (o[k] != null) { if (!isDatum(o[k])) throw new Weigering('--' + k + ' als JJJJ-MM-DD'); f[k] = o[k]; } });
@@ -1250,6 +1265,9 @@ const opdrachten = {
     if (a.opt.max != null) o.max = a.opt.max;
     return Object.assign({ ok: true, bron: 'ecobank-mail' }, ecobankModule().overzicht(x.a, o));
   },
+  // wv3949 (3C103): steunbord Gambia — per persoon toegezegd (dossiers, vaste plek "## Toezeggingen") / betaald (Ecobank + NL Gambia-hulp) /
+  // open. Alleen lezen; koppelen betaling ↔ persoon: zeker (bank noemt de ontvanger), waarschijnlijk (dossierspoor, "niet zeker"), anders niet.
+  async 'gambia-steunbord'(a) { return gambiaSteunbord(a.opt.van); },
   // wv2206: CSV-exports van de Ecobank-website (David haalt ze zelf op). Alleen machinekamer, alleen via de CLI (niet in BANK_OPDRACHTEN,
   // dus niet via /smal/bank): stdin {bestanden: [tekst, …], bron}; alles of niets; alleen aantallen terug.
   async 'ecobank-csv'() {
@@ -1286,6 +1304,8 @@ const opdrachten = {
     // wv2202: tabblad Gambia (Ecobank uit de mails); een fout hier maakt alleen dat blok leeg
     try { const g = ecobankModule().overzicht(x.a, { max: 30 }); uit.gambia = { rekeningen: g.rekeningen, transacties: g.transacties, ronde_op: g.ronde_op, let_op: g.let_op_ecobank }; }
     catch (e) { uit.gambia = null; uit.fouten = (uit.fouten || []).concat(['gambia']); }
+    // wv3949 (3C103): steunbord als blok in tabblad Gambia; een fout maakt alleen dat blok leeg
+    if (uit.gambia) { try { const sb = gambiaSteunbord(null); delete sb.md; uit.gambia.steunbord = sb; } catch (e) { uit.gambia.steunbord = null; uit.fouten = (uit.fouten || []).concat(['steunbord']); } }
     return uit; },
   // wv777: signalen voor het blok "Geld deze maand" in de briefing (financien-app.js briefing); alleen de pod roept dit aan, na de bank-ronde
   async 'geld-briefing'(a) {

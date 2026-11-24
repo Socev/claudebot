@@ -23,6 +23,9 @@ const STAND_TEKST = { gedaan: 'Gedaan', later: 'Later', klopt_niet: 'Klopt niet'
 const GAMBIA_KOP = /gambia-weekreview/i;
 const RUST_DAGEN = 6;   // editie van dag D telt mee in de correctierij voor D+1 .. D+6 (zaterdag -> t/m vrijdag)
 const CONTACT_RE = /^\*\*([^*\n]{1,60})\*\*/;
+// wv3949 (3C99): het antwoord in Davids Engels als `…` achter ✍️ aan het eind van een Gambia-regel → punt.gambia.antwoord (kopieerblok in
+// de app); uit de getoonde tekst gehaald zodat het er niet dubbel staat. Nooit in de correctierij (die bewaart alleen de naam).
+const ANTWOORD_RE = /\s*✍️\s*(?:Antwoord:\s*)?`([^`\n]{1,800})`\s*$/u;
 const BOL_RE = /^\s*[•\-*]\s+/;
 const WIKI_RE = /\[\[([^\]|#\n]+)(?:#[^\]|\n]*)?(?:\|([^\]\n]+))?\]\]/;
 const LINK_RE = /\[([^\]\n]+)\]\(([^)\s]+)\)/;
@@ -82,6 +85,8 @@ function punten(tekst, dag, o) {
       // (die zou na een tik alsnog in de correctierij naar de briefingsessie gaan)
       const c = CONTACT_RE.exec(zin), naam = c ? plat(c[1]).replace(/[\s:—–-]+$/, '') : '';
       punt.gambia = { contact: naam && naam.length <= 60 ? naam : '' };
+      const a = ANTWOORD_RE.exec(punt.tekst);
+      if (a) { punt.gambia.antwoord = a[1].trim(); punt.tekst = punt.tekst.slice(0, a.index).trim() || punt.tekst; }
     }
     sluit();
     blokken.push({ punt: punt });

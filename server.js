@@ -31508,10 +31508,10 @@ function smalRoute(req, res) {
 const BANK_SCRIPT = process.env.BANK_SCRIPT || path.join(__dirname, 'bank-lezer.js');
 const BANK_DIR = process.env.BANK_DIR || '/opt/data/bank';
 const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', 'saldo', 'transacties', 'toestemming', 'label',
-  'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'gambia', 'ecobank-ronde', 'ontkoppel'];
+  'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'gambia', 'gambia-steunbord', 'ecobank-ronde', 'ontkoppel'];   // wv3949: + gambia-steunbord
 const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'verrijk-open', 'verrijk-zet',
   'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'app-rekening', 'app-boekingen', 'app-stroom', 'geld-briefing', 'app-reizen', 'app-reislabel', 'app-vermogen', 'app-corrigeer',   // wv2292: app-rekening alleen voor POST /app/financien/rekening   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
-  'gambia', 'ecobank-bekend', 'ecobank-bij',   // wv2202: de Ecobank-laag leest alleen de database
+  'gambia', 'gambia-steunbord', 'ecobank-bekend', 'ecobank-bij',   // wv2202 (wv3949: + steunbord): de Ecobank-laag leest alleen de database
   'pot-afschrift-maanden', 'pot-afschrift', 'pot-datahub-invoer'];   // wv787 (wv815: pot-datahub-invoer alleen voor potDatahubRonde): alleen voor de App-routes en de maandronde (niet in BANK_OPDRACHTEN: niet via /smal/bank)
 const BANK_TERUG_PER_UUR = 30;
 const bankTerugTijden = [];
@@ -31746,6 +31746,11 @@ async function bankSmal(d) {
       args.push('--' + k, v);
     }
   }
+  if (opdracht === 'gambia-steunbord' && d.van != null && d.van !== '') {   // wv3949
+    const v = datum(String(d.van).trim());
+    if (v == null) return { status: 400, j: { ok: false, fout: 'van ongeldig' } };
+    args.push('--van', v);
+  }
   if (opdracht === 'gambia') {   // wv2202
     for (const k of ['van', 'tot', 'rekening', 'zoek', 'max']) {
       if (d[k] == null || d[k] === '') continue;
@@ -31800,7 +31805,7 @@ async function bankSmal(d) {
   if (opdracht === 'ontkoppel') { if (typeof d.sessie !== 'string' || !/^[A-Za-z0-9-]{8,80}$/.test(d.sessie)) return { status: 400, j: { ok: false, fout: 'sessie ongeldig' } }; args.push(d.sessie); }
   const r = await bankKind(args, null, opdracht === 'historie' ? 1800000 : undefined);   // historie: 19 rekeningen × pagina's à 1,1 s
   const j = r.j;
-  if (['transacties', 'saldo', 'rekeningen', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'paypal', 'paypal-diensten', 'gambia'].indexOf(opdracht) >= 0) j.let_op_bron = BANK_LET_OP;   // wv683: ook rekeningnamen zijn tekst van derden
+  if (['transacties', 'saldo', 'rekeningen', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'paypal', 'paypal-diensten', 'gambia', 'gambia-steunbord'].indexOf(opdracht) >= 0) j.let_op_bron = BANK_LET_OP;   // wv683: ook rekeningnamen zijn tekst van derden
   if (opdracht === 'archief') j.verrijk_ai = bankVerrijkStand();   // wv687: alleen aantallen en tijden
   schrijfLog(nu() + ' bank ' + velden({ opdracht: opdracht, ok: !!j.ok, code: r.code, mk: machinekamer || undefined }));
   return { status: 200, j: j };

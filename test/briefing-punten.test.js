@@ -155,6 +155,23 @@ test('wv3940: bolletjes onder de Gambia-kop zijn Gambia-punten met de naam; ande
   assert.strictEqual(P.correctieTekst(mz, slz, ZAT), '');
 });
 
+test('wv3949 (3C99): antwoord achter ✍️ wordt een kopieerblok, niet dubbel in de tekst en nooit in opslag of correctierij', function () {
+  const blok = '**🇬🇲 Gambia-weekreview**\nSteunbord: Nepcontact Een — nepschoolgeld doorlopend.\n' +
+    '• **Nepcontact Een** — 2 berichten: vraagt hoe het gaat. 👉 Advies: kort groeten. ✍️ `Hello my brother, all good here. Greetings to the family!`\n' +
+    '• **Nepgroep Twee** — 1 bericht. 👉 Advies: niets nodig.';
+  const r = P.punten(blok, ZAT).punten;
+  assert.strictEqual(r.length, 2, 'de steunbordregel is geen punt');
+  assert.strictEqual(r[0].gambia.antwoord, 'Hello my brother, all good here. Greetings to the family!');
+  assert.ok(!/Hello my brother|✍️/.test(r[0].tekst)); assert.ok(/Advies: kort groeten\.$/.test(r[0].tekst));
+  assert.strictEqual(r[1].gambia.antwoord, undefined);
+  const m = { versie: 1, edities: {} }, sl = P.editieSleutel('briefing', ZAT);
+  P.zetStand(m, sl, r[0], 'laat_rusten', Date.now()); P.zetStand(m, sl, r[1], 'gedaan', Date.now());
+  assert.ok(!/Hello|brother/.test(JSON.stringify(m)) && !/Hello|brother/.test(P.correctieTekst(m, sl, ZAT)));
+  // zonder backticks of buiten het Gambia-blok: niets
+  assert.strictEqual(P.punten('**🇬🇲 Gambia-weekreview**\n• **X Y** — advies ✍️ Hello', ZAT).punten[0].gambia.antwoord, undefined);
+  assert.strictEqual(P.punten('**Agenda**\n• overleg ✍️ `Hello`', ZAT).punten[0].gambia, undefined);
+});
+
 test('wv3940: Gambia-punten alleen met naam in opslag en correctierij; Laat rusten 6 dagen (t/m vrijdag)', function () {
   const r = P.punten(GAMBIA, ZAT, { bestaat: BESTAAT }).punten;
   const g = r.filter(function (x) { return x.gambia; });
