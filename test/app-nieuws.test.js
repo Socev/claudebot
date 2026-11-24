@@ -165,18 +165,20 @@ function laadBlok(o) {
     berichtIntern: o.stuur || function () { throw new Error('geen bericht in de toets'); },
   };
   vm.createContext(ctx);
-  vm.runInContext(SRV.slice(i, j) + '\nthis.__x = { loketSchaduw, loketMeld, loketTellersVerversen, appNieuwsRoute, appNieuwsTellersRoute, appNieuwsGezienRoute, appNieuwsSchaduwRoute, appNieuwsInfo, appNieuwsInstelRoute, loketOchtendEditie, loketAvondTik, keten: function () { return appNieuwsKeten; } };', ctx);
+  vm.runInContext(SRV.slice(i, j) + '\nthis.__x = { loketSchaduw, loketMeld, loketTellersVerversen, appNieuwsRoute, appNieuwsTellersRoute, appNieuwsGezienRoute, appNieuwsSchaduwRoute, appNieuwsInfo, appNieuwsInstelRoute, loketOchtendEditie, loketAvondTik, loketOvergang, loketPakjesMeld, keten: function () { return appNieuwsKeten; } };', ctx);
   return { x: ctx.__x, dir: dir, fouten: fouten, antwoorden: antwoorden };
 }
 const nepRes = function () { return { _app: {} }; };
+// wv3882: serverblok-toetsen draaien met de echte klok (Date.now()); vaste datums vervielen na een dag (tijdbom, rood op main sinds 24-11)
+const VANDAAG = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
 test('serverblok: schaduw schrijft de regel, routes tonen hem, gezien haalt hem weg, tellers uit de bronnen', async function () {
   const b = laadBlok({
     facturenRoutes: { rolVoor: function () { return { soort: 'eigenaar' }; }, app: function (fdb, v) { assert.strictEqual(v.pad, '/app/facturen'); return { status: 200, j: { ok: true, tellers: { beoordelen: 3, signalen: 2, wachtrij: 9 } } }; } },
     pakjes: { lijst: function () { return { status: 200, body: { ok: true, lopend: [{ stand: 'vandaag' }, { stand: 'onderweg' }] } }; } },
     beleggenApp: { app: function (v) { assert.strictEqual(v.pad, '/app/beleggen/teller'); return { status: 200, body: { ok: true, totaal: 4 } }; } },
   });
-  b.x.loketSchaduw('geld', '2026-11-22', 'Verzonnen geldregel.');
-  b.x.loketSchaduw('onbekend', '2026-11-22', 'x');   // onbekende bron: gelogd, niets geschreven, geen gooi
+  b.x.loketSchaduw('geld', VANDAAG, 'Verzonnen geldregel.');
+  b.x.loketSchaduw('onbekend', VANDAAG, 'x');   // onbekende bron: gelogd, niets geschreven, geen gooi
   await b.x.keten();
   const s = JSON.parse(fs.readFileSync(path.join(b.dir, 'app-nieuws.json'), 'utf8'));
   assert.deepStrictEqual(Object.keys(s.regels), ['financien/geld']);
@@ -279,18 +281,18 @@ test('serverblok: ochtendeditie zet één rij bron apps (teruggelezen) en markee
     if (m === 'POST') { rij = body.data; return Promise.resolve({}); }
     return Promise.resolve({ data: rij ? [rij] : [] });
   };
-  const b = laadBlok({ zend: zend, ovisAms: function () { return klok('2026-11-22', 6, 50); } });
-  let u = await b.x.loketOchtendEditie({ datum: '2026-11-22' });
+  const b = laadBlok({ zend: zend, ovisAms: function () { return klok(VANDAAG, 6, 50); } });
+  let u = await b.x.loketOchtendEditie({ datum: VANDAAG });
   assert.deepStrictEqual(JSON.parse(JSON.stringify(u)), { ok: true, detail: { regels: 0 } }); assert.strictEqual(aanroepen.length, 0, 'geen regels = geen rij');
-  await b.x.loketMeld({ app: 'proef', onderwerp: 'a', laan: 'editie', datum: '2026-11-22', tekst: 'Verzonnen ochtendregel.' });
-  await b.x.loketMeld({ app: 'socev', onderwerp: 'weer', laan: 'editie', datum: '2026-11-22', editie: 'ochtend', tekst: 'Verzonnen weer.', buffer: 'weer' });
-  u = await b.x.loketOchtendEditie({ datum: '2026-11-22' });
+  await b.x.loketMeld({ app: 'proef', onderwerp: 'a', laan: 'editie', datum: VANDAAG, tekst: 'Verzonnen ochtendregel.' });
+  await b.x.loketMeld({ app: 'socev', onderwerp: 'weer', laan: 'editie', datum: VANDAAG, editie: 'ochtend', tekst: 'Verzonnen weer.', buffer: 'weer' });
+  u = await b.x.loketOchtendEditie({ datum: VANDAAG });
   assert.strictEqual(u.detail.regels, 1);
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(rij)), { bron: 'apps', datum: '2026-11-22', tekst: '• Proef: Verzonnen ochtendregel.' });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(rij)), { bron: 'apps', datum: VANDAAG, tekst: '• Proef: Verzonnen ochtendregel.' });
   const s = JSON.parse(fs.readFileSync(path.join(b.dir, 'app-nieuws.json'), 'utf8'));
   assert.deepStrictEqual(s.edities.verschenen, { 'proef/a': 1 });
-  const b2 = laadBlok({ zend: zend, ovisAms: function () { return klok('2026-11-22', 7, 5); } });
-  u = await b2.x.loketOchtendEditie({ datum: '2026-11-22' });
+  const b2 = laadBlok({ zend: zend, ovisAms: function () { return klok(VANDAAG, 7, 5); } });
+  u = await b2.x.loketOchtendEditie({ datum: VANDAAG });
   assert.strictEqual(u.al_gedaan, true); assert.strictEqual(u.detail.te_laat, true);
 });
 test('serverblok: avondeditie met nepklok — dag zonder nieuws = geen bericht; met nieuws één bericht, daarna niet nog eens; buiten het venster niets', async function () {
@@ -323,4 +325,92 @@ test('serverblok: schuif-route zet instel, schuif teller uit = geen getal', asyn
   assert.deepStrictEqual(a.tellers, {}); assert.deepStrictEqual(a.instel, { pakjes: { teller: false } });
   await b.x.appNieuwsInstelRoute({}, nepRes(), { id: 'a' }, { app: 'pakjes', teller: 'x' });
   assert.strictEqual(b.antwoorden.pop()[0], 400);
+});
+
+// ── fase 3 (wv3882): overgang zonder gat, Pakjes, Beleggen-weekbericht, Dienstwaarschuwer via /nieuws/meld ──
+test('fase 3: ooit na editie of gezien; overgezet alleen met schuif aan (Codex MOET 1); opruim houdt ooit 60 dagen', function () {
+  let s = AN.meld(AN.leeg(), { app: 'beleggen', onderwerp: 'week', laan: 'editie', editie: 'eerstvolgende', datum: '2026-11-22', tekst: 'Verzonnen week.' }, T0).staat;
+  assert.strictEqual(AN.ooit(s, 'beleggen/week'), null); assert.strictEqual(AN.overgezet(s, 'beleggen/week'), false, 'nog nooit in een editie');
+  const r = AN.editieRegels(s, 'avond', '2026-11-22', T0);
+  s = AN.editieMarkeer(s, 'avond', '2026-11-22', [], T0).staat;
+  assert.strictEqual(AN.ooit(s, 'beleggen/week'), null, 'lege markering zet niets');
+  s = AN.editieMarkeer(s, 'avond', '2026-11-22', r, T0).staat;
+  assert.strictEqual(AN.ooit(s, 'beleggen/week'), '2026-11-22'); assert.strictEqual(AN.overgezet(s, 'beleggen/week'), true);
+  s = AN.instelZet(s, 'beleggen', { editie: false }).staat;
+  assert.strictEqual(AN.overgezet(s, 'beleggen/week'), false, 'schuif uit = de oude weg komt terug');
+  s = AN.instelZet(s, 'beleggen', { editie: true }).staat;
+  assert.strictEqual(AN.overgezet(s, 'beleggen/week'), true);
+  // gezien in het paneel telt ook (anders blijft de overgang hangen als David vóór 20:30 kijkt)
+  let g = AN.meld(AN.leeg(), { app: 'kalender', onderwerp: 'diensten', laan: 'editie', editie: 'ochtend', datum: '2026-11-25', tekst: 'Verzonnen diensten.' }, T0).staat;
+  g = AN.gezien(g, [{ sleutel: 'kalender/diensten', versie: 1 }], T0 + UUR).staat;
+  assert.strictEqual(AN.ooit(g, 'kalender/diensten'), '2026-11-21');
+  // de regel vervalt en wordt opgeruimd; ooit blijft tot 60 dagen
+  s = AN.opruim(s, T0 + 20 * DAG).staat;
+  assert.strictEqual(s.regels['beleggen/week'], undefined, 'regel opgeruimd');
+  assert.strictEqual(AN.ooit(s, 'beleggen/week'), '2026-11-22', 'ooit blijft');
+  s = AN.opruim(s, Date.parse('2027-01-22T12:00:00Z')).staat;
+  assert.strictEqual(AN.ooit(s, 'beleggen/week'), null, 'na 60 dagen zonder regel weg');
+});
+test('fase 3: Pakjes — ochtend vandaag + afhaal, avond alleen afhaal, gelijk = geen herhaling, leeg = regel uit het paneel', function () {
+  const nu = Date.parse('2026-11-25T05:50:00Z');
+  const body = { lopend: [{ stand: 'vandaag', winkel: 'Verzonnen Winkel' }, { stand: 'vandaag', omschrijving: 'Boek' }, { stand: 'afhaalpunt', winkel: 'Nepshop' },
+    { stand: 'vandaag', winkel: 'Verborgen', verborgen: true }, { stand: 'onderweg', winkel: 'Later' }] };
+  let ms = AN.pakjesAanmeldingen(AN.leeg(), body, 'ochtend', '2026-11-25', nu);
+  assert.deepStrictEqual(ms.map(function (m) { return [m.onderwerp, m.editie, m.tekst, m.doel.scherm]; }), [
+    ['vandaag', 'ochtend', 'Vandaag verwacht: Verzonnen Winkel, Boek.', 'pakjes'], ['afhaal', 'eerstvolgende', 'Ligt klaar bij een afhaalpunt: Nepshop.', 'pakjes']]);
+  assert.strictEqual(ms[0].vervalt, '2026-11-25T22:59:59.000Z', 'vervalt einde vandaag (Amsterdam)');
+  let s = AN.leeg();
+  ms.forEach(function (m) { s = AN.meld(s, m, nu).staat; });
+  const rs = AN.editieRegels(s, 'ochtend', '2026-11-25', nu);
+  assert.strictEqual(rs.length, 2);
+  s = AN.editieMarkeer(s, 'ochtend', '2026-11-25', rs, nu).staat;
+  ms = AN.pakjesAanmeldingen(s, body, 'avond', '2026-11-25', nu + 14 * UUR);
+  assert.deepStrictEqual(ms.map(function (m) { return m.onderwerp; }), ['afhaal'], 'avond: alleen afhaal');
+  assert.strictEqual(AN.meld(s, ms[0], nu + 14 * UUR).uitkomst, 'gelijk', 'zelfde tekst = niet opnieuw');
+  assert.strictEqual(AN.editieRegels(s, 'avond', '2026-11-25', nu + 14 * UUR).length, 0, 'stond al in de ochtend');
+  // afgehaald: lege lijst → afhaal-regel uit het paneel
+  ms = AN.pakjesAanmeldingen(s, { lopend: [] }, 'avond', '2026-11-25', nu + 15 * UUR);
+  assert.strictEqual(ms.length, 1); s = AN.meld(s, ms[0], nu + 15 * UUR).staat;
+  assert.strictEqual(AN.lijst(s, { app: 'pakjes' }, nu + 15 * UUR + 1).map(function (r) { return r.onderwerp; }).join(), 'vandaag', 'afhaal weg, vandaag blijft');
+  assert.strictEqual(AN.pakjesAanmeldingen(s, { lopend: [] }, 'avond', '2026-11-25', nu + 16 * UUR).length, 0, 'niet nog eens');
+  // veel pakjes: max 8 namen
+  const veel = { lopend: Array.from({ length: 11 }, function (x, i) { return { stand: 'vandaag', winkel: 'W' + i }; }) };
+  assert.match(AN.pakjesAanmeldingen(AN.leeg(), veel, 'ochtend', '2026-11-25', nu)[0].tekst, /W7 en 3 meer\.$/);
+  assert.throws(function () { AN.pakjesAanmeldingen(AN.leeg(), body, 'middag', '2026-11-25', nu); });
+});
+test('fase 3 serverblok: loketOvergang eerst niet overgezet, na de editie wel; fout = niet overgezet; pakjes vóór de editie', async function () {
+  const berichten = [];
+  const stuur = function (d) { berichten.push(d); return Promise.resolve({ status: 200, j: { ok: true } }); };
+  let rij = null;
+  const zend = function (m, p, body) { if (m === 'POST') { rij = body.data; return Promise.resolve({}); } return Promise.resolve({ data: rij ? [rij] : [] }); };
+  const b = laadBlok({ stuur: stuur, zend: zend, ovisAms: function () { return klok(VANDAAG, 6, 50); },
+    pakjes: { lijst: function () { return { status: 200, body: { ok: true, lopend: [{ stand: 'afhaalpunt', winkel: 'Nepshop' }] } }; } } });
+  const m = { app: 'kalender', onderwerp: 'diensten', laan: 'editie', editie: 'ochtend', datum: VANDAAG, tekst: 'Verzonnen diensten.', doel: { scherm: 'kalender' } };
+  let l = await b.x.loketOvergang(m);
+  assert.strictEqual(l.overgezet, false, 'eerste keer: oude bericht gaat ook');
+  const u = await b.x.loketOchtendEditie({ datum: VANDAAG });
+  assert.strictEqual(u.detail.regels, 2);
+  assert.strictEqual(rij.tekst, '• Kalender: Verzonnen diensten.\n• Pakjes: Ligt klaar bij een afhaalpunt: Nepshop.');
+  l = await b.x.loketOvergang(Object.assign({}, m, { datum: VANDAAG, tekst: 'Verzonnen diensten week 2.' }));
+  assert.strictEqual(l.overgezet, true, 'na de editie: alleen het loket');
+  l = await b.x.loketOvergang({ app: 'Kapot', onderwerp: 'x', laan: 'editie', datum: VANDAAG, tekst: 'x' });
+  assert.strictEqual(l.overgezet, false); assert.ok(b.fouten.some(function (f) { return /app-nieuws-overgang/.test(f); }), 'fout gelogd');
+  // pakjeslijst kapot: editie gaat door zonder pakjes
+  const b2 = laadBlok({ zend: zend, ovisAms: function () { return klok(VANDAAG, 6, 50); }, pakjes: { lijst: function () { throw new Error('kapot'); } } });
+  await b2.x.loketMeld({ app: 'proef', onderwerp: 'a', laan: 'editie', datum: VANDAAG, tekst: 'Verzonnen.' });
+  const u2 = await b2.x.loketOchtendEditie({ datum: VANDAAG });
+  assert.strictEqual(u2.detail.regels, 1); assert.ok(b2.fouten.some(function (f) { return /app-nieuws-pakjes/.test(f); }));
+  // avond: pakjes-afhaal vlak vóór de avondeditie
+  const b3 = laadBlok({ stuur: stuur, pakjes: { lijst: function () { return { status: 200, body: { ok: true, lopend: [{ stand: 'afhaalpunt', winkel: 'Nepshop' }, { stand: 'vandaag', winkel: 'Niet s avonds' }] } }; } } });
+  const a = await b3.x.loketAvondTik({ proef: true, ams: klok(VANDAAG, 20, 30), stuur: stuur });
+  assert.strictEqual(a.bericht, true);
+  assert.strictEqual(berichten.pop().tekst, '📬 Uit je Apps (avond)\n\n• Pakjes: Ligt klaar bij een afhaalpunt: Nepshop.');
+});
+test('fase 3 bedrading: Beleggen-weekbericht eerst het loket, oude bericht alleen als niet overgezet; /nieuws/meld geeft ooit en overgezet', function () {
+  const i = SRV.indexOf("bron: 'beleggen-week'");
+  const stuk = SRV.slice(SRV.lastIndexOf('bericht: async function (tekst, sleutel)', i), i);
+  assert.match(stuk, /loketOvergang\(\{ app: 'beleggen', onderwerp: 'week', laan: 'editie', editie: 'eerstvolgende', datum: ovisAms\(\)\.datum, tekst: tekst/);
+  assert.match(stuk, /if \(l\.overgezet\) return \{ ok: true, loket: true \};/);
+  const r = SRV.slice(SRV.indexOf("req.url === '/nieuws/meld'"), SRV.indexOf("req.url === '/heartbeat/moment'"));
+  assert.match(r, /ooit: o, overgezet: oz/);
 });

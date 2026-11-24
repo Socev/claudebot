@@ -16,6 +16,7 @@ const MAX_TEKST = 4000;
 const MAX_ONGEZIEN = 2000;
 const BEWAAR_VERVALLEN_MS = 14 * 86400000;
 const BEWAAR_GEZIEN_MS = 30 * 86400000;
+const OOIT_BEWAAR_MS = 60 * 86400000;   // fase 3 (wv3882): edities.ooit
 const INHOUD = ['laan', 'tekst', 'aantal', 'datum'];
 const META = ['editie', 'vervalt', 'doel', 'taalmodel', 'buffer'];
 
@@ -27,11 +28,13 @@ function normaal(s) {
   if (!x.schaduw || typeof x.schaduw !== 'object' || Array.isArray(x.schaduw)) x.schaduw = {};
   if (!x.edities || typeof x.edities !== 'object' || Array.isArray(x.edities)) x.edities = {};   // fase 2 (wv3815)
   if (!x.edities.verschenen || typeof x.edities.verschenen !== 'object' || Array.isArray(x.edities.verschenen)) x.edities.verschenen = {};
+  if (!x.edities.ooit || typeof x.edities.ooit !== 'object' || Array.isArray(x.edities.ooit)) x.edities.ooit = {};   // fase 3 (wv3882)
   x.versie = 1;
   return x;
 }
 function fout(m) { const e = new Error(m); e.loket = true; return e; }
 function iso(ms) { return new Date(ms).toISOString(); }
+function dagAms(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
 // einde van de dag ná `dag` in Amsterdam (23:59:59), als ISO; de editie van dag D blijft zo tot en met D+1 zichtbaar
 function eindeDagErna(dag) {
   const d = new Date(dag + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + 1);
@@ -140,7 +143,7 @@ function gezien(staat, lijstIn, nu) {
   lijstIn.forEach(function (g) {
     if (!g || typeof g.sleutel !== 'string' || !Number.isInteger(g.versie)) throw fout('ongeldige sleutel');
     const r = s.regels[g.sleutel];
-    if (r && r.versie === g.versie && !r.gezien_op) { r.gezien_op = iso(nu); n++; }
+    if (r && r.versie === g.versie && !r.gezien_op) { r.gezien_op = iso(nu); n++; if (r.laan === 'editie' && !s.edities.ooit[g.sleutel]) s.edities.ooit[g.sleutel] = dagAms(nu); }
   });
   return { staat: s, gezet: n };
 }
@@ -154,6 +157,8 @@ function opruim(staat, nu) {
     if (!r || (v !== null && v + BEWAAR_VERVALLEN_MS <= nu) || (v === null && g !== null && g + BEWAAR_GEZIEN_MS <= nu)) { delete s.regels[k]; weg++; }
   });
   Object.keys(s.edities.verschenen).forEach(function (k) { if (!s.regels[k]) delete s.edities.verschenen[k]; });   // fase 2: alleen bestaande regels
+  const ooitGrens = iso(nu - OOIT_BEWAAR_MS).slice(0, 10);   // fase 3: ooit blijft na de regel; pas weg als er geen regel is en hij > 60 dagen oud is
+  Object.keys(s.edities.ooit).forEach(function (k) { if (!s.regels[k] && !(String(s.edities.ooit[k]) >= ooitGrens)) delete s.edities.ooit[k]; });
   const grens = iso(nu - BEWAAR_VERVALLEN_MS).slice(0, 10);
   Object.keys(s.schaduw).forEach(function (d) { if (d < grens) delete s.schaduw[d]; });
   return { staat: s, weg: weg };
@@ -238,7 +243,11 @@ function editieTekst(regels, max) {
 // na een gelukte editie: welke versies stonden erin (zodat de volgende editie ze niet herhaalt; "gezien" blijft van David)
 function editieMarkeer(staat, soort, dag, regels, nu) {
   const s = normaal(staat);
-  (regels || []).forEach(function (r) { if (r && r.sleutel && s.regels[r.sleutel] && s.regels[r.sleutel].versie === r.versie) s.edities.verschenen[r.sleutel] = r.versie; });
+  (regels || []).forEach(function (r) {
+    if (!(r && r.sleutel && s.regels[r.sleutel] && s.regels[r.sleutel].versie === r.versie)) return;
+    s.edities.verschenen[r.sleutel] = r.versie;
+    if (!s.edities.ooit[r.sleutel]) s.edities.ooit[r.sleutel] = dag;   // fase 3: deze sleutel bereikte David ooit via een editie
+  });
   s.edities[soort] = { dag: dag, op: iso(nu), n: (regels || []).length };
   return { staat: s };
 }
@@ -264,5 +273,40 @@ function instelZet(staat, app, w) {
   return { staat: s, instel: i };
 }
 
-module.exports = { leeg, normaal, meld, lijst, tellers, gezien, opruim, schaduwTel, schaduwAanmelding, bufferZet, pakjesVandaag, eindeDagErna,
+// ── Fase 3 (wv3882): Apps die vroeger een eigen bericht stuurden, melden via het loket ──
+// Overgang zonder gat: het oude losse bericht valt pas weg als deze sleutel al eens in een editie stond (of David hem in het paneel zag) ÉN de
+// editieschuif van die App nu aan staat (Codex MOET 1: schuif later uit = de oude weg komt terug). Anders gaat het oude bericht óók.
+function ooit(staat, sleutel) { const s = normaal(staat); return Object.hasOwn(s.edities.ooit, sleutel) ? s.edities.ooit[sleutel] : null; }
+function overgezet(staat, sleutel) {
+  const s = normaal(staat), app = String(sleutel || '').split('/')[0];
+  return !!ooit(s, sleutel) && schuif(s, app, 'editie');
+}
+// Pakjes: de regels voor het loket uit pakjes.lijst().body (alleen lopend, niet verborgen; dezelfde lijst als de app). Puur: geeft aanmeldingen.
+// vandaag (alleen ochtend): stand vandaag; afhaal (ochtend en avond): stand afhaalpunt. Leeg en er staat een levende regel van vandaag: die
+// regel opnieuw met vervalt = nu (gaat uit het paneel). De App bepaalt de tekst; het loket kiest niets.
+const PAKJES_NAMEN_MAX = 8;
+function pakjeNaam(p) { return String(p.winkel || p.omschrijving || p.vervoerder || 'een pakje').replace(/\s+/g, ' ').trim().slice(0, 60); }
+function pakjesNamen(l) {
+  const n = l.map(pakjeNaam), uit = n.slice(0, PAKJES_NAMEN_MAX).join(', ');
+  return n.length > PAKJES_NAMEN_MAX ? uit + ' en ' + (n.length - PAKJES_NAMEN_MAX) + ' meer' : uit;
+}
+function pakjesAanmeldingen(staat, body, moment, dag, nu) {
+  if (moment !== 'ochtend' && moment !== 'avond') throw fout('onbekend moment');
+  if (!DAG_RE.test(String(dag))) throw fout('ongeldige dag');
+  const s = normaal(staat);
+  const lopend = ((body && Array.isArray(body.lopend)) ? body.lopend : []).filter(function (p) { return p && !p.verborgen; });
+  const dagEind = eindeDagErna(dagMin1(dag));
+  const uit = [];
+  const een = function (onderwerp, editie, lijstP, kop) {
+    const k = 'pakjes/' + onderwerp, oud = s.regels[k];
+    if (lijstP.length) uit.push({ app: 'pakjes', onderwerp: onderwerp, laan: 'editie', editie: editie, datum: dag, vervalt: dagEind, doel: { scherm: 'pakjes' }, tekst: kop + pakjesNamen(lijstP) + '.' });
+    else if (oud && levend(oud, nu) && oud.datum === dag) uit.push({ app: 'pakjes', onderwerp: onderwerp, laan: 'editie', editie: oud.editie, datum: oud.datum, doel: oud.doel, tekst: oud.tekst, vervalt: iso(nu) });
+  };
+  if (moment === 'ochtend') een('vandaag', 'ochtend', lopend.filter(function (p) { return p.stand === 'vandaag'; }), 'Vandaag verwacht: ');
+  een('afhaal', 'eerstvolgende', lopend.filter(function (p) { return p.stand === 'afhaalpunt'; }), 'Ligt klaar bij een afhaalpunt: ');
+  return uit;
+}
+function dagMin1(dag) { const d = new Date(dag + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); }
+
+module.exports = { ooit, overgezet, pakjesAanmeldingen, dagAms, leeg, normaal, meld, lijst, tellers, gezien, opruim, schaduwTel, schaduwAanmelding, bufferZet, pakjesVandaag, eindeDagErna,
   BUFFER_BRONNEN, MAX_ONGEZIEN, MAX_TEKST, editieRegels, editieTekst, editieMarkeer, avondMoment, instelZet, appNaam, EDITIE_MAX };

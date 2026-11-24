@@ -5347,7 +5347,10 @@ function handleRequest(req, res) {
       const m = { app: d.app, onderwerp: d.onderwerp, laan: d.laan, tekst: d.tekst, aantal: d.aantal, datum: d.datum, editie: d.editie, vervalt: d.vervalt, doel: d.doel, taalmodel: d.taalmodel };
       loketMeld(m).then(function (u) {
         res._log = { nieuws: String(d.app || '').slice(0, 30) + '/' + u.uitkomst };
-        stuur(200, { ok: true, uitkomst: u.uitkomst, sleutel: u.sleutel, versie: u.versie });
+        // wv3882 (fase 3): ooit/overgezet — mag de n8n-bron zijn oude losse bericht overslaan? (alleen als ooit in een editie én de schuif aan)
+        let o = null, oz = false;
+        try { if (typeof AN.ooit === 'function') { const st = appNieuwsLees(); o = AN.ooit(st, u.sleutel); oz = AN.overgezet(st, u.sleutel); } } catch (e) { logError('app-nieuws-meld', e); }
+        stuur(200, { ok: true, uitkomst: u.uitkomst, sleutel: u.sleutel, versie: u.versie, ooit: o, overgezet: oz });
       }, function (e) {
         if (e && e.loket) return stuur(400, { ok: false, fout: String(e.message).slice(0, 120) });
         logError('app-nieuws-meld', e); stuur(500, { ok: false, fout: 'pod kon het niet vastleggen' });
@@ -10045,6 +10048,30 @@ function appNieuwsWijzig(fn) {
 }
 // De ene functie waarmee een App nieuws aanmeldt (ook vanuit n8n via POST /nieuws/meld). Gooit bij ongeldige invoer.
 function loketMeld(m) { return appNieuwsWijzig(function (s, nu) { return AN.meld(s, m, nu); }); }
+// wv3882 (fase 3): een App die een eigen bericht stuurde meldt eerst hier. { overgezet: true } = de regel stond al eens in een editie (of David zag
+// hem in het paneel) en de editieschuif staat aan: het oude bericht hoeft niet. Elke fout = { overgezet: false } (oude weg blijft, nooit een gat).
+async function loketOvergang(m) {
+  if (!AN || typeof AN.overgezet !== 'function') return { overgezet: false };
+  try {
+    const u = await loketMeld(m);
+    await appNieuwsKeten.catch(function () {});
+    return { overgezet: AN.overgezet(appNieuwsLees(), u.sleutel), uitkomst: u.uitkomst };
+  } catch (e) { logError('app-nieuws-overgang', e); return { overgezet: false, fout: true }; }
+}
+// wv3882 (fase 3): Pakjes meldt vlak vóór elke editie wat vandaag komt en wat klaarligt (AN.pakjesAanmeldingen; ochtend: vandaag + afhaal, avond:
+// afhaal). Een fout raakt de editie nooit (logError, editie gaat door zonder pakjes). Log: alleen aantallen.
+async function loketPakjesMeld(moment, dag) {
+  if (!AN || typeof AN.pakjesAanmeldingen !== 'function' || typeof pakjes === 'undefined' || !pakjes) return 0;
+  let n = 0;
+  try {
+    const u = pakjes.lijst(pakjesGekocht(), pakjesOnderwerpen);
+    if (!u || !u.body || !Array.isArray(u.body.lopend)) throw new Error('pakjeslijst niet te lezen');
+    await appNieuwsKeten.catch(function () {});
+    const ms = AN.pakjesAanmeldingen(appNieuwsLees(), u.body, moment, dag, Date.now());
+    for (const m of ms) { await loketMeld(m); n++; }
+  } catch (e) { logError('app-nieuws-pakjes', e); }
+  return n;
+}
 // Fase 1: dezelfde regel die een oude schrijver net in ochtend_buffer zette, ook in het loket. Nooit await-en in de oude weg; nooit gooien.
 function loketSchaduw(bron, datum, tekst) {
   if (!AN) return;
@@ -10156,6 +10183,7 @@ async function loketOchtendEditie(ctx) {
   const t = ovisAms(), dag = ctx && ctx.datum ? ctx.datum : t.datum;
   // na 07:00 (keten liep achter) geen rij meer: de briefing is dan al gemaakt; de regels blijven voor de avond of morgen (niet gemarkeerd)
   if (dag === t.datum && t.uur * 60 + t.min >= 7 * 60) return { ok: true, al_gedaan: true, detail: { te_laat: true } };
+  await loketPakjesMeld('ochtend', dag);   // wv3882: Pakjes meldt vlak vóór de editie
   await appNieuwsKeten.catch(function () {});
   const regels = AN.editieRegels(appNieuwsLees(), 'ochtend', dag, Date.now());
   if (!regels.length) {
@@ -10181,6 +10209,8 @@ async function loketAvondTik(opt) {
   try {
     await appNieuwsKeten.catch(function () {});
     if (!AN.avondMoment(klok, t.datum, appNieuwsLees())) return null;
+    await (o.pakjes || loketPakjesMeld)('avond', t.datum);   // wv3882: Pakjes meldt vlak vóór de editie
+    await appNieuwsKeten.catch(function () {});
     const regels = AN.editieRegels(appNieuwsLees(), 'avond', t.datum, o.nu || Date.now());
     if (!regels.length) {
       await appNieuwsWijzig(function (s, nu) { return AN.editieMarkeer(s, 'avond', t.datum, [], nu); });
@@ -27415,6 +27445,9 @@ const beleggenNieuws = (function () {
       haalKoers: async function (url, accept) { const r = await H.veiligHaal(url, { ua: BELEGGEN_KOERS_UA }, accept); return r.body; },
       claude: harvesterClaude, klok: ovisAms,
       bericht: async function (tekst, sleutel) {
+        // wv3882 (2C59 fase 3): eerst het loket (avondeditie); het losse bericht pas weg als de regel al eens in een editie stond en de schuif aan is
+        const l = await loketOvergang({ app: 'beleggen', onderwerp: 'week', laan: 'editie', editie: 'eerstvolgende', datum: ovisAms().datum, tekst: tekst, doel: { scherm: 'beleggen' } });
+        if (l.overgezet) return { ok: true, loket: true };
         const r = await berichtIntern({ kanaal: 'hoofd', bron: 'beleggen-week', klasse: 'normaal', soort: 'dag', tekst: tekst, sleutel: sleutel });
         return { ok: !!(r && r.status === 200 && r.j && r.j.ok), id: r && r.j && r.j.id };
       },
