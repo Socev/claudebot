@@ -6194,6 +6194,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/agenda/reeks', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/te-lezen']);   // wv2245: afvinken of bewaren = David die leest   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });
 APP_GLIJD_ROUTES.add('POST /app/nieuws/gezien');   // wv3689: iets in het loket gezien = David die leest
+['POST /app/dagplan/veeg', 'POST /app/dagplan/weg', 'POST /app/dagplan/erbij'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv3906: David die zijn dag regelt
 APP_GLIJD_ROUTES.add('POST /app/briefing/punt');   // wv3685: een tik onder een briefingpunt = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/voor-jou/woord');   // wv3250: een steekwoordkeuze is David die werkt   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
@@ -12146,7 +12147,7 @@ async function appVandaagRoute(req, res, a) {
   try { d = await appVandaag(); } catch (e) { logError('app-vandaag', e); return appWeiger(res, 503, 'je dag is nu niet te lezen', 'vandaag fout'); }
   appStuur(res, 200, { ok: true, vandaag: d.vandaag, morgen: d.morgen, agenda: d.agenda,
     acties: appActiesNu(d.acties), concepten: d.concepten, voorwerk: d.voorwerk,
-    fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
+    fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString(), dagplan: typeof dagplanStand === 'function' ? dagplanStand() : null });   // wv3906: vers, buiten de cache
 }
 
 // ── Knoppen bij het actielijstje (wv173; bouwplan § 4.9): dezelfde knoppen als onder het ochtendlijstje in Telegram ──
@@ -16531,6 +16532,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/modellen') return appModellen(req, res);
         if (route === 'POST /app/modellen') return appModellenZet(req, res, reg, a, s, d);
         if (route === 'GET /app/vandaag') return appVandaagRoute(req, res, a);
+        if (route === 'POST /app/dagplan/veeg' || route === 'POST /app/dagplan/weg' || route === 'POST /app/dagplan/erbij') return appDagplanRoute(req, res, a, route, d);   // wv3906
         if (route === 'GET /app/praktijken') return appPraktijkenRoute(req, res, a);
         if (route === 'GET /app/cijfer-meester/rapporten' || route === 'POST /app/cijfer-meester/rapport') return appCmRapportRoute(req, res, a, route, d);   // wv3729: Cijfer-Meester › Rapporten
         if (route === 'GET /app/projecten') return appProjectenRoute(req, res, a);   // wv373
@@ -17532,7 +17534,8 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'facturen-sepa-door',   // wv2465: SEPA-batch Tolgaarde zelf naar nogbetalen@; hoofdkanaal, soort dag (zet de aanroep zelf)
   'facturen-nogbetalen',  // wv3369: betaalverzoek naar Cynthia (nogbetalen@) niet of onzeker verstuurd, dagplafond; hoofdkanaal, soort dag
   'apps-avond',           // wv3815: avondeditie "Uit je Apps" van het redactie-loket (20:30–22:29, alleen bij nieuws); hoofdkanaal, soort dag
-  'pot-antwoord']);       // wv3677/wv3765: herstelbericht na een mislukte Ja op de POT-aantalkaart; hoofdkanaal, soort dag (mislukte handeling op Davids knop)
+  'pot-antwoord',          // wv3677/wv3765: herstelbericht na een mislukte Ja op de POT-aantalkaart; hoofdkanaal, soort dag (mislukte handeling op Davids knop)
+  'herinnering-david']);  // wv3906: Davids eigen herinnering uit Zet erbij (Vandaag te doen), op zijn tijdstip; hoofdkanaal, soort dag       // wv3677/wv3765: herstelbericht na een mislukte Ja op de POT-aantalkaart; hoofdkanaal, soort dag (mislukte handeling op Davids knop)
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
 const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
@@ -17540,7 +17543,7 @@ const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
 // in Telegram tikte David 17 van 18 regels aan (mediaan 7 min), in de app 28 van 80 (mediaan 289 min).
 // wv3719 (3C04, David Ja 21-11 13:22): heartbeat = dag. 11 van de 19 heartbeat-berichten (afval, "morgen laatste dag") kwamen
 // als archief binnen, zonder seintje. Een stille ronde (NIETS) komt hier nooit: de n8n-Heartbeat stuurt dan niets.
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'beleggen-waarom': 'dag', 'pot-antwoord': 'dag', 'apps-avond': 'dag', 'pot-loonrun': 'dag' };
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'beleggen-waarom': 'dag', 'pot-antwoord': 'dag', 'apps-avond': 'dag', 'herinnering-david': 'dag', 'pot-loonrun': 'dag' };
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
@@ -24416,6 +24419,79 @@ async function weerAvondTik() {
   finally { weerAvondBezig = false; }
 }
 if (weerOchtend && SERVER_ECHT) { setInterval(function () { weerAvondTik(); }, 5 * 60000).unref(); }
+// ── Dagplan in Vandaag te doen + Zet erbij (wv3906, nr 456 = 3C156, David Ja 22-11 18:15; ontwerp mk-scripts/wv3906/ontwerp.md) ──
+// GET /app/vandaag krijgt `dagplan` (vers uit heartbeat.md § Dagplan vandaag, buiten de 3-min-cache, plus Davids eigen herinneringen).
+// POST /app/dagplan/veeg {sleutel} = "- [x] … — weggeveegd door David" (alleen een regel die nog "- [ ]" is, niet in een tikvenster);
+// POST /app/dagplan/weg {id} = eigen herinnering weg; POST /app/dagplan/erbij {tekst} = herinnering op een tijdstip (tijd zonder
+// taalmodel, dagplan-app.js tijdUit). Eigen klok elke minuut (echte pod, rol primair): rijp = bericht in het hoofdgesprek via
+// berichtIntern (bron herinnering-david, soort dag = met seintje; sleutel per herinnering = geen dubbele bij een herstart).
+const DAGPLAN_MOD = (function () { try { return require(path.join(__dirname, 'dagplan-app.js')); } catch (e) { logError('dagplan-app', e); return null; } })();
+const DAGPLAN_ERBIJ_DIR = serverPad('dagplan-erbij', process.env.DAGPLAN_ERBIJ_DIR, '/opt/data/scripts-staat/dagplan-erbij', serverProefDeel('dagplan-erbij'));
+const dagplanErbij = DAGPLAN_MOD && DAGPLAN_MOD.maak({
+  staatPad: path.join(DAGPLAN_ERBIJ_DIR, 'erbij.json'),
+  melden: async function (tekst, sl) {
+    const r = await berichtIntern({ kanaal: 'hoofd', bron: 'herinnering-david', klasse: 'normaal', soort: 'dag', tekst: tekst, sleutel: sl });
+    if (!r || r.status !== 200) throw new Error('bericht niet bezorgd (' + (r && r.status) + ')');
+  },
+  boxRij: function (t) { return ovisBoxRij(t); },
+  log: function (o) { schrijfLog(nu() + ' dagplan ' + velden(o)); },
+});
+function dagplanPad() { return path.join(appProjVault(), 'heartbeat.md'); }
+function dagplanStand() {
+  if (!DAGPLAN_MOD) return null;
+  const vandaag = appYmd(Date.now());
+  let plan = { datum: null, regels: [] }, fout = null;
+  try { plan = DAGPLAN_MOD.lees(VV().lees(dagplanPad(), 'utf8'), vandaag); } catch (e) { logError('dagplan-lees', e); fout = 'het dagplan is nu niet te lezen'; }
+  let zelf = [];
+  try { zelf = dagplanErbij ? dagplanErbij.zichtbaar(Date.now()) : []; } catch (e) { logError('dagplan-erbij', e); fout = fout || 'je eigen herinneringen zijn nu niet te lezen'; }
+  return { datum: plan.datum, vandaag: vandaag, regels: plan.regels, zelf: zelf, fout: fout };
+}
+async function appDagplanRoute(req, res, a, route, d) {
+  if (!DAGPLAN_MOD || !dagplanErbij) return appWeiger(res, 404, 'het dagplan staat niet in deze versie van de pod', 'dagplan geen module');
+  if (!appTeller('dagplan', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60); probeer het straks opnieuw', 'grens dagplan');
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later opnieuw', 'rol passief');
+  const terug = function (extra) { return appStuur(res, 200, Object.assign({ ok: true, dagplan: dagplanStand() }, extra || {})); };
+  if (route === 'POST /app/dagplan/veeg') {
+    const sl = String(d.sleutel || '');
+    if (!/^[0-9a-f]{12}$/.test(sl)) return appWeiger(res, 400, 'ongeldige regel', 'dagplan veeg sleutel');
+    const a2 = DAGPLAN_MOD.ams(Date.now()), hm = String(a2.h).padStart(2, '0') + ':' + String(a2.m).padStart(2, '0');
+    let uit = null;
+    try {
+      VV().wijzig(dagplanPad(), function (oud) {
+        const r = DAGPLAN_MOD.veeg(oud, sl, { vandaag: appYmd(Date.now()), hhmm: hm, nuMin: a2.h * 60 + a2.m });
+        uit = r; return r.tekst || null;
+      }, { grendel: 5 });
+    } catch (e) { logError('dagplan-veeg', e); return appWeiger(res, 503, 'wegvegen lukte nu niet; probeer het zo opnieuw', 'dagplan veeg fout'); }
+    if (!uit || !uit.tekst) return appWeiger(res, (uit && uit.status) || 409, (uit && uit.fout) || 'het dagplan veranderde net; ververs', 'dagplan veeg ' + ((uit && uit.status) || 'race'));
+    res._app.reden = 'dagplan veeg';
+    schrijfLog(nu() + ' dagplan veeg ' + sl);   // geen tekst in het log
+    return terug();
+  }
+  if (route === 'POST /app/dagplan/weg') {
+    const id = String(d.id || '');
+    if (!/^[0-9a-f]{12}$/.test(id)) return appWeiger(res, 400, 'ongeldige herinnering', 'dagplan weg id');
+    let r;
+    try { r = dagplanErbij.weg(id); } catch (e) { logError('dagplan-weg', e); return appWeiger(res, 503, 'weghalen lukte nu niet', 'dagplan weg fout'); }
+    if (!r.ok) return appWeiger(res, r.status, r.fout, 'dagplan weg ' + r.status);
+    res._app.reden = 'dagplan weg';
+    return terug();
+  }
+  if (route === 'POST /app/dagplan/erbij') {
+    let r;
+    try { r = dagplanErbij.erbij(String(d.tekst == null ? '' : d.tekst)); } catch (e) { logError('dagplan-erbij', e); return appWeiger(res, 503, 'erbij zetten lukte nu niet', 'dagplan erbij fout'); }
+    if (!r.ok) return appWeiger(res, r.status, r.fout, 'dagplan erbij ' + r.status);
+    res._app.reden = 'dagplan erbij';
+    return terug({ gezet: { tijd: r.tijd, dag: r.dag, tekst: r.tekst } });
+  }
+  return appWeiger(res, 404, 'onbekend', 'dagplan route');
+}
+let dagplanTikBezig = false;
+async function dagplanTik() {
+  if (!dagplanErbij || !SERVER_ECHT || !rolPrimair() || dagplanTikBezig) return;
+  dagplanTikBezig = true;
+  try { await dagplanErbij.tik(); } catch (e) { logError('dagplan-tik', e); } finally { dagplanTikBezig = false; }
+}
+if (dagplanErbij && SERVER_ECHT) { setInterval(function () { dagplanTik(); }, 60000).unref(); }
 // ── Contactringen: zondagseintje binnenste kring (wv2894, idee 19d meetpunt 6; ontwerp mk-scripts/wv2876/ontwerp.md, David JA 10-11) ──
 // Nachtketenstap contactringen (zondag, na weer-ochtend): alleen de DATUM van het laatste 1-op-1-appje via het zoekluik (datums_voor),
 // nummers vers uit de contacten-webhook (nooit gelogd of bewaard); hooguit één rij bron 'contactringen' in ochtend_buffer. Logica in
