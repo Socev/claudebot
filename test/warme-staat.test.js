@@ -252,3 +252,49 @@ test('witte lijst gelijk aan die van de nachtbundel (bin/podstaat-offsite.sh)', 
   for (const n of ['transacties', 'facturen', 'intake', 'mailman', 'ghawa', 'beleggen', 'imagine', 'pma', 'zakelijk', 'vastgoed', 'docplan', 'register', 'tibber', 'ah', 'nmbrs', 'openai', 'reken'])
     assert.ok(dbs.includes(n), 'db ' + n);
 });
+
+// wv4005 (fase 1d): gegevenstabellen van n8n elk uur, versleuteld, zelfde vorm als de nachtkopie (uitwijk-n8n.mjs tabellen)
+function nepN8n(rijenPerTabel, telling) {
+  return async function (pad) {
+    telling.n++;
+    if (telling.kapot) throw new Error('n8n http 503');
+    const u = new URL('http://x' + pad);
+    if (u.pathname === '/data-tables') return { data: [{ id: 'TabelEen0000001', name: 'sms_inbox', columns: [{ name: 'tekst', type: 'string' }] }, { id: 'TabelTwee000002', name: 'chat_log', columns: [] }], nextCursor: null };
+    const m = /^\/data-tables\/([A-Za-z0-9]+)\/rows$/.exec(u.pathname); if (!m) throw new Error('onbekend pad ' + pad);
+    const alle = rijenPerTabel[m[1]] || []; const start = Number(u.searchParams.get('cursor') || 0); const stuk = alle.slice(start, start + 2);
+    return { data: stuk, nextCursor: start + 2 < alle.length ? String(start + 2) : null };
+  };
+}
+test('n8n-tabellen (wv4005): elk uur versleuteld naar de R230, alle pagina\'s, nooit klare tekst op schijf; fout = zichtbaar en later opnieuw', async function () {
+  const o = opzet(); standin(o, 'abcdef123456', 'i1', 'i1');
+  const MERK = 'RIJMERK_' + 'z'.repeat(20);
+  const rijen = { TabelEen0000001: [1, 2, 3, 4, 5].map(function (i) { return { id: i, tekst: MERK + i }; }), TabelTwee000002: [] };
+  const tel = { n: 0 };
+  const m = W.maak(o.opties({ n8nApi: nepN8n(rijen, tel) }));
+  const r = await m.ronde();
+  assert.strictEqual(r.soorten['n8n-tabellen'], 'ok', JSON.stringify(r));
+  const j = JSON.parse(require('zlib').gunzipSync(open(o, path.join(o.nep, 'n8n-tabellen.age'))).toString());
+  assert.strictEqual(j.count, 2); assert.strictEqual(j.dataTables[0].naam, 'sms_inbox'); assert.strictEqual(j.dataTables[0].aantal, 5, 'alle pagina\'s');
+  assert.deepStrictEqual(j.dataTables[0].kolommen, [{ name: 'tekst', type: 'string' }]); assert.strictEqual(j.dataTables[0].rijen[4].tekst, MERK + '5');
+  if (echt) assert.strictEqual(cp.execFileSync('bash', ['-c', 'grep -rla "' + MERK + '" "$1" || true', '_', path.join(o.thuis, 'uitwijk-warm')]).toString().trim(), '', 'klare tekst op schijf');
+  assert.match(log(o), / ontvang n8n-tabellen [0-9a-f]{64} /);
+  // binnen het uur: geen nieuwe API-ronde, niets opnieuw geduwd
+  const n1 = tel.n; o.s.klok += 5 * 60e3; await m.ronde();
+  assert.strictEqual(tel.n, n1, 'binnen het uur geen nieuwe API-aanroep');
+  // na een uur: opnieuw; n8n weg → fout zichtbaar, vorige kopie blijft op de R230, pas na 15 min nieuwe poging
+  tel.kapot = true; o.s.klok += 60 * 60e3; const voor = fs.readFileSync(path.join(o.nep, 'n8n-tabellen.age'));
+  const r2 = await m.ronde();
+  assert.strictEqual(r2.soorten['n8n-tabellen'], 'fout'); assert.match(m.stand().soorten['n8n-tabellen'].fout, /n8n-API/); assert.strictEqual(r2.uitkomst, 'deels');
+  assert.ok(voor.equals(fs.readFileSync(path.join(o.nep, 'n8n-tabellen.age'))), 'vorige kopie blijft staan');
+  const n2 = tel.n; o.s.klok += 5 * 60e3; await m.ronde(); assert.strictEqual(tel.n, n2, 'na een fout niet elke 5 min');
+  tel.kapot = false; o.s.klok += 15 * 60e3; const r3 = await m.ronde();
+  assert.strictEqual(r3.soorten['n8n-tabellen'], 'ok'); assert.strictEqual(m.stand().soorten['n8n-tabellen'].fout, undefined);
+});
+test('n8n-tabellen: passief en kant vps vragen de n8n-API niet (kruisproef rolpoort)', async function () {
+  const o = opzet(); const tel = { n: 0 };
+  o.s.primair = false; await W.maak(o.opties({ n8nApi: nepN8n({}, tel) })).ronde();
+  assert.strictEqual(tel.n, 0, 'passief');
+  const o2 = opzet(); o2.s.kant = 'vps'; const tel2 = { n: 0 };
+  await W.maak(o2.opties({ n8nApi: nepN8n({}, tel2) })).ronde();
+  assert.strictEqual(tel2.n, 0, 'kant vps');
+});

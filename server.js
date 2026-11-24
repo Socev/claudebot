@@ -30389,7 +30389,15 @@ var warmeStaat = (function () {   // var (geen const): rolInfo() hierboven leest
       releaseDir: function () { return __dirname; },
       releaseSha: function () { const b = path.basename(__dirname); return /^[0-9a-f]{7,40}$/.test(b) ? b : null; },
       log: function (t) { schrijfLog(nu() + ' warm ' + velden({ melding: String(t).slice(0, 160) })); },
-      hartslag: function (h) { return appSbRpc('mk_hartslag_stempel', { p_component: 'warme_staat', p_gemeten_rijen: h.n, p_bevindingen: h.bevindingen }); } });
+      hartslag: function (h) { return appSbRpc('mk_hartslag_stempel', { p_component: 'warme_staat', p_gemeten_rijen: h.n, p_bevindingen: h.bevindingen }); },
+      // wv4005 (fase 1d): gegevenstabellen van n8n elk uur mee (n8n-API van deze pod; time-out ruimer dan appN8n: rijen in pagina's van 250)
+      n8nApi: async function (pad) {
+        const b = appN8nBasis(), k = process.env.N8N_API_KEY;
+        if (!b || !k) throw new Error('n8n-API niet ingesteld');
+        const r = await fetch(b + '/api/v1' + pad, { headers: { 'X-N8N-API-KEY': k, accept: 'application/json' }, signal: AbortSignal.timeout(60000) });
+        if (!r.ok) throw new Error('n8n http ' + r.status);
+        return r.json();
+      } });
   } catch (e) { logError('warme-staat', e); return null; }
 })();
 if (warmeStaat && SERVER_ECHT === true) {

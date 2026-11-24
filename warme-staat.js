@@ -13,6 +13,9 @@
  *   app-logs   de *.jsonl*-logboeken van socev-app-data                elke ronde (5 min) als ze wijzigden
  *   kern       ZELFDE witte lijst als de nachtbundel (bin/podstaat-offsite.sh) + geheugen van Socev en de machinekamer
  *   db-<naam>  consistente kopie per SQLite-databank (VACUUM INTO, quick_check), zelfde lijst als de nachtbundel, alleen als hij wijzigde
+ *   n8n-tabellen (wv4005, fase 1d; alleen Olares) elk uur alle gegevenstabellen van n8n via de n8n-API (kolommen + rijen), zelfde vorm
+ *              als de nachtkopie n8n-backup-datatables-<dag>.json en als uitwijk-n8n.mjs `tabellen` inleest; nooit in klare tekst op schijf
+ *              (JSON → gzip → age via een pijp). De R230 kan hem pas bij een wissel openen.
  *   geheimen   NAAM=waarde-regels uit uitwijk-vps/geheimen/sleutels.tsv (zonder 'nieuw'): pod-bestanden (databanksleutels, knopsleutel,
  *              rclone.conf), chart-waarden en wat de pod van de kluis in zijn omgeving heeft. Kluiswaarden die niet in de omgeving
  *              staan zitten versleuteld in de databankkopie op de R230 (de kluissleutel zit in deze bundel). Hooguit eens per dag, of
@@ -58,6 +61,8 @@ const APP_MIN_MS = 15000;          // app-data hooguit eens per 15 s (de laatste
 const GEHEIM_MAX_MS = 24 * 3600e3; // geheimenbundel hooguit een dag oud
 const STANDIN_MS = 30 * 60e3;      // stand-in hooguit eens per 30 min opnieuw proberen na een fout
 const TERUG_MS = 60e3;
+const N8N_TABELLEN_MS = 3600e3;    // wv4005: gegevenstabellen van n8n elk uur (bouwplan § 4.2: "≤ 1 uur oud bij een noodwissel")
+const N8N_TABELLEN_FOUT_MS = 15 * 60e3;   // na een fout (n8n even weg) niet elke 5 min opnieuw de hele API af
 
 // glob zonder afhankelijkheid: '*' binnen één padstuk, '**' = alles eronder
 function globNaarRe(g) {
@@ -346,6 +351,49 @@ function maak(o) {
     return duw('geheimen');
   }
 
+  // ── n8n-tabellen (wv4005): alleen olares + actief, elk uur; de inhoud gaat via een pijp naar gzip | age (nooit klare tekst op schijf) ──
+  async function n8nAlle(pad) {   // paginering zoals n8n-kopie-offsite.mjs (cursor, limit 250)
+    const uit = []; let c = null, n = 0;
+    do {
+      const j = await o.n8nApi(pad + (pad.indexOf('?') >= 0 ? '&' : '?') + 'limit=250' + (c ? '&cursor=' + encodeURIComponent(c) : ''));
+      if (!j || !Array.isArray(j.data)) throw new Error('n8n-API gaf geen data-lijst');
+      uit.push.apply(uit, j.data); c = j.nextCursor || null;
+      if (++n > 400) throw new Error('paginering loopt niet af');
+    } while (c);
+    return uit;
+  }
+  async function n8nStroom() {
+    if (typeof o.n8nApi !== 'function') return 'geen';
+    const s = staat.soorten['n8n-tabellen'];
+    const wacht = s && s.fout ? N8N_TABELLEN_FOUT_MS : N8N_TABELLEN_MS;
+    if (s && nu() - (s.geprobeerd || 0) < wacht) return s.fout ? 'fout' : duw('n8n-tabellen');
+    const t0 = nu();
+    (staat.soorten['n8n-tabellen'] = staat.soorten['n8n-tabellen'] || {}).geprobeerd = t0;
+    let tekst, n = 0, rijen = 0;
+    try {
+      const lijst = await n8nAlle('/data-tables');
+      if (!lijst.length) throw new Error('0 gegevenstabellen');
+      const tabellen = [];
+      for (const t of lijst) {
+        if (!primair()) throw new Error('rol verloren');
+        if (!t || typeof t.id !== 'string' || !/^[A-Za-z0-9]{8,32}$/.test(t.id)) throw new Error('tabel zonder geldige id');
+        const r = await n8nAlle('/data-tables/' + encodeURIComponent(t.id) + '/rows');
+        rijen += r.length; n++;
+        tabellen.push({ id: t.id, naam: t.name, kolommen: t.columns || [], aantal: r.length, rijen: r });
+      }
+      tekst = JSON.stringify({ generatedAt: new Date(t0).toISOString(), bron: 'pod warme-staat.js (wv4005)', count: tabellen.length, dataTables: tabellen });
+    } catch (e) { staat.soorten['n8n-tabellen'].fout = 'n8n-API: ' + String(e.message || e).slice(0, 100); bewaar(); return 'fout'; }
+    const doel = path.join(uitMap, 'n8n-tabellen.age'), tmp = doel + '.tmp' + process.pid;
+    const z = await draai('bash', ['-c', 'set -o pipefail; nice -n 10 gzip -n -6 | "$AGE" -r "$ONTV" -o "$DOEL"'],
+      { invoer: tekst, timeout: 300000, env: { PATH: env.PATH || '/usr/bin:/bin', AGE: ageBin, ONTV: ontvanger, DOEL: tmp } });
+    tekst = null;
+    if (z.code !== 0) { try { fs.unlinkSync(tmp); } catch (e) { /* */ } staat.soorten['n8n-tabellen'].fout = 'inpakken faalde (' + z.code + ')'; bewaar(); return 'fout'; }
+    const vinger = crypto.createHash('sha256').update(String(n) + ':' + rijen + ':' + t0).digest('hex');
+    const k = klaarzetten('n8n-tabellen', tmp, doel, t0, vinger, n, { rijen: rijen });
+    k.geprobeerd = t0; bewaar();
+    return duw('n8n-tabellen');
+  }
+
   // ── stand-in: zelfde code en image als hier ──
   // Codex r2/r3: het image telt als gelijk als IMAGE_SHA (bouwcommit, in beide containers) van de stand-in gelijk is aan die van HIER. `start`
   // neemt de pin uit versies.env van de R230 (uitwijk-sync zet die elke nacht uit het versiebriefje van Olares). Volgorde: eerst het image
@@ -457,6 +505,7 @@ function maak(o) {
       if (!primair()) return { uitkomst: 'rol verloren', soorten: uit };
       if (k === 'olares') {
         try { uit.geheimen = await geheimenStroom(); } catch (e) { (staat.soorten.geheimen = staat.soorten.geheimen || {}).fout = String(e.message).slice(0, 120); uit.geheimen = 'fout'; }
+        if (primair()) { try { uit['n8n-tabellen'] = await n8nStroom(); } catch (e) { (staat.soorten['n8n-tabellen'] = staat.soorten['n8n-tabellen'] || {}).fout = String(e.message).slice(0, 120); uit['n8n-tabellen'] = 'fout'; } }
         if (o.standin !== false) { try { uit.standin = await standinRonde(); } catch (e) { uit.standin = 'fout'; } }
       }
       bewaar();
