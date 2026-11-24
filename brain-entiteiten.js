@@ -254,6 +254,163 @@ function fmOvisLijst(fm, veld) {
   return m[1].split(',').map(function (x) { return x.trim().replace(/^["']|["']$/g, '').trim(); }).filter(Boolean).slice(0, 10);
 }
 
+// ── wv4009 (besluitenpagina nr 496 = 3C196, David Ja 22-11-2026 18:19): mailcontact per partij ──
+// Bron 1: de mailkaarten (30_Conversaties/Mail/Mailkaarten: Organisaties/, Personen/ en de alfabetische registers voor wie minder mailde),
+// momentopname van de Takeout van 24-10-2026. Bron 2: het lees-luik (mail_zoeken, privé-Gmail, alleen lezen) voor de periode NA de kaart.
+// Koppeling: kaart.dossier = de pagina (of hoofdpagina) van de partij, 'mailkaart:' op die pagina, of een mailadres/domein uit haar kenmerken,
+// haar Google-contact of de pagina tegen kaart.adressen/kaart.domein. Niet gefilterd (Davids eigen scherm). Alleen datum, richting en onderwerp.
+const MAIL_PREFIX = '30_Conversaties/Mail/Mailkaarten/';
+const MAIL_MAPPEN = ['Organisaties', 'Personen', 'Register organisaties', 'Register personen'];
+const MAIL_TOON = 5;                 // laatste vijf wisselingen
+const MAIL_LUIK_MS = 30 * 60000;     // luikantwoord per partij 30 min geldig
+const MAIL_LUIK_CACHE_MAX = 100;
+const MAIL_LUIK_UUR = 60;            // hooguit zoveel luikvragen per uur (alle partijen samen)
+const MAIL_LUIK_DELEN = 4;           // vol (25) = venster halveren, hooguit zoveel vragen per partij
+const MAIL_TERMEN_MAX = 12;          // adressen + domeinen in één zoekvraag
+const MAIL_LUIK_MAX = 25;            // de grens van mail_zoeken
+const MAIL_LUIK_BUDGET_MS = 7000;    // na zoveel ms geen nieuwe luikvraag meer (de app-proxy wacht 25 s; één vraag duurt tot ± 14 s)
+// domeinen van gratis mail zijn geen partij (een kenmerk 'gmail.com' zou alles vangen)
+const MAIL_VRIJ = new Set(['gmail.com', 'googlemail.com', 'hotmail.com', 'hotmail.nl', 'outlook.com', 'outlook.nl', 'live.nl', 'live.com', 'msn.com',
+  'icloud.com', 'me.com', 'mac.com', 'yahoo.com', 'yahoo.nl', 'ziggo.nl', 'kpnmail.nl', 'kpnplanet.nl', 'planet.nl', 'home.nl', 'xs4all.nl', 'hetnet.nl',
+  'casema.nl', 'chello.nl', 'upcmail.nl', 'tele2.nl', 'online.nl', 'quicknet.nl', 'telfort.nl', 'zeelandnet.nl', 'unknown.email', 'proton.me', 'protonmail.com']);
+const ADRES_RE = /^[^@\s?&"<>(){}]+@[a-z0-9.-]+\.[a-z]{2,}$/;
+const DOMEIN_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/;
+function adresNorm(a) {
+  const s = String(a || '').trim().toLowerCase().replace(/^mailto:/, '');
+  const i = s.lastIndexOf('@');
+  if (i < 1) return null;
+  const v = s.slice(0, i).split('+')[0], d = s.slice(i + 1);
+  const x = v + '@' + d;
+  return ADRES_RE.test(x) && x.length <= 120 ? x : null;
+}
+function domeinNorm(d) { const s = String(d || '').trim().toLowerCase().replace(/^@/, '').replace(/\.$/, ''); return DOMEIN_RE.test(s) && s.length <= 80 && !MAIL_VRIJ.has(s) ? s : null; }
+function adressenUit(tekst) {
+  const uit = [];
+  String(tekst || '').split(/[,;]/).forEach(function (deel) { const a = adresNorm(adresVan(deel)); if (a && uit.indexOf(a) < 0) uit.push(a); });
+  return uit;
+}
+// "[[30_Conversaties/Mail/Mailkaarten/Personen/X]]" of "[[pad|tekst]]" → "pad.md" (of null)
+function linkPad(v) {
+  const m = /\[\[([^\]|#]+)/.exec(String(v || ''));
+  if (!m) return null;
+  const p = m[1].trim();
+  return p.split('/').indexOf('..') >= 0 ? null : (/\.md$/i.test(p) ? p : p + '.md');
+}
+// Kaartregel: "- 2026-10-19 · **Onderwerp** · 2× ⇄ · [[…|tekst]] · `gmail:1a15…` — snippet" (richting ⇄ heen en weer, ← ontvangen, → verstuurd)
+const MAIL_REGEL_RE = /^- (\d{4}-\d{2}-\d{2}) · \*\*(.*?)\*\*\s+(?:·\s+(\d+)×\s+)?([⇄←→])\s.*?`gmail:([0-9a-f]{6,24})`/;
+function mailRegel(r) {
+  const m = MAIL_REGEL_RE.exec(r);
+  return m ? { datum: m[1], onderwerp: m[2].slice(0, 200), n: m[3] ? Number(m[3]) : 1, richting: m[4], id: m[5] } : null;
+}
+function getal(v) { const n = Number(String(v || '').replace(/^"|"$/g, '')); return Number.isInteger(n) && n >= 0 ? n : 0; }
+function dagVeld(v) { const s = String(v || '').replace(/^"|"$/g, '').slice(0, 10); return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null; }
+// Eén mailkaart → { pad, naam, soort, domein, adressen, dossier, mails, gesprekken, laatste, momentopname, regels[≤ 5], ids (Set) } | null
+function mailKaartLees(ruw, pad) {
+  const fm = frontmatter(ruw);
+  if (fmVeld(fm, 'type') !== 'mailkaart') return null;
+  const soort = fmVeld(fm, 'soort');
+  if (soort !== 'organisatie' && soort !== 'persoon') return null;
+  const regels = [], ids = new Set();
+  String(ruw).split('\n').forEach(function (r) {
+    if (r.charAt(0) !== '-') return;
+    const x = mailRegel(r);
+    if (!x) return;
+    ids.add(x.id);
+    if (regels.length < MAIL_TOON) regels.push(x);
+  });
+  const am = /^adressen:\s*\[(.*)\]\s*$/m.exec(fm);
+  return { pad: pad, naam: fmVeld(fm, 'naam'), soort: soort, domein: domeinNorm(fmVeld(fm, 'domein')),
+    adressen: am ? (am[1].match(/"([^"]+)"/g) || []).map(function (x) { return adresNorm(x.slice(1, -1)); }).filter(Boolean) : [],
+    dossier: linkPad(fmVeld(fm, 'dossier')), mails: getal(fmVeld(fm, 'mails')), gesprekken: getal(fmVeld(fm, 'gesprekken')),
+    laatste: dagVeld(fmVeld(fm, 'laatste')), momentopname: dagVeld(fmVeld(fm, 'updated')), regels: regels, ids: ids };
+}
+// Een register (Register organisaties/X.md, Register personen/X.md): elk kopje één partij; onder het kopje "N mails, M gesprekken · adres, domein"
+function mailRegisterLees(ruw, pad) {
+  const fm = frontmatter(ruw);
+  if (fmVeld(fm, 'type') !== 'mailkaart' || !/^register/.test(fmVeld(fm, 'soort'))) return [];
+  const mom = dagVeld(fmVeld(fm, 'updated'));
+  const uit = [];
+  let cur = null;
+  String(ruw).split('\n').forEach(function (r) {
+    if (/^## /.test(r)) {
+      cur = { pad: pad, naam: r.slice(3).trim(), soort: /personen/.test(fmVeld(fm, 'soort')) ? 'persoon' : 'organisatie', domein: null, adressen: [], dossier: null,
+        mails: 0, gesprekken: 0, laatste: null, momentopname: mom, regels: [], ids: new Set(), register: true };
+      uit.push(cur);
+      return;
+    }
+    if (!cur) return;
+    const tm = /^(\d+) mails?, (\d+) gesprekk?e?n? · (.+)$/.exec(r.trim());
+    if (tm && !cur.mails) {
+      cur.mails = Number(tm[1]); cur.gesprekken = Number(tm[2]);
+      tm[3].split(/,\s*/).forEach(function (w) {
+        if (w.indexOf('@') >= 0) { const a = adresNorm(w); if (a && cur.adressen.indexOf(a) < 0) cur.adressen.push(a); }
+        else if (!cur.domein) cur.domein = domeinNorm(w);
+      });
+      return;
+    }
+    if (r.charAt(0) === '-') {
+      const x = mailRegel(r);
+      if (!x) return;
+      cur.ids.add(x.id);
+      if (!cur.laatste || x.datum > cur.laatste) cur.laatste = x.datum;
+      if (cur.regels.length < MAIL_TOON) cur.regels.push(x);
+    }
+  });
+  return uit.filter(function (x) { return x.mails > 0 && (x.domein || x.adressen.length); });
+}
+// Davids eigen adressen (router.json eigen_adressen): ook met +achtervoegsel, en dezelfde naam vóór de @ bij een domein van een eigen adres
+// (d.schaap@huisartsentolgaarde.nl naast dokterschaap@huisartsentolgaarde.nl)
+function eigenToets(lijst) {
+  const vol = new Set(), namen = new Set(), domeinen = new Set();
+  (Array.isArray(lijst) ? lijst : []).forEach(function (a) {
+    const x = adresNorm(a); if (!x) return;
+    vol.add(x); const i = x.lastIndexOf('@'); namen.add(x.slice(0, i)); domeinen.add(x.slice(i + 1));
+  });
+  return function (a) {
+    const x = adresNorm(a); if (!x) return false;
+    if (vol.has(x)) return true;
+    const i = x.lastIndexOf('@');
+    return namen.has(x.slice(0, i)) && domeinen.has(x.slice(i + 1));
+  };
+}
+// Zoekvraag voor het lees-luik: ontvangen van de partij of door David aan de partij verstuurd, na 'vanaf' (JJJJ-MM-DD) en vóór 'tot' (optioneel),
+// zonder promoties/sociaal/forums (die staan ook niet op de kaarten)
+function mailZoekvraag(adressen, domeinen, vanaf, tot) {
+  const t = adressen.concat(domeinen);
+  if (!t.length) return null;
+  const of = function (pre) { return t.map(function (x) { return pre + x; }).join(' OR '); };
+  return '(' + of('from:') + ' OR (from:me (' + of('to:') + '))) after:' + vanaf.replace(/-/g, '/') + (tot ? ' before:' + tot.replace(/-/g, '/') : '') +
+    ' -category:promotions -category:social -category:forums';
+}
+// Luikmails → per gesprek { id, datum, richting, onderwerp, n } en het aantal mails; alleen mails strikt na 'vanaf' (de kaartdag zelf telt de kaart)
+// waarin de partij echt voorkomt: als afzender (←) of, bij een mail van David, als ontvanger (→). Eigen adressen tellen nooit als partij.
+function mailLuikTel(mails, ken, eigen, vanaf) {
+  const hoort = function (a) {
+    if (!a || eigen(a)) return false;
+    if (ken.adressen.indexOf(a) >= 0) return true;
+    const d = a.slice(a.lastIndexOf('@') + 1);
+    return ken.domeinen.some(function (x) { return d === x || d.endsWith('.' + x); });
+  };
+  const draden = new Map(), gezien = new Set();
+  let n = 0;
+  (Array.isArray(mails) ? mails : []).forEach(function (m) {
+    if (!m || typeof m !== 'object' || gezien.has(String(m.id))) return;
+    const dag = /^\d{4}-\d{2}-\d{2}$/.test(String(m.dag_lokaal || '')) ? String(m.dag_lokaal) : String(m.datum || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dag) || dag <= vanaf) return;
+    const van = adresNorm(adresVan(m.van));
+    let r = null;
+    if (hoort(van)) r = '←';
+    else if ((eigen(van) || /SENT/.test(String(m.labels || ''))) && adressenUit(m.aan).some(hoort)) r = '→';
+    if (!r) return;
+    gezien.add(String(m.id)); n++;
+    const tid = /^[0-9a-f]{6,24}$/.test(String(m.thread_id || '')) ? String(m.thread_id) : String(m.id);
+    const d = draden.get(tid);
+    if (!d) draden.set(tid, { id: tid, datum: dag, richting: r, onderwerp: String(m.onderwerp || '').slice(0, 200), n: 1 });
+    else { d.n++; if (dag > d.datum) d.datum = dag; if (d.richting !== r) d.richting = '⇄'; }
+  });
+  return { mails: n, draden: draden };
+}
+
 function maak(o) {
   const rpc = o.rpc, lees = o.lees, vault = o.vault, facturenPad = o.facturenPad || null;
   const bankPad = o.bankPad || null;   // wv3298: privébank (bank-archief transacties.sqlite), alleen lezen
@@ -900,6 +1057,207 @@ function maak(o) {
       })) } };
   }
 
+  // ── wv4009 (3C196): mail per partij — mailkaarten eerst, het lees-luik alleen na de jongste kaart (begrensd, 30 min cache) ──
+  const luik = typeof o.luik === 'function' ? o.luik : null;   // body → json (actie mail_zoeken), alleen lezen
+  const eigenAdressen = typeof o.eigenAdressen === 'function' ? o.eigenAdressen : function () { return []; };
+  const mailMs = o.mailIndexMs > 0 ? o.mailIndexMs : 6 * 3600000;   // index hooguit eens per 6 uur opnieuw (of eerder als een map verandert)
+  let mailIdx = null, mailIdxBezig = null;
+  const luikCache = new Map(), luikBezig = new Map();
+  let luikTik = [];
+  function mailSig() {
+    const fs = require('fs');
+    return MAIL_MAPPEN.map(function (m) { try { const d = path.join(vault, MAIL_PREFIX + m); return fs.statSync(d).mtimeMs + ':' + fs.readdirSync(d).length; } catch (e) { return '-'; } }).join('|');
+  }
+  function mailIndex() {
+    const sig = mailSig();
+    if (mailIdx && mailIdx.sig === sig && nu() - mailIdx.t < mailMs) return mailIdx;
+    const fs = require('fs');
+    const kaarten = [];
+    MAIL_MAPPEN.forEach(function (m) {
+      let namen = [];
+      try { namen = fs.readdirSync(path.join(vault, MAIL_PREFIX + m)).filter(function (n) { return /\.md$/i.test(n) && n.indexOf('/') < 0; }).sort(); } catch (e) { return; }
+      namen.forEach(function (n) {
+        const p = MAIL_PREFIX + m + '/' + n;
+        let ruw; try { ruw = lees(path.join(vault, p)); } catch (e) { return; }
+        if (/^Register /.test(m)) mailRegisterLees(ruw, p).forEach(function (x) { kaarten.push(x); });
+        else { const x = mailKaartLees(ruw, p); if (x) kaarten.push(x); }
+      });
+    });
+    const opDossier = new Map(), opPad = new Map(), opAdres = new Map(), opDomein = new Map();
+    const bij = function (mp, s, x) { if (!s) return; const l = mp.get(s); if (l) { if (l.indexOf(x) < 0) l.push(x); } else mp.set(s, [x]); };
+    let mom = null;
+    kaarten.forEach(function (x) {
+      bij(opDossier, x.dossier, x);
+      if (!x.register) bij(opPad, x.pad, x);
+      x.adressen.forEach(function (a) { bij(opAdres, a, x); });
+      if (x.soort === 'organisatie') bij(opDomein, x.domein, x);
+      if (x.momentopname && (!mom || x.momentopname > mom)) mom = x.momentopname;
+    });
+    mailIdx = { sig: sig, t: nu(), kaarten: kaarten.length, opDossier: opDossier, opPad: opPad, opAdres: opAdres, opDomein: opDomein, momentopname: mom };
+    return mailIdx;
+  }
+  // middernacht (Nederlandse tijd) van een dag als epoch-ms
+  function amsMiddernacht(ymd) {
+    for (const off of ['+01:00', '+02:00']) { const t = Date.parse(ymd + 'T00:00:00' + off); if (amsDag(t) === ymd && amsDag(t - 1) !== ymd) return t; }
+    return Date.parse(ymd + 'T00:00:00Z');
+  }
+  function dagNa(ymd) { return amsDag(amsMiddernacht(ymd) + 36 * 3600000); }
+  // Lees-luik over [van, tot) (epoch-s); vol (25) = venster halveren, hooguit MAIL_LUIK_DELEN vragen. → { mails[], vol, vragen } | { fout }
+  async function luikVenster(adressen, domeinen, vanS, totS) {
+    const ramen = [[vanS, totS]], alle = [];
+    let vragen = 0, vol = false;
+    const start = nu();
+    while (ramen.length) {
+      if (vragen > 0 && nu() - start > MAIL_LUIK_BUDGET_MS) { vol = true; break; }   // de rest van het venster niet gelezen: "minstens"
+      const r = ramen.shift();
+      luikTik = luikTik.filter(function (t) { return nu() - t < 3600000; });
+      if (luikTik.length >= MAIL_LUIK_UUR) return { fout: 'Gmail is dit uur al vaak gevraagd; de laatste weken komen er later bij.' };
+      luikTik.push(nu()); vragen++;
+      const q = mailZoekvraag(adressen, domeinen, String(r[0]), String(r[1]));
+      let j;
+      try { j = await luik({ actie: 'mail_zoeken', query: q, max: MAIL_LUIK_MAX }); } catch (e) { return { fout: 'Gmail is nu niet te lezen.' }; }
+      if (!j || j.fout || j.melding || !Array.isArray(j.mails)) return { fout: 'Gmail gaf geen bruikbaar antwoord.' };
+      j.mails.forEach(function (m) { alle.push(m); });
+      if (j.mails.length >= MAIL_LUIK_MAX) {
+        if (vragen + ramen.length + 2 <= MAIL_LUIK_DELEN && r[1] - r[0] > 3600) { const mid = Math.floor((r[0] + r[1]) / 2); ramen.push([r[0], mid + 60], [mid, r[1]]); }
+        else vol = true;
+      }
+    }
+    return { mails: alle, vol: vol, vragen: vragen };
+  }
+  // Kenmerken van een partij: pagina's (+ hoofdpagina), 'mailkaart:' op die pagina's, mailadressen en domeinen
+  function mailKenmerken(paginas, extraAdressen, extraDomeinen) {
+    const uit = { paginas: [], kaartlinks: [], adressen: [], domeinen: [] };
+    const adres = function (a) { const x = adresNorm(a); if (x && uit.adressen.indexOf(x) < 0) uit.adressen.push(x); };
+    const domein = function (d) { const x = domeinNorm(d); if (x && uit.domeinen.indexOf(x) < 0) uit.domeinen.push(x); };
+    const rij = paginas.filter(Boolean);
+    for (let i = 0; i < rij.length && i < 3; i++) {   // de pagina en (via 'hoofdpagina:') hooguit twee verder
+      const p = rij[i];
+      if (uit.paginas.indexOf(p) >= 0) continue;
+      uit.paginas.push(p);
+      let ruw = ''; try { ruw = lees(path.join(vault, p)); } catch (e) { continue; }
+      const fm = frontmatter(ruw);
+      const mk = linkPad(fmVeld(fm, 'mailkaart')); if (mk && uit.kaartlinks.indexOf(mk) < 0) uit.kaartlinks.push(mk);
+      fmOvisLijst(fm, 'mailadressen').forEach(adres);
+      const hp = fmVeld(fm, 'hoofdpagina');
+      if (hp) { const hm = /\[\[([^\]|#]+)/.exec(hp); const hpPad = hm ? linkVan(hm[1]) : null; if (hpPad && PAGINA_RE.test(hpPad) && hpPad.split('/').indexOf('..') < 0) rij.push(hpPad); }
+    }
+    (extraAdressen || []).forEach(adres); (extraDomeinen || []).forEach(domein);
+    return uit;
+  }
+  const RICHTING = { '⇄': 'beide', '←': 'ontvangen', '→': 'verstuurd' };
+  // → { status, j: { ok, mail } }
+  async function mail(id) {
+    const reg = await register();
+    const isSl = /^[0-9a-f]{12}$/.test(String(id));
+    if (!isSl) return { status: 400, j: { ok: false, fout: 'geen geldige sleutel' } };
+    const k = reg.knopen.find(function (x) { return sleutelVan(x.id) === id; });
+    let ken, sleutelCache, persoon = !k;
+    if (k) {
+      persoon = isPersoon(k);
+      if (!zichtbaar(k)) return { status: 404, j: { ok: false, fout: 'niet gevonden' } };
+      const hv = reg.handvatten[k.id] || [];
+      const adr = hv.filter(function (h) { return h.soort === 'mail'; }).map(function (h) { return h.waarde_norm || h.waarde; });
+      const dom = hv.filter(function (h) { return h.soort === 'domein'; }).map(function (h) { return h.waarde_norm || h.waarde; });
+      if (isPersoon(k)) { const g = await googleVan(k, reg); if (g && Array.isArray(g.mailadressen)) g.mailadressen.forEach(function (a) { adr.push(a); }); }
+      const rel = String(k.vault_pagina || '');
+      ken = mailKenmerken(PAGINA_RE.test(rel) && rel.split('/').indexOf('..') < 0 ? [rel] : [], adr, dom);
+      sleutelCache = k.id;
+    } else {
+      const pv = prive();
+      const x = pv.personen.concat(pv.stamboom).find(function (y) { return sleutelVan(y.pad) === id; });
+      if (!x) return { status: 404, j: { ok: false, fout: 'niet gevonden' } };
+      ken = mailKenmerken([x.pad], [], []);
+      sleutelCache = 'prive:' + x.pad;
+    }
+    let idx;
+    try { idx = mailIndex(); } catch (e) { idx = null; }
+    // kaarten: via dossier/pagina, 'mailkaart:', exact mailadres, of (organisatie) domein
+    const gekozen = [];
+    const neem = function (l) { (l || []).forEach(function (x) { if (gekozen.indexOf(x) < 0) gekozen.push(x); }); };
+    if (idx) {
+      ken.paginas.forEach(function (p) { neem(idx.opDossier.get(p)); });
+      ken.kaartlinks.forEach(function (p) { neem(idx.opPad.get(p)); });
+      // review MOET 1: bij een persoon via adres/domein alleen persoonskaarten (een gedeeld adres mag niet de hele organisatie binnenhalen);
+      // een organisatiekaart alleen via een uitdrukkelijke koppeling (dossier/'mailkaart:')
+      const mag = function (l) { return persoon ? (l || []).filter(function (x) { return x.soort === 'persoon'; }) : l; };
+      ken.adressen.forEach(function (a) { neem(mag(idx.opAdres.get(a))); });
+      ken.domeinen.forEach(function (d) { neem(mag(idx.opDomein.get(d))); });
+    }
+    // een persoonskaart waarvan elk adres al onder een gekozen organisatiedomein valt, telt niet nog eens (die mails staan op de organisatiekaart)
+    const orgDom = gekozen.filter(function (x) { return x.soort === 'organisatie' && x.domein; }).map(function (x) { return x.domein; });
+    const kaarten = gekozen.filter(function (x) {
+      return !(x.soort === 'persoon' && x.adressen.length && x.adressen.every(function (a) { const d = a.slice(a.lastIndexOf('@') + 1); return orgDom.some(function (od) { return d === od || d.endsWith('.' + od); }); }));
+    });
+    // kenmerken voor het luik: die van de partij plus de adressen/domeinen van haar kaarten (een kaart zonder kenmerk op de partij)
+    const eigen = eigenToets(eigenAdressen());
+    const adressen = ken.adressen.slice(), domeinen = persoon ? [] : ken.domeinen.slice();   // review MOET 1: een persoon nooit op een heel domein
+    kaarten.forEach(function (x) {
+      x.adressen.forEach(function (a) { if (adressen.indexOf(a) < 0) adressen.push(a); });
+      if (!persoon && x.soort === 'organisatie' && x.domein && domeinen.indexOf(x.domein) < 0) domeinen.push(x.domein);   // review ronde 2 MOET 1
+    });
+    const adrL = adressen.filter(function (a) { return !eigen(a); });
+    if (!kaarten.length && !adrL.length && !domeinen.length) {
+      return { status: 200, j: { ok: true, mail: { kenmerken: false, aantal: 0, gesprekken: 0, laatste: null, wisselingen: [], kaarten: [], kaart: null, luik: null } } };
+    }
+    const kaartMails = kaarten.reduce(function (s, x) { return s + x.mails; }, 0);
+    const kaartGespr = kaarten.reduce(function (s, x) { return s + x.gesprekken; }, 0);
+    const kaartIds = new Set(); kaarten.forEach(function (x) { x.ids.forEach(function (i) { kaartIds.add(i); }); });
+    const momentopname = kaarten.reduce(function (s, x) { return x.momentopname && (!s || x.momentopname > s) ? x.momentopname : s; }, null) || (idx && idx.momentopname) || null;
+    const kaartLaatste = kaarten.reduce(function (s, x) { return x.laatste && (!s || x.laatste > s) ? x.laatste : s; }, null);
+    // luik: vanaf de dag na de momentopname (geen kaarten in deze pod: de laatste 90 dagen) tot nu
+    const vandaag = amsDag(nu());
+    const vanaf = momentopname || amsDag(nu() - 90 * 86400000);
+    let luikDeel = null;
+    const termen = adrL.concat(domeinen);
+    if (!luik) luikDeel = { vanaf: dagNa(vanaf), mails: 0, gesprekken: 0, vol: false, fout: 'Het lees-luik zit niet in deze pod.' };
+    else if (vanaf >= vandaag) luikDeel = { vanaf: dagNa(vanaf), mails: 0, gesprekken: 0, vol: false, fout: null };
+    else if (!termen.length) luikDeel = { vanaf: dagNa(vanaf), mails: 0, gesprekken: 0, vol: false, fout: 'Geen mailadres of domein bekend om in Gmail te zoeken.' };
+    else {
+      const tA = termen.slice(0, MAIL_TERMEN_MAX), afgekapt = termen.length > MAIL_TERMEN_MAX;
+      const ad = tA.filter(function (x) { return x.indexOf('@') >= 0; }), dm = tA.filter(function (x) { return x.indexOf('@') < 0; });
+      const sl = sleutelCache + '|' + tA.join(',') + '|' + vanaf;
+      const c = luikCache.get(sl);
+      if (c && nu() - c.t < MAIL_LUIK_MS) luikDeel = c.v;
+      else {
+        let p = luikBezig.get(sl);
+        if (!p) {
+          p = (async function () {
+            const r = await luikVenster(ad, dm, Math.floor(amsMiddernacht(dagNa(vanaf)) / 1000), Math.floor(nu() / 1000) + 600);
+            if (r.fout) return { v: { vanaf: dagNa(vanaf), mails: 0, gesprekken: 0, vol: false, fout: r.fout, afgekapt: afgekapt }, bewaar: false };
+            const t = mailLuikTel(r.mails, { adressen: ad, domeinen: dm }, eigen, vanaf);
+            const draden = Array.from(t.draden.values()).sort(function (a, b) { return b.datum.localeCompare(a.datum) || a.id.localeCompare(b.id); });
+            return { v: { vanaf: dagNa(vanaf), mails: t.mails, gesprekken: draden.filter(function (d) { return !kaartIds.has(d.id); }).length, vol: r.vol, fout: null,
+              afgekapt: afgekapt, draden: draden.slice(0, MAIL_TOON), laatste: draden.length ? draden[0].datum : null, gemeten_op: new Date(nu()).toISOString() }, bewaar: true };
+          })();
+          luikBezig.set(sl, p);
+          p.then(function (x) {
+            luikBezig.delete(sl);
+            if (x.bewaar) { luikCache.set(sl, { t: nu(), v: x.v }); while (luikCache.size > MAIL_LUIK_CACHE_MAX) luikCache.delete(luikCache.keys().next().value); }
+          }, function () { luikBezig.delete(sl); });
+        }
+        try { luikDeel = (await p).v; } catch (e) { luikDeel = { vanaf: dagNa(vanaf), mails: 0, gesprekken: 0, vol: false, fout: 'Gmail is nu niet te lezen.' }; }
+      }
+    }
+    // wisselingen: luik eerst (nieuwer, en een doorlopend gesprek vervangt zijn kaartregel), dan de kaartregels; nieuwste eerst, vijf
+    const wis = [], gehad = new Set();
+    (luikDeel && luikDeel.draden || []).forEach(function (d) { gehad.add(d.id); wis.push({ datum: d.datum, richting: RICHTING[d.richting] || 'beide', onderwerp: masker(d.onderwerp), n: d.n, bron: 'luik' }); });
+    const kr = [];
+    kaarten.forEach(function (x) { x.regels.forEach(function (r) { kr.push(r); }); });
+    kr.sort(function (a, b) { return b.datum.localeCompare(a.datum) || a.id.localeCompare(b.id); });
+    kr.forEach(function (r) { if (gehad.has(r.id)) return; gehad.add(r.id); wis.push({ datum: r.datum, richting: RICHTING[r.richting] || 'beide', onderwerp: masker(r.onderwerp), n: r.n, bron: 'kaart' }); });
+    wis.sort(function (a, b) { return b.datum.localeCompare(a.datum); });
+    const lm = luikDeel ? luikDeel.mails : 0;
+    const laatste = [kaartLaatste, luikDeel && luikDeel.laatste].filter(Boolean).sort().pop() || null;
+    const luikUit = luikDeel ? { vanaf: luikDeel.vanaf, mails: luikDeel.mails, gesprekken: luikDeel.gesprekken, vol: !!luikDeel.vol, fout: luikDeel.fout || null,
+      afgekapt: !!luikDeel.afgekapt, gemeten_op: luikDeel.gemeten_op || null } : null;
+    return { status: 200, j: { ok: true, mail: { kenmerken: true, aantal: kaartMails + lm, gesprekken: kaartGespr + (luikDeel ? luikDeel.gesprekken : 0), laatste: laatste,
+      wisselingen: wis.slice(0, MAIL_TOON),
+      kaarten: kaarten.filter(function (x) { return !x.register; }).sort(function (a, b) { return b.mails - a.mails; }).slice(0, 5).map(function (x) { return { pad: x.pad, naam: masker(x.naam), mails: x.mails }; }),
+      kaart: kaarten.length ? { mails: kaartMails, gesprekken: kaartGespr, laatste: kaartLaatste, momentopname: momentopname, aantal: kaarten.length } : null,
+      luik: luikUit } } };
+  }
+
   // wv3715 (3C165): tegels voor het Overzicht — per eigen entiteit (niet PRIVE) de eerste regel "Nu", de datum en het aantal regels
   async function nuTegels() {
     const reg = await register();
@@ -912,9 +1270,10 @@ function maak(o) {
     return { ok: true, tegels: tegels, aan: !!entNu };
   }
 
-  return { lijst: lijst, zoek: zoek, detail: detail, nuTegels: nuTegels, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; bankCache = null; stukCache = null; kIdx = null; eigenCache = new Map(); gezegdCache = null; } };
+  return { lijst: lijst, zoek: zoek, detail: detail, nuTegels: nuTegels, naamTreffers: naamTreffers, mail: mail, vergeet: function () { mailIdx = null; luikCache.clear(); cache = null; priveCache = null; bankCache = null; stukCache = null; kIdx = null; eigenCache = new Map(); gezegdCache = null; } };
 }
 
 module.exports = { telNl: telNl, maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, zichtbaar: zichtbaar, groepVan: groepVan,
   naamPatronen: naamPatronen, bevatNaam: bevatNaam, fmAliassen: fmAliassen, registerIndex: registerIndex, bekekenBij: bekekenBij, adresVan: adresVan,
-  eersteOnderwerp: eersteOnderwerp, contractEinde: contractEinde, fmOvisLijst: fmOvisLijst };
+  eersteOnderwerp: eersteOnderwerp, contractEinde: contractEinde, fmOvisLijst: fmOvisLijst,
+  mailKaartLees: mailKaartLees, mailRegisterLees: mailRegisterLees, mailZoekvraag: mailZoekvraag, mailLuikTel: mailLuikTel, eigenToets: eigenToets, adresNorm: adresNorm, domeinNorm: domeinNorm };

@@ -25839,6 +25839,8 @@ function brainEntMaak() {
       kaart: function () { const k = secondbrain && secondbrain.vers(false); return k && Array.isArray(k.bestanden) ? k.bestanden : null; },   // wv1930: privépersonen en Dossier
       intakePad: path.join(INTAKE_DIR, 'intake.sqlite'),   // wv3938 (3C22): nieuwste stukken per partij (alleen lezen)
       bekeken: appEntBekekenLees,   // wv3938 (3C45): laatst geopende partijen
+      luik: function (body) { return appAgendaApi(body, { timeoutMs: 14000 }); },   // wv4009 (3C196): mail per partij na de jongste mailkaart (alleen mail_zoeken)
+      eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },   // wv4009: Davids adressen tellen nooit als partij
       rpc: (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE) ? appSbRpc : null });
   } catch (e) { logError('brain-entiteiten', e); }
   return brainEnt;
@@ -25900,6 +25902,13 @@ async function appBrainEntiteiten(req, res, a, route) {
       const uit = await B.zoek(q); res._app.stil = true; return appStuur(res, 200, uit);
     }
     const id = route.slice('GET /app/brain/entiteit/'.length);   // sleutel uit de lijst (12 hex; APP_ROUTE_RE laat geen knoop-id door)
+    const mm = /^([0-9a-f]{12})\/mail$/.exec(id);   // wv4009 (3C196): mail per partij — apart, want het lees-luik kan seconden duren
+    if (mm) {
+      if (typeof B.mail !== 'function') return appWeiger(res, 404, 'Mail per partij zit niet in deze versie van de pod', 'brain-entiteit mail ontbreekt');
+      const r = await B.mail(mm[1]);
+      if (r.status === 200) res._app.stil = true; else res._app.reden = 'brain-entiteit mail ' + r.status;
+      return appStuur(res, r.status, r.j);
+    }
     if (!/^[0-9a-f]{12}$/.test(id)) return appWeiger(res, 400, 'geen geldige sleutel', 'brain-entiteit sleutel');
     const r = await B.detail(id);
     if (r.status === 200) { res._app.stil = true; appEntBekeken(id); } else res._app.reden = 'brain-entiteit ' + r.status;

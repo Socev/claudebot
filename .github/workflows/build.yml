@@ -822,6 +822,9 @@ jobs:
       - name: "brain-entiteiten-gezegd (wv3945, 3C97/3C98: gesprekken, notulen, mensen)"
         if: ${{ !cancelled() }}
         run: bash test/brain-entiteiten-gezegd.sh
+      - name: "brain-entiteiten-mail (wv4009, 3C196: mail per partij uit mailkaarten + lees-luik)"
+        if: ${{ !cancelled() }}
+        run: bash test/brain-entiteiten-mail.sh
       - name: "entiteit-nu (wv3715, 3C165: per eigen entiteit elke nacht Nu)"
         if: ${{ !cancelled() }}
         run: bash test/entiteit-nu.sh
