@@ -35,7 +35,7 @@ const PAST_BIJ = ['Hoofdkanaal en gesprek', 'Machinekamer en agents', 'Apps', 'W
 // bij twijfel kiest David. uren = bouwmoeite in agent-uren (nr 185 c; David 16-11: "het zijn mensenuren waarin jij rekent").
 const SOORT = ['merkbaar', 'onderhoud', 'waarschuwing'];
 const SOORT_SOCEV = ['onderhoud', 'waarschuwing'];
-const GRENS = { uren_max: 40, keuzes: 12, uitkomst: 300, regel_max: 15, titel: 70, kort: 300, waarom: 140, naam: 60, adres: 500, item_tekst: 6000, items_ronde: 25, kaarten_item: 3, kaarten_ronde: 15,
+const GRENS = { uren_max: 40, keuzes: 12, uitkomst: 300, regel_max: 40, titel: 70, kort: 300, waarom: 140, naam: 60, adres: 500, item_tekst: 6000, items_ronde: 25, kaarten_item: 3, kaarten_ronde: 15,
   gezien_bron: 2000, bytes: 3 * 1024 * 1024, omleidingen: 3, nieuw_dagen: 30, nieuw_max: 5, weg_dagen: 90, smal_dag: 8 };
 const OPHAAL_MS = 20000, OPHAAL_TOTAAL_MS = 60000, RONDE_FEEDS_MS = 10 * 60000;
 // Bron aix (wv942, AIX-bouwplan § 8): kaarten van andere winkels op aix.socev.dev die David in de App AIX zag; alleen lezen via de pod.
@@ -440,7 +440,7 @@ function keuzes(kaarten) {
     .map(function (k) { return naam[k.status] + ': ' + schoon(k.titel, GRENS.titel) + (k.soort ? ' (' + k.soort + ')' : ''); });
 }
 // wv3934 (nr 152): de opdracht voor de machinekamer bij "Laat Socev dit regelen". Kaartvelden zijn geschoond; tekst van buiten = gegeven.
-const UITKOMST_CLI = 'node /opt/data/claudebot-src/harvester.js uitkomst';
+const UITKOMST_CLI = 'node /opt/data/claudebot-src/harvester.js uitkomst';   // schrijft via de pod (/smal/harvester/uitkomst), nooit zelf in het bestand
 function regelOpdracht(ks, dag) {
   const lijst = ks.map(function (k) {
     return { id: k.id, soort: k.soort, titel: k.titel, kort: k.kort, uren: k.uren || null, complex: k.complex && k.complex.n, past_bij: k.past_bij, link: k.link || null, bericht: k.item_titel || null };
@@ -914,18 +914,27 @@ function maak(deps) {
       if (!mee.length) return { status: 409, j: { ok: false, fout: 'geen van deze kaarten kan nog naar Socev', kaarten: per } };
       const dag = datumNl(klok());
       const label = 'machinekamer:harvester-onderhoud-' + crypto.createHash('sha256').update(dag + ':' + mee.map(function (x) { return x.id; }).sort().join(',')).digest('hex').slice(0, 12);
+      // Codex MOET 2: eerst de kaarten op socev zetten en opslaan (rij nog leeg), dan pas de rij: een agent die meteen start ziet ze al bij Socev.
+      const nu = new Date(klok()).toISOString();
+      mee.forEach(function (x) { x.status = 'socev'; x.gewijzigd = nu; x.socev = { wv: null, label: label, sinds: nu, uitkomst: null, uitkomst_op: null }; });
+      kaartenSchrijf(k);
+      const terugdraaien = function () {
+        const k3 = kaartenLees();
+        k3.forEach(function (x) { if (x.status === 'socev' && x.socev && x.socev.label === label && x.socev.wv == null && !x.socev.uitkomst) { x.status = 'nieuw'; x.gewijzigd = nu; delete x.socev; } });
+        kaartenSchrijf(k3);
+      };
       let r;
       try {
         r = await deps.werkvoorraad({ label: label, prompt: regelOpdracht(mee, dag),
           samenvatting: 'Harvester: David gaf ' + mee.length + (mee.length === 1 ? ' onderhoudskaart' : ' onderhoudskaarten') + ' aan Socev; de machinekamer regelt ze en zegt per kaart wat ermee gebeurde' });
-      } catch (e) { fout('harvester-regel', e); return { status: 502, j: { ok: false, fout: 'de machinekamer nam de stapel niet aan; er is niets veranderd' } }; }
-      if (!r || !Number.isInteger(r.id)) return { status: 502, j: { ok: false, fout: 'de machinekamer gaf geen rij terug; er is niets veranderd' } };
-      // opnieuw lezen na de await (David kan intussen een kaart weggegooid hebben); synchroon tot het schrijven
-      const k2 = kaartenLees(), nu = new Date(klok()).toISOString();
+      } catch (e) { fout('harvester-regel', e); terugdraaien(); return { status: 502, j: { ok: false, fout: 'de machinekamer nam de stapel niet aan; er is niets veranderd' } }; }
+      if (!r || !Number.isInteger(r.id)) { terugdraaien(); return { status: 502, j: { ok: false, fout: 'de machinekamer gaf geen rij terug; er is niets veranderd' } }; }
+      // opnieuw lezen na de await (David kan intussen Toch zelf kiezen of Weg getikt hebben); synchroon tot het schrijven
+      const k2 = kaartenLees();
       mee.forEach(function (m) {
         const x = vind(k2, m.id);
-        if (!x || x.status !== 'nieuw') { per.push({ id: m.id, titel: m.titel, ok: false, uitkomst: 'intussen veranderd; Socev slaat hem over' }); return; }
-        x.status = 'socev'; x.gewijzigd = nu; x.socev = { wv: r.id, sinds: nu, uitkomst: null, uitkomst_op: null };
+        if (!x || x.status !== 'socev' || !x.socev || x.socev.label !== label) { per.push({ id: m.id, titel: m.titel, ok: false, uitkomst: 'intussen veranderd; Socev slaat hem over' }); return; }
+        x.socev.wv = r.id;
         per.push({ id: x.id, titel: x.titel, ok: true, uitkomst: 'bij Socev' });
       });
       kaartenSchrijf(k2);
@@ -963,6 +972,7 @@ function maak(deps) {
 
   // ── /smal/harvester/kaart (Verkenner; Fable #8) ──
   function smal(actie, d) {
+    if (actie === 'uitkomst') { const r = uitkomst(d && d.id, d && d.tekst); return { status: r.ok ? 200 : (r.fout === 'onbekende kaart' ? 404 : 409), j: r }; }   // wv3934: alleen de machinekamer (server.js)
     if (actie !== 'kaart') return { status: 404, j: { ok: false, fout: 'onbekend' } };
     const dag = new Date(klok()).toISOString().slice(0, 10);
     if (smalDag.dag !== dag) { smalDag.dag = dag; smalDag.n = 0; }
@@ -1013,17 +1023,23 @@ function maak(deps) {
 module.exports = { maak: maak, leesFeed: leesFeed, leesAix: leesAix, AIXB: AIXB, feedInHtml: feedInHtml, isPubliek: isPubliek, veiligHaal: veiligHaal, leesBronnen: leesBronnen, leesBus: leesBus,
   maakKaart: maakKaart, schoon: schoon, schema: schema, keuzes: keuzes, regelOpdracht: regelOpdracht, SOORT: SOORT, SYSTEEM: SYSTEEM, sleutel: sleutel, PAST_BIJ: PAST_BIJ, GRENS: GRENS, GENRE: GENRE, BRONNEN_PAD: BRONNEN_PAD, BUS_PAD: BUS_PAD, SPIEGEL_PAD: SPIEGEL_PAD };
 
-// wv3934: opdrachtregel voor de machinekamer (alleen de opslag van de Harvester; de pod leest kaarten.json bij elke vraag opnieuw).
+// wv3934: opdrachtregel voor de machinekamer. Schrijft NIET zelf in kaarten.json (Codex MOET 1: de pod schrijft hetzelfde bestand), maar
+// vraagt de pod via /smal/harvester/uitkomst (sleutel API_SECRET uit de omgeving van de machinekamer); de pod doet lezen-wijzigen-schrijven
+// in één synchrone stap.
 //   node harvester.js uitkomst <kaart-id> "<tekst>"   — wat er met een kaart bij Socev gebeurde (zichtbaar onder Bij Socev)
-//   node harvester.js indeel <bestand.json>           — eenmalige indeling [{id, soort, uren}] van kaarten zonder soort
 if (require.main === module) {
   const a = process.argv.slice(2);
-  const h = maak({ vault: process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', dir: process.env.HARVESTER_DIR || '/opt/data/harvester',
-    fout: function (s, e) { console.error(s + ': ' + String(e && e.message || e).slice(0, 160)); } });
-  let r;
-  if (a[0] === 'uitkomst' && a.length === 3) r = h.uitkomst(a[1], a[2]);
-  else if (a[0] === 'indeel' && a.length === 2) r = { ok: true, ingedeeld: h.deelIn(JSON.parse(fs.readFileSync(a[1], 'utf8'))) };
-  else r = { ok: false, fout: 'gebruik: node harvester.js uitkomst <kaart-id> "<tekst>" | indeel <bestand.json>' };
-  console.log(JSON.stringify(r));
-  process.exitCode = r.ok ? 0 : 2;
+  const klaar = function (r) { console.log(JSON.stringify(r)); process.exitCode = r && r.ok ? 0 : 2; };
+  if (a[0] !== 'uitkomst' || a.length !== 3) klaar({ ok: false, fout: 'gebruik: node harvester.js uitkomst <kaart-id> "<tekst>"' });
+  else if (!process.env.API_SECRET) klaar({ ok: false, fout: 'API_SECRET ontbreekt (alleen de machinekamer)' });
+  else {
+    const body = JSON.stringify({ secret: process.env.API_SECRET, id: a[1], tekst: a[2] });
+    const req = require('http').request({ host: '127.0.0.1', port: Number(process.env.HARVESTER_POORT || process.env.PORT || 8080), path: '/smal/harvester/uitkomst', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }, timeout: 30000 }, function (res) {
+      let t = ''; res.on('data', function (c) { t += c; }); res.on('end', function () { let j; try { j = JSON.parse(t); } catch (e) { j = { ok: false, fout: 'HTTP ' + res.statusCode }; } klaar(j); });
+    });
+    req.on('error', function (e) { klaar({ ok: false, fout: String(e && e.message || e).slice(0, 120) }); });
+    req.on('timeout', function () { req.destroy(new Error('time-out')); });
+    req.end(body);
+  }
 }

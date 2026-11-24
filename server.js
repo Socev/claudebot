@@ -30673,7 +30673,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata']);   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -30923,6 +30923,13 @@ async function smalActie(actie, d, wie) {
     if (!harvester) return { status: 404, j: { ok: false, fout: 'Harvester zit niet in deze versie van de pod' } };
     if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
     return harvester.smal('kaart', d);
+  }
+  // wv3934: de machinekamer zet per Harvester-kaart bij Socev de uitkomst (node harvester.js uitkomst); alleen met API_SECRET, niet Socevs sleutel
+  if (actie === 'harvester/uitkomst') {
+    if (!harvester) return { status: 404, j: { ok: false, fout: 'Harvester zit niet in deze versie van de pod' } };
+    if (!wie || !wie.mk) return { status: 403, j: { ok: false, fout: 'alleen de machinekamer' } };
+    if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
+    return harvester.smal('uitkomst', d);
   }
   // wv3920: GHAWA-lens in de nachtskill whatsapp-conversatie-consolidatie (Socev-sleutel): wat er te koppelen valt, en een voorstel zetten.
   // Alleen de primaire kant schrijft; geen inhoud in een log (de pod logt alleen de actie en de status).
