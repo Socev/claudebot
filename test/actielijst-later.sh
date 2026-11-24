@@ -47,7 +47,7 @@ const ctx = {
 };
 vm.createContext(ctx);
 const code = [blok('function appYmd('), blok('function appYmdPlus('), blok('function appKort('), regel("const APP_KEUZE = {"), regel('const APP_TERUG_MS'),
-  blok('function appPortieLopend('), blok('function appActies('), blok('function appActiesNu('), regel('const APP_ACTIE_KEUZE'), regel('const APP_ACTIES_PER_UUR'),
+  blok('function appPortieLopend('), blok('function appActies('), blok('function appActiesTeller('), blok('function appActiesNu('), regel('const APP_ACTIE_KEUZE'), regel('const APP_ACTIES_PER_UUR'),
   blok('async function appActieRoute(')].join('\n');
 try { vm.runInContext(code + '\nthis.__f = { appActies, appActieRoute, K: APP_ACTIE_KEUZE };', ctx); }
 catch (e) { console.log('ROOD  laden: ' + e.message); process.exit(1); }

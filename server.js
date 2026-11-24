@@ -11961,7 +11961,25 @@ function appActies(rijen, vandaag, nu) {
       // wv452: geen Telegram-message_id meer nodig (het lijstje van 07:05 staat sinds 12-10 alleen in de app; Rij toetsen eist hem alleen bij een tik in Telegram)
       knoppen: stand === 'open' && /^[0-9a-f]{32}$/.test(String(r.nonce || '')),
       terug_tot: terugTot };
-  }) };
+  }), teller: appActiesTeller(rijen, deze, vandaag, nu) };
+}
+// wv3709 (3C92): de kop van Vandaag te doen ("3 van 36 · deze week 2 afgerond, 1 vervallen"), uit dezelfde tabel als de lijst.
+// nog = wat er vanochtend voor David lag (kolom stapel van Kies portie; null = geen stapel op de rijen, dan toont de app "N open") min wat
+// hij er sinds die ochtend per knop van afhandelde. Week = keuzes gedaan / laten vallen met getikt_op sinds maandag 00:00 (NL), elk lijstje.
+function appActiesTeller(rijen, deze, vandaag, nu) {
+  const wd = new Date(vandaag + 'T12:00:00Z').getUTCDay();
+  const maandag = appYmdPlus(vandaag, -((wd + 6) % 7));
+  let gedaan = 0, vervallen = 0;
+  (rijen || []).forEach(function (r) {
+    if (!r || (r.keuze !== 'gedaan' && r.keuze !== 'laten_vallen')) return;
+    const t = Date.parse(r.getikt_op || '');
+    if (!isFinite(t) || t > nu || appYmd(t) < maandag) return;
+    if (r.keuze === 'gedaan') gedaan++; else vervallen++;
+  });
+  const st = deze.map(function (r) { return r.stapel === null || r.stapel === undefined || r.stapel === '' ? NaN : Number(r.stapel); })
+    .filter(function (x) { return Number.isInteger(x) && x >= 0; });
+  const af = deze.filter(function (r) { return r.keuze === 'gedaan' || r.keuze === 'laten_vallen'; }).length;
+  return { nog: st.length ? Math.max(0, Math.max.apply(null, st) - af) : null, week_gedaan: gedaan, week_vervallen: vervallen, sinds: maandag };
 }
 // Fable wv173 K2: ↩️ rekent de app met de resterende tijd op het moment van dit antwoord (pod-klok), niet met de klok van de
 // telefoon tegen terug_tot; ook als het lijstje uit het 3-minutengeheugen komt.
@@ -11971,7 +11989,7 @@ function appActiesNu(acties) {
   return { datum: acties.datum, items: acties.items.map(function (x) {
     const rest = x.terug_tot ? Date.parse(x.terug_tot) - nu : 0;
     return Object.assign({}, x, { terug_ms: rest > 0 ? rest : 0 });
-  }) };
+  }), teller: acties.teller || null };
 }
 // Wikilinks naar gewone tekst ([[pad|naam]] -> naam, [[pad/Pagina#kop]] -> Pagina); frontmatter eraf.
 function appVaultTekst(t) {
