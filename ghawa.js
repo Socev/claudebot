@@ -532,7 +532,9 @@ function overzicht(d, k, mijl) {
   if (sc && sc.verschillen > 0) {
     const r = (sc.rijen || []).filter((x) => x.gelijk === false);
     const fmt = (x, v) => (x.eenheid === '€' ? '€ ' : x.id === 'koers' ? '' : 'GMD ') + Math.round(v).toLocaleString('nl-NL');
-    aandacht.push({ toon: 'info', label: 'website', titel: 'De site toont andere bedragen dan de app',
+    if (sc.proef_verschillen === 0) aandacht.push({ toon: 'info', label: 'website', titel: 'De bedragen van de app staan op de proefsite, nog niet op ghawa.org',   // wv3954
+      sub: 'kijk op de proefsite en druk op Publiceer op Website', scherm: 'website' });
+    else aandacht.push({ toon: 'info', label: 'website', titel: 'De site toont andere bedragen dan de app',
       sub: r.slice(0, 2).map((x) => x.wat.toLowerCase() + ': ' + fmt(x, x.site) + ' op de site, ' + fmt(x, x.app) + ' in de app').join('; ') + (r.length > 2 ? ' (en ' + (r.length - 2) + ' meer)' : ''), scherm: 'website' });
   }
   return { datastand: k.datastand, standen: k.standen, sluit: k.sluit, koers: k.koers, werven: k.werven,
@@ -976,15 +978,54 @@ function maak(cfg) {
       if (v.soort === 'antwoord') { const q = vraag.get(g.vraag); e.vraag = q ? { id: q.id, onderwerp: q.onderwerp, vraag: q.vraag, stand: q.status, antwoord: q.antwoord || null } : null; }
       if (v.soort === 'mijlpaal') { const m = mijl.get(g.mijlpaal); e.mijlpaal = m ? { tekst: m.tekst, wanneer: m.wanneer, stand: m.stand } : null; }
       if (v.soort === 'bon') { e.regel_naam = g.regel ? regelNaam.get(g.regel) || g.regel : null; e.regel_lens_naam = g.regel_lens ? regelNaam.get(g.regel_lens) || g.regel_lens : null; }
-      return Object.assign({}, v, { chat_naam: VS.CHATS[v.bron.chat] || v.bron.chat, bijlagen: v.bijlagen.length, uitleg: e });
+      return Object.assign({}, v, { chat_naam: VS.CHATS[v.bron.chat] || (v.bron.chat === 'socev' ? 'door Socev geschreven' : v.bron.chat), bijlagen: v.bijlagen.length, uitleg: e });
     };
     return { intern: true, open: u.l.open.map(verrijk), afgehandeld: u.l.afgehandeld.map(verrijk), regels: tb.regels.map((r) => ({ id: r.id, naam: regelNaam.get(r.id), open: r.open })) };
   }
   function voorstelBijlageRoute(id) {
     const v = voorstelVan(id);
     if (!v) return { status: 404, body: { ok: false, fout: 'dat voorstel bestaat niet' }, reden: 'ghawa vbijlage onbekend' };
-    const uit = (v.bijlagen || []).slice(0, 4).map((n) => { const by = VS.bijlageLees(voorstelMap(), n); return by ? { type: n.split('.').pop(), data: by.toString('base64') } : null; }).filter(Boolean);
+    const uit = (v.bijlagen || []).slice(0, 4).map((n) => { const by = VS.bijlageLees(voorstelMap(), n); return by ? { naam: n, type: n.split('.').pop(), data: by.toString('base64') } : null; }).filter(Boolean);   // wv3954: naam (voor 'niet mee')
     return { status: 200, body: { ok: true, id: v.id, bijlagen: uit }, reden: 'ghawa vbijlage ' + v.id };
+  }
+  // ── wv3954 (L03): Socev schrijft een nieuwsbericht voor. De server geeft het nieuwste bericht op www en of er al een concept op de
+  // proefsite staat; hier de aanleiding (ghawa-voorstel.js), de feiten voor het taalmodel (alleen totalen, mijlpalen en de laatste
+  // berichten; nooit donateurs, bankregels, rekeningnummers of notities) en het vastleggen als voorstel.
+  function nieuwsAanleiding(ctx) {
+    if (!c.dbPad || !fs.existsSync(c.dbPad)) return null;
+    if (!gemigreerd) schrijf(() => null);
+    return schrijf((db) => VS.socevAanleiding(db, { mijlpalen: mijlpalenDb(db), laatste: ctx && ctx.laatste, op_proef: !!(ctx && ctx.op_proef), nu: nuIso() }));
+  }
+  function nieuwsFeiten(a) {
+    const d = lees(); const k = bereken(d);
+    const mijl = schrijf((db) => mijlpalenDb(db));
+    const isG = (m) => /gehaald|klaar|done|afgerond|complete/i.test(m.stand || '');
+    const eur = (gmdCent) => Math.round(gmdCent / 100 / k.koers);
+    return { mijlpaal: a.mijlpaal || null, aanleiding: a.soort === 'mijlpaal' ? 'mijlpaal gehaald: ' + a.mijlpaal.tekst + (a.mijlpaal.gehaald_op ? ' (op ' + a.mijlpaal.gehaald_op + ')' : '') : 'al ' + a.dagen + ' dagen geen nieuw bericht op de site (laatste ' + a.laatste + ')',
+      mijlpalen_gehaald: mijl.filter(isG).slice(-4).map((m) => ({ wanneer: m.wanneer, tekst: m.tekst })),
+      mijlpalen_bezig: mijl.filter((m) => /bezig/i.test(m.stand || '')).map((m) => ({ wanneer: m.wanneer, tekst: m.tekst })),
+      mijlpalen_gepland: mijl.filter((m) => !isG(m) && !/bezig/i.test(m.stand || '')).slice(0, 2).map((m) => ({ wanneer: m.wanneer, tekst: m.tekst })),
+      cijfers: { stand_van: k.datastand, bouw_begroot_eur: eur(k.bouw.begroot), bouw_uitgegeven_eur: eur(k.bouw.gerealiseerd), bouw_klaar_procent: k.bouw.pct == null ? null : Math.round(k.bouw.pct * 100),
+        nog_nodig_eur: Math.round(k.bouw.open_eur || 0), koers_gmd_per_eur: k.koers } };
+  }
+  // feiten = wat het taalmodel kreeg (nieuwsFeiten); de tekst mag geen cijfers of data hebben, de feitenregel komt eronder uit de administratie
+  function nieuwsZet(a, tekst, feiten) {
+    const g = VS.socevZonderCijfers(tekst);
+    if (!g.ok) return { status: 422, ok: false, fout: 'cijfer of datum in de tekst van het taalmodel', gevonden: g.gevonden };
+    const regel = feiten ? VS.socevFeitenregel(feiten) : '';
+    return schrijf((db) => VS.socevZet(db, a, { titel: tekst.titel, tekst: String(tekst.tekst || '').trim() + (regel ? '\n\n' + regel : '') }, nuIso()));
+  }
+  // ── wv3954 (L04): de begroting zoals de app hem kent, voor de pagina Donatiedoelen (alleen totalen per fase en per activiteit, hele dalasi) ──
+  function siteBedragen() {
+    if (!c.dbPad || !fs.existsSync(c.dbPad)) return null;
+    if (!gemigreerd) schrijf(() => null);
+    const d = lees(); const k = bereken(d);
+    const posten = new Map();
+    for (const a of k.activiteiten.filter((x) => x.project === 'Building')) {
+      const l = posten.get(a.fase) || []; l.push({ naam: a.naam_nl || a.naam, gmd: Math.round((a.begroot || 0) / 100) }); posten.set(a.fase, l);
+    }
+    return { koers: k.koers, datastand: k.datastand, bouw_gmd: Math.round(k.bouw.begroot / 100),
+      fasen: k.fasen.map((f) => ({ naam: f.naam, omschrijving: f.omschrijving || '', gmd: Math.round(f.begroot / 100), posten: posten.get(f.id) || [] })) };
   }
   function voorstellenOpen() { if (!c.dbPad || !fs.existsSync(c.dbPad)) return 0; try { return schrijf((db) => VS.aantalOpen(db)); } catch (e) { return 0; } }
   // Maandronde: kaart als de ECG-cijfers ouder zijn dan 35 dagen (één per maand); de server roept dit eens per dag aan.
@@ -1076,7 +1117,8 @@ function maak(cfg) {
   function siteCijfers() { try { const d = lees(); return d.meta['site:cijfers'] ? JSON.parse(d.meta['site:cijfers']) : null; } catch (e) { return null; } }
   function kaartGezet(sleutel) { schrijf((db) => db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('kaart:' + String(sleutel).slice(0, 60), nuIso())); }
   return { app, info, bankBij, maandKaart, kaartGezet, totalen, siteCijfersZet, siteCijfers, conceptVoor, conceptGezet, fondsKaarten, kaartDicht, kalenderItems,
-    voorstelLens, voorstelZet, voorstelVan, voorstelFotos, voorstelNieuws, voorstellenOpen };   // wv3920
+    voorstelLens, voorstelZet, voorstelVan, voorstelFotos, voorstelNieuws, voorstellenOpen,   // wv3920
+    nieuwsAanleiding, nieuwsFeiten, nieuwsZet, siteBedragen };   // wv3954
 }
 
 module.exports = { maak, invoer, leesData, bereken, csvLees, cent, SCHEMA, TABELLEN, GHAWA_SOORTEN, donateursRoute, indelenRoute, vragenPortie, fondsOpvolg };

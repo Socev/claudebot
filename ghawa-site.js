@@ -24,6 +24,8 @@ const MAX_FOTOS = 6;
 const MAX_FOTO = 12 * 1024 * 1024;
 const NIEUWS = 'src/content/nieuws';
 const ASSETS = 'src/content/assets/nieuws';
+// wv3954 (L04, besluitenpagina nr 904): de ene pagina waarvan de bedragen van main mogen afwijken, alleen als de schakelaar aan staat.
+const BEDRAG_PAGINA = 'src/pages/donatiedoelen.astro';
 const IBAN = /\b[A-Z]{2}\d{2}\s?(?:[A-Z0-9]{4}\s?){2,7}[A-Z0-9]{1,4}\b/;
 
 function slugVan(titel) {
@@ -105,10 +107,71 @@ function namenIn(tekst, namen) {
   return hit;
 }
 
+// ── wv3954 (L04): de begroting op Donatiedoelen gelijk aan de app ──
+// bedragenPagina(md, app) vervangt het blok <section class="begroting-sectie"> door de fasen en posten uit de app (zelfde opmaak/klassen),
+// rekent de euro's in de tabel Jaarlijkse kosten om met de koers van de app en zet die koers in de noot. De rest van de pagina blijft
+// letterlijk staan. alleenBedragen(oud, nieuw) is de poort: buiten dat blok mogen alleen cijfers verschillen, en in het blok staat alleen
+// tabelopmaak met tekst (geen script, geen Astro-expressie, geen link).
+const BEGROTING_RE = /<section class="begroting-sectie">[\s\S]*?<\/section>/g;
+const JAARLIJKS_RE = /<section class="jaarlijks-sectie">[\s\S]*?<\/section>/;
+const html = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;');
+const punt = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+const hoofdletter = (t) => { const x = String(t || '').trim(); return x ? x[0].toUpperCase() + x.slice(1) : x; };
+function datumNl(iso) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || '')); return m ? Number(m[3]) + '-' + Number(m[2]) + '-' + m[1] : null; }
+function bedragenPagina(md, app) {
+  md = String(md || '');
+  const k = Number(app && app.koers);
+  if (!(k > 0 && k < 1000)) return { fout: 'de koers in de app ontbreekt' };
+  const fasen = ((app && app.fasen) || []).filter((f) => f && Number(f.gmd) > 0);
+  if (!fasen.length || !(Number(app.bouw_gmd) > 0)) return { fout: 'de begroting in de app is leeg' };
+  if ((md.match(BEGROTING_RE) || []).length !== 1) return { fout: 'de pagina Donatiedoelen heeft niet precies één begrotingsblok; dat moet de machinekamer bekijken' };
+  const eur = (g) => '€ ' + punt(g / k);
+  const r = [];
+  r.push('<section class="begroting-sectie">', '      <h2>Kosten bouw</h2>',
+    '      <p>De bouw verloopt in ' + (['', 'één', 'twee', 'drie', 'vier', 'vijf', 'zes', 'zeven', 'acht', 'negen', 'tien'][fasen.length] || fasen.length) + ' delen. Hieronder een samenvatting van de begroting' + (datumNl(app.datastand) ? ' (stand ' + datumNl(app.datastand) + ')' : '') + '; klik op elk deel voor de uitgebreide uitsplitsing.</p>',
+    '', '      <div class="totaal-tabel-wrapper">', '        <table class="totaal-tabel">', '          <thead>', '            <tr>',
+    '              <th>Fase</th>', '              <th>Omschrijving</th>', '              <th class="bedrag">GMD</th>', '              <th class="bedrag">EUR</th>',
+    '            </tr>', '          </thead>', '          <tbody>');
+  for (const f of fasen) {
+    r.push('            <tr>', '              <td><strong>' + html(f.naam) + '</strong></td>', '              <td>' + html(hoofdletter(f.omschrijving)) + '</td>',
+      '              <td class="bedrag">GMD ' + punt(f.gmd) + '</td>', '              <td class="bedrag">' + eur(f.gmd) + '</td>', '            </tr>');
+  }
+  r.push('            <tr class="totaal-rij">', '              <td colspan="2"><strong>Totaal bouw</strong></td>',
+    '              <td class="bedrag"><strong>GMD ' + punt(app.bouw_gmd) + '</strong></td>', '              <td class="bedrag"><strong>' + eur(app.bouw_gmd) + '</strong></td>',
+    '            </tr>', '          </tbody>', '        </table>', '      </div>', '', '      <!-- Uitklapbare details per fase -->', '      <div class="fases">', '');
+  for (const f of fasen) {
+    const posten = (f.posten || []).filter((p) => p && Number(p.gmd) > 0);
+    r.push('        <details class="fase-details">', '          <summary>',
+      '            <span class="fase-titel">' + html(f.naam) + ' — ' + html(hoofdletter(f.omschrijving)) + ' (' + eur(f.gmd) + ')</span>', '          </summary>',
+      '          <div class="fase-inhoud">', '            <table class="detail-tabel">',
+      '              <thead><tr><th>Post</th><th class="bedrag">GMD</th><th class="bedrag">EUR</th></tr></thead>', '              <tbody>');
+    for (const p of posten) r.push('                <tr><td>' + html(p.naam) + '</td><td class="bedrag">' + punt(p.gmd) + '</td><td class="bedrag">' + eur(p.gmd) + '</td></tr>');
+    r.push('                <tr class="fase-totaal"><td><strong>' + html(f.naam) + ' totaal</strong></td><td class="bedrag"><strong>' + punt(f.gmd) + '</strong></td><td class="bedrag"><strong>' + eur(f.gmd) + '</strong></td></tr>',
+      '              </tbody>', '            </table>', '          </div>', '        </details>', '');
+  }
+  r.push('      </div>', '    </section>');
+  let uit = md.replace(BEGROTING_RE, () => r.join('\n'));
+  // Jaarlijkse kosten: alleen de euro's naast een GMD-bedrag opnieuw uitrekenen (de GMD-bedragen zelf blijven staan)
+  uit = uit.replace(JAARLIJKS_RE, (blok) => blok.replace(/(<td class="bedrag">(?:<strong>)?)([\d.]+)((?:<\/strong>)?<\/td>\s*<td class="bedrag">(?:<strong>)?€ ?)([\d.]+)/g,
+    (x, a, g, b) => a + g + b + punt(Number(g.replace(/\./g, '')) / k)));
+  uit = uit.replace(/(Wisselkoers circa GMD )\d+( = €\s?1\b)/, (x, a, b) => a + Math.round(k) + b);
+  return { tekst: uit };
+}
+const BEGROTING_TAG = /<\/?(?:section|h2|p|div|table|thead|tbody|tr|th|td|strong|details|summary|span)(?: class="[a-z -]{1,40}")?(?: colspan="\d")?>|<!-- [A-Za-z ]{1,60} -->/g;
+function alleenBedragen(oud, nieuw) {
+  oud = String(oud || ''); nieuw = String(nieuw || '');
+  const bo = oud.match(BEGROTING_RE) || [], bn = nieuw.match(BEGROTING_RE) || [];
+  if (bo.length !== 1 || bn.length !== 1) return false;
+  const cijferloos = (t) => t.replace(BEGROTING_RE, '§').replace(/\d[\d.]*/g, '#');
+  if (cijferloos(oud) !== cijferloos(nieuw)) return false;
+  const rest = bn[0].replace(BEGROTING_TAG, ' ');
+  return !/[<>{}`]/.test(rest) && !/&(?!amp;|lt;|gt;|quot;|#123;|#125;|nbsp;)/.test(rest);
+}
+
 function maak(cfg) {
   const c = Object.assign({ map: '/opt/data/ghawa/site', url: 'https://github.com/Socev/ghawa-site.git', cred: '/opt/data/.git-credentials-socev',
     proefsite: 'https://staging-ghawa.david-e5f.workers.dev', site: 'https://www.ghawa.org', aanPad: '/opt/data/ghawa/site-aan.json',
-    logPad: '/opt/data/ghawa/site-log.jsonl', bouwen: true, namen: () => [], nu: () => new Date() }, cfg || {});
+    logPad: '/opt/data/ghawa/site-log.jsonl', bedragenAanPad: '/opt/data/ghawa/site-bedragen-aan.json', bouwen: true, namen: () => [], nu: () => new Date() }, cfg || {});
   let rij = Promise.resolve();
   let gehaald = 0;
   function opRij(fn) { const p = rij.then(fn, fn); rij = p.then(() => null, () => null); return p; }   // één git-handeling tegelijk
@@ -127,6 +190,8 @@ function maak(cfg) {
   async function gitOk(args, opt) { const r = await git(args, opt); if (!r.ok) throw Object.assign(new Error('git ' + args[0] + ': ' + kortFout(r.err || r.out)), { git: true }); return r.out; }
   function kortFout(s) { return String(s || '').replace(/https?:\/\/[^@\s]*@/g, 'https://').split('\n').filter(Boolean).slice(-3).join(' · ').slice(0, 300); }
   const aan = () => { try { return JSON.parse(fs.readFileSync(c.aanPad, 'utf8')).aan === true; } catch (e) { return false; } };
+  // wv3954 (L04): de schakelaar voor de bedragenknop (uit tot David Ja zegt op de kaart; het register noemt alleen berichten)
+  const bedragenAan = () => { try { return JSON.parse(fs.readFileSync(c.bedragenAanPad, 'utf8')).aan === true; } catch (e) { return false; } };
   function log(x) { try { fs.appendFileSync(c.logPad, JSON.stringify(Object.assign({ op: c.nu().toISOString() }, x)) + '\n', { mode: 0o600 }); } catch (e) { /* log is bijzaak */ } }
   function laatsteLog(n) {
     try { return fs.readFileSync(c.logPad, 'utf8').trim().split('\n').slice(-(n || 5)).map((r) => { try { return JSON.parse(r); } catch (e) { return null; } }).filter(Boolean).reverse(); }
@@ -186,10 +251,11 @@ function maak(cfg) {
     const ns = vooruit ? (await gitOk(['diff', '--name-status', '--no-renames', 'origin/main...origin/staging'])).trim().split('\n').filter(Boolean)
       .map((r) => { const [st, p] = r.split('\t'); return { st: st[0], pad: p }; }) : [];
     const berichtPaden = new Set(berichten.filter((b) => b.waar !== 'live').map((b) => b.slug));
-    const andere = ns.filter((x) => !(x.pad.indexOf(NIEUWS + '/') === 0 || x.pad.indexOf(ASSETS + '/') === 0));
-    return { aan: aan(), proefsite: c.proefsite, site: c.site, live: { sha: live }, proef: { sha: proef, vooruit,
+    const bedragenMee = bedragenAan() && ns.some((x) => x.pad === BEDRAG_PAGINA);   // wv3954: de begroting van de app gaat mee
+    const andere = ns.filter((x) => !(x.pad.indexOf(NIEUWS + '/') === 0 || x.pad.indexOf(ASSETS + '/') === 0) && !(bedragenMee && x.pad === BEDRAG_PAGINA));
+    return { aan: aan(), bedragen_aan: bedragenAan(), proefsite: c.proefsite, site: c.site, live: { sha: live }, proef: { sha: proef, vooruit,
       berichten: berichten.filter((b) => b.waar !== 'live').map((b) => ({ slug: b.slug, titel: b.titel, waar: b.waar })),
-      andere: andere.map((x) => x.st + ' ' + x.pad).slice(0, 30), andere_aantal: andere.length, te_publiceren: vooruit > 0 && ns.length > 0, berichten_aantal: berichtPaden.size },
+      andere: andere.map((x) => x.st + ' ' + x.pad).slice(0, 30), andere_aantal: andere.length, bedragen: bedragenMee, te_publiceren: vooruit > 0 && ns.length > 0, berichten_aantal: berichtPaden.size },
     berichten, paginas, laatste: laatsteLog(5) };
   }
 
@@ -214,7 +280,14 @@ function maak(cfg) {
     // review ronde 2 MOET 1: geen symlink in wat afwijkt (een link onder de fotomap zou bij het schrijven een podbestand kunnen raken)
     if (raw.some((r) => /^:\d{6} 120000 /.test(r) || /^:120000 /.test(r))) return 'De proefsite bevat een snelkoppeling (symlink); dat gaat via de machinekamer.';
     const ns = raw.map((r) => r.split('\t').slice(1).join('\t'));
-    const anders = ns.filter((p) => !(p.indexOf(NIEUWS + '/') === 0 || p.indexOf(ASSETS + '/') === 0));
+    let anders = ns.filter((p) => !(p.indexOf(NIEUWS + '/') === 0 || p.indexOf(ASSETS + '/') === 0));
+    // wv3954 (L04): Donatiedoelen mag afwijken als de schakelaar aan staat en alleen de bedragen anders zijn (alleenBedragen)
+    if (anders.length && anders.includes(BEDRAG_PAGINA) && bedragenAan()) {
+      let ok = false;
+      try { const p = path.join(wb, BEDRAG_PAGINA); ok = fs.lstatSync(p).isFile() && alleenBedragen(await toon('origin/main', BEDRAG_PAGINA), fs.readFileSync(p, 'utf8')); } catch (e) { ok = false; }
+      if (!ok) return 'Op de proefsite is de pagina Donatiedoelen anders dan alleen de bedragen; dat gaat via de machinekamer.';
+      anders = anders.filter((p) => p !== BEDRAG_PAGINA);
+    }
     return anders.length ? 'De proefsite bevat ook andere wijzigingen dan berichten (' + anders.slice(0, 3).join(', ') + (anders.length > 3 ? ', …' : '') + '); dat gaat via de machinekamer.' : null;
   }
   // node_modules van de kopie volgt het lockbestand van main (stempel = sha256), zonder installatiescripts (ZOU 1)
@@ -245,6 +318,13 @@ function maak(cfg) {
   }
   const vandaag = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam' }).format(c.nu());
 
+  // Staat er op main iets wat staging nog niet heeft (bijv. een vorige publicatie), dan eerst main in staging: de proefsite = live + concepten.
+  async function bijMetMain(wb) {
+    if ((await git(['merge-base', '--is-ancestor', 'origin/main', 'HEAD'], { cwd: wb })).ok) return null;
+    const m = await git(['merge', '--no-ff', '--no-edit', '-m', 'Staging bijgewerkt met main (OVIS GHAWA)', 'origin/main'], { cwd: wb });
+    if (!m.ok) { await git(['merge', '--abort'], { cwd: wb }); return { status: 409, ok: false, fout: 'De proefsite loopt uit de pas met de site (samenvoegen lukt niet); dat moet de machinekamer oplossen.' }; }
+    return null;
+  }
   async function concept(b) {
     if (!aan()) return { status: 403, ok: false, fout: 'Website bewerken staat nog uit (wacht op je Ja op de kaart over publiceren).' };
     const titel = String((b && b.titel) || '').replace(/\s+/g, ' ').trim();
@@ -281,10 +361,7 @@ function maak(cfg) {
       if (v.samenvatting.length < 20) return { status: 400, ok: false, fout: 'Tekst: de eerste zin moet minstens 20 tekens hebben.' };
       return inWerkboom('origin/staging', async (wb) => {
         // Staat er op main iets wat staging nog niet heeft (bijv. een vorige publicatie), dan eerst main in staging: de proefsite = live + concepten.
-        if (!(await git(['merge-base', '--is-ancestor', 'origin/main', 'HEAD'], { cwd: wb })).ok) {
-          const m = await git(['merge', '--no-ff', '--no-edit', '-m', 'Staging bijgewerkt met main (OVIS GHAWA)', 'origin/main'], { cwd: wb });
-          if (!m.ok) { await git(['merge', '--abort'], { cwd: wb }); return { status: 409, ok: false, fout: 'De proefsite loopt uit de pas met de site (samenvoegen lukt niet); dat moet de machinekamer oplossen.' }; }
-        }
+        const bm2 = await bijMetMain(wb); if (bm2) return bm2;
         // eerst de controle (alleen berichten, geen symlink), dan pas schrijven; elke map op het pad moet een echte map zijn en elk bestand nieuw
         const ab = await alleenBerichten(wb);
         if (ab) return { status: 422, ok: false, fout: 'Er is niets op de proefsite gezet. ' + ab };
@@ -368,11 +445,46 @@ function maak(cfg) {
     });
   }
 
-  // De pagina's met bedragen zoals ze op main staan (= wat Cloudflare op www.ghawa.org zet).
-  function sitePaginas() {
+  // wv3954 (L04): de begroting van de app op de proefsite (alleen Donatiedoelen, alleen de bedragen). app = ghawa.js siteBedragen().
+  async function bedragen(app) {
+    if (!aan()) return { status: 403, ok: false, fout: 'Website bewerken staat nog uit (wacht op je Ja op de kaart over publiceren).' };
+    if (!bedragenAan()) return { status: 403, ok: false, fout: 'De knop voor de bedragen staat nog uit (wacht op je Ja op de kaart in Voor jou).' };
+    if (!app) return { status: 503, ok: false, fout: 'De GHAWA-cijfers zijn nu niet te lezen.' };
+    return opRij(async () => {
+      await haal(true);
+      return inWerkboom('origin/staging', async (wb) => {
+        const bm2 = await bijMetMain(wb); if (bm2) return bm2;
+        const ab = await alleenBerichten(wb);
+        if (ab) return { status: 422, ok: false, fout: 'Er is niets op de proefsite gezet. ' + ab };
+        const p = path.join(wb, BEDRAG_PAGINA);
+        if (!fs.existsSync(p) || !fs.lstatSync(p).isFile()) return { status: 409, ok: false, fout: 'De pagina Donatiedoelen staat niet op de proefsite; dat moet de machinekamer bekijken.' };
+        const oud = fs.readFileSync(p, 'utf8');
+        const r = bedragenPagina(oud, app);
+        if (r.fout) return { status: 422, ok: false, fout: 'Er is niets op de proefsite gezet: ' + r.fout + '.' };
+        const url = c.proefsite.replace(/\/+$/, '') + '/donatiedoelen/';
+        if (r.tekst === oud) return { status: 200, ok: true, ongewijzigd: true, proef_url: url };
+        if (!alleenBedragen(await toon('origin/main', BEDRAG_PAGINA), r.tekst)) return { status: 422, ok: false, fout: 'Er is niets op de proefsite gezet: de nieuwe pagina wijkt meer af dan alleen de bedragen.' };
+        fs.writeFileSync(p, r.tekst);
+        const fb = await bouw(wb);
+        if (fb) return { status: 422, ok: false, fout: 'Er is niets op de proefsite gezet. ' + fb };
+        await gitOk(['add', '--', BEDRAG_PAGINA], { cwd: wb });
+        await gitOk(['commit', '--quiet', '-m', 'Bedragen Donatiedoelen gelijk aan OVIS GHAWA (koers ' + Math.round(app.koers) + ', totaal bouw GMD ' + punt(app.bouw_gmd) + ')'], { cwd: wb });
+        const ps = await git(['push', '--quiet', 'origin', 'HEAD:refs/heads/staging'], { cwd: wb });
+        if (!ps.ok) return { status: 409, ok: false, fout: 'Op de proefsite zetten lukte niet (' + kortFout(ps.err) + '); probeer het zo opnieuw.' };
+        const nieuw = (await gitOk(['rev-parse', 'HEAD'], { cwd: wb })).trim();
+        gehaald = 0;
+        log({ wat: 'bedragen', sha: nieuw.slice(0, 12), koers: Math.round(app.koers) });
+        return { status: 200, ok: true, sha: nieuw, proef_url: url };
+      });
+    });
+  }
+
+  // De pagina's met bedragen zoals ze op main staan (= wat Cloudflare op www.ghawa.org zet); wv3954: ref 'origin/staging' = de proefsite.
+  function sitePaginas(ref) {
+    const r = ref === 'origin/staging' ? ref : 'origin/main';
     return opRij(async () => {
       await haal(false);
-      const lees = async (p) => { try { return await toon('origin/main', p); } catch (e) { return ''; } };
+      const lees = async (p) => { try { return await toon(r, p); } catch (e) { return ''; } };
       // wv2886 (fase 4): ook de ANBI-pagina's en welke stukken er in public/anbi staan (pad → blob, om een gekopieerd jaarformulier te zien)
       let anbiBestanden = [];
       try { anbiBestanden = [...(await boom('origin/main', 'public/anbi'))]; } catch (e) { anbiBestanden = []; }
@@ -381,7 +493,7 @@ function maak(cfg) {
           publicatieplicht: await lees('src/pages/anbi/publicatieplicht.astro') }, anbiBestanden };
     });
   }
-  return { stand, concept, weg, publiceer, sitePaginas, aan };
+  return { stand, concept, weg, publiceer, bedragen, sitePaginas, aan, bedragenAan };
 }
 
-module.exports = { maak, vergelijk, kop, markdown, samenvattingVan, slugVan, namenIn, soortFoto, CATEGORIEEN };
+module.exports = { maak, vergelijk, bedragenPagina, alleenBedragen, BEDRAG_PAGINA, kop, markdown, samenvattingVan, slugVan, namenIn, soortFoto, CATEGORIEEN };

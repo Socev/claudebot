@@ -47,15 +47,18 @@ grep -qE "'ghawa'" app-vast.js || { echo "ROOD  app-vast.js: ghawa niet in APP_I
 W=$(grep -vE '^\s*(\*|//)' ghawa-site.js)
 if echo "$W" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|os|child_process|crypto)'\)$|^require\(p\)$"; then echo "ROOD  CI-poort: ghawa-site.js laadt een andere module"; f=1; fi
 if echo "$W" | grep -nE "\bfetch\s*\(|require\('https?'\)|\beval\(|new Function|console\."; then echo "ROOD  CI-poort: ghawa-site.js raakt het net buiten git of logt"; f=1; fi
-[ "$(echo "$W" | grep -c "'HEAD:refs/heads/staging'")" = 2 ] || { echo "ROOD  ghawa-site.js: pushen naar staging niet precies twee keer (concept, weg)"; f=1; }
+[ "$(echo "$W" | grep -c "'HEAD:refs/heads/staging'")" = 3 ] || { echo "ROOD  ghawa-site.js: pushen naar staging niet precies drie keer (concept, weg, bedragen wv3954)"; f=1; }
 [ "$(echo "$W" | grep -c "'HEAD:refs/heads/main'")" = 1 ] || { echo "ROOD  ghawa-site.js: pushen naar main niet precies één keer"; f=1; }
 echo "$W" | grep -qE "push.*--force|'-f'|\+HEAD" && { echo "ROOD  ghawa-site.js: force-push"; f=1; }
 [ "$(grep -c "ghawaSite.s.publiceer(" server.js)" = 1 ] || { echo "ROOD  server.js: publiceer niet precies één aanroep"; f=1; }
 PB=$(awk '/^async function appGhawaWebsite/,/^}/' server.js)
 echo "$PB" | grep -q "if (wat === 'publiceer') {" && echo "$PB" | grep -q "a.soort === 'vast') return appWeiger(res, 403" && echo "$PB" | grep -q "if (!appVersOk(a, s))" && echo "$PB" | grep -q "s.vers_tot = 0;" \
   || { echo "ROOD  server.js: publiceren zonder vaste-plek-weigering of verse vingerafdruk"; f=1; }
-grep -qF "/^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer))$/.test(route)" server.js || { echo "ROOD  server.js: website-routes niet precies GET + concept/weg/publiceer"; f=1; }
+grep -qF "/^(GET \/app\/ghawa\/website|POST \/app\/ghawa\/website\/(concept|weg|publiceer|bedragen))$/.test(route)" server.js || { echo "ROOD  server.js: website-routes niet precies GET + concept/weg/publiceer/bedragen"; f=1; }
+# wv3954 (L04): bedragen op de proefsite alleen met een verse vingerafdruk, en ghawa-site.js weigert zonder de eigen schakelaar
+echo "$PB" | grep -q "if (wat === 'bedragen') {" && echo "$PB" | grep -q "ghawa bedragen, niet vers" || { echo "ROOD  server.js: bedragen zonder verse vingerafdruk"; f=1; }
+echo "$W" | grep -q "if (!bedragenAan()) return { status: 403" || { echo "ROOD  ghawa-site.js: bedragen zonder schakelaar"; f=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* ghawa-site\.js ghawa-stichting\.js" uitrol.sh || { echo "ROOD  uitrol.sh: ghawa-site.js/ghawa-stichting.js niet in RELEASE_OPTIONEEL"; f=1; }
-[ $f = 0 ] && echo "GROEN website: alleen git, staging 2× / main 1×, publiceren achter vingerafdruk"
-node --no-warnings --test --test-reporter=spec test/ghawa.test.js test/ghawa-bij.test.js test/ghawa-2c63.test.js test/ghawa-teboeken.test.js test/ghawa-voorstel.test.js test/ghawa-site.test.js test/ghawa-stichting.test.js test/ghawa-mijlpalen.test.js || f=1
+[ $f = 0 ] && echo "GROEN website: alleen git, staging 3× / main 1×, publiceren en bedragen achter vingerafdruk"
+node --no-warnings --test --test-reporter=spec test/ghawa.test.js test/ghawa-bij.test.js test/ghawa-2c63.test.js test/ghawa-teboeken.test.js test/ghawa-voorstel.test.js test/ghawa-site.test.js test/ghawa-stichting.test.js test/ghawa-mijlpalen.test.js test/ghawa-l03-l04.test.js || f=1
 exit $f

@@ -330,4 +330,94 @@ function mijlpaalBevestigd(db) {
   return new Map(db.prepare('SELECT sleutel, gehaald_op FROM mijlpaal_bevestigd').all().map((r) => [r.sleutel, r.gehaald_op]));
 }
 
-module.exports = { SOORTEN, CHATS, SCHEMA, MAX_OPEN, datumOk, bijlageKopie, bijlageLees, lens, bonKoppel, zet, haal, lijst, aantalOpen, vervalOud, versNodig, besluit, nieuwsKlaar, nieuwsTerugKlaar, mijlpaalBevestigd };
+// ── wv3954 (L03, besluitenpagina nr 903): Socev schrijft een nieuwsbericht voor ghawa.org voor ──
+// Aanleiding: een mijlpaal die sinds de vorige ronde op gehaald kwam (vault-tabel of Davids Ja op een mijlpaal-voorstel), of acht weken geen
+// nieuw bericht op www.ghawa.org. Het concept komt als gewoon nieuws-voorstel (bron 'socev') in Voorstellen; David leest, past aan en tikt
+// "Zet op de proefsite" (verse vingerafdruk, zelfde route als een nieuws-voorstel uit WhatsApp); www blijft Publiceer op Website.
+// Hooguit één nieuws-voorstel tegelijk open; de eerste ronde onthoudt alleen welke mijlpalen al gehaald waren (geen concept over het verleden).
+const STILTE_DAGEN = 56;
+const SOCEV_NIEUWS_FOTO_DAGEN = 60;
+function metaLees(db, k) { const r = db.prepare('SELECT waarde FROM meta WHERE sleutel = ?').get(k); return r ? r.waarde : null; }
+function metaZet(db, k, v) { db.prepare('INSERT OR REPLACE INTO meta (sleutel, waarde) VALUES (?,?)').run(k, v); }
+const socevSleutel = (a) => crypto.createHash('sha256').update('socev|' + a).digest('hex');
+// ctx: { mijlpalen: [{sleutel, volgorde, wanneer, tekst, stand}] (stand al met mijlpaal_bevestigd), laatste: 'JJJJ-MM-DD' | null (nieuwste
+// bericht op www), op_proef: bool (er staat al een concept op de proefsite), nu }. → null of { sleutel, soort, citaat, mijlpaal?, laatste?, dagen? }
+function socevAanleiding(db, ctx) {
+  if (!heeft(db, 'voorstel') || !heeft(db, 'meta')) return null;
+  if (db.prepare("SELECT 1 FROM voorstel WHERE soort = 'nieuws' AND staat = 'open'").get()) return null;   // één tegelijk
+  const gehaald = (ctx.mijlpalen || []).filter((m) => /gehaald|klaar|done|afgerond|complete/i.test(m.stand || ''));
+  let gezien = null; try { gezien = JSON.parse(metaLees(db, 'nieuws:mijlpalen-gezien') || 'null'); } catch (e) { gezien = null; }
+  if (!Array.isArray(gezien)) { metaZet(db, 'nieuws:mijlpalen-gezien', JSON.stringify(gehaald.map((m) => m.sleutel))); gezien = gehaald.map((m) => m.sleutel); }
+  const nieuw = gehaald.filter((m) => gezien.indexOf(m.sleutel) < 0).sort((a, b) => (a.volgorde || 0) - (b.volgorde || 0));
+  if (nieuw.length) {
+    const m = nieuw[0];
+    return { sleutel: socevSleutel('mijlpaal|' + m.sleutel), soort: 'mijlpaal', mijlpaal: { sleutel: m.sleutel, tekst: regel1(m.tekst, 160), wanneer: m.wanneer || null, gehaald_op: m.gehaald_op || null },
+      citaat: 'Mijlpaal gehaald: ' + regel1(m.tekst, 160) + (m.gehaald_op ? ' (' + m.gehaald_op + ')' : '') + '.' };
+  }
+  if (ctx.op_proef || !ctx.laatste || !/^\d{4}-\d{2}-\d{2}$/.test(ctx.laatste)) return null;
+  const dagen = dagVerschil(vandaagNl(ctx.nu), ctx.laatste);
+  if (dagen < STILTE_DAGEN) return null;
+  const sl = socevSleutel('stilte|' + ctx.laatste + '|' + Math.floor(dagen / STILTE_DAGEN));   // hooguit één per acht weken stilte, ook na Nee
+  if (db.prepare('SELECT 1 FROM voorstel WHERE sleutel = ?').get(sl)) return null;
+  const nl = (iso) => Number(iso.slice(8, 10)) + '-' + Number(iso.slice(5, 7)) + '-' + iso.slice(0, 4);
+  return { sleutel: sl, soort: 'stilte', laatste: ctx.laatste, dagen, citaat: 'Sinds ' + nl(ctx.laatste) + ' (' + dagen + ' dagen) geen nieuw bericht op ghawa.org.' };
+}
+// Foto's voor het concept: uit de nieuws-voorstellen van de laatste 60 dagen (WhatsApp, idee 1) die David niet afwees; anders geen (dan kiest David).
+function socevFotos(db, nu) {
+  const grens = new Date(Date.parse(nu) - SOCEV_NIEUWS_FOTO_DAGEN * 86400000).toISOString();
+  const uit = [];
+  for (const r of db.prepare("SELECT bijlagen FROM voorstel WHERE soort = 'nieuws' AND staat <> 'nee' AND gemaakt_op >= ? ORDER BY gemaakt_op DESC").all(grens)) {
+    for (const n of JSON.parse(r.bijlagen || '[]')) if (/\.(jpg|png|webp|heic)$/.test(n) && uit.indexOf(n) < 0 && uit.length < MAX_FOTOS) uit.push(n);
+  }
+  return uit;
+}
+// Het concept vastleggen als open nieuws-voorstel. a = socevAanleiding(), tekst = { titel, tekst } van het taalmodel.
+function socevZet(db, a, tekst, nu) {
+  const titel = regel1(tekst && tekst.titel, 120), t = schoon(tekst && tekst.tekst, 6000);
+  if (titel.length < 3 || t.length < 20) return { status: 422, ok: false, fout: 'het concept is te kort' };
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (db.prepare('SELECT 1 FROM voorstel WHERE sleutel = ?').get(a.sleutel)) { db.exec('COMMIT'); return { status: 200, ok: true, nieuw: false }; }
+    if (db.prepare("SELECT 1 FROM voorstel WHERE soort = 'nieuws' AND staat = 'open'").get()) { db.exec('COMMIT'); return { status: 409, ok: false, fout: 'er staat al een nieuws-voorstel open' }; }
+    const id = volgendId(db);
+    const fotos = socevFotos(db, nu);
+    const g = { titel, tekst: t, door: 'socev', aanleiding: a.soort };
+    if (a.mijlpaal) g.mijlpaal = a.mijlpaal.sleutel;
+    db.prepare('INSERT INTO voorstel (id, sleutel, soort, staat, gegevens, bron, citaat, bijlagen, gemaakt_op) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(id, a.sleutel, 'nieuws', 'open', JSON.stringify(g), JSON.stringify({ chat: 'socev', tijd: new Date(nu).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16).replace(' ', 'T'), afzender: null }), a.citaat, JSON.stringify(fotos), nu);
+    if (a.mijlpaal) {
+      let gz = []; try { gz = JSON.parse(metaLees(db, 'nieuws:mijlpalen-gezien') || '[]'); } catch (e) { gz = []; }
+      if (gz.indexOf(a.mijlpaal.sleutel) < 0) gz.push(a.mijlpaal.sleutel);
+      metaZet(db, 'nieuws:mijlpalen-gezien', JSON.stringify(gz));
+    }
+    log(db, id, 'gezet', nu, 'socev-schrijft', { soort: 'nieuws', aanleiding: a.soort, fotos: fotos.length });
+    db.exec('COMMIT');
+    return { status: 200, ok: true, id, nieuw: true };
+  } catch (e) { try { db.exec('ROLLBACK'); } catch (e2) { /* dicht */ } throw e; }
+}
+
+// Codex wv3954 r1+r2 MOET 1: het taalmodel schrijft GEEN getallen, bedragen, procenten, data of maandnamen; de feitenregel (mijlpaal,
+// datum, bedragen) zet de pod er zelf onder uit de administratie (socevFeitenregel). Staat er toch iets in, dan geen voorstel; de volgende
+// ronde (≥ 6 uur) probeert het opnieuw. r3: ook verhoudingen (helft, kwart) en termijnen (dagen, weken, maanden, binnenkort). Restrisico
+// bewust: een onjuiste bewering in gewone woorden kan blijven; David leest en bewerkt elk concept, en www vraagt een eigen Publiceer.
+const GEEN_CIJFER = /\d|€|%|\b(euro'?s?|dalasi|procent|duizend|miljoen|honderd|helft|kwart|dagen|weken|week|maanden|maand|binnenkort|volgende week|januari|februari|maart|april|mei|juni|juli|augustus|september|oktober|november|december)\b/i;
+function socevZonderCijfers(tekst) {
+  const t = String((tekst && tekst.titel) || '') + '\n' + String((tekst && tekst.tekst) || '');
+  const m = GEEN_CIJFER.exec(t);
+  return m ? { ok: false, gevonden: m[0].slice(0, 20) } : { ok: true };
+}
+const eurNl = (n) => '€ ' + String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+function datumNlKort(iso) { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || '')); return m ? Number(m[3]) + '-' + Number(m[2]) + '-' + m[1] : null; }
+// f = ghawa.js nieuwsFeiten(): { mijlpaal?: {tekst, wanneer, gehaald_op}, cijfers: {stand_van, bouw_begroot_eur, bouw_uitgegeven_eur, bouw_klaar_procent, nog_nodig_eur} }
+function socevFeitenregel(f) {
+  const r = [];
+  if (f && f.mijlpaal) r.push('Mijlpaal: ' + f.mijlpaal.tekst + (f.mijlpaal.gehaald_op ? ' (gehaald op ' + datumNlKort(f.mijlpaal.gehaald_op) + ')' : f.mijlpaal.wanneer ? ' (' + f.mijlpaal.wanneer + ')' : '') + '.');
+  const c = (f && f.cijfers) || {};
+  if (c.bouw_begroot_eur > 0 && c.bouw_uitgegeven_eur != null) {
+    r.push('Stand van de bouw' + (datumNlKort(c.stand_van) ? ' op ' + datumNlKort(c.stand_van) : '') + ': ' + eurNl(c.bouw_uitgegeven_eur) + ' besteed van de begroting van ' + eurNl(c.bouw_begroot_eur)
+      + (c.bouw_klaar_procent != null ? ' (' + c.bouw_klaar_procent + ' %)' : '') + (c.nog_nodig_eur > 0 ? '; nog nodig voor de bouw: ' + eurNl(c.nog_nodig_eur) : '') + '.');
+  }
+  return r.join('\n\n');
+}
+
+module.exports = { SOORTEN, CHATS, SCHEMA, MAX_OPEN, datumOk, bijlageKopie, bijlageLees, lens, bonKoppel, zet, haal, lijst, aantalOpen, vervalOud, versNodig, besluit, nieuwsKlaar, nieuwsTerugKlaar, mijlpaalBevestigd, socevAanleiding, socevZet, socevFotos, socevZonderCijfers, socevFeitenregel, STILTE_DAGEN };
