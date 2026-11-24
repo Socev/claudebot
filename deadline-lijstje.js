@@ -178,7 +178,7 @@ function teDoen(rijen, nu, gedaan, vandaag) {
     if (p.status === 'afgehandeld' && ['gedaan', 'laten_vallen', 'later'].indexOf(p.keuze) >= 0) {
       if (!(nu - Date.parse(p.getikt_op || '') >= TIK_RUST_MS)) continue;   // ↩️ kan nog
       keuze = p.keuze;
-    } else if (p.status === 'open' && !p.keuze && p.verzonden_op && p.datum === vandaag) {
+    } else if (p.status === 'open' && !p.keuze && p.verzonden_op && p.datum === vandaag && p.week !== true) {   // wv3710: een kaartje in de weekstapel zonder tik is niet 'getoond'
       // wv3708 (3C87): het tijdstip waarop het lijstje echt verstuurd werd (zaterdag 08:30); onleesbaar = 07:05 zoals vroeger
       keuze = 'getoond';
       const vt = Date.parse(p.verzonden_op);

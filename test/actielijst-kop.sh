@@ -46,7 +46,7 @@ class FD extends RealDate { constructor(...a) { if (a.length) super(...a); else 
 const ctx = { console, Date: FD, JSON, Object, String, Number, Math, isFinite, Array, RegExp, appSleutelMasker: (x) => x, appStaat: { tellers: {} } };
 vm.createContext(ctx);
 const code = [blok('function appYmd('), blok('function appYmdPlus('), blok('function appKort('), regel("const APP_KEUZE = {"), regel('const APP_TERUG_MS'),
-  blok('function appPortieLopend('), blok('function appActies('), blok('function appActiesTeller('), blok('function appActiesNu(')].join('\n');
+  blok('function appPortieLopend('), blok('function appActieRegel('), blok('function appActies('), blok('function appActiesStapel('), blok('function appActiesTeller('), blok('function appActiesNu(')].join('\n');
 try { vm.runInContext(code + '\nthis.__f = { appActies, appActiesNu };', ctx); }
 catch (e) { console.log('ROOD  laden: ' + e.message); process.exit(1); }
 const F = ctx.__f;

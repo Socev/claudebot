@@ -11902,6 +11902,7 @@ async function appAutokastje(req, res) {
 const APP_VANDAAG_CACHE_MS = 3 * 60 * 1000;   // n8n bewaart elke run van de Agenda-API met inhoud (Fable-review wv136 #1): zuinig lezen
 const APP_AGENDA_WF = process.env.APP_AGENDA_WF || 'JD0yNxPq79jXk25J';          // AI - Agenda-Wachter API (alleen lezen)
 const APP_PORTIE_TABEL = process.env.APP_PORTIE_TABEL || 'jTz5tgWWPhkFz9Be';    // n8n Data Table voorwerk_portie
+const APP_PORTIE_LEES = 200;   // wv3710: de weekstapel van maandag (± 45 rijen) moet er de hele week in zitten (2 pagina's van 100)
 const APP_VOORWERK_DIR = path.join(process.env.APP_VAULT_DIR || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', '00_Systeem', 'Voorwerk');
 const APP_VOORWERK_MAX = 64 * 1024;
 const APP_GMAIL_CONCEPTEN = 'https://mail.google.com/mail/?authuser=d.schaap@gmail.com#drafts';
@@ -11978,36 +11979,66 @@ const APP_KEUZE = { gedaan: 'gedaan', later: 'later', laten_vallen: 'laten valle
 const APP_TERUG_MS = 60 * 1000;   // ↩️ staat in Telegram een minuut na de keuze (AI - Voorwerk-knoppen, VENSTER); n8n neemt hem tot 2 min
 // Een tik die nog loopt: claim < 2 min oud (zelfde grens als Rij toetsen en Bericht opbouwen in AI - Voorwerk-knoppen).
 function appPortieLopend(r, nu) { return r.status === 'bezig' && nu - Date.parse(r.updatedAt || '') < 120000; }
+// wv3710 (3C121): één regel van het actielijstje (daglijst of weekstapel) zoals de app hem krijgt
+function appActieRegel(r, nu) {
+  const k = APP_KEUZE[r.keuze] ? r.keuze : null;
+  const verlopen = r.status === 'verlopen' || !(Number(r.verloopt) > nu);
+  // wv173: de stand zoals de knoppen in Telegram hem zien (Bericht opbouwen): een tik die loopt, al afgehandeld (verbruikt)
+  const stand = appPortieLopend(r, nu) ? 'bezig' : k || (r.status === 'klaar' ? 'nog niet verstuurd' : r.status === 'verbruikt' ? 'al afgehandeld' : verlopen ? 'verlopen' : 'open');
+  const terugTot = k && r.herhaal !== true && !verlopen && ['afgehandeld', 'bezig'].indexOf(r.status) >= 0 && Date.parse(r.getikt_op || '') + APP_TERUG_MS > nu
+    ? new Date(Date.parse(r.getikt_op) + APP_TERUG_MS).toISOString() : null;
+  return { positie: Number(r.positie) || 0, regel: appKort(appSleutelMasker(String(r.regel || r.titel || '').replace(/^\d+\.\s*/, '')), 220), bron: appKort(r.bron, 30),
+    stand: stand,
+    later_tot: k === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(r.later_tot)) ? r.later_tot : null,
+    op: k && r.getikt_op ? String(r.getikt_op).slice(0, 32) : null, blok: !!r.blok_op,
+    herhaal: r.herhaal === true,
+    // wv3698 (3C36): teller en vraag uit Kies portie (AI - Voorwerk). aanbod is altijd aanwezig (null = rij van vóór wv3698): daaraan
+    // ziet de app dat deze pod de Later-keuzes en de besluitknoppen kent. vraag: 'besluit' (3e keer of vaker) | 'verlopen' (uiterlijk voorbij).
+    aanbod: Number.isInteger(Number(r.aanbod)) && Number(r.aanbod) > 0 ? Number(r.aanbod) : null,
+    aanbod_sinds: /^\d{4}-\d{2}-\d{2}$/.test(String(r.aanbod_sinds)) ? r.aanbod_sinds : null,
+    vraag: r.vraag === 'besluit' || r.vraag === 'verlopen' ? r.vraag : null,
+    gisteren: r.gisteren === true,
+    hard: /^\d{4}-\d{2}-\d{2}$/.test(String(r.hard)) ? r.hard : null,
+    notitie: k === 'later' && (r.notitie === 'wacht op iemand' || r.notitie === 'doorgegeven') ? r.notitie : null,
+    // wv452: geen Telegram-message_id meer nodig (het lijstje van 07:05 staat sinds 12-10 alleen in de app; Rij toetsen eist hem alleen bij een tik in Telegram)
+    knoppen: stand === 'open' && /^[0-9a-f]{32}$/.test(String(r.nonce || '')),
+    terug_tot: terugTot };
+}
 function appActies(rijen, vandaag, nu) {
   nu = nu || Date.now();
-  const geldig = (rijen || []).filter(function (r) { return r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.datum)) && r.datum <= vandaag; });
-  if (!geldig.length) return null;
-  const datum = geldig.reduce(function (m, r) { return r.datum > m ? r.datum : m; }, '');
+  const binnen = (rijen || []).filter(function (r) { return r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.datum)) && r.datum <= vandaag; });
+  // wv3710: de weekstapel (kolom week) hoort niet bij het daglijstje; die staat apart in stapel
+  const geldig = binnen.filter(function (r) { return r.week !== true; });
+  const stapel = appActiesStapel(binnen, vandaag, nu);
+  if (!geldig.length && !stapel) return null;
+  const datum = geldig.length ? geldig.reduce(function (m, r) { return r.datum > m ? r.datum : m; }, '') : stapel.datum;
   const deze = geldig.filter(function (r) { return r.datum === datum; }).sort(function (a, b) { return (Number(a.positie) || 0) - (Number(b.positie) || 0); });
-  return { datum: datum, items: deze.slice(0, 10).map(function (r) {
-    const k = APP_KEUZE[r.keuze] ? r.keuze : null;
-    const verlopen = r.status === 'verlopen' || !(Number(r.verloopt) > nu);
-    // wv173: de stand zoals de knoppen in Telegram hem zien (Bericht opbouwen): een tik die loopt, al afgehandeld (verbruikt)
-    const stand = appPortieLopend(r, nu) ? 'bezig' : k || (r.status === 'klaar' ? 'nog niet verstuurd' : r.status === 'verbruikt' ? 'al afgehandeld' : verlopen ? 'verlopen' : 'open');
-    const terugTot = k && r.herhaal !== true && !verlopen && ['afgehandeld', 'bezig'].indexOf(r.status) >= 0 && Date.parse(r.getikt_op || '') + APP_TERUG_MS > nu
-      ? new Date(Date.parse(r.getikt_op) + APP_TERUG_MS).toISOString() : null;
-    return { positie: Number(r.positie) || 0, regel: appKort(appSleutelMasker(String(r.regel || r.titel || '').replace(/^\d+\.\s*/, '')), 220), bron: appKort(r.bron, 30),
-      stand: stand,
-      later_tot: k === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(r.later_tot)) ? r.later_tot : null,
-      op: k && r.getikt_op ? String(r.getikt_op).slice(0, 32) : null, blok: !!r.blok_op,
-      herhaal: r.herhaal === true,
-      // wv3698 (3C36): teller en vraag uit Kies portie (AI - Voorwerk). aanbod is altijd aanwezig (null = rij van vóór wv3698): daaraan
-      // ziet de app dat deze pod de Later-keuzes en de besluitknoppen kent. vraag: 'besluit' (3e keer of vaker) | 'verlopen' (uiterlijk voorbij).
-      aanbod: Number.isInteger(Number(r.aanbod)) && Number(r.aanbod) > 0 ? Number(r.aanbod) : null,
-      aanbod_sinds: /^\d{4}-\d{2}-\d{2}$/.test(String(r.aanbod_sinds)) ? r.aanbod_sinds : null,
-      vraag: r.vraag === 'besluit' || r.vraag === 'verlopen' ? r.vraag : null,
-      gisteren: r.gisteren === true,
-      hard: /^\d{4}-\d{2}-\d{2}$/.test(String(r.hard)) ? r.hard : null,
-      notitie: k === 'later' && (r.notitie === 'wacht op iemand' || r.notitie === 'doorgegeven') ? r.notitie : null,
-      // wv452: geen Telegram-message_id meer nodig (het lijstje van 07:05 staat sinds 12-10 alleen in de app; Rij toetsen eist hem alleen bij een tik in Telegram)
-      knoppen: stand === 'open' && /^[0-9a-f]{32}$/.test(String(r.nonce || '')),
-      terug_tot: terugTot };
-  }), teller: appActiesTeller(rijen, deze, vandaag, nu) };
+  return { datum: datum, items: deze.slice(0, 10).map(function (r) { return appActieRegel(r, nu); }), teller: appActiesTeller(rijen, deze, vandaag, nu), stapel: stapel };
+}
+// wv3710 (3C121, David Ja 21-11 13:09): de weekstapel van maandag (AI - Voorwerk, Kies portie: week true, positie 11…), de hele week te
+// bekijken (datum ≥ maandag van deze week). Een kaartje zonder keuze waarvan dezelfde klus (bron + sleutel) daarna elders een keuze kreeg
+// (daglijstje of een ander kaartje) staat als 'al afgehandeld' zonder knoppen, zodat één klus niet twee keer bijgewerkt wordt.
+function appActiesStapel(rijen, vandaag, nu) {
+  const wd = new Date(vandaag + 'T12:00:00Z').getUTCDay();
+  const maandag = appYmdPlus(vandaag, -((wd + 6) % 7));
+  const week = rijen.filter(function (r) { return r.week === true && r.datum >= maandag; });
+  if (!week.length) return null;
+  const datum = week.reduce(function (m, r) { return r.datum > m ? r.datum : m; }, '');
+  const deze = week.filter(function (r) { return r.datum === datum; }).sort(function (a, b) { return (Number(a.positie) || 0) - (Number(b.positie) || 0); }).slice(0, 90);
+  const getikt = {};
+  rijen.forEach(function (r) {
+    if (!r || !APP_KEUZE[r.keuze]) return;
+    const t = Date.parse(r.getikt_op || ''); if (!isFinite(t)) return;
+    const s = r.bron + ':' + r.sleutel;
+    if (!(getikt[s] && getikt[s].t >= t)) getikt[s] = { t: t, nonce: r.nonce };
+  });
+  const items = deze.map(function (r) {
+    const x = appActieRegel(r, nu);
+    const g = getikt[r.bron + ':' + r.sleutel];
+    if (!APP_KEUZE[r.keuze] && g && g.nonce !== r.nonce && g.t >= (Date.parse(r.verzonden_op || '') || Date.parse(r.datum + 'T00:00:00Z'))) { x.stand = 'al afgehandeld'; x.knoppen = false; }
+    return x;
+  });
+  return { datum: datum, items: items, open: items.filter(function (x) { return x.knoppen; }).length, totaal: items.length };
 }
 // wv3709 (3C92): de kop van Vandaag te doen ("3 van 36 · deze week 2 afgerond, 1 vervallen"), uit dezelfde tabel als de lijst.
 // nog = wat er vanochtend voor David lag (kolom stapel van Kies portie; null = geen stapel op de rijen, dan toont de app "N open") min wat
@@ -12032,10 +12063,13 @@ function appActiesTeller(rijen, deze, vandaag, nu) {
 function appActiesNu(acties) {
   if (!acties) return acties;
   const nu = Date.now();
-  return { datum: acties.datum, items: acties.items.map(function (x) {
+  const metRest = function (x) {
     const rest = x.terug_tot ? Date.parse(x.terug_tot) - nu : 0;
     return Object.assign({}, x, { terug_ms: rest > 0 ? rest : 0 });
-  }), teller: acties.teller || null };
+  };
+  // wv3710: stapel is altijd aanwezig (null = geen weekstapel deze week); daaraan ziet de app dat deze pod de stapel kent
+  return { datum: acties.datum, items: acties.items.map(metRest), teller: acties.teller || null,
+    stapel: acties.stapel ? Object.assign({}, acties.stapel, { items: acties.stapel.items.map(metRest) }) : null };
 }
 // Wikilinks naar gewone tekst ([[pad|naam]] -> naam, [[pad/Pagina#kop]] -> Pagina); frontmatter eraf.
 function appVaultTekst(t) {
@@ -12078,7 +12112,7 @@ async function appVandaagVerzamel() {
       agenda = { vandaag: appAfspraken(j.events, vandaag), morgen: appAfspraken(j.events, morgen) };
       if (j.fouten && (Array.isArray(j.fouten) ? j.fouten.length : true)) fouten.push('niet alle agenda\'s waren te lezen');
     }, function (e) { logError('app-vandaag', e); fouten.push('je agenda is nu niet te lezen'); }),
-    appN8nRijen(APP_PORTIE_TABEL, null, 30).then(function (r) { portie = r; },
+    appN8nRijen(APP_PORTIE_TABEL, null, APP_PORTIE_LEES).then(function (r) { portie = r; },
       function (e) { logError('app-vandaag', e); fouten.push('het actielijstje is nu niet te lezen'); }),
     appAgendaApi({ actie: 'mail_zoeken', query: 'in:draft', max: 25 }).then(function (j) {
       if (!j || !Array.isArray(j.mails)) throw new Error('concepten zonder mails');
@@ -12139,7 +12173,7 @@ const APP_VOORWERK_KNOP_WF = process.env.APP_VOORWERK_KNOP_WF || 'SLYiYwqAabFlC8
 // wv3698 (3C36): Later als keuze (later_morgen = volgende werkdag, later = volgende week, later_datum = d.tot, morgen t/m 90 dagen) en de
 // besluitknoppen bij de 3e aanbieding (wacht_op, geef_door: 7 dagen later met een notitie). Telegram kent alleen de eerste vijf.
 const APP_ACTIE_KEUZE = { gedaan: 'g', later: 'l', laten_vallen: 'w', terug: 'o', blok: 'b', later_morgen: 'm', later_datum: 'd', wacht_op: 'a', geef_door: 'p' };
-const APP_ACTIES_PER_UUR = 60;
+const APP_ACTIES_PER_UUR = 200;   // wv3710: de weekstapel is ± 45 kaartjes in één keer (was 60)
 appStaat.tellers.actie = appStaat.tellers.actie || [];
 async function appVoorwerkKnop(body) {
   const geheim = appKnopSleutel();
@@ -12156,7 +12190,7 @@ async function appVoorwerkKnop(body) {
 }
 async function appActieRoute(req, res, a, d) {
   const datum = String(d.datum || ''), positie = typeof d.positie === 'number' ? d.positie : NaN, keuze = String(d.keuze || '');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 10 || !Object.hasOwn(APP_ACTIE_KEUZE, keuze)) return appWeiger(res, 400, 'ongeldige knop', 'actie velden');   // hasOwn: geen 'constructor'
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 99 || !Object.hasOwn(APP_ACTIE_KEUZE, keuze)) return appWeiger(res, 400, 'ongeldige knop', 'actie velden');   // wv3710: weekstapel 11…90   // hasOwn: geen 'constructor'
   const tot = keuze === 'later_datum' ? String(d.tot || '') : '';
   if (keuze === 'later_datum') {   // n8n (Rij toetsen) toetst dezelfde grens nog eens
     const v = appYmd(Date.now());
@@ -12165,7 +12199,7 @@ async function appActieRoute(req, res, a, d) {
   if (!appTeller('actie', APP_ACTIES_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_ACTIES_PER_UUR + '); probeer het straks opnieuw', 'grens actie');
   if (!appKnopSleutel()) return appWeiger(res, 503, 'de knoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'actie geen sleutel');
   let rijen;
-  try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-actie', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen; probeer het zo opnieuw', 'actie lezen'); }
+  try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, APP_PORTIE_LEES); } catch (e) { logError('app-actie', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen; probeer het zo opnieuw', 'actie lezen'); }
   const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
   if (!rij || !/^[0-9a-f]{32}$/.test(String(rij.nonce || ''))) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'actie onbekend');
   // wv456 (Fable KAN 1a): op de reservekant alleen naar Telegram verwijzen als het lijstje daar met knoppen staat (message_id > 0:
@@ -12197,7 +12231,7 @@ async function appActieRoute(req, res, a, d) {
     // Fable wv173 K1: loopt er net een verversing, eerst die afwachten; anders overschrijft haar (oudere) stand de onze
     const lopend = appStaat.vandaag && appStaat.vandaag.bezig;
     if (lopend) await lopend.catch(function () {});
-    const vers = await appN8nRijen(APP_PORTIE_TABEL, null, 30);
+    const vers = await appN8nRijen(APP_PORTIE_TABEL, null, APP_PORTIE_LEES);
     const vandaag = appYmd(Date.now());
     acties = appActies(vers, vandaag);
     const c = appStaat.vandaag;
@@ -13811,9 +13845,9 @@ async function appAnders(req, res, reg, a, s, d) {
     reden = 'anders kaart #' + id + ' -> ' + kanaal + (gedaanWaar ? ' (gedaan)' : '');
   } else if (soort === 'lijstje') {
     const datum = String(d.datum || ''), positie = typeof d.positie === 'number' ? d.positie : NaN;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 10) return appWeiger(res, 400, 'ongeldige knop', 'anders lijstje velden');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 99) return appWeiger(res, 400, 'ongeldige knop', 'anders lijstje velden');
     let rijen;
-    try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-anders', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen; probeer het zo opnieuw', 'anders lijstje lezen'); }
+    try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, APP_PORTIE_LEES); } catch (e) { logError('app-anders', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen; probeer het zo opnieuw', 'anders lijstje lezen'); }
     const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
     if (!rij) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'anders lijstje onbekend');
     kanaal = 'hoofd';
@@ -13907,12 +13941,12 @@ async function appTodoistTaak(id) {
 }
 async function appVandaagActieDetail(req, res, a, rest) {
   res._app.stil = true;
-  const m = /^(\d{4}-\d{2}-\d{2})\/([1-9]|10)$/.exec(rest);
+  const m = /^(\d{4}-\d{2}-\d{2})\/([1-9]\d?)$/.exec(rest);   // wv3710: ook de weekstapel (11…90)
   if (!m) return appWeiger(res, 404, 'onbekend', 'actie-detail pad');
   const datum = m[1], positie = Number(m[2]);
   if (!appTeller('vjdetail', APP_VJ_DETAIL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur; probeer het straks', 'grens details');
   let rijen;
-  try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-actie-detail', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen', 'actie-detail lezen'); }
+  try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, APP_PORTIE_LEES); } catch (e) { logError('app-actie-detail', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen', 'actie-detail lezen'); }
   const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
   if (!rij) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'actie-detail onbekend');
   const bron = String(rij.bron || ''), sl = String(rij.sleutel || '');

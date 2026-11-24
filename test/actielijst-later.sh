@@ -43,11 +43,11 @@ const ctx = {
   appStaat: { tellers: { actie: [] } }, appTeller: () => true, appKnopSleutel: () => 'k'.repeat(64), appN8nRijen: async () => rijen, appRolOk: async () => true,
   appWeiger: (res, st, f, r) => { weiger.push([st, f, r]); res.st = st; return null; },
   appVoorwerkKnop: async (b) => { verstuurd.push(b); return { uitkomst: 'ok', popup: 'Later: komt terug op dinsdag 8-12.' }; },
-  appStuur: (res, st, b) => { res.st = st; res.b = b; }, logError: () => {}, appSleutelMasker: (x) => x, APP_PORTIE_TABEL: 't',
+  appStuur: (res, st, b) => { res.st = st; res.b = b; }, logError: () => {}, appSleutelMasker: (x) => x, APP_PORTIE_TABEL: 't', APP_PORTIE_LEES: 200,
 };
 vm.createContext(ctx);
 const code = [blok('function appYmd('), blok('function appYmdPlus('), blok('function appKort('), regel("const APP_KEUZE = {"), regel('const APP_TERUG_MS'),
-  blok('function appPortieLopend('), blok('function appActies('), blok('function appActiesTeller('), blok('function appActiesNu('), regel('const APP_ACTIE_KEUZE'), regel('const APP_ACTIES_PER_UUR'),
+  blok('function appPortieLopend('), blok('function appActieRegel('), blok('function appActies('), blok('function appActiesStapel('), blok('function appActiesTeller('), blok('function appActiesNu('), regel('const APP_ACTIE_KEUZE'), regel('const APP_ACTIES_PER_UUR'),
   blok('async function appActieRoute(')].join('\n');
 try { vm.runInContext(code + '\nthis.__f = { appActies, appActieRoute, K: APP_ACTIE_KEUZE };', ctx); }
 catch (e) { console.log('ROOD  laden: ' + e.message); process.exit(1); }
