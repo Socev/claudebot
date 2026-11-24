@@ -258,3 +258,14 @@ test('wv4011 review ronde 2: twee afgeschreven blokken in omgekeerde volgorde ge
   f.tx('tolgaarde', '2026-11-10', -33000, A1);
   assert.strictEqual(tgA(M.totaal(docplan(), f.db, '2026', NU)).af_centen, 66000, 'twee betalingen, elk één keer');
 });
+
+test('wv4011 review ronde 3: batches op 5 en 10 november, losse kopieën op 1 en 6 november: twee betalingen, niet drie', () => {
+  const f = sepaFac();
+  f.batch('h1', 'tolgaarde', '2026-10-30', [['SOCEV-TEST-h1-1', '2026-11-05', A1, 21000], ['SOCEV-TEST-h1-1', '2026-11-05', B1, 1000]]);
+  f.batch('h2', 'tolgaarde', '2026-10-30', [['SOCEV-TEST-h2-1', '2026-11-10', A1, 21000], ['SOCEV-TEST-h2-1', '2026-11-10', B1, 2000]]);
+  f.tx('tolgaarde', '2026-11-05', -22000, null, { kenmerk: 'SOCEV-TEST-h1-1' });
+  f.tx('tolgaarde', '2026-11-10', -23000, null, { kenmerk: 'SOCEV-TEST-h2-1' });
+  f.tx('tolgaarde', '2026-11-01', -21000, A1);
+  f.tx('tolgaarde', '2026-11-06', -21000, A1);
+  assert.strictEqual(tgA(M.totaal(docplan(), f.db, '2026', NU)).af_centen, 42000);
+});
