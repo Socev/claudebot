@@ -6168,7 +6168,7 @@ const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // vaste plek: wie bezig is, houd
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/rij/terug', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/broedstoof/knop', 'POST /app/agents/rij', 'POST /app/harvester/broedstoof', 'POST /app/harvester/weg', 'POST /app/harvester/terug', 'POST /app/harvester/bron-nieuw',
-  'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
+  'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/harvester/regel', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/sleutels/nieuw', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/agenda/reeks', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig', 'POST /app/te-lezen']);   // wv2245: afvinken of bewaren = David die leest   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
@@ -23356,6 +23356,13 @@ const harvester = (function () {
     const H = require(p);
     const h = H.maak({ vault: VAULT, dir: HARVESTER_DIR, fout: typeof foutOfKapot === 'function' ? foutOfKapot : logError, claude: harvesterClaude,
       aixKaarten: harvesterAix,
+      // wv3934 (besluitenpagina nr 152): "Laat Socev dit regelen" = één machinekamerrij voor de onderhoudsstapel, herkomst david (zijn tik)
+      werkvoorraad: async function (o) {
+        const z = await appSbRpc('mk_werkvoorraad_zet', { p_label: o.label, p_prompt: mkBlokVoor(o.prompt), p_status: 'open', p_samenvatting: o.samenvatting, p_notitie: 'pod wv3934: Harvester › Laat Socev dit regelen' }, 20000);
+        if (!z || !z.ok || !z.id) throw new Error('werkvoorraad gaf geen rij terug');
+        try { await appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' }, 20000); } catch (e) { logError('harvester-regel', new Error('herkomst niet gezet')); }
+        return { id: z.id, bestond: !!z.bestond };
+      },
       // hartslag na elke geslaagde ronde, ook leeg (AI - Stiltewachter, rij hartslag-harvester; Fable wv820 #3)
       hartslag: async function (items, kaarten) {
         await appSbRpc('mk_hartslag_stempel', { p_component: 'harvester-ronde', p_gemeten_rijen: items, p_bevindingen: kaarten });

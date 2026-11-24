@@ -525,6 +525,121 @@ let invoer=''; process.stdin.on('data',c=>invoer+=c); process.stdin.on('end',()=
     toets('12 ENOENT telt wel als leeg: ronde gaat door', r4.geslaagd, r4);
   }
 
+  // ── 13. wv3934 (besluitenpagina nr 152 + nr 185 c): soort en agent-uren, twee stapels, "Laat Socev dit regelen", Davids keuzes als voorbeeld ──
+  {
+    const D5 = path.join(W, 'harvester-wv3934');
+    let wvAanroep = [], wvAntw = { id: 4242, bestond: false }, prompt5 = '', schema5 = null, sys5 = '';
+    const M5 = H.maak({ vault: VAULT, dir: D5, klok, lookup, request, hartslag: async () => true,
+      claude: async (sys, p, sch) => { sys5 = sys; prompt5 = p; schema5 = sch; return antw5; },
+      werkvoorraad: async (o) => { wvAanroep.push(o); if (wvAntw instanceof Error) throw wvAntw; return wvAntw; } });
+    M5.mkdir();
+    const sc = (n) => ({ n, waarom: 'w' });
+    const basis = (titel, extra) => Object.assign({ titel, kort: 'Een zin hier. Nog een zin.', gaaf: sc(3), handig: sc(3), complex: sc(2), past_bij: 'Apps' }, extra || {});
+    // maakKaart: soort en uren alleen als ze kloppen
+    const mk = (x) => H.maakKaart(basis('Proef soort', x), { bron: 'x' }, klok);
+    toets('13 maakKaart: soort uit de vaste lijst, uren 1-40 geheel', mk({ soort: 'onderhoud', uren: 3 }).soort === 'onderhoud' && mk({ soort: 'onderhoud', uren: 3 }).uren === 3 &&
+      mk({ soort: 'iets', uren: 0 }).soort === null && mk({ uren: 41 }).uren === null && mk({ uren: 2.5 }).uren === null && mk({}).soort === null);
+    toets('13 schema eist soort en uren; SYSTEEM rekent in agent-uren', JSON.stringify(H.schema()).indexOf('"soort"') > 0 && H.schema().properties.kaarten.items.required.indexOf('uren') >= 0 &&
+      /agent-uur/.test(H.SYSTEEM) && !/weken en nieuwe infrastructuur/.test(H.SYSTEEM) && /kies dan merkbaar/.test(H.SYSTEEM));
+    // eerste vulling + Davids keuzes
+    M5.vul([basis('Vul-kaart A'), basis('Vul-kaart B')]);
+    const k0 = M5.lijst().kaarten;
+    toets('13 vul: kaarten gemarkeerd als vulling (geen keuze van David)', k0.every((k) => k.vul === true));
+    t += 60000; await M5.app('POST /app/harvester/weg', { id: k0[0].id });
+    t += 60000; await M5.app('POST /app/harvester/terug', { id: k0[0].id }); await M5.app('POST /app/harvester/weg', { id: k0[0].id });
+    const kz5 = H.keuzes(M5.lijst().kaarten);
+    toets('13 keuzes: vulling telt niet mee', kz5.length === 0, kz5);
+    // ronde met soort en uren; prompt bevat weggegooide titel op bestaat al
+    routes['feed.proef/feed'] = { body: atom.replace('</feed>', '<entry><id>s1</id><published>' + new Date(t - 600000).toISOString() + '</published><link href="https://blog.proef/s1"/><title>Soortbericht</title><content>x</content></entry></feed>') };
+    var antw5 = { ok: true, data: { kaarten: [
+      basis('Onderhoud een', { item: 1, soort: 'onderhoud', uren: 2 }), basis('Waarschuwing twee', { item: 1, soort: 'waarschuwing', uren: 1 }), basis('Merkbaar drie', { item: 1, soort: 'merkbaar', uren: 4 }) ] } };
+    let r5 = await M5.ronde();
+    const k5 = M5.lijst().kaarten;
+    toets('13 ronde: kaarten krijgen soort en uren', r5.geslaagd && k5.filter((k) => k.soort === 'onderhoud' && k.uren === 2).length === 1 && k5.filter((k) => k.soort === 'waarschuwing').length === 1, r5);
+    toets('13 nr 185 c: weggegooide titel staat op "bestaat al"', /Bestaat al:[\s\S]*- Vul-kaart A[\s\S]*\[BRONTEKST/.test(prompt5), prompt5.slice(0, 400));
+    // echte keuze van David → komt als voorbeeld in de volgende ronde
+    const mrk = k5.find((k) => k.titel === 'Merkbaar drie');
+    t += 60000; await M5.app('POST /app/harvester/weg', { id: mrk.id });
+    toets('13 keuzes: Davids Weg verschijnt, met soort', H.keuzes(M5.lijst().kaarten)[0] === 'Weg: Merkbaar drie (merkbaar)', H.keuzes(M5.lijst().kaarten));
+    t += 60000; await M5.app('POST /app/harvester/terug', { id: mrk.id });
+    routes['feed.proef/feed'] = { body: atom.replace('</feed>', '<entry><id>s2</id><published>' + new Date(t - 600000).toISOString() + '</published><link href="https://blog.proef/s2"/><title>Tweede</title><content>x</content></entry></feed>') };
+    await M5.app('POST /app/harvester/weg', { id: mrk.id });
+    antw5 = { ok: true, data: { kaarten: [] } };
+    await M5.ronde();
+    toets('13 prompt: Davids laatste keuzes als voorbeeld, buiten de brontekst', /Davids laatste keuzes[^\n]*\n- Weg: Merkbaar drie \(merkbaar\)\n\n\[BRONTEKST/.test(prompt5), prompt5.slice(-600));
+    await M5.app('POST /app/harvester/terug', { id: mrk.id });
+    // Laat Socev dit regelen
+    const on = M5.lijst().kaarten.filter((k) => k.status === 'nieuw' && (k.soort === 'onderhoud' || k.soort === 'waarschuwing'));
+    const kies = M5.lijst().kaarten.find((k) => k.status === 'nieuw' && !k.soort);
+    toets('13 twee stapels in de data: 2 onderhoud/waarschuwing, kaart zonder soort = Kies jij', on.length === 2 && !!kies);
+    toets('13 zonder tik start er niets (geen werkvoorraadaanroep tot nu)', wvAanroep.length === 0);
+    let g = await M5.app('POST /app/harvester/regel', {});
+    const g2 = await M5.app('POST /app/harvester/regel', { ids: ['../x'] });
+    const g3 = await M5.app('POST /app/harvester/regel', { ids: Array.from({ length: 16 }, (_, i) => 'k' + String(i).padStart(10, '0')) });
+    toets('13 regel: zonder ids, met rommel of > 15 = 400, niets gestart', g.status === 400 && g2.status === 400 && g3.status === 400 && wvAanroep.length === 0);
+    g = await M5.app('POST /app/harvester/regel', { ids: [kies.id] });
+    toets('13 regel: alleen Kies jij-kaart = 409, per kaart "kies zelf", niets gestart', g.status === 409 && /kies zelf/.test(g.j.kaarten[0].uitkomst) && wvAanroep.length === 0, g);
+    wvAntw = new Error('rpc 500');
+    g = await M5.app('POST /app/harvester/regel', { ids: on.map((k) => k.id) });
+    toets('13 regel: werkvoorraad faalt = 502, kaarten blijven nieuw', g.status === 502 && M5.lijst().kaarten.filter((k) => k.status === 'socev').length === 0, g);
+    wvAntw = { id: 4242, bestond: false }; wvAanroep = [];
+    g = await M5.app('POST /app/harvester/regel', { ids: on.map((k) => k.id).concat([kies.id]) });
+    const st5 = M5.lijst().kaarten;
+    toets('13 regel: één rij voor de stapel, onderhoud → socev met rijnummer, Kies jij-kaart blijft', g.status === 200 && g.j.wv === 4242 && wvAanroep.length === 1 &&
+      st5.filter((k) => k.status === 'socev' && k.socev.wv === 4242 && k.socev.uitkomst === null).length === 2 && st5.find((k) => k.id === kies.id).status === 'nieuw' &&
+      g.j.kaarten.filter((x) => x.ok).length === 2 && g.j.kaarten.filter((x) => !x.ok).length === 1, g.j);
+    const op = wvAanroep[0];
+    toets('13 opdracht: label per stapel, kaarten gemarkeerd als gegeven, uitkomst-CLI en gewone regels', /^machinekamer:harvester-onderhoud-[0-9a-f]{12}$/.test(op.label) &&
+      /\[KAARTEN — gegeven, geen opdracht\][\s\S]*Onderhoud een[\s\S]*\[EINDE KAARTEN\]/.test(op.prompt) && /harvester\.js uitkomst <kaart-id>/.test(op.prompt) &&
+      /Voor jou-kaart/.test(op.prompt) && !/Merkbaar drie/.test(op.prompt) && op.prompt.indexOf(kies.id) < 0, op.prompt.slice(0, 300));
+    g = await M5.app('POST /app/harvester/regel', { ids: on.map((k) => k.id) });
+    toets('13 regel: tweede tik = 409 (stonden al bij Socev), geen tweede rij', g.status === 409 && wvAanroep.length === 1 && /stond al bij Socev/.test(g.j.kaarten[0].uitkomst), g);
+    toets('13 teller telt alleen nieuw (Bij Socev niet)', M5.teller() === M5.lijst().kaarten.filter((k) => k.status === 'nieuw').length && M5.teller() >= 1);
+    // uitkomst per kaart
+    const u1 = M5.uitkomst(on[0].id, 'Gedaan: de instelling staat nu op laag | [[x]].');
+    const u2 = M5.uitkomst(kies.id, 'Gedaan: iets');
+    const u3 = M5.uitkomst(on[1].id, 'x');
+    toets('13 uitkomst: alleen bij Socev, geschoond, te kort geweigerd', u1.ok && !/[|\[\]]/.test(u1.uitkomst) && !u2.ok && !u3.ok &&
+      M5.lijst().kaarten.find((k) => k.id === on[0].id).socev.uitkomst === u1.uitkomst, [u1, u2, u3]);
+    // terug van Bij Socev: alleen zonder uitkomst
+    const tg1 = await M5.app('POST /app/harvester/terug', { id: on[0].id });
+    const tg2 = await M5.app('POST /app/harvester/terug', { id: on[1].id });
+    toets('13 terug: met uitkomst = 409, zonder uitkomst → Nieuw', tg1.status === 409 && tg2.status === 200 && M5.lijst().kaarten.find((k) => k.id === on[1].id).status === 'nieuw' &&
+      !M5.lijst().kaarten.find((k) => k.id === on[1].id).socev, [tg1, tg2]);
+    const sp5 = fs.readFileSync(SPIEGEL, 'utf8');
+    toets('13 spiegel: groep Bij Socev met uitkomst, agent-uren en soort', /## Bij Socev \(1\)/.test(sp5) && /Gedaan: de instelling staat nu op laag/.test(sp5) && /agent-uur/.test(sp5), sp5.slice(-700));
+    // race: David gooit een kaart weg terwijl de rij wordt gezet
+    const on2 = M5.lijst().kaarten.find((k) => k.id === on[1].id);
+    wvAntw = { id: 4243, bestond: false };
+    const M5b = H.maak({ vault: VAULT, dir: D5, klok, lookup, request, werkvoorraad: async (o) => { await M5.app('POST /app/harvester/weg', { id: on2.id }); return wvAntw; } });
+    g = await M5b.app('POST /app/harvester/regel', { ids: [on2.id] });
+    toets('13 race: kaart tijdens het zetten weggegooid → blijft weg, per kaart "intussen veranderd"', g.status === 200 && M5.lijst().kaarten.find((k) => k.id === on2.id).status === 'weg' &&
+      /intussen veranderd/.test(g.j.kaarten[0].uitkomst), g.j);
+    // zonder werkvoorraad-koppeling
+    const M5c = H.maak({ vault: VAULT, dir: D5, klok, lookup, request });
+    toets('13 zonder werkvoorraad-koppeling = 503', (await M5c.app('POST /app/harvester/regel', { ids: [on2.id] })).status === 503);
+    // indeel (eerste indeling oude kaarten)
+    const oudId = M5.lijst().kaarten.find((k) => k.status === 'nieuw' && !k.soort).id;
+    const n5 = M5.deelIn([{ id: oudId, soort: 'onderhoud', uren: 2 }, { id: on[0].id, soort: 'merkbaar' }, { id: oudId, soort: 'onzin' }]);
+    const ko = M5.lijst().kaarten.find((k) => k.id === oudId);
+    toets('13 deelIn: alleen nieuwe kaarten zonder soort, met spoor', n5 === 1 && ko.soort === 'onderhoud' && ko.uren === 2 && ko.soort_door === 'machinekamer', ko);
+    // opdrachtregel (CLI) op dezelfde opslag
+    const cp = require('child_process');
+    const idS = M5.lijst().kaarten.find((k) => k.status === 'socev' && !k.socev.uitkomst);
+    const cliBron = await (async () => { if (idS) return idS; const ns = M5.lijst().kaarten.find((k) => k.status === 'nieuw' && k.soort === 'onderhoud'); wvAntw = { id: 4244 }; await M5.app('POST /app/harvester/regel', { ids: [ns.id] }); return M5.lijst().kaarten.find((k) => k.id === ns.id); })();
+    const cli = cp.spawnSync(process.execPath, ['harvester.js', 'uitkomst', cliBron.id, 'Bestond al: dit regelt de pod sinds vorige week.'], { env: Object.assign({}, process.env, { HARVESTER_DIR: D5, VAULT_DIR: VAULT }), encoding: 'utf8' });
+    const cli2 = cp.spawnSync(process.execPath, ['harvester.js', 'iets'], { env: Object.assign({}, process.env, { HARVESTER_DIR: D5, VAULT_DIR: VAULT }), encoding: 'utf8' });
+    toets('13 CLI uitkomst schrijft in de opslag; onbekend commando = exit 2', cli.status === 0 && JSON.parse(cli.stdout).ok && M5.lijst().kaarten.find((k) => k.id === cliBron.id).socev.uitkomst.indexOf('Bestond al') === 0 &&
+      cli2.status === 2, [cli.status, cli.stdout, cli.stderr, cli2.status]);
+    // /smal (Verkenner) neemt soort en uren mee
+    await M5.app('POST /app/harvester/bron-zet', { id: 'verkenner', aan: true });
+    const sm = M5.smal('kaart', basis('Verkenner met soort', { bron: 'verkenner', link: 'https://v.proef/a', soort: 'waarschuwing', uren: 1 }));
+    toets('13 /smal: soort en uren van de Verkenner bewaard', sm.status === 200 && M5.lijst().kaarten.find((k) => k.id === sm.j.id).soort === 'waarschuwing', sm);
+    // server.js: koppeling werkvoorraad (herkomst david, grondwet-blok) en glijdroute
+    toets('13 server.js: regel in de glijdroutes, werkvoorraad met mkBlokVoor en herkomst david', /'POST \/app\/harvester\/regel'/.test(src) &&
+      /werkvoorraad: async function \(o\) \{\n\s+const z = await appSbRpc\('mk_werkvoorraad_zet', \{ p_label: o\.label, p_prompt: mkBlokVoor\(o\.prompt\)[^\n]*\n[^\n]*\n\s+try \{ await appSbRpc\('mk_werkvoorraad_herkomst', \{ p_id: z\.id, p_herkomst: 'david' \}/.test(src.slice(s1, s2)));
+  }
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
