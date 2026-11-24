@@ -14875,7 +14875,36 @@ async function appGezondheid(req, res, a, route) {
   // half antwoord: niet bewaren, maar de laatste volle stand blijft als terugval staan (Fable wv937 diff #3)
   if (r.j.fouten && r.j.fouten.length) res._app.reden += ' half (' + r.j.fouten.map(function (f) { return f.blok; }).join(',') + ')';
   else appGezCache[route] = { op: nu, j: r.j };
+  if (route === 'GET /app/gezondheid') gezondheidTellerNul();
   return appStuur(res, 200, Object.assign({}, r.j, { vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }));
+}
+// wv3936 (besluitenpagina nr 164 = 2C64, David Ja 22-11): Gezondheid "Deze week". Nachtketenstap gezondheid-week (06:30, primaire kant,
+// vóór apps-editie van 06:50): de pod rekent (gezondheid.week(), geen taalmodel) en meldt alleen bij een NIEUWE afwijking (een soort die
+// in de 7 dagen ervoor niet gemeld is) één editie-regel in het loket (app gezondheid → "Uit je Apps" in het ochtendbericht) en een teller
+// op de tegel. Een gewone dag: niets. Na 06:50 (keten liep achter) geen editie meer, wel de teller. Opent David Gezondheid, dan gaat de
+// teller op nul. Wat gemeld is staat in APP_DATA/gezondheid-week.json (soort → dag, plus de laatste stand zonder meetwaarden).
+function gezWeekBestand() { return path.join(APP_DATA, 'gezondheid-week.json'); }   // lui: de UI-/poorttoets knipt dit blok zonder APP_DATA
+function gezondheidTellerNul() {
+  if (typeof AN === 'undefined' || !AN || typeof loketMeld !== 'function') return;   // UI-/poorttoets laden dit blok zonder het loket
+  loketMeld({ app: 'gezondheid', onderwerp: 'deze-week', laan: 'teller', aantal: 0 }).catch(function (e) { logError('gezondheid-teller', e); });
+}
+async function gezondheidWeekStap(ctx, opt) {
+  const o = opt || {};
+  const g = o.mod || gezondheidMod();
+  if (!g || typeof g.week !== 'function' || typeof AN === 'undefined' || !AN) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+  const t = o.ams || ovisAms(), dag = ctx && ctx.datum ? ctx.datum : t.datum;
+  const st = appLeesStreng(o.bestand || gezWeekBestand(), {});
+  if (st.dag === dag) return { ok: true, al_gedaan: true };
+  const dw = await g.week();   // gooit als de metingen niet te lezen zijn: de keten meldt het (box-rij), geen regel en geen teller
+  const k = g.weekNieuw(dw, st.gemeld, dag);
+  const laat = dag === t.datum && t.uur * 60 + t.min >= 6 * 60 + 50;
+  if (k.nieuw.length) {
+    const regel = g.weekRegel(dw, k.nieuw);
+    if (regel && !laat) await loketMeld({ app: 'gezondheid', onderwerp: 'deze-week', laan: 'editie', editie: 'ochtend', datum: dag, tekst: regel, doel: { scherm: 'gezondheid' } });
+    await loketMeld({ app: 'gezondheid', onderwerp: 'deze-week', laan: 'teller', aantal: k.nieuw.length, vervalt: AN.eindeDagErna(dag), doel: { scherm: 'gezondheid' } });
+  }
+  appSchrijfJson(o.bestand || gezWeekBestand(), { dag: dag, op: new Date().toISOString(), gemeld: k.gemeld, afwijkingen: dw.afwijkingen, nieuw: k.nieuw, editie: k.nieuw.length > 0 && !laat });
+  return { ok: true, detail: { afwijkingen: dw.afwijkingen.length, nieuw: k.nieuw.length, te_laat: laat || undefined } };
 }
 
 // ── wv787: POT-afschriften (App POT-afschriften; bouwplan vault 01_Ontwikkeling/POT-afschriften - bouwplan (App, 22-10-2026).md) ──
@@ -24538,6 +24567,8 @@ const nachtketen = (function () {
         if (!weerOchtend) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
         return weerOchtend.doe({ ams: ctx.ams });
       } },
+      // wv3936 (2C64): Gezondheid "Deze week" — bij een nieuwe afwijking één regel in het loket vóór apps-editie; een fout meldt de keten (box-rij)
+      { naam: 'gezondheid-week', start_na: [6, 30], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return gezondheidWeekStap(ctx); } },
       // wv3815 (2C59 fase 2): ochtendeditie "Uit je Apps" als bufferrij bron 'apps' vóór de briefing van 07:00; een fout meldt de keten (box-rij)
       { naam: 'apps-editie', start_na: [6, 50], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return loketOchtendEditie(ctx); } },
       // wv2894 (idee 19d): zondag één regel over de binnenste kring voor de briefing van 07:00; stil bij een fout (box-rij), anders al_gedaan

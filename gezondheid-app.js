@@ -174,6 +174,122 @@ function knieBlok(k) {
   };
 }
 
+// ── wv3936 (besluitenpagina nr 164 = 2C64, David Ja 22-11): "Deze week" — gewoon rekenen, geen taalmodel ──
+// Per soort de dagwaarden van de laatste 7 hele dagen (t/m gisteren; vandaag is nog niet af) tegen de 8 weken (56 dagen) ervoor.
+// Eén waarde per dag: twee apparaten (Pixel Watch + band) geven elk een rusthartslag/hrv → gemiddelde van die dag; slaap en stappen →
+// de grootste rij van die dag (dubbele sessie of een dutje telt nooit op). Onvolledige nachten (< 3 uur) en dagen zonder dragen
+// (< 300 stappen) tellen niet mee. "Je eigen normaal" = de band tussen het laagste en hoogste weekgemiddelde van die 8 weken. Een
+// afwijking is alleen: de slechte kant op, buiten die band EN minstens de vaste drempel; te weinig dagen = geen oordeel.
+const WEEK_SOORTEN = [
+  { soort: 'slaapduur', naam: 'Slaap', kort: 'slaap', eenheid: 'uur', slecht: 'lager', abs: 0.75, dag: 'max', min: 3, max: 16 },
+  { soort: 'rusthartslag', naam: 'Rusthartslag', kort: 'rusthartslag', eenheid: 'bpm', slecht: 'hoger', abs: 4, dag: 'gem', min: 30, max: 130 },
+  { soort: 'hrv', naam: 'Herstel (hrv)', kort: 'hrv', eenheid: 'ms', slecht: 'lager', rel: 0.15, dag: 'gem', min: 1, max: 300 },
+  { soort: 'stappen', naam: 'Beweging', kort: 'stappen', eenheid: 'stappen', slecht: 'lager', rel: 0.3, dag: 'max', min: 300, max: 100000 },
+];
+const WEEK_MIN_DAGEN = 4, BASIS_MIN_DAGEN = 28, BAND_MIN_WEKEN = 5, BAND_WEEK_MIN_DAGEN = 3;
+const DAG_RE = /^\d{4}-\d{2}-\d{2}$/;
+function dagPlus(d, n) { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
+function dagenTussen(a, b) { return Math.round((Date.parse(b + 'T12:00:00Z') - Date.parse(a + 'T12:00:00Z')) / 86400000); }
+const gem = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+const rond = (v, n) => { const f = Math.pow(10, n); return Math.round(v * f) / f; };
+// Kalenderdag in Nederland: een datum zonder tijd blijft zoals hij is; een tijdstip met zone (Z of +hh:mm) gaat naar Europe/Amsterdam
+// (Codex MOET 1, ronde 2). Gemeten 24-11: de vier soorten komen als datum zonder tijd binnen.
+function dagNL(t) {
+  if (typeof t !== 'string') return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  if (/^\d{4}-\d{2}-\d{2}T.*(Z|[+-]\d{2}:?\d{2})$/.test(t)) { const ms = Date.parse(t); return Number.isFinite(ms) ? new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }) : null; }
+  return t.slice(0, 10);
+}
+// rijen: [{ t, w }] van één soort → { dag: waarde } binnen [van, tot], plus hoeveel dagen wel rijen hadden maar geen geldige waarde
+function dagwaarden(rijen, s, van, tot) {
+  const per = {};
+  lijst(rijen).forEach(function (r) {
+    const d = r ? dagNL(r.t) : null, w = r ? getal(r.w) : null;
+    if (!d || !DAG_RE.test(d) || d < van || d > tot || w === null) return;
+    (per[d] = per[d] || []).push(w);
+  });
+  const uit = {}; let weg = 0;
+  Object.keys(per).forEach(function (d) {
+    const v = per[d].filter((w) => w >= s.min && w <= s.max);
+    if (!v.length) { weg++; return; }
+    uit[d] = s.dag === 'max' ? Math.max.apply(null, v) : gem(v);
+  });
+  return { per: uit, weg: weg };
+}
+function weekSoort(rijen, s, vandaag) {
+  const eind = dagPlus(vandaag, -1), weekVan = dagPlus(eind, -6), basisTot = dagPlus(eind, -7), basisVan = dagPlus(eind, -62);
+  const w = dagwaarden(rijen, s, weekVan, eind), b = dagwaarden(rijen, s, basisVan, basisTot);
+  const wv = Object.values(w.per), bv = Object.values(b.per);
+  const uit = { soort: s.soort, naam: s.naam, eenheid: s.eenheid, slecht: s.slecht, week: { van: weekVan, tot: eind, dagen: wv.length, gem: null, weggelaten: w.weg },
+    basis: { van: basisVan, tot: basisTot, dagen: bv.length, gem: null, lo: null, hi: null, weken: 0 }, verschil: null, drempel: null, richting: 'onbekend', afwijking: false };
+  if (wv.length < WEEK_MIN_DAGEN || bv.length < BASIS_MIN_DAGEN) return uit;
+  const wg = gem(wv), bg = gem(bv);
+  // de 8 basisweken, elk van 7 dagen terug vanaf basisTot; een week telt met minstens 3 geldige dagen
+  const weken = [];
+  for (let k = 0; k < 8; k++) {
+    const tot = dagPlus(basisTot, -7 * k), van = dagPlus(tot, -6);
+    const v = Object.keys(b.per).filter((d) => d >= van && d <= tot).map((d) => b.per[d]);
+    if (v.length >= BAND_WEEK_MIN_DAGEN) weken.push(gem(v));
+  }
+  const drempel = s.abs != null ? s.abs : s.rel * bg;
+  const verschil = wg - bg;
+  const lo = weken.length >= BAND_MIN_WEKEN ? Math.min.apply(null, weken) : bg - drempel;
+  const hi = weken.length >= BAND_MIN_WEKEN ? Math.max.apply(null, weken) : bg + drempel;
+  const buiten = wg > hi ? 'hoger' : wg < lo ? 'lager' : null;
+  const richting = buiten && Math.abs(verschil) >= drempel ? buiten : 'normaal';
+  const n = s.soort === 'stappen' ? 0 : s.soort === 'slaapduur' ? 2 : 1;
+  Object.assign(uit.week, { gem: rond(wg, n) });
+  Object.assign(uit.basis, { gem: rond(bg, n), lo: rond(lo, n), hi: rond(hi, n), weken: weken.length });
+  uit.verschil = rond(verschil, n); uit.drempel = rond(drempel, n); uit.richting = richting; uit.afwijking = richting === s.slecht;
+  return uit;
+}
+// reeksen: { soort: [{t,w}] } (null = niet te lezen); gebeurtenissen: uitvoer van gebeurtenissenBlok (of null); vandaag: 'JJJJ-MM-DD'
+function weekBlok(reeksen, gebeurtenissen, vandaag) {
+  if (!reeksen || !DAG_RE.test(String(vandaag))) return null;
+  const soorten = WEEK_SOORTEN.map((s) => weekSoort(reeksen[s.soort], s, vandaag));
+  let afspraak = null;
+  if (Array.isArray(gebeurtenissen)) {
+    const komt = gebeurtenissen.filter((g) => g && /^gepland/i.test(g.status || '') && DAG_RE.test(String(g.datum || '').slice(0, 10)) && String(g.datum).slice(0, 10) >= vandaag)
+      .sort((a, b) => String(a.datum).localeCompare(String(b.datum)));
+    if (komt.length) afspraak = { datum: komt[0].datum.slice(0, 10), omschrijving: komt[0].omschrijving, over_dagen: dagenTussen(vandaag, komt[0].datum.slice(0, 10)) };
+  }
+  return { vandaag: vandaag, soorten: soorten, afwijkingen: soorten.filter((x) => x.afwijking).map((x) => x.soort), afspraak: afspraak,
+    afspraken_te_lezen: Array.isArray(gebeurtenissen) };
+}
+const nl = (v, n) => (n === 0 ? Math.round(v).toLocaleString('nl-NL') : Number(v).toFixed(n).replace('.', ','));
+function weekWaarde(x, v) {
+  if (x.soort === 'slaapduur') { const m = Math.round(v * 60); return Math.floor(m / 60) + ' u ' + String(m % 60).padStart(2, '0'); }
+  if (x.soort === 'stappen') return nl(Math.round(v / 100) * 100, 0) + ' stappen';
+  return nl(v, 0) + ' ' + x.eenheid;
+}
+// één regel voor het ochtendbericht, alleen bij een afwijking (anders null); alleen = de soorten die nieuw zijn (Codex ZOU 1: een eerder
+// gemelde afwijking komt niet opnieuw mee als er een andere bijkomt)
+function weekRegel(dw, alleen) {
+  if (!dw) return null;
+  const a = dw.soorten.filter((x) => x.afwijking && (!Array.isArray(alleen) || alleen.indexOf(x.soort) >= 0));
+  if (!a.length) return null;
+  const delen = a.map(function (x) {
+    const s = WEEK_SOORTEN.find((y) => y.soort === x.soort);
+    return s.kort + ' ' + weekWaarde(x, x.week.gem) + (x.soort === 'slaapduur' ? ' per nacht' : ' per dag') + ' tegen je normaal ' + weekWaarde(x, x.basis.gem);
+  });
+  const zin = delen.join('; ');
+  return 'Deze week afwijkend: ' + zin + '. Gemiddelde van de laatste 7 dagen tegen de 8 weken ervoor.';
+}
+// Herhaal geen melding: een soort die in de 7 dagen vóór vandaag al gemeld is, telt niet als nieuw. gemeld: { soort: 'JJJJ-MM-DD' }.
+// Een soort die berekend weer normaal is, valt uit gemeld (de volgende afwijking is dan weer nieuws); bij "onbekend" (te weinig metingen)
+// blijft de melddatum staan (Codex ZOU 2: anders telt dezelfde afwijking na een gat binnen 7 dagen opnieuw als nieuw).
+function weekNieuw(dw, gemeld, vandaag) {
+  const g = gemeld && typeof gemeld === 'object' ? gemeld : {};
+  const af = dw ? dw.afwijkingen : [];
+  const recent = (s) => typeof g[s] === 'string' && DAG_RE.test(g[s]) && dagenTussen(g[s], vandaag) < 7 && dagenTussen(g[s], vandaag) >= 0;
+  const nieuw = af.filter((s) => !recent(s));
+  const onbekend = dw ? dw.soorten.filter((x) => x.richting === 'onbekend').map((x) => x.soort) : Object.keys(g);
+  const uit = {};
+  Object.keys(g).forEach(function (s) { if (onbekend.indexOf(s) >= 0 && recent(s)) uit[s] = g[s]; });
+  af.forEach(function (s) { uit[s] = nieuw.indexOf(s) >= 0 ? vandaag : g[s]; });
+  return { nieuw: nieuw, gemeld: uit };
+}
+
 // ── de module ──
 function maak(opts) {
   const o = opts || {};
@@ -231,10 +347,28 @@ function maak(opts) {
   const podBlokken = ['metingen', 'gebeurtenissen', 'diagnoses', 'medicatie', 'rapporten', 'bloedgroep', 'dragerschap'];
   const allesWeg = (b) => b.fouten.filter((f) => podBlokken.indexOf(f.blok) >= 0).length === Object.keys(b).filter((k) => podBlokken.indexOf(k) >= 0).length;
 
+  // wv3936: datum in Nederland; de dagwaarden van de vier soorten van "Deze week" (63 dagen terug, vaste paden; soort en datum kiest de pod zelf)
+  function vandaagAms() { return new Date(nu()).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
+  async function weekReeksen() {
+    const van = dagPlus(vandaagAms(), -64);
+    const r = await Promise.all(WEEK_SOORTEN.map((s) => pod('/metingen?soort=' + s.soort + '&van=' + van + '&limiet=2000')));
+    const uit = {};
+    WEEK_SOORTEN.forEach(function (s, i) {
+      if (!r[i] || !Array.isArray(r[i].rijen)) throw new GezFout('vorm');
+      uit[s.soort] = r[i].rijen.map((x) => ({ t: tekst(x && x.tijdstip, 40), w: getal(x && x.waarde) }));
+    });
+    return uit;
+  }
+  // voor de nachtstap gezondheid-week (server.js): alleen "Deze week"; gooit als de metingen niet te lezen zijn (geen oordeel = geen regel)
+  async function week() {
+    const b = await blokken({ week: weekReeksen, gebeurtenissen: () => pod('/gebeurtenissen') });
+    if (!b.week) throw new GezFout((b.fouten.find((f) => f.blok === 'week') || {}).soort || 'fout');
+    return weekBlok(b.week, b.gebeurtenissen ? gebeurtenissenBlok(b.gebeurtenissen) : null, vandaagAms());
+  }
   async function overzicht() {
     const b = await blokken({
       metingen: () => pod('/metingen/overzicht'), gebeurtenissen: () => pod('/gebeurtenissen'), diagnoses: () => pod('/diagnoses'),
-      medicatie: () => pod('/medicatie'), rapporten: rapporten, knie: knie,
+      medicatie: () => pod('/medicatie'), rapporten: rapporten, knie: knie, week: weekReeksen,
     });
     if (allesWeg(b)) return { status: 503, j: { ok: false, fout: 'De health-pod is nu niet bereikbaar; probeer het over een paar minuten.', pod_weg: true } };
     const rap = b.rapporten;
@@ -244,6 +378,7 @@ function maak(opts) {
       lopend: { gebeurtenissen: b.gebeurtenissen ? gebeurtenissenBlok(b.gebeurtenissen) : null, diagnoses: b.diagnoses ? diagnosesBlok(b.diagnoses) : null,
         medicatie: b.medicatie ? medicatieBlok(b.medicatie) : null },
       knie: b.knie ? knieBlok(b.knie) : null,
+      deze_week: b.week ? weekBlok(b.week, b.gebeurtenissen ? gebeurtenissenBlok(b.gebeurtenissen) : null, vandaagAms()) : null,
       totaal: rap && rap.totaal ? rapportBlok(rap.totaal, false) : null,
       advies: rap && rap.advies ? rapportBlok(rap.advies, true) : null,
       links: LINKS, fouten: b.fouten,
@@ -266,10 +401,10 @@ function maak(opts) {
     } };
   }
   return {
-    overzicht: overzicht, genoom: genoom,
+    overzicht: overzicht, genoom: genoom, week: week, weekRegel: weekRegel, weekNieuw: weekNieuw,
     leeg: function () { rapCache = null; },
     health: function () { return Object.assign({ aan: true, adres_ok: adresToegestaan(basis, sleutels, STANDAARD_SLEUTELS, POD_HOSTS), rapporten_cache: !!rapCache }, tellers); },
   };
 }
 
-module.exports = { maak: maak, _t: { metingenBlok, gebeurtenissenBlok, diagnosesBlok, medicatieBlok, rapportBlok, dnaRij, knieBlok, adresToegestaan, naamVan, LINKS } };
+module.exports = { maak: maak, _t: { dagNL, weekBlok, weekSoort, weekRegel, weekNieuw, dagwaarden, WEEK_SOORTEN, metingenBlok, gebeurtenissenBlok, diagnosesBlok, medicatieBlok, rapportBlok, dnaRij, knieBlok, adresToegestaan, naamVan, LINKS } };

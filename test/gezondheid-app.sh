@@ -40,6 +40,21 @@ const KNIE = { nu: { datum: '2026-10-23' }, tekst: 'Dag 3 na de operatie.', vand
   medicatie: { vandaag: [{ middel: 'ibuprofen' }], per_middel: [{ middel: 'pcm', naam: 'Paracetamol', dosis_mg: 1000, vandaag_aantal: 1, vandaag_mg: 1000, laatste_24u_aantal: 1, laatste: { datum: '2026-10-23', tijd: '08:00' } }] },
   komende_mijlpalen: [{ datum: '2026-10-27', titel: 'Wondjes', ongeveer: 1 }, { datum: 'a' }, { datum: 'b' }, { datum: 'c' }], herinneringen: { apparaten: 1, vandaag: [{ slot: 'LEK-H' }] } };
 
+// wv3936: verzonnen dagwaarden rond de proefklok (1e12 = zo 9-9-2001; gisteren = 8-9). Rusthartslag: twee apparaten per dag, de laatste
+// week 7 slagen hoger (afwijking). Slaap: een onvolledige nacht (1,5 u) en een dubbele sessie (7,0 + 3,5) in de laatste week. Hrv en stappen normaal.
+const proefDag = (n) => { const d = new Date(Date.UTC(2001, 8, 9, 12)); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
+const nepRij = (d, w, ctx) => ({ id: 1, tijdstip: d, waarde: w, eenheid: 'x', context: ctx || 'Google', persoon_id: 1, vastgelegd_door: 'koppeling-google', geheim_veld: 'LEK-W' });
+const WEEKNEP = { rusthartslag: [], slaapduur: [], hrv: [], stappen: [] };
+for (let n = 70; n >= 0; n--) {
+  const d = proefDag(n), laatsteWeek = n >= 1 && n <= 7, wiebel = (n % 3) - 1;
+  WEEKNEP.rusthartslag.push(nepRij(d, (laatsteWeek ? 67 : 60) + wiebel, 'Google · horloge'), nepRij(d, (laatsteWeek ? 69 : 62) + wiebel, 'Google · band'));
+  WEEKNEP.slaapduur.push(nepRij(d, n === 3 ? 1.5 : 7 + wiebel * 0.2));
+  if (n === 4) WEEKNEP.slaapduur.push(nepRij(d, 3.5));
+  WEEKNEP.hrv.push(nepRij(d, 40 + wiebel));
+  WEEKNEP.stappen.push(nepRij(d, n === 5 ? 120 : 6000 + wiebel * 500));
+}
+const WEEK_PADEN = ['hrv', 'rusthartslag', 'slaapduur', 'stappen'].map((s) => '/metingen?soort=' + s + '&van=' + proefDag(64) + '&limiet=2000');
+
 // ── nep-server ──
 const log = [];
 let gedrag = {};   // pad -> 'weg' | 'fout' | 'redirect' | 'html' | 'traag' | 'groot'
@@ -56,6 +71,8 @@ const srv = http.createServer(function (req, res) {
   if (g === 'traag') return setTimeout(function () { try { res.writeHead(200); res.end('{}'); } catch (e) {} }, 4000);
   if (g === 'druppel') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('['); const t = setInterval(function () { try { res.write(' '); } catch (e) { clearInterval(t); } }, 300); setTimeout(function () { clearInterval(t); try { res.end(']'); } catch (e) {} }, 6000); return; }
   if (g === 'groot') { res.writeHead(200); return res.end('"' + 'x'.repeat(2.2 * 1024 * 1024) + '"'); }
+  const mq = /^\/metingen\?soort=([a-z_]+)&van=(\d{4}-\d{2}-\d{2})&limiet=2000$/.exec(p);
+  if (mq && WEEKNEP[mq[1]]) { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ aantal: WEEKNEP[mq[1]].length, rijen: WEEKNEP[mq[1]].filter((x) => x.tijdstip >= mq[2]) })); }
   const a = ANTW[p];
   if (!a) { res.writeHead(404); return res.end('{}'); }
   res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(a));
@@ -90,7 +107,7 @@ const srv = http.createServer(function (req, res) {
   let r = await m.overzicht();
   const s = JSON.stringify(r);
   toets('overzicht 200 zonder fouten', r.status === 200 && r.j.ok === true && r.j.fouten.length === 0, r.j && r.j.fouten);
-  toets('alleen vaste GET-paden gevraagd', log.every((x) => x.methode === 'GET') && JSON.stringify(log.map((x) => x.pad).sort()) === JSON.stringify(['/api/samenvatting', '/diagnoses', '/gebeurtenissen', '/medicatie', '/metingen/overzicht', '/rapporten']), log.map((x) => x.pad));
+  toets('alleen vaste GET-paden gevraagd', log.every((x) => x.methode === 'GET') && JSON.stringify(log.map((x) => x.pad).sort()) === JSON.stringify(['/api/samenvatting', '/diagnoses', '/gebeurtenissen', '/medicatie', '/metingen/overzicht', '/rapporten'].concat(WEEK_PADEN).sort()), log.map((x) => x.pad));
   toets('health-pod: leessleutel + doorgeefgeheim, nooit de schrijfsleutel', log.filter((x) => x.pad !== '/api/samenvatting').every((x) => x.auth === 'Bearer lees-proef-123' && x.door === 'door-proef-456') && s.indexOf('schrijf-NOOIT') < 0 && JSON.stringify(log).indexOf('schrijf-NOOIT') < 0);
   toets('knie-app: alleen het servicetoken, geen health-sleutel', log.filter((x) => x.pad === '/api/samenvatting').every((x) => x.cfid === 'knie-id-proef' && x.cfgeheim === 'knie-geheim-proef' && !x.auth && !x.door));
   toets('health-pod krijgt geen knie-token', log.filter((x) => x.pad !== '/api/samenvatting').every((x) => !x.cfid && !x.cfgeheim));
@@ -114,6 +131,47 @@ const srv = http.createServer(function (req, res) {
   toets('knie: geen dosis_mg per inname, geen herinneringen of notities', !('dosis_mg' in k.medicatie[0]) && !('herinneringen' in k) && s.indexOf('"notities"') < 0);
   toets('totaal en advies (adviezen alleen bij advies)', r.j.totaal.beweringen.length === 1 && !('adviezen' in r.j.totaal) && r.j.advies.adviezen[0].advies === 'bespreek X');
   toets('links vast', r.j.links.pod === 'https://health.primumnonnocere.olares.com/' && r.j.links.knie === 'https://knie.socev.dev/');
+
+  // ── wv3936: Deze week (verzonnen data; narekenen) ──
+  {
+    const dw = r.j.deze_week, per = {};
+    (dw && dw.soorten || []).forEach((x) => { per[x.soort] = x; });
+    toets('deze week: vier soorten in vaste volgorde, vandaag = proefklok', dw && dw.vandaag === '2001-09-09' && dw.soorten.map((x) => x.soort).join() === 'slaapduur,rusthartslag,hrv,stappen', dw);
+    const rh = per.rusthartslag;
+    // laatste week: per dag (67+w + 69+w)/2 = 68+w; w over n=1..7 = 0,1,-1,0,1,-1,0 → gem 68. Basis 8 weken: 61+w → gem ±61
+    toets('rusthartslag: twee apparaten = één dag (gemiddelde), week 68 tegen ±61, afwijking hoger', rh.week.dagen === 7 && rh.week.gem === 68 && Math.abs(rh.basis.gem - 61) < 0.2 && rh.basis.dagen === 56 && rh.richting === 'hoger' && rh.afwijking === true, rh);
+    const sl = per.slaapduur;
+    toets('slaap: onvolledige nacht telt niet, dubbele sessie = de grootste (geen optelling), normaal', sl.week.dagen === 6 && sl.week.weggelaten === 1 && sl.week.gem > 6.7 && sl.week.gem < 7.3 && sl.richting === 'normaal' && !sl.afwijking, sl);
+    toets('stappen: dag niet gedragen (< 300) telt niet; hrv normaal', per.stappen.week.dagen === 6 && per.stappen.week.weggelaten === 1 && !per.stappen.afwijking && per.hrv.richting === 'normaal', [per.stappen, per.hrv]);
+    toets('deze week: band = laagste/hoogste weekgemiddelde van 8 weken', rh.basis.weken === 8 && rh.basis.lo <= rh.basis.gem && rh.basis.hi >= rh.basis.gem && rh.basis.hi < 62);
+    toets('deze week: afwijkingen-lijst en geen LEK', JSON.stringify(dw.afwijkingen) === '["rusthartslag"]' && !/LEK-/.test(JSON.stringify(dw)));
+    toets('deze week: geen afspraak in de toekomst (nep ligt in 2026, klok 2001 → wel)', dw.afspraak && dw.afspraak.datum === '2026-11-05' && dw.afspraken_te_lezen === true, dw.afspraak);
+    const regel = m.weekRegel(dw);
+    toets('ochtendregel bij afwijking: één regel met week en normaal', typeof regel === 'string' && regel.indexOf('\n') < 0 && /rusthartslag 68 bpm per dag tegen je normaal 61 bpm/.test(regel) && regel.length < 300, regel);
+    // gewone dag: alles normaal → geen regel
+    const vlak = T.weekBlok({ rusthartslag: WEEKNEP.rusthartslag.filter((x) => x.context === 'Google · band').map((x) => ({ t: x.tijdstip, w: 62 })), slaapduur: [], hrv: [], stappen: [] }, null, '2001-09-09');
+    toets('gewone dag: geen afwijking, geen ochtendregel; te weinig dagen = onbekend', vlak.afwijkingen.length === 0 && m.weekRegel(vlak) === null && vlak.soorten[0].richting === 'onbekend' && vlak.soorten[1].richting === 'normaal' && vlak.afspraak === null && vlak.afspraken_te_lezen === false, vlak);
+    // kleine uitschieter binnen de drempel: geen afwijking ook al buiten de band
+    const klein = T.weekBlok({ rusthartslag: Array.from({ length: 64 }, (_, i) => ({ t: proefDag(64 - i), w: (64 - i) <= 7 && (64 - i) >= 1 ? 63 : 60 })), slaapduur: [], hrv: [], stappen: [] }, null, '2001-09-09');
+    toets('buiten de band maar onder de drempel (3 < 4 slagen): normaal', klein.soorten[1].richting === 'normaal' && !klein.soorten[1].afwijking, klein.soorten[1]);
+    const n1 = m.weekNieuw(dw, {}, '2001-09-09'), n2 = m.weekNieuw(dw, n1.gemeld, '2001-09-12'), n3 = m.weekNieuw(dw, n1.gemeld, '2001-09-16'), n4 = m.weekNieuw(vlak, n1.gemeld, '2001-09-10');
+    toets('niet herhalen: nieuw, binnen 7 dagen niet opnieuw, daarna wel; weer normaal = uit de lijst', n1.nieuw.join() === 'rusthartslag' && n1.gemeld.rusthartslag === '2001-09-09' &&
+      n2.nieuw.length === 0 && n2.gemeld.rusthartslag === '2001-09-09' && n3.nieuw.join() === 'rusthartslag' && JSON.stringify(n4.gemeld) === '{}', [n1, n2, n3, n4]);
+    // Codex ZOU 2: te weinig metingen (onbekend) wist de melddatum niet
+    const gat = T.weekBlok({ rusthartslag: [], slaapduur: [], hrv: [], stappen: [] }, null, '2001-09-11'), n5 = m.weekNieuw(gat, n1.gemeld, '2001-09-11'), n6 = m.weekNieuw(dw, n5.gemeld, '2001-09-12');
+    toets('onbekend (gat in de metingen) houdt de melddatum; dezelfde afwijking daarna binnen 7 dagen niet opnieuw', n5.gemeld.rusthartslag === '2001-09-09' && n6.nieuw.length === 0, [n5, n6]);
+    // Codex ZOU 1: de regel noemt alleen de nieuwe soorten
+    const twee = JSON.parse(JSON.stringify(dw)); twee.soorten[0].afwijking = true; twee.afwijkingen = ['slaapduur', 'rusthartslag'];
+    const r1 = m.weekRegel(twee, ['slaapduur']);
+    toets('ochtendregel alleen met de nieuwe afwijking (eerder gemelde niet opnieuw)', /^Deze week afwijkend: slaap /.test(r1) && !/rusthartslag/.test(r1) && /per nacht/.test(r1), r1);
+  }
+  toets('dagNL: datum blijft, UTC rond middernacht → Nederlandse dag (winter en zomer)', T.dagNL('2026-11-23') === '2026-11-23' && T.dagNL('2026-11-23T23:30:00Z') === '2026-11-24' &&
+    T.dagNL('2026-07-05T22:30:00Z') === '2026-07-06' && T.dagNL('2026-07-05T21:30:00Z') === '2026-07-05' && T.dagNL('2026-11-24T00:30:00+01:00') === '2026-11-24' && T.dagNL(null) === null);
+  // pod-blok week weg → alleen dat blok leeg (overzicht blijft 200)
+  { gedrag['/metingen?soort=hrv&van=' + proefDag(64) + '&limiet=2000'] = 'weg'; const mw = maak(); const rw = await mw.overzicht(); delete gedrag['/metingen?soort=hrv&van=' + proefDag(64) + '&limiet=2000'];
+    toets('deze week niet te lezen: blok null + fout week, rest 200', rw.status === 200 && rw.j.deze_week === null && rw.j.fouten.some((f) => f.blok === 'week') && rw.j.metingen, rw.j.fouten);
+    let gooit = false; gedrag['/metingen?soort=stappen&van=' + proefDag(64) + '&limiet=2000'] = 'fout'; try { await mw.week(); } catch (e) { gooit = e.soort === 'fout 500' || !!e.soort; } delete gedrag['/metingen?soort=stappen&van=' + proefDag(64) + '&limiet=2000'];
+    toets('week() voor de nachtstap gooit als de metingen niet te lezen zijn (geen oordeel)', gooit); }
 
   // ── genoom ──
   log.length = 0;
@@ -176,7 +234,7 @@ const srv = http.createServer(function (req, res) {
   const a0 = src.indexOf('let appGezMod;'), b0 = src.indexOf('// ── wv787: POT-afschriften', a0);
   // wv1051 bracht APP_PRIVE_MODULES buiten dit blok; de echte regel meenemen (CI 274/275 rood op ReferenceError). wv3446: afscherm-schakelaar weg
   const prive = (src.match(/^const APP_PRIVE_MODULES = [^\n]*/m) || [''])[0] + '\n';
-  const blok = prive + src.slice(a0, b0) + '\nthis.appGezondheid = appGezondheid; this.gezondheidInfo = gezondheidInfo;';
+  const blok = prive + src.slice(a0, b0) + '\nthis.appGezondheid = appGezondheid; this.gezondheidInfo = gezondheidInfo; this.gezondheidWeekStap = gezondheidWeekStap;';
   let antw = [];
   let nep = { aanroepen: 0, volgende: null };
   const ctx = { require: function (p) { if (/gezondheid-app\.js$/.test(p)) return { maak: function () { return {
@@ -222,6 +280,46 @@ const srv = http.createServer(function (req, res) {
   antw = [];
   await ctx.appGezondheid({}, res(), { soort: 'mee' }, 'GET /app/gezondheid');
   toets('half antwoord wist de terugval niet', antw[0].st === 200 && antw[0].o.oud === true && antw[0].o.metingen[0] === 3, antw[0]);
+  // ── wv3936: teller op nul bij openen + nachtstap gezondheid-week (loket nagebootst, bestand in de proefmap) ──
+  {
+    const meld = [];
+    ctx.AN = require('./app-nieuws.js');
+    ctx.loketMeld = async function (x) { meld.push(x); return { uitkomst: 'nieuw' }; };
+    ctx.appLeesStreng = function (f, leeg) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return leeg; } };
+    ctx.appSchrijfJson = function (f, d) { fs.writeFileSync(f, JSON.stringify(d)); };
+    vm.runInContext('Object.keys(appGezCache).forEach(function (k) { delete appGezCache[k]; });', ctx);
+    nep.volgende = { status: 200, j: { ok: true, metingen: [5], fouten: [] } }; antw = [];
+    await ctx.appGezondheid({}, res(), { soort: 'mee' }, 'GET /app/gezondheid');
+    await new Promise((k) => setTimeout(k, 10));
+    toets('Gezondheid openen zet de teller op nul (loket, aantal 0)', meld.length === 1 && meld[0].app === 'gezondheid' && meld[0].laan === 'teller' && meld[0].aantal === 0, meld);
+    meld.length = 0; await ctx.appGezondheid({}, res(), { soort: 'mee' }, 'GET /app/gezondheid/genoom'); await new Promise((k) => setTimeout(k, 10));
+    toets('Genoom openen raakt de teller niet', meld.length === 0, meld);
+    const F = path.join(W, 'gezondheid-week.json');
+    const afw = { vandaag: '2026-11-24', soorten: [{ soort: 'rusthartslag', afwijking: true }], afwijkingen: ['rusthartslag'] };
+    const gewoon = { vandaag: '2026-11-24', soorten: [{ soort: 'rusthartslag', afwijking: false }], afwijkingen: [] };
+    let nu = afw;
+    let regelArg = null;
+    const mod = { week: async function () { return nu; }, weekRegel: function (dw, alleen) { regelArg = alleen; return dw.afwijkingen.length ? 'Deze week afwijkend: proef.' : null; }, weekNieuw: G._t.weekNieuw };
+    const ams = (d, u, mi) => ({ datum: d, uur: u, min: mi });
+    meld.length = 0;
+    let u = await ctx.gezondheidWeekStap({ datum: '2026-11-24' }, { mod: mod, ams: ams('2026-11-24', 6, 30), bestand: F });
+    const ed = meld.find((x) => x.laan === 'editie'), te = meld.find((x) => x.laan === 'teller');
+    toets('nachtstap: nieuwe afwijking → één editie-regel (ochtend, vandaag, scherm gezondheid) + teller 1', u.ok && meld.length === 2 && ed && ed.editie === 'ochtend' && ed.datum === '2026-11-24' && ed.app === 'gezondheid' && ed.doel.scherm === 'gezondheid' && te && te.aantal === 1 && te.vervalt && JSON.stringify(regelArg) === '["rusthartslag"]', [meld, regelArg]);
+    meld.length = 0; u = await ctx.gezondheidWeekStap({ datum: '2026-11-24' }, { mod: mod, ams: ams('2026-11-24', 6, 32), bestand: F });
+    toets('nachtstap: zelfde dag nog eens = al gedaan, niets gemeld', u.al_gedaan === true && meld.length === 0, [u, meld]);
+    meld.length = 0; u = await ctx.gezondheidWeekStap({ datum: '2026-11-25' }, { mod: mod, ams: ams('2026-11-25', 6, 30), bestand: F });
+    toets('nachtstap: dag erna dezelfde afwijking = geen herhaling', u.ok && meld.length === 0 && u.detail.nieuw === 0, [u, meld]);
+    nu = gewoon; meld.length = 0; u = await ctx.gezondheidWeekStap({ datum: '2026-11-26' }, { mod: mod, ams: ams('2026-11-26', 6, 30), bestand: F });
+    toets('nachtstap: gewone dag = niets in het ochtendbericht', u.ok && meld.length === 0 && u.detail.afwijkingen === 0, [u, meld]);
+    nu = afw; meld.length = 0; u = await ctx.gezondheidWeekStap({ datum: '2026-11-27' }, { mod: mod, ams: ams('2026-11-27', 6, 55), bestand: F });
+    toets('nachtstap: na 06:50 geen editie meer, wel de teller', u.ok && meld.length === 1 && meld[0].laan === 'teller' && u.detail.te_laat === true, [u, meld]);
+    const opgeslagen = fs.readFileSync(F, 'utf8');
+    toets('stand-bestand zonder meetwaarden', !/\d+[.,]\d/.test(opgeslagen.replace(/"op":"[^"]*"/, '')) && /"gemeld"/.test(opgeslagen), opgeslagen);
+    nu = null; mod.week = async function () { throw new Error('weg'); }; meld.length = 0; let gooide = false;
+    try { await ctx.gezondheidWeekStap({ datum: '2026-11-28' }, { mod: mod, ams: ams('2026-11-28', 6, 30), bestand: F }); } catch (e) { gooide = true; }
+    toets('nachtstap: metingen niet te lezen → gooit (keten meldt), niets gemeld, stand niet bijgewerkt', gooide && meld.length === 0 && JSON.parse(fs.readFileSync(F, 'utf8')).dag === '2026-11-27');
+    toets('nachtketen: stap gezondheid-week om 06:30, vóór apps-editie (06:50)', /\{ naam: 'gezondheid-week', start_na: \[6, 30\][^\n]*gezondheidWeekStap\(ctx\)/.test(src) && src.indexOf("naam: 'gezondheid-week'") < src.indexOf("naam: 'apps-editie'"));
+  }
   // module niet in de release → 404
   vm.runInContext('appGezMod = null;', ctx); antw = [];
   await ctx.appGezondheid({}, res(), { soort: 'mee' }, 'GET /app/gezondheid');
