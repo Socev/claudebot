@@ -972,7 +972,7 @@ function bonjacht(fdb, r, nu) {
   const link = (t) => t && t.account === 'prive' && /^[0-9a-f]{10,20}$/.test(String(t.id || '')) ? 'https://mail.google.com/mail/u/0/#all/' + t.id : null;
   return { lijsten: lijsten.map((l) => ({
     id: l.id, ontvangen: l.ontvangen, datum_lijst: l.datum_lijst, entiteit: l.entiteit, entiteit_naam: l.naam_kort || l.e_naam || l.entiteit, status: l.status,
-    reden: l.status === 'onleesbaar' ? 'deze lijst kon ik niet lezen (' + (l.reden || 'onbekend') + ')' : null,
+    reden: l.status === 'onleesbaar' ? 'deze lijst kon ik niet lezen (' + ({ geen_exact_kop: 'andere vorm dan de Exact-export', onleesbaar: 'bestand kapot', te_groot: 'bestand te groot', te_veel_regels: 'te veel regels' }[l.reden] || 'onbekende vorm') + ')' : null,
     lijst_link: link({ account: l.account, id: l.message_id }),
     regels: fdb.db.prepare("SELECT r.*, f.status AS f_status FROM bonjacht_regel r LEFT JOIN factuur f ON f.id = r.factuur WHERE r.lijst = ? ORDER BY r.nr").all(l.id).map((x) => {
       const tr = (json(x.treffers, []) || []).slice(0, 5);
@@ -2284,6 +2284,8 @@ function bonjachtBewijs(fdb, f) {
       "WHERE r.factuur = ? AND r.status = 'gevonden' ORDER BY r.id DESC LIMIT 1").get(f.id);
   } catch (e) { return null; }
   if (!x) return null;
+  // review MOET 1: alleen als het bedrag op de factuur (nu) op de cent de bankbetaling is, in euro, bij dezelfde entiteit
+  if (!Number.isSafeInteger(f.incl) || f.incl !== -Number(x.bedrag_centen) || (f.valuta || 'EUR') !== 'EUR' || (f.entiteit && f.entiteit !== x.entiteit)) return null;
   const inv = json(x.invoer, {}) || {};
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(x.boekdatum || ''));
   const n = Math.abs(Number(x.bedrag_centen) || 0);

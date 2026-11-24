@@ -129,10 +129,26 @@ async function lijstenLezen(fdb, io, o, tel) {
   const bekend = fdb.db.prepare('SELECT 1 FROM bonjacht_lijst WHERE message_id = ? LIMIT 1');
   const shaBekend = fdb.db.prepare("SELECT id FROM bonjacht_lijst WHERE sha256 = ? AND sha256 <> '' LIMIT 1");
   for (const account of ACCOUNTS) {
-    let z;
-    try { z = await io.luik({ actie: 'mail_zoeken', query: lijstQuery(afz), account, max: 25 }); } catch (e) { tel.fouten.push('zoeken:' + foutSoort(e)); continue; }
-    if (!z || !Array.isArray(z.mails) || z.melding) { tel.fouten.push('zoeken:' + (z && z.melding ? 'melding' : 'geen_lijst')); continue; }
-    for (const m of z.mails) {
+    // review MOET 3: het luik geeft hooguit 25; een vol antwoord = per week opnieuw (newer_than/older_than), zodat oudere lijsten niet wegvallen
+    const mails = new Map(); let mis = false;
+    for (const q of [lijstQuery(afz)]) {
+      let z;
+      try { z = await io.luik({ actie: 'mail_zoeken', query: q, account, max: 25 }); } catch (e) { tel.fouten.push('zoeken:' + foutSoort(e)); mis = true; break; }
+      if (!z || !Array.isArray(z.mails) || z.melding) { tel.fouten.push('zoeken:' + (z && z.melding ? 'melding' : 'geen_lijst')); mis = true; break; }
+      for (const m of z.mails) if (m && typeof m.id === 'string') mails.set(m.id, m);
+      if (z.mails.length >= 25) {
+        for (const [a, b] of [[0, 7], [7, 14], [14, GRENS.dagen]]) {
+          const q2 = lijstQuery(afz).replace(/ newer_than:\d+d$/, ' newer_than:' + b + 'd' + (a ? ' older_than:' + a + 'd' : ''));
+          let z2;
+          try { z2 = await io.luik({ actie: 'mail_zoeken', query: q2, account, max: 25 }); } catch (e) { tel.fouten.push('zoeken:' + foutSoort(e)); mis = true; break; }
+          if (!z2 || !Array.isArray(z2.mails) || z2.melding) { tel.fouten.push('zoeken:melding'); mis = true; break; }
+          if (z2.mails.length >= 25) tel.afgekapt = true;
+          for (const m of z2.mails) if (m && typeof m.id === 'string') mails.set(m.id, m);
+        }
+      }
+    }
+    if (mis && !mails.size) continue;
+    for (const m of [...mails.values()].sort((x, y) => String(x.datum_lokaal || '').localeCompare(String(y.datum_lokaal || '')))) {
       if (!m || typeof m.id !== 'string' || bekend.get(m.id)) continue;
       if (tel.berichten >= GRENS.berichten) { tel.later = (tel.later || 0) + 1; continue; }
       // alleen van de boekhouder zelf (de zoekvraag kan via een alias of een doorgestuurde kopie iets anders geven)
@@ -192,10 +208,21 @@ async function lijstenLezen(fdb, io, o, tel) {
  * door hetzelfde besliskader als elke factuur (F.verwerkBericht). Een factuur op te_beoordelen krijgt betaalwijze "al betaald" als voorstel, de
  * entiteit van de bankregel als die ontbreekt, het bedrag van de bank als het ontbreekt, en een besluitrij met de bron. → { factuur, al } of null.
  */
+// Eén factuur uit een mail voor één post: precies één met het bedrag op de cent, of (zonder bedrag op de cent) de enige factuur. Een factuur die al
+// bij een andere post hoort telt niet. Anders null (dan kiest David). review MOET 2.
+function kiesFactuur(fdb, lijst, regel, rij) {
+  const bezet = (id) => !!fdb.db.prepare("SELECT 1 FROM bonjacht_regel WHERE factuur = ? AND id <> ? AND status = 'gevonden'").get(id, rij.id);
+  const vrij = lijst.filter((x) => !bezet(x.id));
+  const raak = vrij.filter((x) => Number.isSafeInteger(x.incl) && x.incl === -regel.bedrag_centen);
+  if (raak.length === 1) return raak[0];
+  if (raak.length > 1) return null;
+  return vrij.length === 1 && lijst.length === 1 ? vrij[0] : null;
+}
 async function zetKlaar(fdb, io, pdf, rij, regel, u, o) {
   const t = u.treffers[0];
-  const al = fdb.db.prepare('SELECT f.id FROM bericht b JOIN factuur f ON f.bericht = b.id WHERE b.message_id = ? ORDER BY f.aangemaakt_op LIMIT 1').get(t.id);
-  if (al) return { factuur: al.id, al: true };
+  // review MOET 2: staat deze mail al in Facturen, kies dan de ene factuur die bij de post past (bedrag op de cent, of zonder bedrag bij één factuur)
+  const al = fdb.db.prepare('SELECT f.id, f.incl, f.status FROM bericht b JOIN factuur f ON f.bericht = b.id WHERE b.message_id = ? ORDER BY f.aangemaakt_op').all(t.id);
+  if (al.length) { const k = kiesFactuur(fdb, al, regel, rij); return k ? { factuur: k.id, al: true, status: k.status } : { factuur: null, al: true, meer: true }; }
   const account = luikAccount(t.account);
   const mail = await io.luik({ actie: 'mail_lezen', id: t.id, account });
   if (!mail || mail.fout) throw Object.assign(new Error('mail_lezen'), { code: 'mail_lezen' });
@@ -234,8 +261,9 @@ async function zetKlaar(fdb, io, pdf, rij, regel, u, o) {
       D.voegToe(fdb, 'bericht', { id, bron: bron.id, message_id: kort(t.id, 200), draad_id: kort(mail.thread_id, 200), afzender, onderwerp,
         datum_lokaal: kort(mail.datum_lokaal || t.dag, 40), bron_link: account ? null : 'https://mail.google.com/mail/u/0/#all/' + encodeURIComponent(String(t.id).slice(0, 100)), ontvangen_op: wanneer });
       const v = F.verwerkBericht(fdb, { bericht: { id, message_id: t.id, afzender, onderwerp }, documenten }, { wie: o.wie || 'koerier', nu: o.klok() });
-      const f = v.facturen.find((x) => x.status === 'te_beoordelen') || v.facturen.find((x) => x.status === 'geen_factuur') || v.facturen[0] || null;
-      if (!f) return;
+      const rijen = v.facturen.map((x) => Object.assign({}, x, { incl: (fdb.db.prepare('SELECT incl FROM factuur WHERE id = ?').get(x.id) || {}).incl }));
+      const f = kiesFactuur(fdb, rijen.filter((x) => x.status === 'te_beoordelen' || x.status === 'geen_factuur'), regel, rij);
+      if (!f) { uit = rijen.length ? { factuur: null, al: false, meer: rijen.length > 1 } : null; return; }
       uit = { factuur: f.id, al: false, status: f.status };
       // droogproef 24-11 (Compex, orderbevestiging): het besliskader zag "geen factuur" (nieuwsbrief zonder factuurwoord). Hier vroeg de
       // boekhouder er zelf om: zelfde overgang als Davids knop "Toch een factuur" (kern: geen_factuur → toch_factuur → te_beoordelen), met de reden erbij.
@@ -280,8 +308,9 @@ async function regelsAfwerken(fdb, io, pdf, o, tel, t0) {
     if (u.status === 'gevonden') {
       try {
         const k = await zetKlaar(fdb, io, pdf, rij, regel, u, o);
-        if (k) { factuur = k.factuur; if (k.al) reden = 'de bon stond al in Facturen'; else if (k.status === 'te_beoordelen') tel.klaargezet++; else reden = 'gevonden; staat in Facturen als ' + String(k.status).replace(/_/g, ' '); }
-        else reden = 'gevonden, maar niet als factuur te lezen';
+        if (k && k.meer) { status = 'kandidaten'; reden = 'die mail heeft meer facturen: kies zelf'; }
+        else if (k && k.factuur) { factuur = k.factuur; if (k.al) reden = 'de bon stond al in Facturen'; else if (k.status === 'te_beoordelen') tel.klaargezet++; else reden = 'gevonden; staat in Facturen als ' + String(k.status).replace(/_/g, ' '); }
+        else if (!k || !k.factuur) reden = 'gevonden, maar niet als factuur te lezen';
       }
       catch (e) {
         fdb.db.prepare("UPDATE bonjacht_regel SET status = 'fout', pogingen = pogingen + 1, reden = ?, bijgewerkt_op = ? WHERE id = ?").run('bon gevonden, klaarzetten lukte niet; volgt opnieuw', wanneer, rij.id);

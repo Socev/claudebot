@@ -137,6 +137,11 @@ test('lijst herkend → posten aan de bank, bon gevonden en in Beoordelen met "a
   const d = t.call('GET', 'factuur/' + f.id);
   assert.equal(d.al_betaald && d.al_betaald.bron, 'bank');
   assert.match(d.al_betaald.regel, /lijst van de boekhouder/);
+  // review MOET 1: ander bedrag op de factuur = geen bankbewijs
+  t.fdb.db.prepare('UPDATE factuur SET incl = 14300 WHERE id = ?').run(f.id);
+  const d2 = t.call('GET', 'factuur/' + f.id);
+  assert.ok(!d2.al_betaald || d2.al_betaald.bron !== 'bank', 'bedrag wijkt af: geen bankbewijs');
+  t.fdb.db.prepare('UPDATE factuur SET incl = 14400 WHERE id = ?').run(f.id);
   // blok in de app
   const b = t.call('GET', 'bonjacht');
   assert.equal(b.lijsten.length, 1); assert.equal(b.lijsten[0].regels.length, 2);
@@ -202,4 +207,24 @@ test('portaallink: alleen https', () => {
   assert.throws(() => t.call('POST', 'leverancier', { id: lev.id, portaal_url: 'http://x.invalid/' }), /https/);
   t.call('POST', 'leverancier', { id: lev.id, portaal_url: 'https://portaal.invalid/facturen' });
   assert.equal(t.fdb.db.prepare('SELECT portaal_url FROM leverancier WHERE id = ?').get(lev.id).portaal_url, 'https://portaal.invalid/facturen');
+});
+
+test('vol antwoord (25) op de lijstzoekvraag: per week opnieuw zoeken, oudere lijst valt niet weg', async () => {
+  const t = opzet(); const g = nepLuik(t);
+  const vol = Array.from({ length: 25 }, (_, i) => ({ id: '19aa00000000c' + String(i).padStart(3, '0'), naam: 'iets.xlsx', bytes: Buffer.from('x') }));
+  g.lijstMails.push(...vol, { id: '19aa00000000a001', naam: 'CflStatementsToBeCompleted (3).xlsx', bytes: lijstVoor(t.rek.iban) });
+  const oud = g.luik;
+  g.luik = async (b) => {
+    if (b.actie === 'mail_zoeken' && /^from:\(/.test(b.query) && b.account === '') {
+      g.vragen.push(b);
+      const week = /older_than:14d/.test(b.query);
+      const m = /older_than/.test(b.query) ? (week ? [g.lijstMails[25]] : []) : /newer_than:7d/.test(b.query) ? g.lijstMails.slice(0, 25) : g.lijstMails.slice(0, 25);
+      return { mails: m.map((x) => ({ id: x.id, thread_id: x.id, van: AFZ, onderwerp: 'lijst', datum_lokaal: '2026-10-27 09:00' })) };
+    }
+    return oud(b);
+  };
+  BJ.GRENS.berichten = 40;
+  try { await t.ronde(g); } finally { BJ.GRENS.berichten = 6; }
+  assert.ok(g.vragen.some((v) => /older_than:14d/.test(v.query)), 'per week gezocht');
+  assert.equal(t.fdb.db.prepare("SELECT count(*) AS n FROM bonjacht_lijst WHERE status = 'klaar' OR status = 'bezig'").get().n, 1);
 });
