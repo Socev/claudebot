@@ -1,0 +1,40 @@
+{
+ "profiel": "map",
+ "versie": 1,
+ "omschrijving": "Eén los bestand dat in de map raw_input van een entiteit werd gezet (door David of door Socev: app-bijlage, gemaakt document, opgehaalde mailbijlage), aangeboden door de pod-tik map-ingang.js (wv3962, besluit nr 133 deel 2: de nachtverwerking van Tolgaarde loopt alleen via Intake, zolang wat in de map wordt gezet ook naar Intake gaat). Alleen intern. De map bepaalt de entiteit (map_entiteit); de router geeft alleen de kennislens (of geen/vragen/systeem), nooit facturen, keten of deadlines. Marker en Jev zoals bij elk stuk. Na aanname verhuist het origineel naar Bronnen/Intake/ van die entiteit.",
+ "bronnen": [
+  "vault:tolgaarde"
+ ],
+ "bron_id": {
+  "vorm": "^[0-9a-f]{24}$",
+  "uitleg": "24 hex van sha256('map|' + entiteit + '|' + sha256 van de bytes): hetzelfde bestand nog eens = dubbel"
+ },
+ "herzienbaar": false,
+ "alleen_intern": true,
+ "meta": {
+  "onderwerp": { "type": "tekst", "min": 1, "max": 300, "verplicht": true },
+  "map_entiteit": { "type": "keuze", "waarden": ["TG"], "verplicht": true },
+  "bestand": { "type": "tekst", "min": 1, "max": 300, "verplicht": true },
+  "gewijzigd_op": { "type": "tijd", "verplicht": true }
+ },
+ "onderdelen": {
+  "origineel": { "min": 1, "max": 1, "mime": ["application/pdf", "text/markdown", "text/plain", "text/csv", "text/html", "message/rfc822",
+   "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+   "application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.oasis.opendocument.text",
+   "application/vnd.oasis.opendocument.spreadsheet", "application/vnd.oasis.opendocument.presentation",
+   "image/jpeg", "image/png", "image/gif", "image/webp"], "max_mb": 25 }
+ },
+ "archief": {
+  "schrijf_rol": "origineel",
+  "map": "10_Zakelijk/Tolgaarde/Bronnen/Intake",
+  "naam": "^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}_map_[a-z0-9-]{1,80}\\.[a-z0-9]{1,5}$"
+ },
+ "privacy": {
+  "access_context": "strikt_prive"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "intake-router.js (kennislens → raw_input van de entiteit, origineel als bijlage)",
+  "second-brain-verwerk-raw-input"
+ ]
+}

@@ -1184,7 +1184,9 @@ function maak(o) {
     // wv2660: een webpagina die David met de Chrome-extensie aanleverde, alleen vanuit brain-web.js (POST /app/brain/webpagina, Davids app-sessie)
     webpagina: { id: 'intern-webpagina', route: 'webpagina', profielen: ['webpagina@1'], bronnen: ['web:david'], lezen: [], intern: true },
     // wv3299: een blad uit OVIS Tabula (Stuur naar de Second Brain), alleen vanuit tabula-loket.js (opdracht opgehaald bij tabula.socev.dev)
-    tabula: { id: 'intern-tabula', route: 'tabula', profielen: ['tabula@1'], bronnen: ['app:tabula'], lezen: [], intern: true } };
+    tabula: { id: 'intern-tabula', route: 'tabula', profielen: ['tabula@1'], bronnen: ['app:tabula'], lezen: [], intern: true },
+    // wv3962: een los bestand uit raw_input van een entiteit met een map-ingang, alleen vanuit map-ingang.js (pod-tik)
+    map: { id: 'intern-map', route: 'map', profielen: ['map@1'], bronnen: ['vault:tolgaarde'], lezen: [], intern: true } };
   function nepReq(method, headers, buf) {
     const h = {};
     const r = { method, url: '/intake/intern', headers, complete: true, resume() {}, on(ev, f) {

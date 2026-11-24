@@ -42,9 +42,12 @@ const path = require('path');
 const crypto = require('crypto');
 
 const REGELVERSIE = 'router-1.3';   // 1.1 (wv1408): Davids routeringsregels gaan vóór de standaard; 1.2 (wv1916): live per bron (Jev, vangnet, kennislens); 1.3 (wv1919): facturen, keten, deadlines
-const PROFIELEN = new Set(['mail@1', 'outlook-mail@1', 'scansnap@1', 'webpagina@1', 'tabula@1']);   // de rest (dumps, contacten) gaat zoals nu: buiten de router; webpagina@1: wv2660; tabula@1: wv3299
+const PROFIELEN = new Set(['mail@1', 'outlook-mail@1', 'scansnap@1', 'webpagina@1', 'tabula@1', 'map@1']);   // de rest (dumps, contacten) gaat zoals nu: buiten de router; webpagina@1: wv2660; tabula@1: wv3299
 // wv3299 (OVIS Tabula, Stuur naar de Second Brain): een blad uit Davids kladblok gaat net als een webpagina alleen naar WEB_LENZEN.
 const WEB_ACHTIG = new Set(['webpagina@1', 'tabula@1']);
+// wv3962 (besluit nr 133, deel 2): een los bestand uit een raw_input-map (map-ingang.js) krijgt ook alleen de WEB_LENZEN, met de
+// entiteit van de map (vast, hoog: David of Socev zette het daar; geen nieuwe beslisregel en geen vangnetmodel)
+const ALLEEN_KENNIS = new Set(['webpagina@1', 'tabula@1', 'map@1']);
 // wv2660 (Chrome-extensie Naar Second Brain): webtekst van derden gaat alleen naar de kennislens (of nergens, vragen, Systeem), nooit naar
 // facturen, keten of deadlines, ook niet via een regel: een webpagina is geen post en geen bewijsstuk.
 const WEB_LENZEN = ['kennis', 'geen', 'vragen', 'systeem'];
@@ -69,7 +72,8 @@ const INDELING = [['Huisartsenpraktijk Tolgaarde', 'TG'], ['Huisartsenpraktijk G
 // bewaren" mag het zeggen, maar wordt alleen een voorstel op de kaart (nooit vanzelf weggooien). Uit (standaard) = de oude vraag, gedrag gelijk.
 const POSTVAK_TEKST = { 'gmail:david': 'Davids eigen Gmail (daar komt zowel privé- als werkpost binnen)', 'gmail:groenhouten': 'het gedeelde Gmail-postvak van de maten van Huisartsenpraktijk Groenhouten',
   'outlook:tolgaarde': 'Davids Outlook-postvak van Huisartsenpraktijk Tolgaarde (praktijkpost; ook HAGRO- en POH-GGZ-post komt hier binnen)', 'scanner:scansnap': 'de scanner (papieren post)',
-  'web:david': 'een webpagina die David zelf naar zijn Second Brain stuurde', 'app:tabula': 'een notitie uit Davids eigen kladblok' };
+  'web:david': 'een webpagina die David zelf naar zijn Second Brain stuurde', 'app:tabula': 'een notitie uit Davids eigen kladblok',
+  'vault:tolgaarde': 'een bestand dat in de map raw_input van Tolgaarde werd gezet' };
 const PLEK_UITLEG = { TG: 'Davids eigen huisartsenpraktijk in Leusden: praktijkvoering, personeel, zorgverzekeraars, leveranciers, ICT/HIS, accreditatie en nascholing als huisarts, praktijkpost',
   GH: 'de tweede praktijk in Leusden (vroeger HAP Leusden), een maatschap van vier maten waarvan David er één is: alles van en over die praktijk en het maten-overleg',
   HAGRO: 'de huisartsengroep Leusden-Achterveld: overleg, waarneming en samenwerking tussen de Leusdense praktijken',
@@ -562,6 +566,7 @@ function soortBepaal(x) {
   const bewijs = [];
   if (x.profiel === 'webpagina@1') return { soort: 'notitie', sub: 'webpagina', kracht: 'hoog', bewijs: ['webpagina'] };   // wv2660: vast, nooit factuur of keten
   if (x.profiel === 'tabula@1') return { soort: 'notitie', sub: 'tabula', kracht: 'hoog', bewijs: ['tabula'] };   // wv3299: idem
+  if (x.profiel === 'map@1') return { soort: 'notitie', sub: 'map', kracht: 'hoog', bewijs: ['map'] };   // wv3962: idem (alleen kennis)
   if (x.ubl) return { soort: 'bewijsstuk', sub: 'factuur', kracht: 'hoog', bewijs: ['ubl'] };
   // wv2684 (postketen): keten_kracht is de zekerheid voor de keten-lens alleen (soort keten + een nummer om op te zoeken); kracht blijft voor de facturenlens
   const nummer = heeft('dossiernummer') || heeft('kenmerk') || heeft('factuurnummer');
@@ -914,10 +919,10 @@ const EIGEN_VERZONDEN_LENZEN = ['facturen', 'keten', 'deadlines'];
 // wv2660: bij een webpagina gaat elke andere lens dan WEB_LENZEN naar de schaduw (reden 'webpagina'); blijft er niets over, dan de kennislens
 // zonder automatisch (David kiest de plek). schaduw wordt aangevuld (zelfde array).
 function webLenzen(s, bs, schaduw) {
-  if (!s || !WEB_ACHTIG.has(s.profiel)) return bs;
+  if (!s || !ALLEEN_KENNIS.has(s.profiel)) return bs;
   const weg = bs.filter(function (b) { return WEB_LENZEN.indexOf(b.lens) < 0; });
   if (!weg.length) return bs;
-  const reden = s.profiel === 'tabula@1' ? 'tabula' : 'webpagina';
+  const reden = s.profiel === 'tabula@1' ? 'tabula' : (s.profiel === 'map@1' ? 'map' : 'webpagina');
   for (const b of weg) schaduw.push(Object.assign({}, b, { zou_auto: false, reden: reden }));
   const blijft = bs.filter(function (b) { return WEB_LENZEN.indexOf(b.lens) >= 0; });
   return blijft.length ? blijft : [{ lens: 'kennis', doel: weg[0].doel || null, zou_auto: false, reden: reden }];
@@ -954,7 +959,7 @@ function nlMoment(iso) {
   const f = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(t));
   return { datum: f.slice(0, 10), uumm: f.slice(11, 13) + f.slice(14, 16) };
 }
-const BRON_KORT = { 'mail@1': 'gmail', 'outlook-mail@1': 'outlook', 'scansnap@1': 'scan', 'webpagina@1': 'web', 'tabula@1': 'tabula' };
+const BRON_KORT = { 'mail@1': 'gmail', 'outlook-mail@1': 'outlook', 'scansnap@1': 'scan', 'webpagina@1': 'web', 'tabula@1': 'tabula', 'map@1': 'map' };
 function kennisNaam(profiel, iso, onderwerp, fallback) {
   const m = nlMoment(iso) || { datum: 'onbekende-datum', uumm: '0000' };
   return m.datum + '_' + m.uumm + '_' + (BRON_KORT[profiel] || 'intake') + '_' + (slug(onderwerp, 80) || slug(String(fallback || '').replace(/\.[A-Za-z0-9]{1,8}$/, ''), 80) || 'zonder-onderwerp') + '.md';
@@ -1003,6 +1008,8 @@ function kennisInhoud(x) {
     'regel: ' + yv(x.regel || 'standaard'), 'ontvangen: ' + yv(x.ontvangen || '')];
   kop.push(...datumKop(x.datums));   // wv1276: datumdetector (stap 6, op de lokale tekstlaag ná de markers)
   if (x.documentbron) kop.push('documentbron: ' + yv(x.documentbron));
+  // wv3962: los bestand uit raw_input; het origineel verhuist naar Bronnen/Intake/ van dezelfde entiteit (map-ingang.js)
+  if (x.map) kop.push('map_bestand: ' + yv(String(x.map.bestand || '')), 'origineel_naar: ' + yv((KENNIS_MAP[x.map.entiteit] || '').replace(/\/raw_input$/, '/Bronnen/Intake/')));
   if (x.verplaatst_van) kop.push('ovis_verplaatst_van: ' + yv(x.verplaatst_van));   // wv2618: na de nacht verplaatst; de oude plek krijgt een rechtzet-notitie
   const geplaatst = (x.bijlagen || []).filter(function (b) { return b.bestand; }), niet = (x.bijlagen || []).filter(function (b) { return !b.bestand; });
   if (geplaatst.length) kop.push('bijlagen:', ...geplaatst.map(function (b) { return '  - ' + yv(b.bestand); }));
@@ -1626,6 +1633,8 @@ function maak(o) {
           B('afzender', af.knoop || 'onbekend', af.kracht, { kenmerken: af.kenmerken, twijfel: af.twijfel || null, aangeleverd_door: af.aangeleverd_door, voorgesteld_spoor: af.voorgesteld_spoor, kandidaten: af.kandidaten,
             voorstel: af.o ? null : (af.van_domein && !af.aangeleverd_door ? 'nieuwe_conceptpagina' : null) });
           const en = entiteitBepaal(r, x, af);
+          // wv3962: map-ingang — de map bepaalt de entiteit (meta.map_entiteit, door het profiel beperkt tot de maps met een ingang)
+          if (s.profiel === 'map@1' && KENNIS_MAP[meta.map_entiteit]) { en.knoop = meta.map_entiteit; en.kracht = 'hoog'; en.bewijs = 'map'; en.twijfel = null; en.kenmerken = ['map']; }
           const labels = Array.from(new Set([].concat(meta.entiteit || [], delen.map(function (d) { const m = safeJson(d.meta); return m && m.entiteit; }).filter(Boolean)))).map(function (l) { return LABEL_KNOOP[l] || null; }).filter(Boolean);
           B('entiteit', en.knoop || 'onbekend', en.kracht, { kenmerken: en.kenmerken, twijfel: en.twijfel || null, label_route: labels });
           // Davids regels gaan vóór de standaard (wv1408); de marker ging hierboven al voor
@@ -1832,7 +1841,9 @@ function maak(o) {
     // Systeem: een door David vrijgegeven markerstuk krijgt een neutrale naam (de box-rij noemt het pad, niet het onderwerp)
     const naam = systeem ? systeemNaam(ontvangen, sam.na_keuze ? 'vrijgegeven stuk ' + s.stuk_id.slice(-8) : onderwerp, eerste ? eerste.naam : '') : kennisNaam(s.profiel, ontvangen, onderwerp, eerste ? eerste.naam : '');
     // bijlagen als bestand ernaast (pdf, docx, afbeeldingen …; een scan: het origineel), het .eml niet
-    const bijlagen = delen.filter(function (d) { return d.rol === 'bijlage' || (s.profiel === 'scansnap@1' && d.rol === 'origineel'); });
+    // wv3962: een mapbestand ook (het origineel naast het kennisbestand), behalve een tekstbestand dat helemaal in het kennisbestand staat
+    const tekstHeel = function (d) { const x = lt.delen.find(function (y) { return y.deel === d.deel; }); return /^text\//i.test(String(d.mime || '')) && !!x && lt.deels.indexOf(d.deel) < 0 && String(x.tekst || '').length <= KENNIS_TEKST_MAX && d.grootte <= LEES_MAX; };
+    const bijlagen = delen.filter(function (d) { return d.rol === 'bijlage' || (s.profiel === 'scansnap@1' && d.rol === 'origineel') || (s.profiel === 'map@1' && d.rol === 'origineel' && !tekstHeel(d)); });
     const uit = [];
     const bijNamen = [];
     for (const d of bijlagen) {
@@ -1868,7 +1879,8 @@ function maak(o) {
       soort: sam.soort, soort_kracht: sam.soort_kracht, afzender: sam.afzender, afzender_naam: naamVan(r, sam.afzender), afzender_kracht: sam.afzender_kracht,
       entiteit: b.doel, entiteit_kracht: b.reden === 'david' ? 'david' : sam.entiteit_kracht, entiteit_bewijs: b.reden === 'david' ? 'keuze van David' : sam.entiteit_bewijs, regel: sam.regel,
       jev: sam.jev === 'boven' ? { boven: true } : (sam.jev_overgeslagen ? { overgeslagen: sam.jev_overgeslagen } : null), delen: tekstDelen, bijlagen: bijNamen,
-      documentbron: /(^|\.)plaud\.ai$/i.test(domeinVan(adresVan(meta.van || ''))) ? 'plaud' : null, systeem, verplaatst_van: systeem ? null : verplaatstVan(s.stuk_id, b.doel),
+      documentbron: /(^|\.)plaud\.ai$/i.test(domeinVan(adresVan(meta.van || ''))) ? 'plaud' : null, systeem,
+      map: s.profiel === 'map@1' ? { bestand: meta.bestand, entiteit: meta.map_entiteit } : null, verplaatst_van: systeem ? null : verplaatstVan(s.stuk_id, b.doel),
       web: s.profiel === 'webpagina@1' ? { url: meta.url, domein: meta.domein, opgehaald_op: meta.opgehaald_op, wijze: meta.wijze, sleutels_weggelaten: meta.sleutels_weggelaten, ingekort: meta.ingekort === true }
         : (s.profiel === 'tabula@1' ? { tabula: true, blad: meta.blad, geschreven_op: meta.geschreven_op, sleutels_weggelaten: meta.sleutels_weggelaten, ingekort: meta.ingekort === true } : null) }), 'utf8');
     const k = schrijfVrij(mapRel, naam, inhoud);

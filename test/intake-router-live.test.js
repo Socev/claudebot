@@ -1073,3 +1073,31 @@ test('wv3683 review MOET 2: een latere handeling van David zonder leren (verwijd
   assert.deepEqual(E.vragen[1].voorbeelden, []);
   E.r.sluit();
 });
+
+test('live: map@1 (wv3962) → entiteit uit de map (hoog, bewijs map), geen vangnetmodel, alleen kennis; origineel als bijlage, tekstbestand niet', async () => {
+  const E = omgeving();
+  const id = E.zet({ profiel: 'map@1', bron: 'vault:tolgaarde', meta: { onderwerp: 'Rooster week 45', map_entiteit: 'TG', bestand: 'Rooster week 45.pdf', gewijzigd_op: '2026-10-28T19:00:00Z' },
+    delen: [{ deel: 'b1', rol: 'origineel', naam: 'Rooster week 45.pdf', mime: 'application/pdf', bytes: '%PDF-1.4 rooster' }] });
+  const id2 = E.zet({ profiel: 'map@1', bron: 'vault:tolgaarde', meta: { onderwerp: 'Notitie factuur leverancier', map_entiteit: 'TG', bestand: 'sub/Notitie.md', gewijzigd_op: '2026-10-28T19:00:00Z' },
+    delen: [{ deel: 'b1', rol: 'origineel', naam: 'Notitie.md', mime: 'text/markdown', bytes: '# Notitie\n\nFactuur 2026-123 van de leverancier, te betalen voor 30-11, IBAN volgt. Verzonnen tekst voor de toets van de map-ingang.' }] });
+  const u = await E.r.ronde();
+  assert.equal(u.fout, 0);
+  assert.equal(E.tel.indeling.length, 0);   // geen vangnetmodel: de map zegt de entiteit
+  assert.equal(E.tel.jev.length, 2);        // Jev blijft
+  const ls = E.db.prepare('SELECT * FROM live_stuk WHERE stuk_id = ?').get(id);
+  assert.equal(ls.staat, 'klaar'); assert.equal(ls.bewijs, 'map');
+  const f = E.bestanden().sort();
+  assert.deepEqual(f, ['10_Zakelijk/Tolgaarde/raw_input/2026-10-28_2052_map_Notitie-factuur-leverancier.md', '10_Zakelijk/Tolgaarde/raw_input/2026-10-28_2051_map_Rooster-week-45.md',
+    '10_Zakelijk/Tolgaarde/raw_input/2026-10-28_2051_map_Rooster-week-45__Rooster-week-45.pdf'].sort());
+  const t = fs.readFileSync(path.join(E.vault, '10_Zakelijk/Tolgaarde/raw_input/2026-10-28_2051_map_Rooster-week-45.md'), 'utf8');
+  assert.match(t, /\nentiteit: "tolgaarde"\nentiteit_id: TG\nentiteit_zekerheid: "hoog, bewijs map"\n/);
+  assert.match(t, /\nmap_bestand: "Rooster week 45\.pdf"\norigineel_naar: "10_Zakelijk\/Tolgaarde\/Bronnen\/Intake\/"\n/);
+  assert.match(t, /bijlagen:\n  - "2026-10-28_2051_map_Rooster-week-45__Rooster-week-45\.pdf"/);
+  const t2 = fs.readFileSync(path.join(E.vault, '10_Zakelijk/Tolgaarde/raw_input/2026-10-28_2052_map_Notitie-factuur-leverancier.md'), 'utf8');
+  assert.match(t2, /## Document: Notitie\.md\n\n# Notitie\n\nFactuur 2026-123/);
+  assert.doesNotMatch(t2, /\nbijlagen:/);
+  // alleen kennis: geen facturen/keten/deadlines, ook al staat er een factuurnummer en een datum
+  const lenzen = E.db.prepare('SELECT DISTINCT lens FROM bestemming WHERE stuk_id IN (?, ?)').all(id, id2).map((x) => x.lens).sort();
+  assert.deepEqual(lenzen, ['kennis']);
+  E.r.sluit();
+});

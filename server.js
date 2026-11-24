@@ -4759,7 +4759,8 @@ function handleRequest(req, res) {
       mail_sluit: typeof mailSluitInfo === 'function' ? mailSluitInfo() : { aan: false },   // wv3091: OVIS Mail fase 2 (sluitcontrole; alleen tellingen)
       mail_voorwerk: typeof mailVoorwerkInfo === 'function' ? mailVoorwerkInfo() : { aan: false },   // wv2455: voorwerk bij vragen in Mail (tellingen, geen inhoud)   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
-      tabula: typeof tabulaInfo === 'function' ? tabulaInfo() : { aan: false },   // wv3299: OVIS Tabula-opdrachtenloket (lijn, laatste ophaalronde, dagtellers per soort; nooit tekst, titel of code)
+      tabula: typeof tabulaInfo === 'function' ? tabulaInfo() : { aan: false },
+      map_ingang: typeof mapIngangInfo === 'function' ? mapIngangInfo() : { module: false },   // wv3962: map → Intake (tellers, geen namen)   // wv3299: OVIS Tabula-opdrachtenloket (lijn, laatste ophaalronde, dagtellers per soort; nooit tekst, titel of code)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
       weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
@@ -28816,6 +28817,44 @@ const tabulaLoket = (function () {
 })();
 function tabulaInfo() { if (!tabulaLoket) return { aan: false, module: false }; try { return tabulaLoket.health(); } catch (e) { return { fout: true }; } }
 if (tabulaLoket && (SERVER_ECHT || process.env.TABULA_TOETS_BASIS)) setTimeout(function () { try { tabulaLoket.start(); } catch (e) { logError('tabula-start', e); } }, SERVER_ECHT ? 20000 : 500).unref();
+
+// wv3962 (besluit nr 133 = 2C33 deel 2, David 22-11-2026): MAP-INGANG. Een los bestand in raw_input van Tolgaarde gaat via OVIS Intake
+// (map@1); het origineel verhuist daarna naar Bronnen/Intake/. Aan per bron in router.json live["vault:tolgaarde"] (terugrol: weg = uit; de
+// nachtskill neemt LOS dan weer zelf). Gedeelde stand voor raw-input-stand.py in MAP_INGANG_STAND. Elke 5 min; pauze bij onderhoud,
+// 01:xx (nachtgrendel) en 04:30–06:29 (de nachtverwerking van raw_input loopt om 05:00).
+const MAP_INGANG_STAND = serverPad('map_ingang', process.env.MAP_INGANG_STAND, '/opt/data/intake-map/stand.json', serverProefDeel('intake-map/stand.json'));
+const RAW_INPUT_STAND = path.join(VAULT, '.claude', 'skills', 'second-brain-verwerk-raw-input', 'raw-input-stand.py');
+const mapIngang = (function () {
+  const p = path.join(__dirname, 'map-ingang.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ vault: VAULT, vv: VV(), mappen: { TG: '10_Zakelijk/Tolgaarde/raw_input' }, staatPad: MAP_INGANG_STAND,
+      live: function (ent) { return ent === 'TG' && !!intake && typeof intake.leverIntern === 'function' && intakeLiveBron('vault:tolgaarde'); },
+      lever: function (env, bytes) { return intake.leverIntern('map', env, bytes); },
+      los: function (mapRel) {
+        return new Promise(function (resolve, reject) {
+          require('child_process').execFile('python3', ['-I', RAW_INPUT_STAND, mapRel, '--json', '--zonder-ingang'], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, env: Object.assign({}, process.env, { VAULT_ROOT: VAULT }) },
+            function (err, so) {
+              if (err) return reject(err);
+              try { const j = JSON.parse(so); resolve([].concat(...j.map(function (m) { return (m.rijen || []).filter(function (r) { return r.stand === 'LOS'; }); }))); } catch (e) { reject(e); }
+            });
+        });
+      },
+      pauze: function () {
+        try { if (onderhoud.stand().aan === true) return true; } catch (e) { return true; }
+        const a = ovisAms(), m = a.uur * 60 + a.min;
+        return a.uur === 1 || (m >= 270 && m < 390);
+      },
+      log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError,
+      melding: function (t) { ovisBoxRij('\n## [log] ' + ovisAms().klok + ' — map-ingang Tolgaarde: ' + t + ' (automatisch, wv3962)\n- status: open\n- van: pod (map-ingang)\n' +
+        '- gevolg als er niets gebeurt: die bestanden verwerkt de nacht zelf (oude route), niet via Intake.\n- voorstel: redenen nalopen in /opt/data/intake-map/stand.json (geweigerd) en intake.sqlite (aanlevering).\n'); } });
+  } catch (e) { logError('map-ingang', e); return null; }
+})();
+function mapIngangInfo() { if (!mapIngang) return { module: false }; try { return Object.assign({ aan: intakeLiveBron('vault:tolgaarde') }, mapIngang.info()); } catch (e) { return { fout: true }; } }
+if (mapIngang && SERVER_ECHT === true) {
+  const mapTik = function () { mapIngang.tik().catch(function (e) { logError('map-ingang-tik', e); }); };
+  setTimeout(mapTik, 90000).unref(); setInterval(mapTik, 5 * 60000).unref();
+}
 
 // ── Syncthing (wv1277, 25-10-2026) ─────────────────────────────────────────────────────────────────────────────────────────
 // run.sh start en bewaakt Syncthing (vault ↔ Synology thuis, laptop, werk-pc) en schrijft /opt/data/syncthing/status.json; hier
