@@ -501,7 +501,14 @@ function maak(deps) {
   function mkdir() { fs.mkdirSync(path.join(DIR, 'tmp'), { recursive: true, mode: 0o700 }); try { fs.chmodSync(DIR, 0o700); fs.chmodSync(path.join(DIR, 'tmp'), 0o700); } catch (e) {} }
   function leesJson(p, leeg) { return leesStreng(p, leeg, fout, 'harvester ' + path.basename(p)); }   // B137: alleen ENOENT = leeg
   function schrijfJson(p, j) { mkdir(); const tmp = p + '.' + process.pid + '.' + crypto.randomBytes(3).toString('hex'); fs.writeFileSync(tmp, JSON.stringify(j, null, 1), { mode: 0o600 }); fs.renameSync(tmp, p); }
-  function kaartenLees() { const k = leesJson(P.kaarten, { kaarten: [] }); return Array.isArray(k.kaarten) ? k.kaarten : []; }
+  // wv3934 (Codex ronde 2): een kaart die op socev staat zonder rijnummer (pod viel om tussen opslaan en de rij zetten) telt na 5 minuten
+  // weer als nieuw; de volgende schrijfactie legt dat vast. Zo blijft er nooit een kaart "bij Socev" hangen die niemand oppakt.
+  function kaartenLees() {
+    const k = leesJson(P.kaarten, { kaarten: [] }), l = Array.isArray(k.kaarten) ? k.kaarten : [];
+    const grens = klok() - 5 * 60000;
+    l.forEach(function (x) { if (x && x.status === 'socev' && x.socev && x.socev.wv == null && !x.socev.uitkomst && !(Date.parse(x.socev.sinds) > grens)) { x.status = 'nieuw'; delete x.socev; } });
+    return l;
+  }
   function kaartenSchrijf(l) {
     const grens = klok() - GRENS.weg_dagen * 86400000;
     schrijfJson(P.kaarten, { versie: 1, kaarten: l.filter(function (k) { return !(k.status === 'weg' && Date.parse(k.gewijzigd) < grens); }) });   // Fable #10

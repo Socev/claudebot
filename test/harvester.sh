@@ -618,6 +618,23 @@ let invoer=''; process.stdin.on('data',c=>invoer+=c); process.stdin.on('end',()=
     g = await M5b.app('POST /app/harvester/regel', { ids: [on2.id] });
     toets('13 race: kaart tijdens het zetten teruggehaald en weggegooid → blijft weg, per kaart "intussen veranderd"', g.status === 200 && M5.lijst().kaarten.find((k) => k.id === on2.id).status === 'weg' &&
       /intussen veranderd/.test(g.j.kaarten[0].uitkomst), g.j);
+    // Codex ronde 2: pod valt om tussen opslaan en de rij → na 5 minuten weer nieuw, en opnieuw door te zetten
+    {
+      M5.vul([basis('Hangproef onderhoud')]);
+      const vrijId = M5.lijst().kaarten.find((k) => k.titel === 'Hangproef onderhoud').id;
+      M5.deelIn([{ id: vrijId, soort: 'onderhoud', uren: 1 }]);
+      const vrij = M5.lijst().kaarten.find((k) => k.id === vrijId);
+      const Md = H.maak({ vault: VAULT, dir: D5, klok, lookup, request, werkvoorraad: () => new Promise(() => {}) });   // rij komt nooit (pod "valt om")
+      Md.app('POST /app/harvester/regel', { ids: [vrij.id] });
+      await new Promise((r) => setTimeout(r, 20));
+      const hangt = M5.lijst().kaarten.find((k) => k.id === vrij.id).status;
+      t += 6 * 60000;
+      const na = M5.lijst().kaarten.find((k) => k.id === vrij.id);
+      wvAntw = { id: 4250, bestond: false };
+      const g6 = await M5.app('POST /app/harvester/regel', { ids: [vrij.id] });
+      toets('13 Codex ronde 2: socev zonder rij → na 5 min weer nieuw en opnieuw door te zetten', hangt === 'socev' && na.status === 'nieuw' && !na.socev && g6.status === 200 &&
+        M5.lijst().kaarten.find((k) => k.id === vrij.id).socev.wv === 4250, [hangt, na.status, g6]);
+    }
     // zonder werkvoorraad-koppeling
     const M5c = H.maak({ vault: VAULT, dir: D5, klok, lookup, request });
     toets('13 zonder werkvoorraad-koppeling = 503', (await M5c.app('POST /app/harvester/regel', { ids: [on2.id] })).status === 503);
