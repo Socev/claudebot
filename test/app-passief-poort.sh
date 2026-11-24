@@ -9,6 +9,7 @@
 #   L  lease (rolPrimair uit de broncode geknipt): lezing 181 s oud → passief + reden 'lease verlopen'; 10 s oud → primair.
 #   S  stand-in (kant vps, SOCEV_ALTIJD_PASSIEF=1): passief; geen spaarstand, nood-spiegel stand_in (wv3909).
 #   V  volle pod kant vps, primair (wv3909, fase 1h): spaarstand aan, maxAgents 1 (ook met MAX_AGENTS=3), POST Studio/Imagine 503.
+#   B  spaarstand-browser (geknipt): agent geen mcp__playwright, beurt/ophalen/winkelbrowser niet naast een agent.
 #   T  geen 'gebruik Telegram' meer in de broncode (Telegram is geen noodingang meer, wv3909).
 # Kruisproef: KRUIS=1 bash test/app-passief-poort.sh draait P en L tegen de server.js van origin/main (verwacht: rood).
 set -u
@@ -36,6 +37,17 @@ const toets = (n, ok, x) => { if (ok) goed++; else fout++; console.log((ok ? 'GR
   toets('L3 lezing 10 s oud: primair', rolPrimair() === true);
   rol.gelezen = 0;
   toets('L4 nooit gelezen maar rol primair: niet primair', rolPrimair() === false);
+})();
+
+// ── B: spaarstand-browser (wv3909; geknipt): dicht voor een agent en voor alles zolang er een agent loopt, alleen op kant vps ──
+(function () {
+  const i = BRON.indexOf('function spaarBrowserDicht('), j = BRON.indexOf('\n', i);
+  if (i < 0) return toets('B0 spaarBrowserDicht bestaat', false);
+  const maak = (spaar, lopend) => new Function('SPAARSTAND', 'agentInfo', BRON.slice(i, j) + '\n;return spaarBrowserDicht;')(spaar, () => ({ lopend }));
+  toets('B1 kant olares: browser nooit dicht', maak(false, 3)(true) === false && maak(false, 3)(false) === false);
+  toets('B2 spaarstand: agent zelf geen browser, beurt wel zonder agent, niet naast een agent', maak(true, 0)(true) === true && maak(true, 0)(false) === false && maak(true, 1)(false) === true);
+  toets('B3 aangesloten: --disallowedTools mcp__playwright, /ophalen en winkelbrowser', /spaarBrowserDicht\(!!\(opts && opts\.env && opts\.env\[EIND_MARKER\]\)\) \? 'mcp__playwright'/.test(BRON)
+    && /if \(spaarBrowserDicht\(false\)\) return stuur\(200/.test(BRON) && /!browserMag\(url\) \|\| spaarBrowserDicht\(false\)/.test(BRON));
 })();
 
 // ── routes uit handleApp ──
