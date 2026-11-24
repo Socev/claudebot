@@ -12143,6 +12143,8 @@ async function appActieRoute(req, res, a, d) {
   const uitkomst = ['ok', 'al_afgehandeld', 'weg', 'geweigerd', 'bezig', 'mislukt'].indexOf(j && j.uitkomst) >= 0 ? j.uitkomst : 'onbekend';
   const melding = appKort(j && j.popup || 'Onbekend antwoord van de knoppen; kijk bij Ververs.', 200);
   res._app.reden = 'actie ' + keuze + ' ' + datum + '#' + positie + ' -> ' + uitkomst;
+  // wv3707: een tik op een deadline-regel werkt het register bij zodra ↩️ niet meer kan (deadline-lijstje.js)
+  if (uitkomst === 'ok' && rij.bron === 'deadline' && DL_LIJSTJE) setTimeout(function () { dlVerwerkStil('tik'); }, DL_LIJSTJE.TIK_RUST_MS + 10000).unref();
   // Verse stand van het lijstje terug, en het geheugen van Vandaag bijwerken (anders toont Ververs 3 min de oude stand)
   let acties = null;
   try {
@@ -12157,6 +12159,52 @@ async function appActieRoute(req, res, a, d) {
   } catch (e) { logError('app-actie', e); if (appStaat.vandaag) appStaat.vandaag.data = null; }
   appStuur(res, 200, { ok: uitkomst === 'ok', uitkomst: uitkomst, melding: melding, acties: appActiesNu(acties) });
 }
+
+// ── Deadlines in het actielijstje (wv3707, nr 371 = 3C71; waarom en werking in deadline-lijstje.js) ──
+// POST /voorwerk/deadlines (n8n AI - Voorwerk, Lees deadlines, pod-geheim in de body): eerst de openstaande tikken in het register
+// verwerken, dan de rijpe [jij]-deadlines terug. Na een tik op een deadline-regel (app) en elke 10 min (echte pod, primair) verwerkt de pod
+// de tikken zelf: Gedaan/Hoeft niet = regel naar Afgehandeld, Later = verzet-merkteken, getoond = GESEIND-merkteken (heartbeat zwijgt).
+const DL_LIJSTJE = (function () { try { return require(path.join(__dirname, 'deadline-lijstje.js')); } catch (e) { logError('deadline-lijstje', e); return null; } })();
+const DL_KALENDER_PY = process.env.DL_KALENDER_PY || '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2/kalender_deadlines.py';
+function dlRegister() { return path.join(appProjVault(), '00_Systeem', 'Deadlines.md'); }
+function dlDroog() {
+  return new Promise(function (ok, nee) {
+    require('child_process').execFile('python3', ['-I', DL_KALENDER_PY, '--droog', '--vault', appProjVault()], { timeout: 20000, maxBuffer: 8 * 1024 * 1024 }, function (e, uit) {
+      if (e) return nee(new Error('kalender_deadlines --droog: ' + String(e.message || e).slice(0, 200)));
+      let j; try { j = JSON.parse(String(uit)); } catch (x) { return nee(new Error('kalender_deadlines --droog: geen json')); }
+      if (!j || !Array.isArray(j.items)) return nee(new Error('kalender_deadlines --droog: geen items'));
+      ok(j);
+    });
+  });
+}
+const dlLijstje = DL_LIJSTJE && DL_LIJSTJE.maak({
+  mag: function () { return rolPrimair(); },
+  droog: dlDroog,
+  lees: function () { return VV().lees(dlRegister(), 'utf8'); },
+  wijzig: function (f) { return VV().wijzig(dlRegister(), f); },
+  rijen: function () { return appN8nRijen(APP_PORTIE_TABEL, null, 100); },
+  vandaag: function () { return appYmd(Date.now()); },
+  log: function (s) { schrijfLog(nu() + ' ' + s); },
+});
+function dlVerwerkStil(waar) { if (!dlLijstje || !rolPrimair()) return Promise.resolve(null); return dlLijstje.verwerk().catch(function (e) { logError('deadline-lijstje ' + waar, e); return null; }); }
+function voorwerkDeadlinesIsPad(req) { return reqPath(req) === '/voorwerk/deadlines'; }
+function voorwerkDeadlinesRoute(req, res) {
+  if (req.method !== 'POST') { req.resume(); return berichtStuur(res, 405, { ok: false, fout: 'alleen POST' }); }
+  berichtBody(req, 64 * 1024, function (fout, d) {
+    if (fout === 'afgebroken') return;
+    if (fout || !d) return berichtStuur(res, 400, { ok: false, fout: 'ongeldige json' });
+    if (!berichtGeheimOk(d)) return berichtStuur(res, 401, { ok: false, fout: 'niet toegestaan' });
+    if (!dlLijstje) return berichtStuur(res, 503, { ok: false, fout: 'deadline-lijstje.js ontbreekt' });
+    appRolOk().then(async function (primair) {
+      if (!primair) return berichtStuur(res, 409, { ok: false, fout: 'passief' });
+      const verwerkt = await dlVerwerkStil('route');
+      const lijst = await dlLijstje.deadlines();
+      res._log.reden = 'deadlines ' + lijst.length;
+      berichtStuur(res, 200, { ok: true, vandaag: appYmd(Date.now()), verwerkt: verwerkt, deadlines: lijst });
+    }).catch(function (e) { logError('voorwerk-deadlines', e); berichtStuur(res, 500, { ok: false, fout: 'register niet te lezen' }); });
+  });
+}
+if (SERVER_ECHT) { setInterval(function () { if (rolPrimair()) dlVerwerkStil('ronde'); }, 10 * 60000).unref(); }
 
 // ── Voor jou (wv335, idee 11 fase 2; bouwplan "Voor jou - beheerde actielijst" § 2, § 4.4) ──
 // Eén beheerde lijst van wat Socev van David nodig heeft: tabel machinekamer.voor_jou (Supabase), gevuld en gemeten door de
@@ -30143,6 +30191,7 @@ const server = http.createServer(function (req, res) {
       req.resume(); res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); return res.end('{"ok":false,"uitkomst":"geweigerd","reden":"onbekend"}');
     }
     if (mailmanIsPad(req)) return mailmanRoute(req, res);
+    if (voorwerkDeadlinesIsPad(req)) return voorwerkDeadlinesRoute(req, res);   // wv3707: n8n AI - Voorwerk leest de rijpe [jij]-deadlines (pod-geheim)
     if (promedicoAgendaIsPad(req)) return promedicoAgendaRoute(req, res);   // wv3132: ontvanger Promedico-agenda-extensie (n8n; pod-geheim + kluisgeheim), nooit door naar handleRequest   // wv1856: OVIS MailMan (n8n; eigen sleutel of pod-geheim), nooit door naar handleRequest
     if (telIsPad(req)) return handleTel(req, res);   // wv264: spraak via de telefoon (Tasker)
     if (openaiIsPad(req)) return openaiRoute(req, res);   // wv2055: OpenAI-hulp (intern, API_SECRET)
