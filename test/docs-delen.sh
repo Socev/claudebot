@@ -69,7 +69,7 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
   let d1Stuk = false;
   const d1 = async (sql, p) => {
     if (d1Stuk) return { ok: false, rijen: null };
-    if (/^INSERT INTO deel \(slug, soort, titel, html, sinds, bijgewerkt, aud, ontvangers, access_app\)/.test(sql)) { const oud = db.get(p[0]); db.set(p[0], { slug: p[0], soort: p[1], titel: p[2], html: p[3], sinds: oud ? oud.sinds : p[4], bijgewerkt: p[5], aud: p[6], ontvangers: p[7], access_app: p[8] }); return { ok: true, rijen: [] }; }
+    if (/^INSERT INTO deel \(slug, soort, titel, html, sinds, bijgewerkt, aud, ontvangers, access_app(, reacties)?\)/.test(sql)) { const oud = db.get(p[0]); db.set(p[0], { slug: p[0], soort: p[1], titel: p[2], html: p[3], sinds: oud ? oud.sinds : p[4], bijgewerkt: p[5], aud: p[6], ontvangers: p[7], access_app: p[8] }); return { ok: true, rijen: [] }; }
     if (/^DELETE FROM deel/.test(sql)) { db.delete(p[0]); return { ok: true, rijen: [] }; }
     if (/^SELECT soort, access_app FROM deel WHERE slug = \?1$/.test(sql)) { const r = db.get(p[0]); return { ok: true, rijen: r ? [{ soort: r.soort, access_app: r.access_app || null }] : [] }; }
     if (/^SELECT slug, soort, titel, sinds, bijgewerkt FROM deel/.test(sql)) return { ok: true, rijen: Array.from(db.values()).map((r) => ({ slug: r.slug, soort: r.soort, titel: r.titel, sinds: r.sinds, bijgewerkt: r.bijgewerkt })) };

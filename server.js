@@ -26174,6 +26174,9 @@ const docsDelen = (function () {
       // wv3901 (3C41): het concept na Beveiligd delen via het mailluik (zelfde weg als Bandjes en GHAWA; nooit versturen)
       gmail: typeof APP_GMAIL_CONCEPTEN === 'string' ? APP_GMAIL_CONCEPTEN : null,
       mailconcept: function (c) { return typeof bandjesMailConcept === 'function' ? bandjesMailConcept(c) : Promise.resolve({ ok: false, zeker: true, reden: 'het mailluik zit niet in deze versie van de pod' }); },
+      // wv3948 (3C201): de bundel van Akkoord/opmerkingen als één Voor jou-kaart per deling (upsert op de sleutel), en of die kaart nog open staat
+      kaart: async function (p) { try { const r = await appSbRpc('mk_voor_jou_zet', { p: p }); appStaat.vjCache = null; return { ok: !!r }; } catch (e) { logError('docs-reacties-kaart', e); return { ok: false }; } },
+      kaartOpen: async function (sleutel) { const l = await appVjPunten(); return Array.isArray(l) && l.some(function (x) { return x && x.sleutel === sleutel && (x.status === 'open' || x.status === 'later'); }); },
       hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
       d1: async function (sql, params) {
         if (!process.env.CLOUDFLARE_API_TOKEN) return { ok: false, rijen: null };
@@ -26184,6 +26187,14 @@ const docsDelen = (function () {
       } });
   } catch (e) { logError('docs-delen', e); return null; }
 })();
+// wv3948 (3C201): reacties op beveiligde delingen elke 5 minuten ophalen (alleen de primaire pod; niets te doen = geen D1-vraag)
+let docsReactieLoopt = false;
+async function docsReactieTik() {
+  if (!docsDelen || typeof docsDelen.reactieTik !== 'function' || docsReactieLoopt || !rolPrimair()) return;
+  docsReactieLoopt = true;
+  try { await docsDelen.reactieTik(); } catch (e) { logError('docs-reacties-tik', e); } finally { docsReactieLoopt = false; }
+}
+if (docsDelen && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setTimeout(function () { docsReactieTik(); }, 150000).unref(); setInterval(function () { docsReactieTik(); }, 5 * 60000).unref(); }
 function docsDelenInfo() {
   if (!docsDelen) return { aan: false };
   try { return docsDelen.health(); } catch (e) { return { aan: true, fout: true }; }

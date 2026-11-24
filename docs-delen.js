@@ -284,12 +284,49 @@ const STIJL = [
   'a{color:var(--acc)}del{color:var(--zacht)}mark{background:#fff3b0}hr{border:0;border-top:1px solid var(--lijn);margin:28px 0}',
 ].join('');
 
+// wv3948 (besluitenpagina nr 489 = 3C189, David Ja 22-11 18:17): de deelpagina in de huisstijl van de praktijk en netjes af te drukken.
+// Alleen Delen geeft opt.afdruk mee (omzet.js rendert zonder en voegt zijn eigen PDF-stijl toe). De huisstijl komt uit omzet-huisstijl.js
+// (dezelfde lijst als Download als…; logo als data:-URI, dat laat de CSP van de deelsite toe; lettertype als data:-font, idem font-src data:).
+// Kop = logo of naam van het briefpapier met de lijnkleur; voet = naam · website (zoals de PDF). Geen IBAN, KvK of adres.
+const AFDRUK = '@page{size:A4;margin:16mm 18mm}@media print{html,body{background:#fff}body{font-size:10.5pt;line-height:1.5;' +
+  '-webkit-print-color-adjust:exact;print-color-adjust:exact}.wrap{max-width:none;margin:0;padding:0}h1{font-size:19pt}h2{font-size:14pt}h3{font-size:12pt}' +
+  'h1,h2,h3,h4,h5,h6{break-after:avoid;page-break-after:avoid}.tabel{overflow:visible}table{width:100%;font-size:9.5pt}thead{display:table-header-group}' +
+  'tr,pre,blockquote,.callout,.hs-kop{break-inside:avoid;page-break-inside:avoid}pre{white-space:pre-wrap;word-break:break-word}a{text-decoration:none;color:inherit}' +
+  '.reactie,.geen-afdruk{display:none!important}}';
+const KLEUR_RE = /^[0-9A-Fa-f]{6}$/;
+const DATA_BEELD_RE = /^data:image\/(png|jpeg|webp|svg\+xml);base64,[A-Za-z0-9+/]+=*$/;
+const DATA_FONT_RE = /^data:font\/woff2;base64,[A-Za-z0-9+/]+=*$/;
+function huisstijlDelen(st, fonts) {
+  if (!st || !st.kleuren) return { css: '', kop: '', voet: '' };
+  const k = st.kleuren, b = st.briefhoofd || {};
+  const kl = (x, nood) => '#' + (KLEUR_RE.test(String(x || '')) ? x : nood);
+  let css = '';
+  if (st.font && fonts && typeof fonts[st.font] === 'string' && DATA_FONT_RE.test(fonts[st.font]))
+    css += '@font-face{font-family:"Huisstijl";src:url(' + fonts[st.font] + ') format("woff2");font-weight:100 900}body{font-family:"Huisstijl",ui-sans-serif,system-ui,Arial,sans-serif}';
+  css += ':root{--acc:' + kl(k.accent, '1f5fbf') + ';--lijn-hs:' + kl(k.lijn, 'e3e3df') + '}h1,h2,h3,h4{color:' + kl(k.titel, '141414') + '}' +
+    'h1{border-bottom:2px solid var(--lijn-hs);padding-bottom:6px}th{color:' + kl(k.caps, '5f6368') + '}' +
+    '.hs-kop{border-bottom:1px solid var(--lijn-hs);padding-bottom:10px;margin:0 0 28px}.hs-kop img{display:block;height:64px;width:auto;max-width:100%}' +
+    '.hs-caps{font-size:.72rem;font-weight:700;letter-spacing:.12em;color:' + kl(k.caps, '5f6368') + '}.hs-naam{font-size:1.45rem;font-weight:700;line-height:1.15;color:' + kl(k.titel, '141414') + '}' +
+    '.hs-onder{font-size:.78rem;color:' + kl(k.caps, '5f6368') + '}.hs-voet{margin-top:48px;padding-top:8px;border-top:1px solid var(--lijn-hs);font-size:.8rem;color:' + kl(k.caps, '5f6368') + '}' +
+    '@media print{.hs-kop{margin-bottom:18pt}.hs-kop img{height:' + (Number(st.logo_mm) > 0 && Number(st.logo_mm) <= 30 ? Number(st.logo_mm) : 16) + 'mm}.hs-voet{margin-top:24pt}}';
+  const naam = esc(st.naam || b.naam || '');
+  const kop = '<header class="hs-kop">' + (typeof st.logo === 'string' && DATA_BEELD_RE.test(st.logo)
+    ? '<img src="' + st.logo + '" alt="' + naam + '">'
+    : (b.caps ? '<div class="hs-caps">' + esc(b.caps) + '</div>' : '') + '<div class="hs-naam">' + esc(b.naam || st.naam || '') + '</div>' +
+      (b.ondertitel ? '<div class="hs-onder">' + esc(b.ondertitel) + '</div>' : '')) + '</header>\n';
+  const voet = '<footer class="hs-voet">' + [st.naam, st.website].filter(Boolean).map(esc).join(' · ') + '</footer>\n';
+  return { css: css, kop: kop, voet: voet };
+}
+
 // Eén pagina: {titel, body, html, zichtbaar (platte tekst zoals de lezer hem ziet), hrefs, sha}
-function render(md, bestandsnaam) {
+// opties (alleen Delen): { afdruk: true, huisstijl: <stijl uit omzet-huisstijl.js> of null, fonts }
+function render(md, bestandsnaam, opties) {
   const hrefs = [];
   const inline = maakInline(hrefs);
   const src = voorbewerk(md);
   let body = markdownNaarHtml(src, inline);
+  const o = opties || {};
+  const hs = o.afdruk ? huisstijlDelen(o.huisstijl, o.fonts) : { css: '', kop: '', voet: '' };
   const h1 = /^<h1>([\s\S]*?)<\/h1>/.exec(body.trimStart());
   let titel = h1 ? ontEsc(h1[1].replace(/<[^>]+>/g, '')).trim() : '';
   if (!titel) {
@@ -298,13 +335,13 @@ function render(md, bestandsnaam) {
   }
   const html = '<!DOCTYPE html>\n<html lang="nl">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
     '<meta name="robots" content="noindex, nofollow">\n<meta name="referrer" content="no-referrer">\n<title>' + esc(titel) + '</title>\n' +
-    (POD_FAVICON ? '<link rel="icon" type="image/png" sizes="32x32" href="' + POD_FAVICON + '">\n' : '') + '<style>' + STIJL + '</style>\n' +
-    '</head>\n<body>\n<main class="wrap">\n' + body + '\n</main>\n</body>\n</html>\n';
+    (POD_FAVICON ? '<link rel="icon" type="image/png" sizes="32x32" href="' + POD_FAVICON + '">\n' : '') + '<style>' + STIJL + (o.afdruk ? AFDRUK + hs.css : '') + '</style>\n' +
+    '</head>\n<body>\n<main class="wrap">\n' + hs.kop + body + '\n' + hs.voet + '</main>\n</body>\n</html>\n';
   const zichtbaar = ontEsc(body.replace(/<br>/g, '\n').replace(/<\/(p|h\d|li|tr|td|th|div|blockquote|pre)>/g, '\n').replace(/<[^>]+>/g, ' ')).replace(/[ \t]+/g, ' ');
   // wv3405 (A32): dezelfde tekst met tabelcellen naast elkaar (| a | b |), alleen voor de poort: anders staan "Wachtwoord" en de waarde in de
   // zichtbare tekst op twee regels en ziet het masker het paar niet (Fable register-zoek § 1, tabelcel)
   const rijen = ontEsc(body.replace(/<br>/g, '\n').replace(/<\/(td|th)>/g, ' | ').replace(/<\/(p|h\d|li|tr|div|blockquote|pre)>/g, '\n').replace(/<[^>]+>/g, ' ')).replace(/[ \t]+/g, ' ');
-  return { titel: titel, body: body, html: html, zichtbaar: zichtbaar, rijen: rijen, hrefs: hrefs,
+  return { titel: titel, body: body, toon: hs.kop + body + hs.voet, html: html, zichtbaar: zichtbaar, rijen: rijen, hrefs: hrefs,
     sha: crypto.createHash('sha256').update(html, 'utf8').digest('hex') };
 }
 
@@ -374,6 +411,23 @@ function namenIn(volledig, tekst) {
 //        host, lees(abs) (namenlijst), nu, fout,
 //        access (beveiligd; weg = beveiligd delen uit): { idp, maak(body) → {ok, id, aud}, wijzig(id, body) → {ok, aud}, haal(id) → {ok, domein} |
 //        {ok: false, weg: true}, weg(id) → {ok}, zoek(domein) → {ok, ids} } }
+// wv3948 (3C189): voorkeuze van het briefpapier uit het vaultpad, gelijk aan Download als… (socev-app src/downloadAls.ts PAD_STIJL). Gemengde
+// map of werkbestand: geen voorkeuze (neutraal); David kiest in het Delen-scherm net als bij Download als….
+const PAD_STIJL = [
+  [/(^|\/)10_Zakelijk\/Tolgaarde(\/|$)/i, 'tolgaarde'],
+  [/(^|\/)10_Zakelijk\/Groenhouten(\/|$)/i, 'groenhouten'],
+  [/(^|\/)10_Zakelijk\/POT_POH_GGZ(\/|$)/i, 'pot'],
+  [/(^|\/)10_Zakelijk\/Holding(\/|$)/i, 'holding'],
+  [/(^|\/)10_Zakelijk\/Praktijkhouders_BV(\/|$)/i, 'praktijkhouders'],
+  [/kostenmaatschap/i, 'kostenmaatschap'],
+  [/(^|\/)(SLOEL|Leusden op een Lijn)(\/|$)/i, 'sloel'],
+];
+function huisstijlUitPad(p) {
+  if (typeof p !== 'string' || !p || p.indexOf('werk:') === 0) return '';
+  for (const [re, id] of PAD_STIJL) if (re.test(p)) return id;
+  return '';
+}
+
 function maak(opt) {
   const DIR = opt.dir;
   const REG = path.join(DIR, 'gedeeld.json');
@@ -382,6 +436,22 @@ function maak(opt) {
   const fout = opt.fout || function () {};
   const lees = opt.lees || function (p) { return fs.readFileSync(p, 'utf8'); };
   let namen = null;   // { op, set }
+  // wv3948 (3C189): de huisstijlen van Download als… (omzet-huisstijl.js); ontbreekt de module, dan alleen neutraal
+  const HS = opt.huisstijlen !== undefined ? opt.huisstijlen : (function () { try { return require('./omzet-huisstijl.js'); } catch (e) { return null; } })();
+  const STIJLEN = (HS && HS.STIJLEN) || {};
+  const stijlLijst = () => Object.keys(STIJLEN).map((k) => ({ id: k, label: STIJLEN[k].label || k }));
+  // keuze uit het verzoek: undefined/null = de vorige keuze bij deze deling, anders de voorkeuze uit het pad; '' of 'neutraal' = geen
+  function huisstijlKeuze(d, p, oud) {
+    const w = d ? d.huisstijl : undefined;
+    if (w === undefined || w === null) {
+      if (oud && typeof oud.huisstijl === 'string') return { id: Object.prototype.hasOwnProperty.call(STIJLEN, oud.huisstijl) ? oud.huisstijl : '' };
+      const v = huisstijlUitPad(p);
+      return { id: Object.prototype.hasOwnProperty.call(STIJLEN, v) ? v : '' };
+    }
+    if (w === '' || w === 'neutraal') return { id: '' };
+    if (typeof w === 'string' && Object.prototype.hasOwnProperty.call(STIJLEN, w)) return { id: w };
+    return { fout: 'onbekende huisstijl' };
+  }
 
   // B137 (Fable-review kleine-pod 19-11, advies 3): alleen 'bestaat niet' is een leeg register. Een leesfout of een kapot bestand geeft een
   // register met kapot = true: niet schrijven (anders zijn ontvangerslijsten en de koppeling pagina-link weg en krijgt een pagina een tweede
@@ -496,7 +566,11 @@ function maak(opt) {
     const audit = { domein: b.d, h: opt.hmac(b.p) };
     const nooit = nooitDelen(b.p, b);
     if (nooit) return { status: 403, j: { ok: false, fout: nooit, kan_niet: true }, audit: audit, b: b };
-    const r = render(b.tekst, b.naam || b.p);   // wv3688: een werkbestand heet naar zijn bestandsnaam, niet naar werk:<job>/<n>
+    const keuze = huisstijlKeuze(d, b.p, huidigeDeling(leesRegister(), audit.h));
+    if (keuze.fout) return { status: 400, j: { ok: false, fout: keuze.fout }, audit: audit, b: b };
+    // wv3688: een werkbestand heet naar zijn bestandsnaam, niet naar werk:<job>/<n>; wv3948: huisstijl en afdrukopmaak
+    const r = render(b.tekst, b.naam || b.p, { afdruk: true, huisstijl: keuze.id ? STIJLEN[keuze.id] : null, fonts: HS && HS.FONTS });
+    r.huisstijl = keuze.id;
     if (Buffer.byteLength(r.html, 'utf8') > MAX_HTML) return { status: 413, j: { ok: false, fout: 'deze pagina is te groot om te delen', kan_niet: true }, audit: audit, b: b };
     const proef = r.titel + '\n' + r.zichtbaar + '\n' + r.hrefs.join('\n') + '\n' + r.rijen;
     // wv3405 (A32): strenge poortstand van het masker (4e argument), ook korte wachtwoorden, tabelcel, URL met inlog, token na een /
@@ -510,7 +584,8 @@ function maak(opt) {
 
   function huidigeDeling(reg, h) { return reg.delingen.find((x) => x.h === h) || null; }
   const naarApp = (x) => x ? Object.assign({ slug: x.slug, url: url(x.slug, x.soort), soort: x.soort, titel: x.titel, sinds: x.sinds, bijgewerkt: x.bijgewerkt || x.sinds },
-    x.soort === 'beveiligd' ? { ontvangers: Array.isArray(x.ontvangers) ? x.ontvangers.slice() : [] } : {}, x.bron_tot ? { bron_tot: x.bron_tot } : {}) : null;
+    x.soort === 'beveiligd' ? { ontvangers: Array.isArray(x.ontvangers) ? x.ontvangers.slice() : [] } : {}, x.bron_tot ? { bron_tot: x.bron_tot } : {},
+    typeof x.huisstijl === 'string' ? { huisstijl: x.huisstijl } : {}, x.reacties ? { reacties: true } : {}) : null;
 
   // Is deze pagina gedeeld, en kan hij gedeeld worden? (licht: geen render)
   function stand(d, ctx) {
@@ -528,13 +603,14 @@ function maak(opt) {
     const v = bekijk(d, ctx);
     if (v.status !== 200) return { status: v.status, j: v.j, audit: v.audit };
     const x = huidigeDeling(leesRegister(), v.audit.h);
-    return { status: 200, audit: v.audit, j: { ok: true, titel: v.r.titel, body: v.r.body, sha: v.r.sha, namen: v.namen, gedeeld: naarApp(x),
-      host: HOST, beveiligd: !!ACC, bron_tot: v.b.tot || null } };
+    return { status: 200, audit: v.audit, j: { ok: true, titel: v.r.titel, body: v.r.toon /* wv3948: met de kop van het briefpapier */, sha: v.r.sha, namen: v.namen, gedeeld: naarApp(x),
+      host: HOST, beveiligd: !!ACC, bron_tot: v.b.tot || null,
+      huisstijl: v.r.huisstijl, huisstijl_voorkeuze: huisstijlUitPad(v.b.p), huisstijlen: stijlLijst() } };
   }
 
-  const D1_ZET = 'INSERT INTO deel (slug, soort, titel, html, sinds, bijgewerkt, aud, ontvangers, access_app) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ' +
+  const D1_ZET = 'INSERT INTO deel (slug, soort, titel, html, sinds, bijgewerkt, aud, ontvangers, access_app, reacties) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ' +
     'ON CONFLICT(slug) DO UPDATE SET soort = excluded.soort, titel = excluded.titel, html = excluded.html, bijgewerkt = excluded.bijgewerkt, ' +
-    'aud = excluded.aud, ontvangers = excluded.ontvangers, access_app = excluded.access_app';
+    'aud = excluded.aud, ontvangers = excluded.ontvangers, access_app = excluded.access_app, reacties = excluded.reacties';
   const zelfde = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x) => b.indexOf(x) >= 0);
 
   async function delen(d, ctx) {
@@ -565,9 +641,11 @@ function maak(opt) {
     const slug = oud ? oud.slug : crypto.randomBytes(16).toString('base64url');
     const bronSha = crypto.createHash('sha256').update(String(v.b.tekst), 'utf8').digest('hex');
     const nieuw = { h: v.audit.h, slug: slug, soort: soort, titel: v.r.titel, sinds: oud ? oud.sinds : tijd, bijgewerkt: tijd, sha: v.r.sha,
-      bron_sha: bronSha, namen_bevestigd: v.namen.length };
+      bron_sha: bronSha, namen_bevestigd: v.namen.length, huisstijl: v.r.huisstijl || '' };
     if (v.b.tot) nieuw.bron_tot = v.b.tot;   // wv3688: werkbestand; na deze datum ruimt de pod de bron op (de link blijft de laatst gedeelde kopie tonen)
     if (soort === 'beveiligd') Object.assign(nieuw, { ontvangers: ontvangers, access_app: oud ? oud.access_app || null : null, aud: oud ? oud.aud || null : null });
+    // wv3948 (3C201): Akkoord en opmerkingen (en wie het opende) alleen bij beveiligd en alleen als David het bij deze deling aanzet
+    if (soort === 'beveiligd' && d.reacties === true) { nieuw.reacties = true; if (oud && oud.kaart_ronde) nieuw.kaart_ronde = oud.kaart_ronde; if (oud && oud.gemeld) nieuw.gemeld = oud.gemeld; }
     // eerst het register (dan staat elke deling die buiten kan staan erin, ook als D1 daarna faalt; en de toestaanlijst kent de slug), dan
     // bij beveiligd de Access-app, dan D1. Mislukt een latere stap, dan gaat wat er al stond terug.
     const vorige = reg.delingen.slice();
@@ -601,7 +679,7 @@ function maak(opt) {
     let ok = false;
     try {
       const q = await opt.d1(D1_ZET, [slug, soort, v.r.titel, v.r.html, nieuw.sinds, tijd, soort === 'beveiligd' ? nieuw.aud : null,
-        soort === 'beveiligd' ? JSON.stringify(ontvangers.map(mailHash)) : null, soort === 'beveiligd' ? nieuw.access_app : null]);
+        soort === 'beveiligd' ? JSON.stringify(ontvangers.map(mailHash)) : null, soort === 'beveiligd' ? nieuw.access_app : null, nieuw.reacties ? 1 : 0]);
       ok = !!(q && q.ok);
     } catch (e) { fout('docs-d1', e); }
     if (!ok) {
@@ -630,6 +708,8 @@ function maak(opt) {
         const rij = { slug: r.slug, url: url(r.slug, r.soort), soort: r.soort, titel: r.titel, sinds: r.sinds, bijgewerkt: r.bijgewerkt, in_register: !!x };
         if (r.soort === 'beveiligd') rij.ontvangers = x && Array.isArray(x.ontvangers) ? x.ontvangers.slice() : [];
         if (x && x.bron_tot) rij.bron_tot = x.bron_tot;   // wv3688
+        if (x && typeof x.huisstijl === 'string') rij.huisstijl = x.huisstijl;   // wv3948
+        if (x && x.reacties) rij.reacties = reactieStand(x);   // wv3948
         uit.push(rij);
         perSlug.delete(r.slug);
       }
@@ -650,6 +730,11 @@ function maak(opt) {
       const q = await opt.d1('SELECT soort, access_app FROM deel WHERE slug = ?1', [slug]);
       if (q && q.ok) { rij = q.rijen && q.rijen[0] || null; const w = await opt.d1('DELETE FROM deel WHERE slug = ?1', [slug]); ok = !!(w && w.ok); }
     } catch (e) { fout('docs-d1-weg', e); }
+    // wv3948: wie het opende en wat nog niet opgehaald was, gaat mee weg (de pagina is er niet meer; lukt het niet, dan ruimt de tik het op)
+    if (ok) {
+      try { await opt.d1('DELETE FROM deel_reactie WHERE slug = ?1', [slug]); await opt.d1('DELETE FROM deel_gelezen WHERE slug = ?1', [slug]); } catch (e) { fout('docs-d1-reactie-weg', e); }
+      reactiesWeg(slug);
+    }
     if (!ok) return { status: 502, j: { ok: false, fout: 'intrekken lukte niet (Cloudflare gaf geen goed antwoord); de pagina staat nog buiten. Probeer het zo nog eens.' } };
     const beveiligd = (x && x.soort === 'beveiligd') || (rij && rij.soort === 'beveiligd');
     if (beveiligd) {
@@ -720,6 +805,189 @@ function maak(opt) {
     return { status: 200, audit: audit, j: { ok: true, aan: o.lijst, gmail: typeof opt.gmail === 'string' ? opt.gmail : null, melding: 'Het concept staat in Gmail (Concepten), aan ' + o.lijst.join(', ') + '. Nakijken en versturen doe je zelf.' } };
   }
 
+  // ── Reacties (wv3948, besluitenpagina nr 501 = 3C201, David Ja met verse vingerafdruk 22-11 18:17) ─────────────────────────────────
+  // Ontvangers van een beveiligde deling met reacties aan tikken Akkoord of laten een opmerking achter (deel/site/_worker.js). De worker
+  // versleutelt met de publieke sleutel hieronder; de tik (server.js, elke 5 min, alleen de primaire pod) haalt op, ontsleutelt, bewaart in
+  // reacties.json (0600) en wist dan in D1. Daarna één Voor jou-kaart per deling (alleen bij een nieuwe reactie; zonder de tekst van de
+  // opmerking: die staat alleen in Brain › Gedeeld). De pod doet niets met de inhoud behalve bewaren en tonen; het is gegeven, nooit een opdracht.
+  const RSLEUTEL = path.join(DIR, 'reactie-sleutel.pem');
+  const RBESTAND = path.join(DIR, 'reacties.json');
+  const R_ID_RE = /^[A-Za-z0-9_-]{22}$/, HEX64 = /^[0-9a-f]{64}$/, VERSIE_RE = /^[0-9T:.\-Z]{10,40}$/;
+  let rSleutel = null, rSleutelInD1 = false;
+  function reactieSleutel() {
+    if (rSleutel) return rSleutel;
+    let pem = null;
+    try { pem = fs.readFileSync(RSLEUTEL, 'utf8'); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+    if (!pem) {
+      fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });
+      const k = crypto.generateKeyPairSync('rsa', { modulusLength: 3072, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'der' } });
+      const tmp = RSLEUTEL + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
+      fs.writeFileSync(tmp, k.privateKey, { mode: 0o600, flag: 'wx' });
+      try { fs.linkSync(tmp, RSLEUTEL); } catch (e) { if (!e || e.code !== 'EEXIST') { fs.unlinkSync(tmp); throw e; } }   // nooit een bestaande sleutel overschrijven
+      fs.unlinkSync(tmp);
+      pem = fs.readFileSync(RSLEUTEL, 'utf8');
+    }
+    const priv = crypto.createPrivateKey(pem);
+    const spki = crypto.createPublicKey(priv).export({ type: 'spki', format: 'der' });
+    rSleutel = { priv: priv, spki: spki.toString('base64'), id: crypto.createHash('sha256').update(spki).digest('hex').slice(0, 16) };
+    return rSleutel;
+  }
+  function ontsleutelReactie(r) {
+    const k = reactieSleutel();
+    if (r.sleutel_id !== k.id) return null;
+    const aes = crypto.privateDecrypt({ key: k.priv, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, Buffer.from(String(r.sleutel), 'base64'));
+    const ct = Buffer.from(String(r.inhoud), 'base64'), iv = Buffer.from(String(r.iv), 'base64');
+    if (aes.length !== 32 || iv.length !== 12 || ct.length < 17) return null;
+    const dc = crypto.createDecipheriv('aes-256-gcm', aes, iv);
+    dc.setAAD(Buffer.from(r.id + '|' + r.slug + '|' + r.versie, 'utf8'));
+    dc.setAuthTag(ct.subarray(ct.length - 16));
+    return JSON.parse(Buffer.concat([dc.update(ct.subarray(0, ct.length - 16)), dc.final()]).toString('utf8'));
+  }
+  function leesReacties() {
+    let t;
+    try { t = fs.readFileSync(RBESTAND, 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return { versie: 1, per: {} }; return null; }
+    try { const j = JSON.parse(t); return j && typeof j === 'object' && j.per && typeof j.per === 'object' ? j : null; } catch (e) { return null; }
+  }
+  function schrijfReacties(r) {
+    fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });
+    const tmp = RBESTAND + '.tmp' + process.pid + '-' + crypto.randomBytes(3).toString('hex');
+    fs.writeFileSync(tmp, JSON.stringify(r, null, 1), { mode: 0o600, flag: 'wx' });
+    fs.renameSync(tmp, RBESTAND);
+  }
+  function reactiesWeg(slug) {
+    const r = leesReacties();
+    if (!r || !r.per[slug]) return;
+    delete r.per[slug];
+    try { schrijfReacties(r); } catch (e) { fout('docs-reacties', e); }
+  }
+  // per deling: { gelezen: { <hash>: {eerst, laatst, n} }, lijst: [{ id, wie (hash), soort, tekst, versie, op }] }
+  function reactieStand(x) {
+    const r = leesReacties();
+    const p = (r && r.per[x.slug]) || { gelezen: {}, lijst: [] };
+    const adres = new Map((Array.isArray(x.ontvangers) ? x.ontvangers : []).map((m) => [mailHash(m), m]));
+    const versie = x.bijgewerkt || x.sinds;
+    const gelezen = Object.keys(p.gelezen || {}).filter((h) => adres.has(h));
+    const akkoord = new Set((p.lijst || []).filter((y) => y.soort === 'akkoord' && y.versie === versie && adres.has(y.wie)).map((y) => y.wie));
+    const ouderAkkoord = new Set((p.lijst || []).filter((y) => y.soort === 'akkoord' && y.versie !== versie && adres.has(y.wie) && !akkoord.has(y.wie)).map((y) => y.wie));
+    return { aan: true, ontvangers: adres.size, gelezen: gelezen.length, akkoord: akkoord.size, akkoord_ouder: ouderAkkoord.size,
+      wie_gelezen: gelezen.map((h) => adres.get(h)), wie_akkoord: [...akkoord].map((h) => adres.get(h)),
+      opmerkingen: (p.lijst || []).filter((y) => y.soort === 'opmerking').map((y) => ({ wie: adres.get(y.wie) || 'een vroegere ontvanger', tekst: String(y.tekst || ''), op: y.op, oud: y.versie !== versie })),
+      leesbaar: !!r };
+  }
+  function bundelZin(x, st) {
+    return st.gelezen + ' van ' + st.ontvangers + ' geopend, ' + st.akkoord + ' akkoord' + (st.opmerkingen.length ? ', ' + st.opmerkingen.length + (st.opmerkingen.length === 1 ? ' opmerking' : ' opmerkingen') : '');
+  }
+  // de kaart voor David (mk_voor_jou_zet via opt.kaart; upsert op de sleutel). Zonder de tekst van een opmerking.
+  function kaartVoor(x, st, sleutel) {
+    const titel = String(x.titel || 'pagina').replace(/[\r\n]+/g, ' ');
+    return { sleutel: sleutel, soort: 'doen', waar: 'overal', prive: true, duur_min: 5, volgorde: 70, door: 'pod',
+      titel: 'Docs — reacties op "' + (titel.length > 55 ? titel.slice(0, 54) + '…' : titel) + '"',
+      waarom: ('Je deelde "' + (titel.length > 120 ? titel.slice(0, 119) + '…' : titel) + '" met ' + st.ontvangers + (st.ontvangers === 1 ? ' persoon' : ' mensen') + '. Stand: ' + bundelZin(x, st) + '.').slice(0, 390),
+      stappen: ['Open in de Socev-app Brain › Second Brain › Gedeeld en tik op deze pagina: daar staat wie hem opende, wie akkoord gaf en wat er opgemerkt is.',
+        'Wil je hem aanpassen: tik daar op Vraag Socev om een aanpasvoorstel. Socev stelt een nieuwe tekst voor; jij past aan en deelt hem opnieuw (de link blijft dezelfde).',
+        'Klaar: zet deze kaart op gedaan.'],
+      herkomst: { handmatig: 'docs-reacties', module: 'docs', doel: { scherm: 'secondbrain' } } };   // de knop opent Brain; Gedeeld is daar de vierde weergave
+  }
+  let tikBezig = false, tikLaatst = null, tikFout = null;
+  async function reactieTik() {
+    if (tikBezig) return { ok: false, bezig: true };
+    const reg = leesRegister();
+    if (reg.kapot) return { ok: false, fout: 'register' };
+    const aan = reg.delingen.filter((x) => x.reacties && x.soort === 'beveiligd' && SLUG_RE.test(String(x.slug)));
+    const r0 = leesReacties();
+    if (!aan.length && !(r0 && Object.keys(r0.per).length)) return { ok: true, niets: true };
+    tikBezig = true;
+    try {
+      const k = reactieSleutel();
+      if (!rSleutelInD1) {
+        const q = await opt.d1('SELECT id, spki FROM deel_sleutel', []);
+        if (!q || !q.ok) throw new Error('D1 niet bereikbaar');
+        const goed = (q.rijen || []).length === 1 && q.rijen[0].id === k.id && q.rijen[0].spki === k.spki;
+        if (!goed) {
+          const w1 = await opt.d1('DELETE FROM deel_sleutel WHERE id <> ?1', [k.id]);
+          const w2 = await opt.d1('INSERT INTO deel_sleutel (id, spki) VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET spki = excluded.spki', [k.id, k.spki]);
+          if (!w1 || !w1.ok || !w2 || !w2.ok) throw new Error('sleutel niet in D1');
+        }
+        rSleutelInD1 = true;
+      }
+      const r = r0 || null;
+      if (!r) throw new Error('reacties.json onleesbaar');
+      const perSlug = new Map(aan.map((x) => [x.slug, x]));
+      const nieuwPer = new Map();
+      let binnen = 0, weg = 0;
+      // ZOU 1: doorlopen tot D1 leeg is (hooguit 10 rondes van 100 per tik)
+      for (let ronde = 0; ronde < 10; ronde++) {
+        const q = await opt.d1('SELECT id, slug, wie, soort, versie, sleutel_id, sleutel, iv, inhoud, op FROM deel_reactie ORDER BY op LIMIT 100', []);
+        if (!q || !q.ok) throw new Error('D1 niet bereikbaar');
+        const rijen = q.rijen || [];
+        if (!rijen.length) break;
+        const ids = [];
+        for (const y of rijen) {
+          ids.push(y.id);
+          const x = perSlug.get(y.slug);
+          let inh = null;
+          if (x && R_ID_RE.test(String(y.id)) && HEX64.test(String(y.wie)) && VERSIE_RE.test(String(y.versie)) && (y.soort === 'akkoord' || y.soort === 'opmerking')) {
+            try { inh = ontsleutelReactie(y); } catch (e) { inh = null; }
+          }
+          const adres = x ? new Set((x.ontvangers || []).map(mailHash)) : null;
+          if (!inh || inh.soort !== y.soort || typeof inh.tekst !== 'string' || inh.tekst.length > 4000 || !adres.has(y.wie)) { weg++; continue; }
+          const p = r.per[y.slug] || (r.per[y.slug] = { gelezen: {}, lijst: [] });
+          if (p.lijst.some((z) => z.id === y.id)) continue;
+          p.lijst.push({ id: y.id, wie: y.wie, soort: y.soort, tekst: y.soort === 'opmerking' ? inh.tekst : '', versie: y.versie, op: String(y.op || new Date(nu()).toISOString()).slice(0, 40) });
+          if (p.lijst.length > 500) p.lijst = p.lijst.slice(-500);
+          nieuwPer.set(y.slug, (nieuwPer.get(y.slug) || 0) + 1);
+          binnen++;
+        }
+        schrijfReacties(r);   // eerst bewaren, dan pas wissen
+        for (const id of ids) await opt.d1('DELETE FROM deel_reactie WHERE id = ?1', [id]);
+        if (rijen.length < 100) break;
+      }
+      // gelezen (tellers blijven in D1)
+      if (aan.length) {
+        const q = await opt.d1('SELECT slug, wie, eerst, laatst, n FROM deel_gelezen WHERE slug IN (' + aan.map((_, i) => '?' + (i + 1)).join(', ') + ')', aan.map((x) => x.slug));
+        if (q && q.ok) {
+          for (const x of aan) { const p = r.per[x.slug] || (r.per[x.slug] = { gelezen: {}, lijst: [] }); p.gelezen = {}; }
+          for (const g of q.rijen || []) if (perSlug.has(g.slug) && HEX64.test(String(g.wie))) r.per[g.slug].gelezen[g.wie] = { eerst: g.eerst, laatst: g.laatst, n: Number(g.n) || 1 };
+          schrijfReacties(r);
+        }
+      }
+      // weesjes: reacties van een deling die niet meer in het register staat
+      for (const slug of Object.keys(r.per)) if (!reg.delingen.some((x) => x.slug === slug)) { delete r.per[slug]; schrijfReacties(r); }
+      // één kaart per deling bij een nieuwe reactie; een open kaart krijgt ook nieuwe cijfers
+      let kaarten = 0;
+      if (typeof opt.kaart === 'function') {
+        let veranderd = false;
+        for (const x of aan) {
+          const st = reactieStand(x);
+          const n = (r.per[x.slug] && r.per[x.slug].lijst.length) || 0;
+          const nieuw = n > (x.gemeld || 0);
+          let ronde = x.kaart_ronde || 0;
+          let open = false;
+          // Voor jou niet te lezen: deze tik geen kaart (anders een tweede kaart naast een open eerste)
+          if (ronde && typeof opt.kaartOpen === 'function') { try { open = await opt.kaartOpen(kaartSleutel(x, ronde)); } catch (e) { continue; } }
+          if (!nieuw && !(open && x.kaart_zin !== bundelZin(x, st))) continue;
+          if (nieuw && !open) ronde += 1;
+          const kr = await opt.kaart(kaartVoor(x, st, kaartSleutel(x, ronde)));
+          if (kr && kr.ok) { x.kaart_ronde = ronde; x.gemeld = n; x.kaart_zin = bundelZin(x, st); veranderd = true; kaarten++; }
+        }
+        if (veranderd) {
+          // het register opnieuw lezen en alleen deze velden zetten (David kan intussen gedeeld of ingetrokken hebben)
+          const reg2 = leesRegister();
+          if (!reg2.kapot) {
+            for (const x of aan) { const y = reg2.delingen.find((z) => z.slug === x.slug); if (y) { y.kaart_ronde = x.kaart_ronde; y.gemeld = x.gemeld; y.kaart_zin = x.kaart_zin; } }
+            schrijfRegister(reg2);
+          }
+        }
+      }
+      tikLaatst = new Date(nu()).toISOString(); tikFout = null;
+      return { ok: true, binnen: binnen, onleesbaar: weg, kaarten: kaarten };
+    } catch (e) {
+      tikFout = String(e && e.message || e).slice(0, 80); fout('docs-reacties', e);
+      return { ok: false, fout: tikFout };
+    } finally { tikBezig = false; }
+  }
+  const kaartSleutel = (x, ronde) => 'docs-reacties-' + String(x.h || x.slug).slice(0, 16) + '-' + ronde;
+
   async function app(route, d, ctx) {
     ctx = ctx || {};
     if (route === 'POST /app/docs/mailconcept') return mailconcept(d, ctx);
@@ -734,11 +1002,12 @@ function maak(opt) {
   function health() {
     const reg = leesRegister();
     return { aan: true, host: HOST, gedeeld: reg.delingen.length, beveiligd: reg.delingen.filter((x) => x.soort === 'beveiligd').length,
+      reacties_aan: reg.delingen.filter((x) => x.reacties).length, reacties_tik: tikLaatst, reacties_fout: tikFout,
       werk: reg.delingen.filter((x) => x.bron_tot).length, beveiligd_aan: !!ACC, opruimen_open: reg.delingen.filter((x) => x.access_open).length, register_kapot: !!reg.kapot };
   }
 
-  return { app: app, health: health };
+  return { app: app, health: health, reactieTik: reactieTik };
 }
 
-module.exports = { maak: maak, render: render, namenIn: namenIn, bouwNamen: bouwNamen, voorbewerk: voorbewerk, SLUG_RE: SLUG_RE, ontvangersUit: ontvangersUit,
+module.exports = { maak: maak, render: render, huisstijlUitPad: huisstijlUitPad, huisstijlDelen: huisstijlDelen, namenIn: namenIn, bouwNamen: bouwNamen, voorbewerk: voorbewerk, SLUG_RE: SLUG_RE, ontvangersUit: ontvangersUit,
   mailHash: mailHash };
