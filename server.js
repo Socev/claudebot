@@ -13308,7 +13308,8 @@ function appVjKnopStand(p, rv, afgeleid) {
   else if (!/^[a-z0-9][a-z0-9_-]{1,60}$/.test(String(p.sleutel || ''))) waaromNiet = 'deze kaart heeft een onverwachte sleutel; antwoord in het gesprek';   // Fable wv404 #2
   else if (appVjBriefingVerlopen(p, appYmd(Date.now()))) waaromNiet = 'deze vraag uit de ochtendbriefing is verlopen; vraag het Socev opnieuw als het nog speelt';   // wv4016
   return { p: p, rv: rv, ks: ks, gek: gekBruik ? gek : null, gekRij: gekRij, eigenOud: eigenOud, beantwoord: beantwoord, elders: beantwoord ? null : elders, knopBewijs: knopBewijs,
-    tekstId: appVjFnv(tekst + '\n' + (voorstel || '') + '\n' + (q ? q.regSleutel : 'kaart') + '\n' + kanaal + '\n' + (gev !== null)),
+    // wv4016 (Codex MOET 2): bij een briefingvraag hoort de uitleg bij wat David bevestigt; verandert hij, dan een nieuwe tekst_id
+    tekstId: appVjFnv(tekst + '\n' + (voorstel || '') + '\n' + (q ? q.regSleutel : 'kaart') + '\n' + kanaal + '\n' + (gev !== null) + (bv ? '\n' + String(p.waarom || '') : '')),
     waaromNiet: waaromNiet, tekst: tekst, voorstel: voorstel, kanaal: kanaal, gevoelig: gev !== null, gevoeligReden: gev };
 }
 // wv646: tekst van een kaart en machinetekst in de details (titel, waarom, stappen, samenvatting van een klus, meting, bewijs) zonder interne nummers:
@@ -19713,8 +19714,12 @@ function appVjBriefingContext(p) {
   const b = appVjBriefing(p);
   if (!b) return '';
   const w = appOntmasker(appVjOpmaakWeg(String(p.waarom || '')), 'kaart');
-  return '\n(Deze vraag stelde je zelf in je ochtendbriefing van ' + b.dag + ' (verborgen blok socev-autovragen); je uitleg op de kaart, die David ook hoorde: ' + JSON.stringify(appKort(w, 900)) +
-    '. Bij Ja doe je precies wat je in die uitleg beloofde, niets meer; bij Nee doe je niets en zeg je dat in één zin.)';
+  // Codex MOET 1 (ronde 1): de vraag is de opdracht, de uitleg alleen toelichting; een waarde (bedrag, datum, ontvanger) uit de uitleg geldt
+  // niet als bevestigd, en alles wat gevoelig is loopt langs de gewone sloten (concept in plaats van versturen, Poortwachter, geen betaling)
+  return '\n(Deze vraag stelde je zelf in je ochtendbriefing van ' + b.dag + ' (verborgen blok socev-autovragen). Je uitleg op de kaart, die David ook hoorde: ' + JSON.stringify(appKort(w, 900)) +
+    '. De Ja geldt voor de vraag zoals hij er staat; de uitleg is toelichting. Bij Ja doe je wat de vraag zegt, binnen wat je in die uitleg beloofde en nooit meer; ' +
+    'een bedrag, datum, tijd of ontvanger uit de uitleg geldt niet als door David gecontroleerd: controleer hem zelf tegen de bron voor je iets doet, en twijfel = eerst vragen. ' +
+    'Versturen blijft een concept, een agendawijziging gaat langs de Poortwachter, betalen doe je nooit. Bij Nee doe je niets en zeg je dat in één zin.)';
 }
 // Na een geslaagd briefingbericht: de vragen als kaarten (idempotent op sleutel), oude briefingvragen op vervallen, en de stem vooruit.
 async function briefingAutovragenZet(av, tekst, dag) {

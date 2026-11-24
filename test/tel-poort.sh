@@ -1462,6 +1462,9 @@ srv.listen(0, '127.0.0.1', async () => {
     const gevVan = (titel, label) => { const k = ks({ id: 9, sleutel: 'briefing-' + dagY + '-1', soort: 'besluit', status: 'open', prive: true, titel, herkomst: { module: 'briefing', briefing: { dag: dagY, gevoelig: label } } }, null, {}); return k.gevoelig ? k.gevoeligReden : null; };
     toets('8y gevoelig = strengste: pod geld boven label -, label geld boven pod agenda, label - en pod niets = gewoon', gevVan('Zal ik de factuur betalen?', '-') === 'geld' && gevVan('Zal ik het overleg in je agenda zetten?', 'geld') === 'geld' &&
       gevVan('Zal ik je herinneren?', '-') === null && gevVan('Zal ik je herinneren?', 'agenda') === 'agenda', [gevVan('Zal ik de factuur betalen?', '-'), gevVan('Zal ik het overleg in je agenda zetten?', 'geld'), gevVan('Zal ik je herinneren?', '-')]);
+    const tidVan = (waarom) => ks({ id: 9, sleutel: 'briefing-' + dagY + '-1', soort: 'besluit', status: 'open', prive: true, titel: 'Zal ik je herinneren?', waarom, herkomst: { module: 'briefing', briefing: { dag: dagY, gevoelig: '-' } } }, null, {}).tekstId;
+    toets('8y andere uitleg = andere tekst_id (Codex MOET 2); een gewone kaart houdt zijn tekst_id', tidVan('Uitleg een hier.') !== tidVan('Uitleg twee hier.') &&
+      ks({ id: 8, sleutel: 'k8', soort: 'besluit', status: 'open', prive: true, titel: 'Zal ik het bewaren?', waarom: 'a', herkomst: {} }, null, {}).tekstId === ks({ id: 8, sleutel: 'k8', soort: 'besluit', status: 'open', prive: true, titel: 'Zal ik het bewaren?', waarom: 'b', herkomst: {} }, null, {}).tekstId);
     // gesprek
     const ttsG = st.tts.length;
     r = await tel('GET', '/tel/uit?lijst=gesprek', { sleutel: OWV });
@@ -1497,7 +1500,7 @@ srv.listen(0, '127.0.0.1', async () => {
     await tik(); await tik();
     const kbT = gestart.slice(gT).find((g) => /\[KNOP\] David drukte JA/.test(g.prompt));
     toets('8y tik JA op een gewone briefingkaart: 200, [KNOP]-beurt "Knopdruk in Onderweg (auto)", met de uitleg, zonder vingerafdruk', r.status === 200 && r.j.ok === true && !!kbT &&
-      /Knopdruk in Onderweg \(auto\)/.test(kbT.prompt) && /ochtendbriefing van/.test(kbT.prompt) && kbT.prompt.includes('proefkeuring verloopt vrijdag') && !/vingerafdruk bevestigd|stilstaand/.test(kbT.prompt), { r: r.j, p: gestart.slice(gT).map((g) => g.prompt.slice(0, 300)) });
+      /Knopdruk in Onderweg \(auto\)/.test(kbT.prompt) && /ochtendbriefing van/.test(kbT.prompt) && kbT.prompt.includes('proefkeuring verloopt vrijdag') && /niet als door David gecontroleerd/.test(kbT.prompt) && !/vingerafdruk bevestigd|stilstaand/.test(kbT.prompt), { r: r.j, p: gestart.slice(gT).map((g) => g.prompt.slice(0, 300)) });
     const crT = st.chatlog.slice(cT).find((c) => c.rol === 'david');
     toets('8y chat_log: knop-ja-kaart, "in Onderweg (auto)"', crT && crT.bevestiging === 'knop-ja-kaart' && /in Onderweg \(auto\)/.test(crT.tekst), st.chatlog.slice(cT));
     const vrT = Object.values(JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))).find((v) => v.soort === 'voorjou' && v.antwoord && v.antwoord.via === 'onderweg' && v.antwoord.keuze === 'ja');
