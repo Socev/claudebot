@@ -19737,9 +19737,11 @@ async function briefingAutovragenZet(av, tekst, dag) {
   try {
     for (const p of await appVjPunten()) {
       const b = appVjBriefing(p);
-      if (!b || b.dag >= dag || (p.status !== 'open' && p.status !== 'later')) continue;
+      // eerdere dag, of (Codex ZOU 1) een vervangende briefing van vandaag met minder vragen: de overtollige van vandaag ook dicht
+      const weg = b.dag < dag || (b.dag === dag && b.n > Math.min(av.vragen.length, BP.AV_MAX));
+      if (!weg || (p.status !== 'open' && p.status !== 'later')) continue;
       const r = await appSbRpc('mk_voor_jou_status', { p_sleutel: p.sleutel, p_van: p.status, p_naar: 'vervallen', p_door: 'agent', p_later_tot: null,
-        p_bewijs: 'vraag uit de ochtendbriefing van ' + b.dag + '; vervalt aan het eind van die dag', p_reden: 'wv4016 briefingvraag einde dag' });
+        p_bewijs: b.dag < dag ? 'vraag uit de ochtendbriefing van ' + b.dag + '; vervalt aan het eind van die dag' : 'niet meer in de nieuwe ochtendbriefing van ' + b.dag, p_reden: 'wv4016 briefingvraag einde dag' });
       if (r && r.ok === true) vervallen++;
     }
   } catch (e) { logError('briefing-autovragen', e); }
@@ -19912,14 +19914,14 @@ async function telKaartStem(req, res, t, idTekst) {
   let k;
   try { k = await telVjKaartVers(Number(idTekst)); } catch (e) { logError('tel-kaartstem', e); return telWeiger(res, 503, 'de lijst is nu niet te lezen', 'kaartstem lezen'); }
   if (!k) return telWeiger(res, 404, 'deze kaart staat niet meer open', 'kaartstem kaart weg');
-  const sl = k.id + ':' + k.tekst_id;
+  const zin = function (x) { x = String(x || '').trim(); return x && !/[.?!]$/.test(x) ? x + '.' : x; };
+  // wv4016: titel + waarom + vraag + voorstel (David: "alleen de titel, waar ik niks aan heb"); geheugen op de uitgesproken tekst (Codex ZOU 2)
+  const tekst = [zin(k.titel), k.waarom ? zin(k.waarom) : '', k.vraag && k.vraag !== k.titel ? zin(k.vraag) : '', k.voorstel ? 'Voorstel: ' + zin(k.voorstel) : ''].filter(Boolean).join(' ');
+  const sl = k.id + ':' + k.tekst_id + ':' + appSha(tekst).slice(0, 12);
   let wav = telStaat.kaartstem[sl];
   if (!wav) {
     if (!process.env.GEMINI_API_KEY_AUTO) return telWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'geen gemini-sleutel');
     if (!appTeller('tel-kaartstem', TEL_KAARTSTEM_PER_DAG, 86400000)) return telWeiger(res, 429, 'genoeg voorgelezen voor vandaag', 'grens kaartstem dag');
-    const zin = function (x) { x = String(x || '').trim(); return x && !/[.?!]$/.test(x) ? x + '.' : x; };
-    // wv4016: titel + waarom + vraag + voorstel (David: "alleen de titel, waar ik niks aan heb")
-    const tekst = [zin(k.titel), k.waarom ? zin(k.waarom) : '', k.vraag && k.vraag !== k.titel ? zin(k.vraag) : '', k.voorstel ? 'Voorstel: ' + zin(k.voorstel) : ''].filter(Boolean).join(' ');
     try {
       let tm = null;
       wav = await Promise.race([appGeminiStem(tekst, {}), new Promise(function (_, nee) { tm = setTimeout(function () { nee(Object.assign(new Error('duurde te lang'), { traag: true })); }, TEL_WACHT_MAX_S * 1000); })]);
