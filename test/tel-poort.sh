@@ -23,7 +23,9 @@ for (const [x, y] of [['const TEL_LEASE_MS = 3 * 60 * 1000;', 'const TEL_LEASE_M
                       ['const TEL_ZELF_HERHAAL_MS = 4 * 60 * 1000;', 'const TEL_ZELF_HERHAAL_MS = 1200;'],
                       ['const TEL_ZELF_AANKONDIG_MS = 20 * 1000;', 'const TEL_ZELF_AANKONDIG_MS = 400;'],
                       // wv3826: te-lezen.js laden in de vm (geen __dirname daar); de toets draait in de repo-wortel
-                      ["if (typeof __dirname !== 'string') return null; return require(path.join(__dirname, 'te-lezen.js'));", "return require(path.resolve('te-lezen.js'));"]]) {
+                      ["if (typeof __dirname !== 'string') return null; return require(path.join(__dirname, 'te-lezen.js'));", "return require(path.resolve('te-lezen.js'));"],
+                      // wv4016: briefing-punten.js laden in de vm (autovragen, gesprek)
+                      ["const BP = (function () { try { return require(path.join(__dirname, 'briefing-punten.js'));", "const BP = (function () { try { return require(path.resolve('briefing-punten.js'));"]]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'teltoets-'));
@@ -1398,6 +1400,158 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('8x noodstop blijft: Onderweg zonder app-sessie 503', r.status === 503, r.j);
     fs.unlinkSync(TELUIT);
     toets('8x telSessieOk: Onderweg-rij true, Tasker-rij zonder sessie false', H.__haal('telSessieOk')({ soort: 'onderweg', app_apparaat: PIXEL }) === true && H.__haal('telSessieOk')({ app_apparaat: PIXEL }) === false);
+    // ── 8y. wv4016 (dagbriefing als gesprek, fase 1): vragen uit de briefing → kaarten; lijst=gesprek/gesprekstem; tik = knopdruk (niet gevoelig) ──
+    H.appStaat.tellers['tel-alles'] = []; H.appStaat.tellers['tel-beurt'] = []; H.appStaat.tellers['tel-beurtdag'] = []; H.appStaat.tellers['tel-voorjou'] = [];
+    await rond();
+    const BPm = require(path.resolve('briefing-punten.js'));
+    const blokTekst = (vr, vorm) => (vorm === 'oud' ? '```\nsocev-autovragen\n' : '```socev-autovragen\n') + JSON.stringify(vr) + '\n```';
+    const VR = [
+      { punt: 'Proefgarage bellen', vraag: 'Zal ik je om tien uur herinneren aan de proefgarage?', uitleg: 'De proefkeuring verloopt vrijdag. Bij Ja zet ik een herinnering om tien uur, bij Nee doe ik niets.', gevoelig: '-' },
+      { punt: 'Proefoverleg', vraag: 'Zal ik het proefoverleg naar donderdag verschuiven?', uitleg: 'Woensdag botst het met de proefdienst. Bij Ja zet ik het voorstel klaar, bij Nee blijft het staan.', gevoelig: 'agenda' },
+      { punt: 'iets dat er niet staat', vraag: 'Zal ik de proefvoorraad laten uitzoeken?', uitleg: 'Er speelt een vraag over de voorraad. Bij Ja zoek ik het uit, bij Nee niet.', gevoelig: 'raar' },
+      { punt: 'x', vraag: 'Een vierde vraag?', uitleg: 'Deze is er één te veel en valt weg.', gevoelig: '-' }];
+    const avA = BPm.autovragen('Kop\n\n' + blokTekst(VR) + '\n'), avB = BPm.autovragen('Kop\n' + blokTekst(VR.slice(0, 1), 'oud')), avK = BPm.autovragen('Kop\n```socev-autovragen\n{kapot\n```');
+    toets('8y autovragen: blok weg, hooguit 3, onbekend label = versturen, oude vorm ook, kapot blok ook weg', avA.tekst === 'Kop' && avA.vragen.length === 3 && avA.vragen[2].gevoelig === 'versturen' && avA.fouten.length === 1 &&
+      avB.tekst === 'Kop' && avB.vragen.length === 1 && avK.tekst === 'Kop' && avK.vragen.length === 0 && avK.fouten[0] === 'geen json' && BPm.autovragen('Gewoon').blokken === 0, { avA, avB, avK });
+    toets('8y autovragen: vraag zonder ? of te korte uitleg valt weg', BPm.autovragen(blokTekst([{ vraag: 'Zal ik het doen', uitleg: 'Lang genoeg om te tellen hier.' }, { vraag: 'Zal ik het doen?', uitleg: 'kort' }])).vragen.length === 0);
+    // zet-oproepen vangen (de rest van de databank zoals in de toets)
+    const sbOrig = H.__haal('appSbRpc'), zetten = [], statussen = [];
+    H.__zet('appSbRpc', async (fn, b) => {
+      if (fn === 'mk_voor_jou_zet') { zetten.push(b.p); return { sleutel: b.p.sleutel }; }
+      if (fn === 'mk_voor_jou_status') { statussen.push(b); return { ok: true }; }
+      return sbOrig(fn, b);
+    });
+    const dagY = ymdNu, gisteren = new Date(Date.now() - 86400000).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    H.__zet('appVjPunten', async () => [{ id: 51, sleutel: 'briefing-' + gisteren + '-1', soort: 'besluit', status: 'open', prive: true, titel: 'Zal ik iets van gisteren doen?', waarom: 'Oude uitleg van gisteren hier.',
+      herkomst: { module: 'briefing', briefing: { dag: gisteren, punt: null, gevoelig: '-' } } }]);
+    H.appStaat.vjCache = null;
+    const briefTekst = '**🌅 Ochtendbericht**\n\n**Goedemorgen David**\n\nVandaag:\n• Proefgarage bellen over de keuring\n• Proefoverleg woensdag om 10:00\n\nPrioriteit: de keuring.\n\n' + blokTekst(VR);
+    const bres = () => { let k; const p = new Promise((r) => { k = r; }); return { p, res: { headersSent: false, writeHead(s) { this.s = s; this.headersSent = true; }, end(b) { k({ status: this.s, j: JSON.parse(b) }); }, setHeader() {}, on() { return this; } } }; };
+    let bx = bres();
+    H.__haal('berichtNieuw')(bx.res, { kanaal: 'hoofd', bron: 'briefing', klasse: 'normaal', tekst: briefTekst, sleutel: 'proef-8y-briefing' });
+    let rb = await bx.p; await tik(); await tik(); await wacht(150);
+    const logH = fs.readFileSync(path.join(LOGDIR, 'hoofd.jsonl'), 'utf8');
+    toets('8y briefingbericht: 200 en het blok staat niet in het app-log', rb.status === 200 && rb.j.ok && /Proefgarage bellen/.test(logH) && !/socev-autovragen|proefvoorraad laten/.test(logH), rb);
+    const z1 = zetten.find((p) => p.sleutel === 'briefing-' + dagY + '-1'), z2 = zetten.find((p) => p.sleutel === 'briefing-' + dagY + '-2'), z3 = zetten.find((p) => p.sleutel === 'briefing-' + dagY + '-3');
+    const modY = BPm.punten(briefTekst.replace(/```socev[\s\S]*$/, '').trim(), dagY);
+    const pGarage = modY.punten.find((p) => /Proefgarage/.test(p.tekst)), pOverleg = modY.punten.find((p) => /Proefoverleg/.test(p.tekst));
+    toets('8y drie besluitkaarten: hoofdkanaal (prive), uitleg als waarom, deadline vandaag, module briefing, punt-id', zetten.length === 3 && z1 && z1.soort === 'besluit' && z1.prive === true && z1.deadline === dagY &&
+      z1.waarom === VR[0].uitleg && z1.titel === VR[0].vraag && z1.herkomst.module === 'briefing' && z1.herkomst.briefing.punt === pGarage.id && z2.herkomst.briefing.punt === pOverleg.id &&
+      z2.herkomst.briefing.gevoelig === 'agenda' && z3.herkomst.briefing.punt === null && z3.herkomst.briefing.gevoelig === 'versturen', zetten);
+    toets('8y de vraag van gisteren gaat op vervallen', statussen.some((s) => s.p_sleutel === 'briefing-' + gisteren + '-1' && s.p_naar === 'vervallen' && s.p_door === 'agent'), statussen);
+    const zN = zetten.length;
+    bx = bres();
+    H.__haal('berichtNieuw')(bx.res, { kanaal: 'machinekamer', bron: 'agentrapport', klasse: 'normaal', tekst: 'Rapport\n' + blokTekst(VR.slice(0, 1)) });
+    rb = await bx.p; await tik(); await wacht(80);
+    toets('8y blok in een ander bericht: wel weg, geen kaart', rb.status === 200 && zetten.length === zN && !/socev-autovragen/.test(fs.readFileSync(path.join(LOGDIR, 'machinekamer.jsonl'), 'utf8')), rb);
+    // de kaarten zoals de databank ze teruggeeft (+ een andere open vraag in het hoofdkanaal en een in de machinekamer)
+    const kaartVan = (z, id) => ({ id, sleutel: z.sleutel, soort: 'besluit', status: 'open', prive: true, titel: z.titel, waarom: z.waarom, deadline: z.deadline, herkomst: z.herkomst });
+    let punten8y = [kaartVan(z1, 61), kaartVan(z2, 62), kaartVan(z3, 63),
+      { id: 64, sleutel: 'k64', soort: 'besluit', status: 'open', prive: true, titel: 'Zal ik het proefdossier bewaren?', waarom: 'Het dossier staat los.', herkomst: {} },
+      { id: 65, sleutel: 'k65', soort: 'besluit', status: 'open', prive: false, titel: 'Zal ik de proefmachine herstarten?', herkomst: {} },
+      { id: 51, sleutel: 'briefing-' + gisteren + '-1', soort: 'besluit', status: 'open', prive: true, titel: 'Zal ik iets van gisteren doen?', herkomst: { module: 'briefing', briefing: { dag: gisteren, punt: null, gevoelig: '-' } } }];
+    H.__zet('appVjPunten', async () => punten8y);
+    H.appStaat.vjCache = null;
+    const zicht = H.__haal('appVjZichtbaar');
+    toets('8y vraag van gisteren niet meer zichtbaar, die van vandaag wel', zicht(punten8y[5], dagY) === false && zicht(punten8y[0], dagY) === true);
+    r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: OWV });
+    const vj = {}; (r.j.voorjou || []).forEach((k) => { vj[k.id] = k; });
+    toets('8y voorjou: waarom, gevoelig + reden (strengste van label en pod), kanaal; gisteren weg', vj[61] && vj[61].waarom === VR[0].uitleg && vj[61].gevoelig === false && vj[62] && vj[62].gevoelig === true && vj[62].reden === 'agenda' &&
+      vj[63] && vj[63].gevoelig === true && vj[63].reden === 'versturen' && vj[61].kanaal === 'hoofd' && vj[65].kanaal === 'machinekamer' && !vj[51] && vj[61].briefing.punt === pGarage.id, r.j);
+    const ks = H.__haal('appVjKnopStand');
+    const gevVan = (titel, label) => { const k = ks({ id: 9, sleutel: 'briefing-' + dagY + '-1', soort: 'besluit', status: 'open', prive: true, titel, herkomst: { module: 'briefing', briefing: { dag: dagY, gevoelig: label } } }, null, {}); return k.gevoelig ? k.gevoeligReden : null; };
+    toets('8y gevoelig = strengste: pod geld boven label -, label geld boven pod agenda, label - en pod niets = gewoon', gevVan('Zal ik de factuur betalen?', '-') === 'geld' && gevVan('Zal ik het overleg in je agenda zetten?', 'geld') === 'geld' &&
+      gevVan('Zal ik je herinneren?', '-') === null && gevVan('Zal ik je herinneren?', 'agenda') === 'agenda', [gevVan('Zal ik de factuur betalen?', '-'), gevVan('Zal ik het overleg in je agenda zetten?', 'geld'), gevVan('Zal ik je herinneren?', '-')]);
+    // gesprek
+    const ttsG = st.tts.length;
+    r = await tel('GET', '/tel/uit?lijst=gesprek', { sleutel: OWV });
+    const sk = (r.j.gesprek && r.j.gesprek.stukken) || [];
+    const iG = sk.findIndex((s) => s.punt_id === pGarage.id && s.soort === 'punt'), iO = sk.findIndex((s) => s.punt_id === pOverleg.id && s.soort === 'punt');
+    toets('8y gesprek: punten in volgorde, de vraag direct na zijn punt, de losse vraag na het laatste punt, nog 1 (alleen hoofdkanaal)', r.status === 200 && iG >= 0 && sk[iG + 1].soort === 'vraag' && sk[iG + 1].kaart.id === 61 &&
+      sk[iO + 1].soort === 'vraag' && sk[iO + 1].kaart.id === 62 && sk[iO + 2].soort === 'vraag' && sk[iO + 2].kaart.id === 63 && r.j.gesprek.nog === 1 && sk.every((s) => /^[a-f0-9]{12}$/.test(s.stem)), r.j);
+    toets('8y gesprek: vraagstuk met uitleg, tekst_id en gevoelig van de kaart; geen wikilink of blok in de tekst', sk[iG + 1].uitleg === VR[0].uitleg && sk[iG + 1].kaart.tekst_id === vj[61].tekst_id && sk[iG + 1].kaart.gevoelig === false &&
+      sk[iO + 1].kaart.gevoelig === true && sk[iO + 1].kaart.reden === 'agenda' && !sk.some((s) => /\[\[|socev-autovragen/.test(s.tekst)), sk);
+    await wacht(400);
+    toets('8y gesprek: stem vooruit, per stuk één keer (uitleg + vraag in één stuk)', st.tts.length - ttsG === sk.length && st.tts.slice(ttsG).some((t) => t.includes('proefkeuring verloopt vrijdag') && /herinneren aan de proefgarage\?/.test(t)), st.tts.slice(ttsG));
+    const ttsS = st.tts.length;
+    r = await tel('GET', '/tel/uit?lijst=gesprekstem&s=' + sk[iG].stem, { sleutel: OWV });
+    toets('8y gesprekstem: wav uit het geheugen, geen nieuwe stemaanroep', r.status === 200 && /audio\/wav/.test(r.ct) && st.tts.length === ttsS, { status: r.status, ct: r.ct });
+    r = await tel('GET', '/tel/uit?lijst=gesprekstem&s=abcdefabcdef', { sleutel: OWV });
+    toets('8y gesprekstem onbekend stuk: 404', r.status === 404, r.j);
+    r = await tel('GET', '/tel/uit?lijst=gesprekstem&s=x', { sleutel: OWV });
+    toets('8y gesprekstem ongeldig: 400', r.status === 400, r.j);
+    r = await tel('GET', '/tel/uit?lijst=gesprek', { sleutel: TKV });
+    toets('8y gesprek met een Tasker-sleutel: 404', r.status === 404, r.j);
+    H.telStaat.gesprek.wav = {}; H.appStaat.tellers['tel-gesprekstem'] = Array(60).fill(Date.now());
+    r = await tel('GET', '/tel/uit?lijst=gesprekstem&s=' + sk[iG].stem, { sleutel: OWV });
+    toets('8y gesprekstem boven het dagplafond: 429', r.status === 429 && /genoeg voorgelezen/.test(r.j.fout), r.j);
+    H.appStaat.tellers['tel-gesprekstem'] = [];
+    // kaartstem zegt nu ook het waarom
+    const ttsK = st.tts.length;
+    r = await tel('GET', '/tel/uit?lijst=kaartstem&id=64', { sleutel: OWV });
+    toets('8y kaartstem: titel + waarom', r.status === 200 && st.tts.length === ttsK + 1 && /Het dossier staat los\./.test(st.tts[ttsK]), st.tts.slice(ttsK));
+    // tik op JA: gewone kaart = knopdruk, rijdend, zonder vingerafdruk
+    const tikR = (q) => tel('GET', '/tel/uit?lijst=tik&' + q, { sleutel: OWV });
+    const gT = gestart.length, cT = st.chatlog.length;
+    r = await tikR('soort=kaart&doel=61&keuze=ja&tekst_id=' + vj[61].tekst_id);
+    await tik(); await tik();
+    const kbT = gestart.slice(gT).find((g) => /\[KNOP\] David drukte JA/.test(g.prompt));
+    toets('8y tik JA op een gewone briefingkaart: 200, [KNOP]-beurt "Knopdruk in Onderweg (auto)", met de uitleg, zonder vingerafdruk', r.status === 200 && r.j.ok === true && !!kbT &&
+      /Knopdruk in Onderweg \(auto\)/.test(kbT.prompt) && /ochtendbriefing van/.test(kbT.prompt) && kbT.prompt.includes('proefkeuring verloopt vrijdag') && !/vingerafdruk bevestigd|stilstaand/.test(kbT.prompt), { r: r.j, p: gestart.slice(gT).map((g) => g.prompt.slice(0, 300)) });
+    const crT = st.chatlog.slice(cT).find((c) => c.rol === 'david');
+    toets('8y chat_log: knop-ja-kaart, "in Onderweg (auto)"', crT && crT.bevestiging === 'knop-ja-kaart' && /in Onderweg \(auto\)/.test(crT.tekst), st.chatlog.slice(cT));
+    const vrT = Object.values(JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))).find((v) => v.soort === 'voorjou' && v.antwoord && v.antwoord.via === 'onderweg' && v.antwoord.keuze === 'ja');
+    toets('8y vragen.json: antwoord ja via onderweg, zonder vingerafdruk', vrT && !vrT.antwoord.vingerafdruk && vrT.antwoord.apparaat === PIXEL, vrT);
+    toets('8y de kaart gaat op beantwoord (door david)', statussen.some((s) => s.p_sleutel === z1.sleutel && s.p_naar === 'gedaan' && s.p_door === 'david'), statussen.slice(-3));
+    const gT2 = gestart.length;
+    r = await tikR('soort=kaart&doel=62&keuze=ja&tekst_id=' + vj[62].tekst_id);
+    toets('8y tik JA op een agenda-vraag: 409 "vingerafdruk als je stilstaat", geen beurt', r.status === 409 && /vingerafdruk/.test(r.j.fout) && r.j.gevoelig === 'agenda' && gestart.length === gT2, r.j);
+    r = await tikR('soort=kaart&doel=63&keuze=ja&tekst_id=' + vj[63].tekst_id);
+    toets('8y tik JA op een versturen-vraag: 409 "in de Socev-app", geen beurt', r.status === 409 && /Socev-app/.test(r.j.fout) && gestart.length === gT2, r.j);
+    await rond();
+    r = await tikR('soort=kaart&doel=63&keuze=nee&tekst_id=' + vj[63].tekst_id);
+    await tik(); await tik();
+    toets('8y tik NEE op een gevoelige vraag mag wel: 200, [KNOP] NEE', r.status === 200 && gestart.slice(gT2).some((g) => /\[KNOP\] David drukte NEE/.test(g.prompt) && /Knopdruk in Onderweg \(auto\)/.test(g.prompt)), r.j);
+    r = await tikR('soort=kaart&doel=64&keuze=ja&tekst_id=' + (vj[64].tekst_id === 'deadbeef' ? 'feedbeef' : 'deadbeef'));
+    toets('8y tik met een oude tekst_id: 409 "veranderd"', r.status === 409 && /veranderd/.test(r.j.fout), r.j);
+    r = await tikR('soort=kaart&doel=51&keuze=ja&tekst_id=deadbeef');
+    toets('8y tik op de vraag van gisteren: 409', r.status === 409, r.j);
+    r = await tel('GET', '/tel/uit?lijst=tik&soort=kaart&doel=64&keuze=ja&tekst_id=' + vj[64].tekst_id, { sleutel: TKV });
+    toets('8y tik met een Tasker-sleutel: 404', r.status === 404, r.j);
+    for (const q of ['soort=kaart&doel=64&keuze=anders&tekst_id=' + vj[64].tekst_id, 'soort=kaart&doel=64&keuze=ja', 'soort=iets&doel=64&keuze=ja', 'soort=vraag&doel=abc&keuze=ja']) {
+      r = await tikR(q);
+      toets('8y tik ongeldig (' + q.split('&')[0] + ' ' + q.split('&')[2] + '): 400', r.status === 400, r.j);
+    }
+    // een vraag onder een antwoord (autobeurt): uitgifte zegt of hij gevoelig is; tik = knopdruk
+    await rond(); await rond();
+    const itT = await vraagBeurt('Zal ik het proefrapport in de map Werk bewaren?');
+    toets('8y uitgifte: vraag_gevoelig nee bij een gewone vraag', itT.vraag_gevoelig === 'nee', itT);
+    const gV = gestart.length;
+    r = await tikR('soort=vraag&doel=' + itT.vraag_job + ':' + itT.vraag_hash + '&keuze=ja');
+    await tik(); await tik();
+    const kbV = gestart.slice(gV).find((g) => /\[KNOP\] David drukte JA/.test(g.prompt));
+    toets('8y tik JA op de vraag onder een antwoord: [KNOP]-beurt "Knopdruk in Onderweg (auto)"', r.status === 200 && !!kbV && /Knopdruk in Onderweg \(auto\)/.test(kbV.prompt) && kbV.prompt.includes(itT.vraag_hash), { r: r.j, p: gestart.slice(gV).map((g) => g.prompt.slice(0, 200)) });
+    await rond(); await rond();
+    const itG2 = await vraagBeurt('Zal ik de factuur van 200 euro betalen?');
+    toets('8y uitgifte: vraag_gevoelig geld bij een geldvraag', itG2.vraag_gevoelig === 'geld', itG2);
+    const gV2 = gestart.length;
+    r = await tikR('soort=vraag&doel=' + itG2.vraag_job + ':' + itG2.vraag_hash + '&keuze=ja');
+    toets('8y tik JA op een geldvraag: 409, geen beurt, onbeantwoord', r.status === 409 && gestart.length === gV2 && !JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[itG2.vraag_job + ':' + itG2.vraag_hash].antwoord, r.j);
+    // CODEX MOET 2: een gesproken "ja" is geen knopdruk: gewone [AUTO]-beurt, de vraag blijft open
+    const itS = await vraagBeurt('Zal ik het proefverslag opslaan?');
+    const gS = gestart.length;
+    r = await tel('POST', '/tel/beurt', { sleutel: OWV, ct: 'text/plain', body: 'ja' });
+    await tik(); await tik();
+    toets('8y gesproken ja: [AUTO]-beurt, geen [KNOP], de vraag blijft onbeantwoord', r.status === 202 && gestart.slice(gS).length === 1 && /\[AUTO\] ja/.test(gestart[gS].prompt) && !/\[KNOP\]/.test(gestart[gS].prompt) &&
+      !JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[itS.vraag_job + ':' + itS.vraag_hash].antwoord, gestart.slice(gS).map((g) => g.prompt.slice(0, 120)));
+    await rond();
+    H.appStaat.tellers['tel-tik'] = Array(60).fill(Date.now());
+    r = await tikR('soort=kaart&doel=64&keuze=ja&tekst_id=' + vj[64].tekst_id);
+    toets('8y tik grens per uur: 429', r.status === 429, r.j);
+    H.appStaat.tellers['tel-tik'] = [];
+    toets('8y tel-audit zonder vraag of uitleg', !/proefkeuring|proefgarage|Proefoverleg|proefrapport/.test(audit()) && /tik kaart ja -> 200/.test(audit()) && /gesprek \d+ stukken/.test(audit()));
+    toets('8y geen onverwachte fouten (gesprek, tik, autovragen)', !logs.some((l) => /tel-gesprek|tel-tik|briefing-autovragen/.test(l)), logs.filter((l) => /tel-gesprek|tel-tik|briefing-autovragen/.test(l)));
+    H.__zet('appSbRpc', sbOrig);
     toets('8 geen onverwachte fouten (wv3700)', !logs.some((l) => /tel-voorjou/.test(l) && !/databank weg/.test(l)), logs.filter((l) => /tel-voorjou/.test(l)));
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }
   srv.close();

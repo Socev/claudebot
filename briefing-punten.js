@@ -168,4 +168,93 @@ function correctieTekst(m, sleutel, dag) {
 }
 function volgendeDag(dag) { return dagPlus(dag, 1); }
 
-module.exports = { STANDEN, STAND_TEKST, RUST_DAGEN, punten, puntId, plat, vaultPad, bronVan, editieSleutel, snoei, zetStand, standenVan, correctieTekst, rustLopend, volgendeDag };
+// ── wv4016 (Onderweg — dagbriefing als gesprek, fase 1; David Ja 22-11 22:33, vraag-id c4d5ba57) ──
+// 1. autovragen(tekst): het verborgen blok ```socev-autovragen (JSON-lijst, hooguit AV_MAX) uit de briefingtekst. Geeft altijd de tekst
+//    zonder elk zo'n blok terug (ook een kapot blok gaat eruit: David ziet nooit JSON) en de geldige vragen. n8n (Opmaak/Briefing sturen)
+//    zet het blok onderaan met de taal erbij; de oude omzetting (<pre> terug naar ```) gaf "```\nsocev-autovragen\n…": beide vormen tellen.
+//    Een vraag = { punt, vraag, uitleg, gevoelig }; vraag eindigt op ?, gevoelig = '-' | agenda | versturen | geld (onbekend = versturen).
+// 2. gesprek(model, vragen, o): de briefing als reeks stukken voor Onderweg (lijst=gesprek): tekstblokken en punten in volgorde, met
+//    direct na het punt waar een vraag bij hoort die vraag (o.kaart(v) geeft de Voor jou-kaart of null = geen knop meer). Vragen zonder
+//    passend punt komen na het laatste punt. Wat n8n letterlijk onder het bericht zet (Geld deze maand, Uit je Apps, Gambia-weekreview)
+//    staat ook niet in de gesproken briefing van nu (Spreektekst leest alleen de pod-uitvoer): hier ook niet. o.spreek = appSpreektekst.
+const AV_MAX = 3;
+const AV_GEVOELIG = ['-', 'agenda', 'versturen', 'geld'];
+const AV_BLOK_RE = /```[ \t]*(?:socev-autovragen[ \t]*\n|\n[ \t]*socev-autovragen[ \t]*\n)([\s\S]*?)(?:```|$)/g;
+function autovragen(tekst) {
+  const vragen = [], fouten = [];
+  let n = 0;
+  const schoon = String(tekst || '').replace(AV_BLOK_RE, function (m, inhoud) {
+    n++;
+    let j = null;
+    try { j = JSON.parse(String(inhoud).trim()); } catch (e) { fouten.push('geen json'); return ''; }
+    if (!Array.isArray(j)) { fouten.push('geen lijst'); return ''; }
+    j.forEach(function (x) {
+      if (vragen.length >= AV_MAX) { fouten.push('meer dan ' + AV_MAX); return; }
+      if (!x || typeof x !== 'object') { fouten.push('geen object'); return; }
+      const vraag = plat(x.vraag).slice(0, 300), uitleg = plat(x.uitleg).slice(0, 900), punt = plat(x.punt).slice(0, 300);
+      if (vraag.length < 8 || !/\?$/.test(vraag)) { fouten.push('vraag zonder ?'); return; }
+      if (uitleg.length < 20) { fouten.push('uitleg te kort'); return; }
+      const g = String(x.gevoelig == null ? '-' : x.gevoelig).trim().toLowerCase() || '-';
+      vragen.push({ punt: punt, vraag: vraag, uitleg: uitleg, gevoelig: AV_GEVOELIG.indexOf(g) >= 0 ? g : 'versturen' });   // onbekend label = streng
+    });
+    return '';
+  }).replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '');
+  return { tekst: n ? schoon : String(tekst || ''), vragen: vragen, blokken: n, fouten: fouten };
+}
+// Bij welk punt hoort de vraag: het punt waarvan de platte tekst begint met (of bevat) het opgegeven begin (hoofdletterongevoelig, de
+// eerste 60 tekens); anders het punt met de meeste gedeelde woorden (>= 3, woorden van 4+ letters). null = geen.
+function norm(s) { return plat(s).toLowerCase().replace(/[^\p{L}\p{N} ]+/gu, ' ').replace(/\s+/g, ' ').trim(); }
+function puntBij(model, begin) {
+  const b = norm(begin).slice(0, 60);
+  if (!b || !model || !Array.isArray(model.punten)) return null;
+  const pp = model.punten.filter(function (p) { return !p.niet_door && !p.gambia; });
+  const raak = pp.find(function (p) { return norm(p.tekst).indexOf(b) === 0; }) || pp.find(function (p) { return norm(p.tekst).indexOf(b) >= 0; });
+  if (raak) return raak.id;
+  const w = new Set(b.split(' ').filter(function (x) { return x.length >= 4; }));
+  let best = null, bestN = 2;
+  pp.forEach(function (p) { const n = norm(p.tekst).split(' ').filter(function (x) { return w.has(x); }).length; if (n > bestN) { best = p.id; bestN = n; } });
+  return best;
+}
+const GESPREK_NIET = /geld deze maand|uit je apps|gambia-weekreview/i;
+const GESPREK_MAX = 40;
+function gesprek(model, vragen, o) {
+  o = o || {};
+  const spreek = o.spreek || plat, kaart = o.kaart || function () { return null; };
+  if (!model || !Array.isArray(model.blokken) || !model.blokken.length) return null;
+  const stukken = [], bij = {}, los = [];
+  (vragen || []).forEach(function (v) { const id = v.punt_id; if (id && model.punten.some(function (p) { return p.id === id; })) (bij[id] = bij[id] || []).push(v); else los.push(v); });
+  const vraagStuk = function (v) {
+    const k = kaart(v);
+    if (!k) return;
+    stukken.push({ soort: 'vraag', punt_id: v.punt_id || null, tekst: v.vraag, uitleg: v.uitleg, spreek: spreek(v.uitleg + '\n' + v.vraag), kaart: k });
+  };
+  let weg = false, laatstePunt = -1;
+  model.blokken.forEach(function (b) {
+    if (b.md != null) {
+      const koppen = String(b.md).split('\n').map(function (r) { return r.trim(); }).filter(function (r) { return r && isKop(r); });
+      if (koppen.length) weg = GESPREK_NIET.test(plat(koppen[koppen.length - 1]));
+      // een blok dat begint met een kop van n8n slaat alleen dat blok over; een gewone kop daarna zet het weer aan
+      if (weg || GESPREK_NIET.test(b.md)) return;
+      const z = spreek(b.md).trim();
+      if (z) stukken.push({ soort: 'tekst', tekst: plat(b.md).slice(0, 1500), spreek: z });
+      return;
+    }
+    const p = b.punt;
+    if (!p || p.niet_door || p.gambia || GESPREK_NIET.test(String(p.rubriek || ''))) return;
+    stukken.push({ soort: 'punt', punt_id: p.id, tekst: plat(p.tekst).slice(0, 1200), rubriek: p.rubriek || null, spreek: spreek(p.tekst) });
+    (bij[p.id] || []).forEach(vraagStuk);
+    laatstePunt = stukken.length - 1;   // ná de eigen vragen van dit punt
+  });
+  // vragen zonder punt: na het laatste punt (vóór een slotzin), anders achteraan
+  if (los.length) {
+    const rest = laatstePunt >= 0 ? stukken.splice(laatstePunt + 1) : [];
+    los.forEach(vraagStuk);
+    rest.forEach(function (s) { stukken.push(s); });
+  }
+  return stukken.filter(function (s) { return s.spreek; }).slice(0, GESPREK_MAX).map(function (s, i) {
+    return Object.assign({ i: i, stem: crypto.createHash('sha256').update(s.spreek).digest('hex').slice(0, 12) }, s);
+  });
+}
+
+module.exports = { STANDEN, STAND_TEKST, RUST_DAGEN, punten, puntId, plat, vaultPad, bronVan, editieSleutel, snoei, zetStand, standenVan, correctieTekst, rustLopend, volgendeDag,
+  AV_MAX, AV_GEVOELIG, autovragen, puntBij, gesprek };

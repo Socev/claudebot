@@ -9244,7 +9244,10 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
     (codeIdVanKanaal(rij.kanaal) ? 'OVIS Code › ' + CODE_APPS.app(codeIdVanKanaal(rij.kanaal)).naam : rij.kanaal);   // wv3227   // Fable-review wv200 K1
   // wv3862: een JA met vingerafdruk uit Onderweg (s.onderweg = tel-apparaat) loopt door deze zelfde code; alleen de plaatsnaam verschilt
   const viaOw = !!(s && s.onderweg);
-  const waarIn = viaOw ? (kaart ? 'op de Voor jou-kaart in Onderweg (auto, stilstaand, vingerafdruk op de telefoon; ' + kanaalNaam + ')' : 'in Onderweg (auto, stilstaand, vingerafdruk op de telefoon; ' + kanaalNaam + ')')
+  // wv4016: een tik op JA/NEE in Onderweg (ook rijdend, alleen niet-gevoelig) heet "Knopdruk in Onderweg (auto)"; nooit een gesproken beurt
+  const tikOw = viaOw && s.onderweg_tik === true;
+  const waarIn = tikOw ? (kaart ? 'in Onderweg (auto), op de Voor jou-kaart (' + kanaalNaam + '; tik op het scherm, geen vingerafdruk)' : 'in Onderweg (auto) (' + kanaalNaam + '; tik op het scherm, geen vingerafdruk)')
+    : viaOw ? (kaart ? 'op de Voor jou-kaart in Onderweg (auto, stilstaand, vingerafdruk op de telefoon; ' + kanaalNaam + ')' : 'in Onderweg (auto, stilstaand, vingerafdruk op de telefoon; ' + kanaalNaam + ')')
     : kaart ? 'op de Voor jou-kaart in de app (Overzicht, ' + kanaalNaam + ')' : 'in de app (' + kanaalNaam + ')';
   const tekst = (keuze === 'anders'
     ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
@@ -9277,7 +9280,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
     return appChatLogVoor(rij.kanaal, [
       { rol: 'socev', tekst: vb ? vb.bericht : vz, ts: nu - 1 },
       { rol: 'david', ts: nu, bevestiging: appKnopBevestiging(keuze, gevoeligJa, a, !!kaart),
-        tekst: (keuze === 'anders' ? 'Anders' : keuze === 'nee' ? (kaart && kaart.stop ? 'Stop' : 'Nee') : doorbouw ? 'Ja, en bouw door' : 'Ja') + ' (knop ' + (kaart ? 'op een Voor jou-kaart ' : '') + (viaOw ? 'in Onderweg, stilstaand' : 'in de app') + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
+        tekst: (keuze === 'anders' ? 'Anders' : keuze === 'nee' ? (kaart && kaart.stop ? 'Stop' : 'Nee') : doorbouw ? 'Ja, en bouw door' : 'Ja') + ' (knop ' + (kaart ? 'op een Voor jou-kaart ' : '') + (tikOw ? 'in Onderweg (auto)' : viaOw ? 'in Onderweg, stilstaand' : 'in de app') + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
           (keuze === 'anders' ? ' — toelichting: ' + appOntmasker(toel) : '') + '\n(vraag-id ' + hash + ')' }])
       .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); })
       .then(function (st) {
@@ -12430,6 +12433,7 @@ function appVjRegel2(p, vandaag) {
 // toekomst; null = meteen). Geldt overal waar de pod 'zichtbaar' gebruikt: lijst, telling, Onderweg.
 function appVjZichtbaar(p, vandaag, nu) {
   if (Date.parse(p.toon_vanaf || '') > (nu == null ? Date.now() : nu)) return false;
+  if (typeof appVjBriefingVerlopen === 'function' && appVjBriefingVerlopen(p, vandaag)) return false;   // wv4016 (los geknipt in test/voor-jou-momenten: zonder): een vraag uit de briefing vervalt aan het eind van zijn dag
   return p.status === 'open' || (p.status === 'later' && !(String(p.later_tot || '') > vandaag));
 }
 // wv3967: wacht deze open kaart nog op een vast moment?
@@ -13282,6 +13286,9 @@ function appVjKnopStand(p, rv, afgeleid) {
   if (gev === null && /^boekstuk-vrijgave-\d{1,9}$/.test(String(p.sleutel || ''))) gev = 'versturen';
   // wv2347: een kaart die de grondregels raakt (vlag van werkvoorraad.py --voor-jou, via mk_voor_jou_van_wv in herkomst) is altijd gevoelig
   if (gev === null && p.herkomst && typeof p.herkomst === 'object' && p.herkomst.grondwet === true) gev = 'grondwet';
+  // wv4016: vraag uit de briefing: het strengste van Socevs label (herkomst.briefing.gevoelig) en de eigen classificatie hierboven
+  const bv = appVjBriefing(p);
+  if (bv) gev = appGevStrengst(gev, bv.gevoelig);
   // gekoppeld en bruikbaar: de druk loopt via die vraag (ook de knoppen onder het oorspronkelijke bericht tonen dan beantwoord)
   const gekBruik = !!(gekRij && Date.now() - Date.parse(gekRij.t || 0) <= APP_VRAAG_GELDIG_MS);
   // wv1018 (Fable diffreview #2): appKnop eist een vingerafdruk zodra de chatvraag gevoelig is (rij zonder gevoelig: false); zeg het de app vooraf
@@ -13299,6 +13306,7 @@ function appVjKnopStand(p, rv, afgeleid) {
   else if (tekst.length + (voorstel ? voorstel.length : 0) > APP_VJ_VRAAG_MAX) waaromNiet = 'deze vraag is te lang voor een knop; antwoord in het gesprek';
   else if (!tekst.trim() || (!q && !/\?$/.test(tekst) && !(typeof doorbouwStopSleutel === 'function' && doorbouwStopSleutel(p.sleutel)))) waaromNiet = 'deze kaart heeft geen vraag';   // wv3692: mededeling doorbouw-<rij> heeft Stop/Anders   // Fable wv404 #5: een titel zonder vraagteken is geen vraag
   else if (!/^[a-z0-9][a-z0-9_-]{1,60}$/.test(String(p.sleutel || ''))) waaromNiet = 'deze kaart heeft een onverwachte sleutel; antwoord in het gesprek';   // Fable wv404 #2
+  else if (appVjBriefingVerlopen(p, appYmd(Date.now()))) waaromNiet = 'deze vraag uit de ochtendbriefing is verlopen; vraag het Socev opnieuw als het nog speelt';   // wv4016
   return { p: p, rv: rv, ks: ks, gek: gekBruik ? gek : null, gekRij: gekRij, eigenOud: eigenOud, beantwoord: beantwoord, elders: beantwoord ? null : elders, knopBewijs: knopBewijs,
     tekstId: appVjFnv(tekst + '\n' + (voorstel || '') + '\n' + (q ? q.regSleutel : 'kaart') + '\n' + kanaal + '\n' + (gev !== null)),
     waaromNiet: waaromNiet, tekst: tekst, voorstel: voorstel, kanaal: kanaal, gevoelig: gev !== null, gevoeligReden: gev };
@@ -13624,7 +13632,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   const context = '(Voor jou-kaart ' + JSON.stringify(titel) + ' (punt ' + appOntmasker(p.sleutel, 'kaart') + ')' + (rv.vraag ? ', registerrij ' + JSON.stringify(appOntmasker(rv.vraag.regSleutel, 'kaart')) : '') + (wv.length ? ', werkvoorraad ' + wv.join(', ') : '') +
     (voorstel ? '. Voorstel op de kaart: ' + JSON.stringify(voorstel) : '') + ((tekst + (voorstel || '')).indexOf(APP_SLEUTEL_WEG) >= 0 ? '. Op de kaart is een sleutel weggelaten (' + APP_SLEUTEL_WEG + '); de volledige tekst staat in de registerrij' : '') + '. David zag precies deze vraag' + (voorstel ? ' en dit voorstel' : '') + ' boven de knoppen; een Ja geldt voor wat er staat, niets meer. ' +
     'De kaart gaat vanzelf op beantwoord. Wacht een werkvoorraadrij op dit antwoord, geef hem vrij of zet hem bij volgens het antwoord. ' +
-    'Een agendawijziging uit deze druk blijft oranje bij de Poortwachter (✅ in de app onder het volledige voorstel).)';
+    'Een agendawijziging uit deze druk blijft oranje bij de Poortwachter (✅ in de app onder het volledige voorstel).)' + appVjBriefingContext(p);
   const bericht = 'Voor jou-kaart ' + JSON.stringify(titel) + ':\n' + tekst + (voorstel ? '\nMijn voorstel: ' + voorstel : '');   // chat_log-rij van Socev (hoofdkanaal)
   // wv1964 (SB2 fase 6d): een gevoelige Ja (verse vingerafdruk, appKnop) staat zo in het bewijs; de verwijderroute in de databank eist dat
   const bijStart = function (kz, gevoeligJa) {
@@ -17899,6 +17907,13 @@ async function berichtNieuw(res, d) {
   }
   let tekst = typeof appOpenKnip === 'function' ? appOpenKnip(d.tekst.replace(/\r\n?/g, '\n')) : d.tekst.replace(/\r\n?/g, '\n');   // wv1712: een bericht stuurt nooit de weergave
   if (!tekst.trim()) return berichtStuur(res, 400, { ok: false, fout: 'geen tekst' });
+  // wv4016: het verborgen vragenblok van de ochtendbriefing (```socev-autovragen) staat nooit in de app; bij de briefing in het hoofdkanaal
+  // worden de vragen Voor jou-besluitkaarten (briefingAutovragenZet, ná het schrijven van het bericht). Een kapot blok gaat er ook uit.
+  let autov = null;
+  if (/socev-autovragen/.test(tekst) && typeof BP !== 'undefined' && BP && typeof BP.autovragen === 'function') {
+    try { const av = BP.autovragen(tekst); if (av.blokken) { tekst = av.tekst; autov = av; } } catch (e) { logError('briefing-autovragen', e); }
+    if (!tekst.trim()) return berichtStuur(res, 400, { ok: false, fout: 'geen tekst' });
+  }
   const idx = berichtIndex(), nu = Date.now();
   const sl = d.sleutel ? appSha('bericht:' + d.sleutel) : null;
   const dubbelVan = function (tNu) { return sl ? Object.keys(idx).find(function (id) { return idx[id].sleutel === sl && tNu - Date.parse(idx[id].t) < BERICHT_SLEUTEL_MS; }) : null; };
@@ -17981,7 +17996,12 @@ async function berichtNieuw(res, d) {
   // wv452 (Fable KAN 3): het actielijstje van 07:05 zegt "de knoppen staan in Voor jou"; de rijen staan dan al open (n8n markeert ze vóór
   // dit bericht), dus het geheugen van Vandaag (3 min) weg, anders toont Ververs nog "nog niet verstuurd" zonder knoppen
   if (bron === 'actielijst' && appStaat.vandaag) appStaat.vandaag.data = null;
-  res._log = { bericht: id, kanaal: doelKanaal, bron: bron, klasse: klasse, soort: soort, agenda: ag ? ag.soort : undefined, op_kaart: opKaart ? opKaart.sleutel : undefined };
+  res._log = { bericht: id, kanaal: doelKanaal, bron: bron, klasse: klasse, soort: soort, agenda: ag ? ag.soort : undefined, op_kaart: opKaart ? opKaart.sleutel : undefined,
+    autovragen: autov ? autov.vragen.length + (autov.fouten.length ? '/' + autov.fouten.length + ' fout' : '') : undefined };   // wv4016
+  if (autov && autov.vragen.length && bron === 'briefing' && doelKanaal === 'hoofd') {
+    const avDag = appYmd(nu);
+    setTimeout(function () { briefingAutovragenZet(autov, tekst, avDag).catch(function (e) { logError('briefing-autovragen', e); }); }, 0);
+  }
   berichtStuur(res, 200, { ok: true, id: id, vraag: !!vraag && d.knoppen === true, push: { gewenst: gewenst, gestart: plan.direct }, uitgesteld: plan.uitgesteld, app_actief: berichtAppActief(),
     agenda: ag ? true : undefined, soort: soort, seintje: seintje, op_kaart: opKaart ? opKaart.sleutel : undefined });
   if (plan.direct && plan.gebundeld) setTimeout(function () { berichtBundelAf(kanaal); }, 0);   // Fable wv292 #3: met de wachtende mee
@@ -18818,7 +18838,15 @@ function telOnderwegVelden(x) {
   const kern = s.replace(/(^|\n)Ik heb een vraag voor je in [^\n]*\.$/, '').trim();
   return { tekst: s.slice(0, 2000), wedervraag: !x.snel && (x.soort === 'antwoord' || x.soort === 'zelf') && /\?["'”’)]*$/.test(kern) ? 'ja' : 'nee', snel: x.snel ? 'ja' : 'nee',
     knopvraag: knop ? 'ja' : 'nee', rest: x.rest ? 'ja' : 'nee', vraagzin: knop && x.vraag ? String(x.vraag).slice(0, TEL_VRAAGZIN_MAX) : '',
-    vraag_job: knop && x.vraag && x.vraag_hash ? x.id : '', vraag_hash: knop && x.vraag && x.vraag_hash ? x.vraag_hash : '' };   // wv3862
+    vraag_job: knop && x.vraag && x.vraag_hash ? x.id : '', vraag_hash: knop && x.vraag && x.vraag_hash ? x.vraag_hash : '',   // wv3862
+    vraag_gevoelig: knop && x.vraag && x.vraag_hash ? telVraagGevoelig(x.id + ':' + x.vraag_hash) : '' };   // wv4016: '' = geen, 'nee' = gewoon, anders de reden
+}
+// wv4016: is de vraag onder dit antwoord gevoelig? (vragen.json; onleesbaar of zonder veld = gevoelig, zoals appKnop)
+function telVraagGevoelig(sl) {
+  let r = null;
+  try { r = appVragen()[sl]; } catch (e) { return 'onbekend'; }
+  if (!r) return 'onbekend';
+  return r.gevoelig === false ? 'nee' : String(r.gevoelig_reden || 'onbekend');
 }
 // wv3770: de zin van de VRAAG AAN DAVID-regel (zelfde knip als telSpreektekst: alleen vóór "Verder in de app:"), zonder opmaak.
 const TEL_VRAAGZIN_MAX = 300;
@@ -19216,6 +19244,9 @@ function telUitRoute(req, res, t) {
     if (q.get('lijst') === 'vingerja') return telVingerJa(req, res, t, q);
     if (q.get('lijst') === 'agenda') return telAgendaLijst(req, res, t);   // wv3878: de regel "Straks 9:00 …" en "lees mijn dag voor"
     if (q.get('lijst') === 'agendastem') return telAgendaStem(req, res, t);
+    if (q.get('lijst') === 'gesprek') return telGesprekRoute(req, res, t);   // wv4016: de briefing als gesprek
+    if (q.get('lijst') === 'gesprekstem') return telGesprekStem(req, res, t, String(q.get('s') || ''));
+    if (q.get('lijst') === 'tik') return telTikRoute(req, res, t, q);   // wv4016: een tik op JA/NEE = de knopdruk (niet gevoelig)
     return telWeiger(res, 400, 'onbekende lijst', 'lijst');
   }
   res._tel.stil = true;   // de hartslag (± 1 per minuut) niet in het auditlog; alleen weigeringen
@@ -19456,8 +19487,12 @@ async function telVjKaart(p, afMap) {
   const st = appVjKnopStand(p, await appVjRegisterVraag(p), afMap);
   const k = appVjKnopVorm(st);
   if (!k.kan) return null;
+  // wv4016: waarom (de uitleg; de kaartstem zegt hem nu ook), gevoelig + reden (Onderweg: tik = knopdruk alleen als niet gevoelig), kanaal
+  const bv = appVjBriefing(p);
   return { id: p.id, titel: appKort(appVjGewoon(appVjOpmaakWeg(p.titel)), 160), vraag: k.vraag ? appKort(k.vraag, 600) : null, voorstel: k.voorstel ? appKort(k.voorstel, 400) : null,
-    deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) ? p.deadline : null, tekst_id: k.tekst_id };
+    deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) ? p.deadline : null, tekst_id: k.tekst_id,
+    waarom: p.waarom ? appKort(appVjGewoon(appVjOpmaakWeg(p.waarom)), 900) : null, gevoelig: !!k.gevoelig, reden: k.gevoelig ? (st.gevoeligReden || 'onbekend') : null, kanaal: k.kanaal,
+    briefing: bv ? { dag: bv.dag, punt: bv.punt } : undefined };
 }
 async function telVjKaartVers(id) {
   const punten = await appVjPunten();
@@ -19643,6 +19678,224 @@ async function telVingerJa(req, res, t, q) {
   telStuur(res, 200, { ok: true, bevestigd: n, uitslag: uitslag });
 }
 // ── einde wv3862 ──
+// ── wv4016 (Onderweg — dagbriefing als gesprek, fase 1; David Ja 22-11 22:33 met vingerafdruk, vraag-id c4d5ba57) ─────────────────
+// Ontwerp: vault 01_Ontwikkeling/Onderweg - dagbriefing als gesprek (bouwplan 24-11-2026).md (Codex NO-GO, 2 MOET verwerkt: fase 2
+// apart; een gesproken ja voert niets uit, alleen de tik). Toets: test/tel-poort.sh § 8y.
+// 1. Vragen uit de briefing: berichtNieuw haalt het verborgen blok ```socev-autovragen eruit (briefing-punten.js autovragen); hier wordt
+//    elke vraag een gewone Voor jou-besluitkaart: sleutel briefing-<dag>-<n>, kanaal hoofd (prive), waarom = Socevs uitleg, deadline = de
+//    dag (vervalt aan het eind ervan: appVjZichtbaar en appVjKnopStand), herkomst {module: 'briefing', briefing: {dag, punt, gevoelig}}.
+//    module = de beheerronde laat hem ongemoeid (modulekaart). Gevoelig = het strengste van Socevs label en appGevoelig (appVjKnopStand).
+//    Een Ja werkt dus overal hetzelfde (app, auto): dezelfde [KNOP]-beurt met de uitleg als context.
+// 2. GET /tel/uit?lijst=gesprek: de briefing van vandaag als stukken (tekst, punt, vraag direct na zijn punt) + het aantal andere open
+//    hoofdkanaalvragen; lijst=gesprekstem&s=<stem> = dat stuk met de pod-stem (vooruit gemaakt, 60 echte stemaanroepen per dag).
+// 3. GET /tel/uit?lijst=tik&soort=vraag|kaart&doel=<job:hash>|<kaart-id>&keuze=ja|nee[&tekst_id=]: een tik op ✓ JA / ✗ NEE in Onderweg is
+//    dezelfde knopdruk als in de app (appKnop / appVoorJouKnop met een sessiekopie, via 'onderweg'), ook rijdend en zonder vingerafdruk,
+//    alleen voor een NIET-gevoelige vraag of kaart (gevoelig = 409: agenda met de vingerafdruk-JA, de rest in de Socev-app). Een gesproken
+//    ja is nooit een knopdruk: dat blijft een [AUTO]-beurt (en Onderweg zegt dan "tik op JA").
+const BRIEFING_VJ_RE = /^briefing-(\d{4}-\d{2}-\d{2})-([1-9])$/;
+const APP_GEV_RANG = { agenda: 1, versturen: 2, verwijderen: 2, geld: 3, grondwet: 4, onleesbaar: 4 };
+function appGevStrengst(a, b) {
+  if (!b) return a || null;
+  if (!a) return b;
+  return (APP_GEV_RANG[b] || 4) > (APP_GEV_RANG[a] || 4) ? b : a;
+}
+// { dag, punt, gevoelig (null = geen label) } of null: alleen voor een kaart met de sleutelvorm én herkomst.briefing van dezelfde dag
+function appVjBriefing(p) {
+  const m = BRIEFING_VJ_RE.exec(String((p && p.sleutel) || ''));
+  const h = m && p.herkomst && typeof p.herkomst === 'object' && p.herkomst.briefing && typeof p.herkomst.briefing === 'object' ? p.herkomst.briefing : null;
+  if (!h || h.dag !== m[1]) return null;
+  const g = String(h.gevoelig || '-');
+  return { dag: m[1], n: Number(m[2]), punt: typeof h.punt === 'string' && APP_BRIEFING_PUNT_ID.test(h.punt) ? h.punt : null,
+    gevoelig: g === '-' ? null : ['agenda', 'versturen', 'geld'].indexOf(g) >= 0 ? g : 'versturen' };
+}
+function appVjBriefingVerlopen(p, vandaag) { const b = appVjBriefing(p); return !!(b && b.dag < vandaag); }
+function appVjBriefingContext(p) {
+  const b = appVjBriefing(p);
+  if (!b) return '';
+  const w = appOntmasker(appVjOpmaakWeg(String(p.waarom || '')), 'kaart');
+  return '\n(Deze vraag stelde je zelf in je ochtendbriefing van ' + b.dag + ' (verborgen blok socev-autovragen); je uitleg op de kaart, die David ook hoorde: ' + JSON.stringify(appKort(w, 900)) +
+    '. Bij Ja doe je precies wat je in die uitleg beloofde, niets meer; bij Nee doe je niets en zeg je dat in één zin.)';
+}
+// Na een geslaagd briefingbericht: de vragen als kaarten (idempotent op sleutel), oude briefingvragen op vervallen, en de stem vooruit.
+async function briefingAutovragenZet(av, tekst, dag) {
+  if (!(await appRolOk())) return { gezet: 0, reden: 'reserve' };
+  let model = null;
+  try { model = BP.punten(tekst, dag, { bestaat: appBriefingVaultBestaat }); } catch (e) { logError('briefing-autovragen', e); }
+  let gezet = 0, fouten = 0, vervallen = 0;
+  for (let i = 0; i < av.vragen.length && i < BP.AV_MAX; i++) {
+    const v = av.vragen[i];
+    const p = { sleutel: 'briefing-' + dag + '-' + (i + 1), soort: 'besluit', titel: v.vraag, waarom: v.uitleg, stappen: [], deadline: dag, waar: 'overal', prive: true,
+      herkomst: { module: 'briefing', briefing: { dag: dag, punt: model ? BP.puntBij(model, v.punt) : null, gevoelig: v.gevoelig } } };
+    try { const r = await appSbRpc('mk_voor_jou_zet', { p: p }); if (r && r.sleutel) gezet++; else fouten++; } catch (e) { fouten++; logError('briefing-autovragen', e); }
+  }
+  appStaat.vjCache = null;
+  try {
+    for (const p of await appVjPunten()) {
+      const b = appVjBriefing(p);
+      if (!b || b.dag >= dag || (p.status !== 'open' && p.status !== 'later')) continue;
+      const r = await appSbRpc('mk_voor_jou_status', { p_sleutel: p.sleutel, p_van: p.status, p_naar: 'vervallen', p_door: 'agent', p_later_tot: null,
+        p_bewijs: 'vraag uit de ochtendbriefing van ' + b.dag + '; vervalt aan het eind van die dag', p_reden: 'wv4016 briefingvraag einde dag' });
+      if (r && r.ok === true) vervallen++;
+    }
+  } catch (e) { logError('briefing-autovragen', e); }
+  appStaat.vjCache = null;
+  if (typeof schrijfLog === 'function') schrijfLog(nu() + ' briefing-autovragen ' + velden({ dag: dag, vragen: av.vragen.length, gezet: gezet, fouten: fouten + av.fouten.length, vervallen: vervallen }));
+  setTimeout(function () { telGesprekVooruit().catch(function (e) { logError('tel-gesprek', e); }); }, 2000);
+  return { gezet: gezet, fouten: fouten, vervallen: vervallen };
+}
+
+const TEL_GESPREK_PER_UUR = 60;
+const TEL_GESPREKSTEM_PER_DAG = 60;   // ± 15-20 stukken per briefing ± $0,002 per stuk; hooguit ± $0,12 per dag (vooruit + op verzoek)
+const TEL_TIK_PER_UUR = 60;
+appStaat.tellers['tel-gesprek'] = []; appStaat.tellers['tel-gesprekstem'] = []; appStaat.tellers['tel-tik'] = [];
+telStaat.gesprek = { dag: null, wav: {}, bezig: {} };
+// De stukken van vandaag (null = geen briefing van vandaag of geen punten: Onderweg speelt dan de mp3). Leest de kaarten vers.
+async function telGesprekStukken() {
+  const b = await appBriefingLaad();
+  const vandaag = appYmd(Date.now());
+  if (!b || b.dag !== vandaag || !b.p || !BP || typeof BP.gesprek !== 'function') return null;
+  let punten = [];
+  try { punten = await appVjPunten(); } catch (e) { logError('tel-gesprek', e); punten = []; }
+  let afMap = {};
+  try { afMap = (await appVjAfgeleid(punten, Date.now())).map || {}; } catch (e) { logError('tel-gesprek', e); }
+  const vragen = [], kaarten = {};
+  for (const p of punten) {
+    const bv = appVjBriefing(p);
+    if (!bv || bv.dag !== vandaag || p.soort !== 'besluit' || (p.status !== 'open' && p.status !== 'later')) continue;
+    let k = null;
+    try { k = await telVjKaart(p, afMap); } catch (e) { logError('tel-gesprek', e); }
+    if (!k) continue;   // al beantwoord of geen knop: niet meer vragen
+    kaarten[p.id] = k;
+    vragen.push({ n: bv.n, punt_id: bv.punt, vraag: k.vraag || k.titel, uitleg: k.waarom || '', kaart_id: p.id });
+  }
+  vragen.sort(function (x, y) { return x.n - y.n; });
+  const stukken = BP.gesprek(b.p, vragen, { spreek: appSpreektekst, kaart: function (v) { const k = kaarten[v.kaart_id]; return k ? { id: k.id, tekst_id: k.tekst_id, gevoelig: k.gevoelig, reden: k.reden } : null; } });
+  if (!stukken || !stukken.some(function (s) { return s.soort === 'punt'; })) return null;
+  // andere open vragen in het hoofdkanaal (niet die van deze briefing): "Er liggen nog n vragen van eerder"
+  let nog = 0;
+  for (const p of punten) {
+    if (nog >= TEL_VOORJOU_MAX || !p || p.soort !== 'besluit' || appVjBriefing(p) || !appVjZichtbaar(p, vandaag)) continue;
+    try { const k = await telVjKaart(p, afMap); if (k && k.kanaal === 'hoofd') nog++; } catch (e) { logError('tel-gesprek', e); }
+  }
+  return { dag: b.dag, job_id: b.job_id, stukken: stukken, nog: nog };
+}
+async function telGesprekWav(tekst, sl) {
+  const g = telStaat.gesprek, dag = appYmd(Date.now());
+  if (g.dag !== dag) { g.dag = dag; g.wav = {}; g.bezig = {}; }
+  if (g.wav[sl]) return g.wav[sl];
+  if (g.bezig[sl]) return g.bezig[sl];
+  if (!process.env.GEMINI_API_KEY_AUTO) throw Object.assign(new Error('geen gemini-sleutel'), { code: 'sleutel' });
+  if (!appTeller('tel-gesprekstem', TEL_GESPREKSTEM_PER_DAG, 86400000)) throw Object.assign(new Error('plafond'), { code: 'plafond' });
+  const p = (async function () {
+    let tm = null;
+    try {
+      const wav = await Promise.race([appGeminiStem(tekst, {}), new Promise(function (_, nee) { tm = setTimeout(function () { nee(Object.assign(new Error('duurde te lang'), { traag: true })); }, 45000); })]);
+      if (g.dag === dag) g.wav[sl] = wav;
+      return wav;
+    } finally { clearTimeout(tm); delete g.bezig[sl]; }
+  })();
+  g.bezig[sl] = p;
+  return p;
+}
+// Vooruit: alle stukken van vandaag na elkaar inspreken (één tegelijk; bij het plafond of zonder sleutel stoppen).
+let telGesprekVooruitBezig = null;
+function telGesprekVooruit() {
+  if (telGesprekVooruitBezig) return telGesprekVooruitBezig;
+  telGesprekVooruitBezig = (async function () {
+    const g = await telGesprekStukken();
+    if (!g) return 0;
+    let n = 0;
+    for (const s of g.stukken) {
+      if (telStaat.gesprek.dag === g.dag && telStaat.gesprek.wav[s.stem]) continue;
+      try { await telGesprekWav(s.spreek, s.stem); n++; } catch (e) { if (e && (e.code === 'plafond' || e.code === 'sleutel')) break; if (!(e && e.traag)) logError('tel-gesprek', e); }
+    }
+    return n;
+  })().finally(function () { telGesprekVooruitBezig = null; });
+  return telGesprekVooruitBezig;
+}
+async function telGesprekRoute(req, res, t) {
+  if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'gesprek: geen onderweg-sleutel');
+  if (!telSessieOk(t)) return telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (gesprek)');
+  if (!appTeller('tel-gesprek', TEL_GESPREK_PER_UUR, 3600000)) return telWeiger(res, 429, 'te vaak dit uur', 'grens gesprek');
+  if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (gesprek)');
+  let g;
+  try { g = await telGesprekStukken(); } catch (e) { logError('tel-gesprek', e); return telWeiger(res, 503, 'de briefing is nu niet te lezen', 'gesprek lezen'); }
+  if (!g) { res._tel.reden = 'gesprek geen'; return telStuur(res, 200, { ok: true, gesprek: null }); }
+  const klaar = telStaat.gesprek.dag === g.dag ? telStaat.gesprek.wav : {};
+  const uit = g.stukken.map(function (s) {
+    return { i: s.i, soort: s.soort, tekst: s.tekst, uitleg: s.uitleg || undefined, punt_id: s.punt_id || undefined, rubriek: s.rubriek || undefined, stem: s.stem, klaar: !!klaar[s.stem],
+      kaart: s.kaart || undefined };
+  });
+  res._tel.reden = 'gesprek ' + uit.length + ' stukken, ' + uit.filter(function (s) { return s.soort === 'vraag'; }).length + ' vragen';
+  telStuur(res, 200, { ok: true, gesprek: { dag: g.dag, stukken: uit, nog: g.nog } });
+  if (uit.some(function (s) { return !s.klaar; })) telGesprekVooruit().catch(function (e) { logError('tel-gesprek', e); });
+}
+async function telGesprekStem(req, res, t, sl) {
+  if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'gesprekstem: geen onderweg-sleutel');
+  if (!telSessieOk(t)) return telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (gesprekstem)');
+  if (!/^[a-f0-9]{12}$/.test(sl)) return telWeiger(res, 400, 'ongeldig stuk', 'gesprekstem s');
+  if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (gesprekstem)');
+  let wav = telStaat.gesprek.dag === appYmd(Date.now()) ? telStaat.gesprek.wav[sl] : null;
+  if (!wav) {
+    let g;
+    try { g = await telGesprekStukken(); } catch (e) { logError('tel-gesprek', e); return telWeiger(res, 503, 'de briefing is nu niet te lezen', 'gesprekstem lezen'); }
+    const s = g && g.stukken.find(function (x) { return x.stem === sl; });
+    if (!s) return telWeiger(res, 404, 'dit stuk staat niet (meer) in de briefing', 'gesprekstem weg');
+    try { wav = await telGesprekWav(s.spreek, sl); } catch (e) {
+      if (e && e.code === 'plafond') return telWeiger(res, 429, 'genoeg voorgelezen voor vandaag', 'grens gesprekstem dag');
+      if (e && e.code === 'sleutel') return telWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'geen gemini-sleutel');
+      if (!(e && e.traag)) logError('tel-gesprek', e);
+      return telWeiger(res, 503, 'inspreken lukte niet', 'gesprekstem gemini');
+    }
+  }
+  res._tel.reden = 'gesprekstem'; res._tel.stil = true;   // ± 15 per briefing: alleen weigeringen in het auditlog (de lijst-regel telt het gebruik)
+  if (res.headersSent) return;
+  res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, 'Cache-Control': 'no-store' });
+  res.end(wav);
+}
+// 3. De tik. Zelfde sessiekopie als de vingerafdruk-JA (wv3976: geen app-sessie nodig), maar zonder verse vingerafdruk: appKnop eist die
+// bij elke gevoelige Ja zelf nog eens (403 vers_nodig), dus een gevoelige vraag kan hier nooit doorkomen, ook niet als de toets hieronder mist.
+async function telTikRoute(req, res, t, q) {
+  if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'tik: geen onderweg-sleutel');
+  if (!telSessieOk(t)) return telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (tik)');
+  if (!appTeller('tel-tik', TEL_TIK_PER_UUR, 3600000)) return telWeiger(res, 429, 'te vaak dit uur', 'grens tik');
+  const soort = String(q.get('soort') || ''), doel = String(q.get('doel') || ''), keuze = String(q.get('keuze') || ''), tid = String(q.get('tekst_id') || '');
+  if (['ja', 'nee'].indexOf(keuze) < 0) return telWeiger(res, 400, 'ongeldige tik', 'tik keuze');
+  if (soort === 'vraag') { if (!/^[a-f0-9]{16}:[a-f0-9]{8}$/.test(doel)) return telWeiger(res, 400, 'ongeldige tik', 'tik doel'); }
+  else if (soort === 'kaart') { if (!/^[1-9]\d{0,8}$/.test(doel) || !/^[a-f0-9]{8}$/.test(tid)) return telWeiger(res, 400, 'ongeldige tik', 'tik kaart'); }
+  else return telWeiger(res, 400, 'ongeldige tik', 'tik soort');
+  if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (tik)');
+  let reg, a;
+  try { reg = appRegister(); } catch (e) { logError('app-register', e); return telWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'tik register'); }
+  a = reg.apparaten.find(function (x) { return x && x.id === t.app_apparaat && x.actief && x.credential && x.credential.id; });
+  if (!a) return telWeiger(res, 409, 'je telefoon is in de Socev-app niet meer gekoppeld; bevestig in de app', 'tik: app-apparaat');
+  const sEcht = telAppSessieVan(t) || { apparaat: a.id, credential: a.credential.id, start: Date.now(), vers_tot: 0, tot: Date.now() + 60000, binding: null };
+  const sKopie = Object.assign({}, sEcht, { credential: a.credential.id, vers_tot: 0, onderweg: t.id, onderweg_tik: true });
+  const gevZin = function (r) { return r === 'agenda' ? 'dit bevestig je met je vingerafdruk als je stilstaat' : 'dit bevestig je in de Socev-app' + (r ? ' (' + r + ')' : ''); };
+  let u2;
+  if (soort === 'vraag') {
+    let rij;
+    try { rij = appVragen()[doel]; } catch (e) { logError('app-vragen', e); return telWeiger(res, 503, 'vragenregister onleesbaar; vraag de machinekamer', 'tik vragen'); }
+    if (!rij) return telWeiger(res, 404, 'deze vraag ken ik niet (meer)', 'tik: onbekende vraag');
+    if (rij.kanaal !== 'hoofd') return telWeiger(res, 409, 'deze vraag bevestig je in de Socev-app', 'tik: kanaal ' + rij.kanaal);
+    if (keuze === 'ja' && rij.gevoelig !== false) { res._tel.reden = 'tik: gevoelig ' + (rij.gevoelig_reden || '?'); return telStuur(res, 409, { ok: false, fout: gevZin(rij.gevoelig_reden), gevoelig: rij.gevoelig_reden || 'onbekend' }); }
+    u2 = await telViaApp(appKnop, [req, reg, a, sKopie, { job_id: doel.split(':')[0], vraag_hash: doel.split(':')[1], keuze: keuze }]);
+    appAudit({ route: '/app/knop', m: 'ONDERWEG', status: u2.status, apparaat: a.id, reden: 'tik via onderweg ' + t.id + ': ' + (u2.reden || '') });
+  } else {
+    let k;
+    try { k = await telVjKaartVers(Number(doel)); } catch (e) { logError('tel-tik', e); return telWeiger(res, 503, 'de lijst is nu niet te lezen', 'tik lezen'); }
+    if (!k) return telWeiger(res, 409, 'deze kaart staat niet meer open of heeft geen knop', 'tik kaart weg #' + doel);
+    if (k.tekst_id !== tid) return telWeiger(res, 409, 'de vraag is intussen veranderd', 'tik tekst gewijzigd #' + doel);
+    if (keuze === 'ja' && k.gevoelig) { res._tel.reden = 'tik: kaart gevoelig ' + (k.reden || '?'); return telStuur(res, 409, { ok: false, fout: gevZin(k.reden), gevoelig: k.reden || 'onbekend' }); }
+    u2 = await telViaApp(appVoorJouKnop, [req, reg, a, sKopie, { id: k.id, keuze: keuze, tekst_id: tid }]);
+    appAudit({ route: '/app/voor-jou/knop', m: 'ONDERWEG', status: u2.status, apparaat: a.id, reden: 'tik via onderweg ' + t.id + ': ' + (u2.reden || '') });
+  }
+  const ok = u2.status === 200 && u2.j.ok === true;
+  const fout = ok ? undefined : u2.j.vers_nodig ? 'dit bevestig je in de Socev-app' : u2.j.tekst_gewijzigd ? 'de vraag is veranderd; lees hem opnieuw' : String(u2.j.fout || 'lukte niet').slice(0, 160);
+  res._tel.reden = 'tik ' + soort + ' ' + keuze + ' -> ' + u2.status;
+  telStuur(res, ok ? 200 : (u2.status >= 400 ? u2.status : 409), { ok: ok, fout: fout, in_rij: u2.j.in_rij || undefined, beantwoord: ok ? keuze : undefined });
+}
+// ── einde wv4016 ──
 // GET /tel/uit?lijst=kaartstem&id=<kaart>: de kaart (titel, vraag, voorstel) ingesproken met de pod-stem, alleen na een tik in Onderweg
 // (passagiers). Zelfde sloten als Voor jou; 40 per dag; in het geheugen per (kaart, tekst_id).
 telStaat.kaartstem = {};
@@ -19660,7 +19913,8 @@ async function telKaartStem(req, res, t, idTekst) {
     if (!process.env.GEMINI_API_KEY_AUTO) return telWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'geen gemini-sleutel');
     if (!appTeller('tel-kaartstem', TEL_KAARTSTEM_PER_DAG, 86400000)) return telWeiger(res, 429, 'genoeg voorgelezen voor vandaag', 'grens kaartstem dag');
     const zin = function (x) { x = String(x || '').trim(); return x && !/[.?!]$/.test(x) ? x + '.' : x; };
-    const tekst = [zin(k.titel), k.vraag && k.vraag !== k.titel ? zin(k.vraag) : '', k.voorstel ? 'Voorstel: ' + zin(k.voorstel) : ''].filter(Boolean).join(' ');
+    // wv4016: titel + waarom + vraag + voorstel (David: "alleen de titel, waar ik niks aan heb")
+    const tekst = [zin(k.titel), k.waarom ? zin(k.waarom) : '', k.vraag && k.vraag !== k.titel ? zin(k.vraag) : '', k.voorstel ? 'Voorstel: ' + zin(k.voorstel) : ''].filter(Boolean).join(' ');
     try {
       let tm = null;
       wav = await Promise.race([appGeminiStem(tekst, {}), new Promise(function (_, nee) { tm = setTimeout(function () { nee(Object.assign(new Error('duurde te lang'), { traag: true })); }, TEL_WACHT_MAX_S * 1000); })]);
