@@ -162,7 +162,12 @@ function teDoen(rijen, nu, gedaan, vandaag) {
     if (p.status === 'afgehandeld' && ['gedaan', 'laten_vallen', 'later'].indexOf(p.keuze) >= 0) {
       if (!(nu - Date.parse(p.getikt_op || '') >= TIK_RUST_MS)) continue;   // ↩️ kan nog
       keuze = p.keuze;
-    } else if (p.status === 'open' && !p.keuze && p.verzonden_op && p.datum === vandaag) { keuze = 'getoond'; tijd = '07:05'; }
+    } else if (p.status === 'open' && !p.keuze && p.verzonden_op && p.datum === vandaag) {
+      // wv3708 (3C87): het tijdstip waarop het lijstje echt verstuurd werd (zaterdag 08:30); onleesbaar = 07:05 zoals vroeger
+      keuze = 'getoond';
+      const vt = Date.parse(p.verzonden_op);
+      tijd = isFinite(vt) ? new Date(vt).toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' }) : '07:05';
+    }
     else continue;
     const merk = crypto.createHash('sha256').update([p.nonce, keuze, p.later_tot || '', p.getikt_op || ''].join('|')).digest('hex').slice(0, 24);
     if (gedaan && gedaan.has(merk)) continue;

@@ -124,6 +124,9 @@ toets('5c verwerkt merk telt niet nog eens', DL.teDoen([rij({ status: 'afgehande
 toets('5d getoond: alleen open + verzonden + van vandaag', DL.teDoen([rij({ status: 'open', keuze: '', verzonden_op: 'x' })], nu, new Set(), '2030-03-05').length === 1
   && DL.teDoen([rij({ status: 'open', keuze: '', verzonden_op: 'x', datum: '2030-03-04' })], nu, new Set(), '2030-03-05').length === 0
   && DL.teDoen([rij({ status: 'klaar', keuze: '' })], nu, new Set(), '2030-03-05').length === 0);
+// wv3708: tijdstip = verzonden_op (NL-tijd); onleesbaar = 07:05
+toets('5f getoond: tijd uit verzonden_op (zaterdag 08:30), onleesbaar = 07:05', DL.teDoen([rij({ status: 'open', keuze: '', verzonden_op: '2030-03-05T07:30:12Z' })], nu, new Set(), '2030-03-05')[0].tijd === '08:30'
+  && DL.teDoen([rij({ status: 'open', keuze: '', verzonden_op: 'x' })], nu, new Set(), '2030-03-05')[0].tijd === '07:05');
 toets('5e andere bron telt niet', DL.teDoen([rij({ bron: 'todoist', status: 'afgehandeld', keuze: 'gedaan', getikt_op: new Date(nu - 200000).toISOString() })], nu, new Set(), '2030-03-05').length === 0);
 
 // 6. runner: gedaan via maak() op het nep-register (wijzig = in het geheugen)
