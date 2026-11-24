@@ -200,6 +200,60 @@ function bekekenBij(lijst, sleutel, iso) {
   return [{ s: sleutel, t: iso }].concat(l).slice(0, BEKEKEN_MAX);
 }
 
+// ── wv3945 (besluitenpagina nr 397/398 = 3C97/3C98, David Ja 22-11-2026 18:18/18:19): "Wat er gezegd is" en "Mensen" ──
+// Gesprekken: de bijgehouden WhatsApp-/Teams-pagina's (…/Conversaties/*.md, elke nacht bijgewerkt) met datum (updated) en het eerste lopende
+// onderwerp; bij een eigen entiteit die in haar map plus de laatste drie notulen (…/Notulen/, zonder Index en Agenda), bij een persoon de
+// gesprekspagina's met zijn naam. Mensen: de medewerkerspagina's (type medewerker) in <entiteit>/Medewerkers/ met functie, status (in/uit
+// dienst uit het statusveld, de bestandsnaam en einddatum), contracteinde en de eerstvolgende datum (deadline of geplande gespreksleidraad).
+// Alleen lezen, niets gefilterd (Davids eigen scherm); het sleutelmasker (grondwet 2) blijft op alle tekst.
+const GESPREK_MAX = 40, NOTULEN_TOON = 3, GEZEGD_CACHE_MS = 60000;
+const UIT_DIENST_RE = /uit[ _-]?dienst|\boud(?:-|\s+)(?:waarnemer|medewerker|collega)|^oud\b(?!er)|gestopt|vertrokken|be[eë]indigd|overleden|archief/i;   // review MOET 1: 'Ouderschapsverlof' is in dienst
+function amsDag(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
+function isoUitNl(s) {
+  const m = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(String(s || '').trim());
+  return m ? m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0') : null;
+}
+// Eerste punt onder "## Lopende onderwerpen": het vetgedrukte kopje, anders de tekst tot " — "; zonder opmaak, hooguit 160 tekens
+function eersteOnderwerp(ruw) {
+  const t = String(ruw || '').replace(/\r\n?/g, '\n');
+  const i = t.search(/^## Lopende onderwerpen[^\n]*$/m);
+  if (i < 0) return null;
+  const deel = t.slice(i).split('\n').slice(1);
+  for (const r of deel) {
+    if (/^## /.test(r)) break;
+    const m = /^[-*]\s+(.*)$/.exec(r);
+    if (!m) continue;
+    const vet = /^\*\*(.+?)\*\*/.exec(m[1]);
+    let s = vet ? vet[1] : m[1].split(' — ')[0];
+    s = s.replace(/\[\[(?:[^\]|]+\|)?([^\]]+)\]\]/g, '$1').replace(/[*_`]/g, '').replace(/\s+/g, ' ').trim();
+    if (s) return s.length > 160 ? s.slice(0, 159).trimEnd() + '…' : s;
+  }
+  return null;
+}
+function gesprekNaam(p) { return stamVan(p).replace(/^(WhatsApp|Teams|Signal|Telegram)\s+-\s+/i, '').replace(/\s*\((?:actueel|1-op-1)\)/gi, '').trim(); }
+function gesprekBron(p, fm) {
+  const b = fmVeld(fm, 'bron').toLowerCase();
+  if (b === 'whatsapp' || b === 'teams' || b === 'signal' || b === 'telegram') return BRON_WOORD[b] || b;
+  const m = /^(WhatsApp|Teams|Signal|Telegram)\b/i.exec(stamVan(p));
+  return m ? (BRON_WOORD[m[1].toLowerCase()] || m[1]) : null;
+}
+// Einde van het contract uit einddatum of het statusveld ("t/m 2027-06-30", "tot 1-3-2027")
+function contractEinde(fm) {
+  const e = fmVeld(fm, 'einddatum');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(e)) return e;
+  const st = fmVeld(fm, 'status');
+  const a = /(?:t\/m|tot)\s+(\d{4}-\d{2}-\d{2})/.exec(st);
+  if (a) return a[1];
+  const b = /(?:t\/m|tot)\s+(\d{1,2}-\d{1,2}-\d{4})/.exec(st);
+  return b ? isoUitNl(b[1]) : null;
+}
+// Lijst uit het ovis-blok in de frontmatter ("  telefoons: [\"06…\"]"); de waarden komen uit Contacten (de compiler schrijft ze)
+function fmOvisLijst(fm, veld) {
+  const m = new RegExp('^\\s+' + veld + ':[ \\t]*\\[(.*)\\][ \\t]*$', 'm').exec(String(fm || ''));
+  if (!m) return [];
+  return m[1].split(',').map(function (x) { return x.trim().replace(/^["']|["']$/g, '').trim(); }).filter(Boolean).slice(0, 10);
+}
+
 function maak(o) {
   const rpc = o.rpc, lees = o.lees, vault = o.vault, facturenPad = o.facturenPad || null;
   const bankPad = o.bankPad || null;   // wv3298: privébank (bank-archief transacties.sqlite), alleen lezen
@@ -579,6 +633,107 @@ function maak(o) {
     return { stukken: uit.slice(0, DOSSIER_MAX).map(function (x) { return { pad: x.pad, titel: x.titel, ext: x.ext, soort: x.soort, datum: x.datum }; }), totaal: uit.length };
   }
 
+  // wv3945 (3C97): gesprekspagina's en notulen. Eén index over de kaart (60 s): per gesprekspagina pad, naam, bron, datum en eerste onderwerp.
+  let gezegdCache = null;
+  function gesprekIndex() {
+    const b = kaart();
+    if (!Array.isArray(b)) return null;
+    if (gezegdCache && gezegdCache.b === b && nu() - gezegdCache.t < GEZEGD_CACHE_MS) return gezegdCache.v;
+    const gesprekken = [], notulen = [];
+    b.forEach(function (x) {
+      const p = String(x && x.p || '');
+      if (!/\.md$/i.test(p) || !PAGINA_RE.test(p) || p.split('/').indexOf('..') >= 0) return;
+      const d = p.split('/');
+      const map = d[d.length - 2];
+      if (map === 'Conversaties') {
+        let ruw = '';
+        try { ruw = lees(path.join(vault, p)); } catch (e) { return; }
+        const fm = frontmatter(ruw);
+        const upd = fmVeld(fm, 'updated').slice(0, 10);
+        gesprekken.push({ pad: p, naam: gesprekNaam(p), bron: gesprekBron(p, fm),
+          datum: /^\d{4}-\d{2}-\d{2}$/.test(upd) ? upd : (typeof x.m === 'number' && isFinite(x.m) && x.m > 0 ? amsDag(x.m) : null),
+          onderwerp: eersteOnderwerp(ruw) });
+      } else if (d.indexOf('Notulen') >= 0 && d.indexOf('Notulen') < d.length - 1) {
+        // alleen een vergadering met datum vooraan ("2026-10-14 - …", ook "2024-12 - …"); agenda en voorbereiding zijn geen notulen
+        const naam = stamVan(p);
+        const dm = /^(\d{4}-\d{2}(?:-\d{2})?)\s*-\s*(.+)$/.exec(naam);
+        if (!dm || /^(?:Agenda|Concept-agenda|Voorbereiding)\b/i.test(dm[2])) return;
+        notulen.push({ pad: p, titel: dm[2], datum: dm[1] });
+      }
+    });
+    const nieuwst = function (a, z) { return String(z.datum || '').localeCompare(String(a.datum || '')) || a.pad.localeCompare(z.pad); };
+    gesprekken.sort(nieuwst); notulen.sort(nieuwst);
+    const v = { gesprekken: gesprekken, notulen: notulen };
+    gezegdCache = { b: b, t: nu(), v: v };
+    return v;
+  }
+  function gesprekRegel(g) {
+    return { pad: g.pad, titel: masker(g.naam), bron: g.bron, datum: g.datum, onderwerp: g.onderwerp ? masker(g.onderwerp) : null };
+  }
+  // { gesprekken[≤ 40], totaal, notulen[≤ 3], notulen_totaal } | { fout } | undefined (geen blok: geen eigen entiteit en geen persoon)
+  function gezegdVan(k, persoon) {
+    const eigen = k && isEigen(k);
+    if (!eigen && !persoon) return undefined;
+    const gi = gesprekIndex();
+    if (!gi) return { gesprekken: [], totaal: 0, notulen: [], notulen_totaal: 0, fout: 'De kaart van de vault is nu niet te lezen.' };
+    let g, n = [];
+    if (eigen) {
+      const w = wortelVan(k.vault_pagina);
+      if (!w) return undefined;
+      g = gi.gesprekken.filter(function (x) { return x.pad.indexOf(w) === 0; });
+      n = gi.notulen.filter(function (x) { return x.pad.indexOf(w) === 0; });
+    } else {
+      const pat = persoon.patronen.filter(function (x) { return x.indexOf(' ') > 0; });   // alleen volledige namen ("Anne" alleen is te los)
+      g = pat.length ? gi.gesprekken.filter(function (x) { return bevatNaam(x.naam, pat); }) : [];
+    }
+    return { gesprekken: g.slice(0, GESPREK_MAX).map(gesprekRegel), totaal: g.length,
+      notulen: n.slice(0, NOTULEN_TOON).map(function (x) { return { pad: x.pad, titel: masker(x.titel), datum: x.datum }; }), notulen_totaal: n.length };
+  }
+
+  // wv3945 (3C98): de mensen van een eigen entiteit uit <wortel>Medewerkers/*.md (type medewerker). undefined = geen medewerkerspagina's (geen blok).
+  function mensenVan(k, reg) {
+    if (!isEigen(k)) return undefined;
+    const w = wortelVan(k.vault_pagina);
+    const b = kaart();
+    if (!w || w === '20_Prive/' || !Array.isArray(b)) return undefined;
+    const vandaag = amsDag(nu());
+    const pre = w + 'Medewerkers/';
+    const opPagina = new Map();
+    reg.knopen.forEach(function (x) { if (zichtbaar(x) && x.vault_pagina) opPagina.set(String(x.vault_pagina), sleutelVan(x.id)); });
+    const gesprekPaden = b.map(function (x) { return String(x && x.p || ''); }).filter(function (p) { return p.indexOf(pre + 'Gesprekken/') === 0; });
+    const uit = [];
+    b.forEach(function (x) {
+      const p = String(x && x.p || '');
+      if (p.indexOf(pre) !== 0 || !/\.md$/i.test(p) || p.slice(pre.length).indexOf('/') >= 0 || p.split('/').indexOf('..') >= 0) return;
+      let ruw; try { ruw = lees(path.join(vault, p)); } catch (e) { return; }
+      const fm = frontmatter(ruw);
+      if (fmVeld(fm, 'type') !== 'medewerker') return;
+      const naam = fmVeld(fm, 'naam') || stamVan(p).split(' - ')[0];
+      const status = fmVeld(fm, 'status');
+      const eind = contractEinde(fm);
+      const weg = UIT_DIENST_RE.test(status) || /\((?:uit dienst|oud)\b/i.test(stamVan(p)) || (!!eind && eind < vandaag);
+      const pat = naamPatronen([naam, stamVan(p).split(' - ')[0]].concat(fmAliassen(fm)));
+      // eerstvolgende datum: deadline van deze persoon (vandaag of later) of een geplande gespreksleidraad in Gesprekken/<naam>/
+      let volgende = null;
+      const dl = (deadlinesVan(null, { pagina: p, patronen: pat }) || []).filter(function (y) { return y.dagen >= 0; });
+      if (dl.length) volgende = { soort: 'deadline', datum: dl[0].datum, dagen: dl[0].dagen, titel: dl[0].titel };
+      const volPat = pat.filter(function (y) { return y.indexOf(' ') > 0; });
+      gesprekPaden.forEach(function (gp) {
+        const deel = gp.slice((pre + 'Gesprekken/').length).split('/');
+        if (deel.length !== 2 || !volPat.length || !bevatNaam(deel[0], volPat)) return;
+        const dm = /^(\d{4}-\d{2}-\d{2})\s*-\s*(.+)$/.exec(stamVan(gp));
+        if (!dm || dm[1] < vandaag || !/leidraad|gepland|uitnodiging/i.test(dm[2])) return;
+        if (!volgende || dm[1] < volgende.datum) volgende = { soort: 'gesprek', datum: dm[1], titel: masker(dm[2].slice(0, 160)), pad: gp };
+      });
+      uit.push({ naam: masker(naam), functie: masker(fmVeld(fm, 'functie').slice(0, 120)) || null, status: masker(status.slice(0, 200)) || null,
+        start: /^\d{4}-\d{2}-\d{2}$/.test(fmVeld(fm, 'startdatum')) ? fmVeld(fm, 'startdatum') : null,
+        contract_tot: eind && eind >= vandaag ? eind : null, in_dienst: !weg, pad: p, sleutel: opPagina.get(p) || null, volgende: volgende });
+    });
+    if (!uit.length) return undefined;
+    uit.sort(function (a, z) { return a.naam.localeCompare(z.naam, 'nl'); });
+    return { in_dienst: uit.filter(function (x) { return x.in_dienst; }), uit_dienst: uit.filter(function (x) { return !x.in_dienst; }), totaal: uit.length };
+  }
+
   async function lijst() {
     const reg = await register();
     const uit = reg.knopen.filter(function (k) { return zichtbaar(k); }).map(function (k) {
@@ -671,7 +826,7 @@ function maak(o) {
         pagina_pad: paginaFout ? null : x.pad, opmerking: null, register: false },
       tekst: tekst, pagina_fout: paginaFout, links: reg ? partijLinks([tekst], reg) : {},
       weet: { handvatten: [], kvk: null, agb: null, iban: null, facturen: null, deadlines: deadlinesVan(null, { pagina: x.pad, patronen: pat }),
-        contact: null, stukken: null, register: LEEG_REGISTER, in_register: false },
+        contact: null, stukken: null, gezegd: gezegdVan(null, { patronen: pat }), register: LEEG_REGISTER, in_register: false },
       dossier: dossierVan(x.pad, pat) } };
   }
 
@@ -727,6 +882,11 @@ function maak(o) {
       contact: !persoon ? null : await googleVan(k, reg),   // wv1771
       nu: eigen ? nuVan(k.id) : undefined,   // wv3715 (3C165): bovenaan de kaart; undefined = oude pod/geen module (geen blok)
       stukken: stukkenVan(k, reg),   // wv3938 (3C22): nieuwste stukken uit Intake (null = geen intake.sqlite in deze pod)
+      gezegd: gezegdVan(k, persoon ? { patronen: pat } : null),   // wv3945 (3C97): gesprekspagina's (+ notulen bij een eigen entiteit)
+      mensen: eigen ? mensenVan(k, reg) : undefined,   // wv3945 (3C98): medewerkers in en uit dienst
+      bereik: persoon ? { telefoons: fmOvisLijst(fm, 'telefoons').map(telNl).filter(function (x) { return /^0[0-9]{9,15}$/.test(x); }),
+        mailadressen: fmOvisLijst(fm, 'mailadressen').map(function (x) { return x.toLowerCase(); }).filter(function (x) { return /^[^@\s?&"<>]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(x) && x.length <= 120; }),
+        whatsapp: fmOvisLijst(fm, 'whatsapp').map(telNl).filter(function (x) { return /^0[0-9]{9,15}$/.test(x); }) } : undefined,   // wv3945: uit de pagina (Contacten via de compiler), naast Google
       register: { concept: !!k.concept, compilatie: k.compilatienummer || null, gecompileerd_op: k.gecompileerd_op || null }, in_register: true };
     return { status: 200, j: { ok: true, vaste_plek: false,
       knoop: { id: k.id, naam: masker(k.naam), groep: groepVan(k), rol: ROL_WOORD[k.rol] || k.rol || null, concept: !!k.concept,
@@ -752,8 +912,9 @@ function maak(o) {
     return { ok: true, tegels: tegels, aan: !!entNu };
   }
 
-  return { lijst: lijst, zoek: zoek, detail: detail, nuTegels: nuTegels, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; bankCache = null; stukCache = null; kIdx = null; eigenCache = new Map(); } };
+  return { lijst: lijst, zoek: zoek, detail: detail, nuTegels: nuTegels, naamTreffers: naamTreffers, vergeet: function () { cache = null; priveCache = null; bankCache = null; stukCache = null; kIdx = null; eigenCache = new Map(); gezegdCache = null; } };
 }
 
 module.exports = { telNl: telNl, maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, zichtbaar: zichtbaar, groepVan: groepVan,
-  naamPatronen: naamPatronen, bevatNaam: bevatNaam, fmAliassen: fmAliassen, registerIndex: registerIndex, bekekenBij: bekekenBij, adresVan: adresVan };
+  naamPatronen: naamPatronen, bevatNaam: bevatNaam, fmAliassen: fmAliassen, registerIndex: registerIndex, bekekenBij: bekekenBij, adresVan: adresVan,
+  eersteOnderwerp: eersteOnderwerp, contractEinde: contractEinde, fmOvisLijst: fmOvisLijst };
