@@ -244,9 +244,10 @@ function bereken(inv) {
   // toezeggingen tegen de betalingen
   dossiers.forEach(function (d) {
     const P = pp[d.naam];
-    d.toezeggingen.forEach(function (t) {
+    const gebruikt = new Set();   // Codex MOET 2: elke betaling dekt hooguit één toezegging (oud → nieuw)
+    d.toezeggingen.slice().sort(function (a, b) { return a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : 0; }).forEach(function (t) {
       const uit = { datum: t.datum, wat: t.wat, bedrag: t.bedrag, bedrag_tekst: t.bedrag_tekst, citaat: t.citaat, dossier: t.stand_tekst };
-      const na = P.betaald.filter(function (b) { return b.datum >= t.datum; });
+      const na = P.betaald.filter(function (b) { return b.datum >= t.datum && !gebruikt.has(b); });
       const passend = function (b) { return t.bedrag && b.valuta === t.bedrag.valuta && b.bedrag >= t.bedrag.bedrag * 0.95 && b.bedrag <= t.bedrag.bedrag * 1.05; };
       const woord = plat(t.wat).split(' ').filter(function (w) { return w.length >= 5; });
       const memo = function (b) { return woord.some(function (w) { return plat(b.omschrijving).indexOf(w) >= 0; }); };
@@ -254,14 +255,19 @@ function bereken(inv) {
       const misschien = na.find(function (b) { return !b.zeker && passend(b); });
       if (t.stand_dossier === 'vervallen') uit.stand = 'vervallen';
       else if (t.stand_dossier === 'doorlopend') uit.stand = 'doorlopend';
-      else if (zeker) { uit.stand = 'betaald'; uit.zeker = true; uit.betaling = zeker; }
-      else if (t.stand_dossier === 'betaald') { uit.stand = 'betaald'; uit.zeker = false; uit.waarom = 'volgens het dossier: ' + t.stand_tekst; }
-      else if (misschien) { uit.stand = 'mogelijk betaald'; uit.zeker = false; uit.betaling = misschien; }
+      else if (zeker) { uit.stand = 'betaald'; uit.zeker = true; uit.betaling = zeker; gebruikt.add(zeker); }
+      // Codex MOET 1: "betaald" in het dossier (door de weekreview gezet) sluit niets af zonder bank: eigen stand, telt als niet zeker
+      else if (t.stand_dossier === 'betaald') { uit.stand = 'betaald volgens dossier'; uit.zeker = false; uit.waarom = 'volgens het dossier: ' + t.stand_tekst + '; niet in de bank aan deze persoon'; }
+      else if (misschien) { uit.stand = 'mogelijk betaald'; uit.zeker = false; uit.betaling = misschien; gebruikt.add(misschien); }
       else uit.stand = 'open';
       P.toezeggingen.push(uit);
     });
     P.betaald.forEach(function (b) { const s = P.som[b.valuta] = P.som[b.valuta] || { zeker: 0, waarschijnlijk: 0 }; s[b.zeker ? 'zeker' : 'waarschijnlijk'] = r2(s[b.zeker ? 'zeker' : 'waarschijnlijk'] + b.bedrag); });
-    P.open = P.toezeggingen.filter(function (t) { return t.stand === 'open' || t.stand === 'mogelijk betaald' || t.stand === 'doorlopend'; }).length;
+    P.toezeggingen.sort(function (a, b) { return a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : 0; });
+    P.open = P.toezeggingen.filter(function (t) { return t.stand === 'open' || t.stand === 'doorlopend'; }).length;
+    P.niet_zeker = P.toezeggingen.filter(function (t) { return t.stand === 'mogelijk betaald' || t.stand === 'betaald volgens dossier'; }).length;
+    P.ontvangen_som = {};   // Codex MOET 3: per valuta
+    P.ontvangen.forEach(function (x) { P.ontvangen_som[x.valuta] = r2((P.ontvangen_som[x.valuta] || 0) + x.bedrag); });
   });
   const klopt = {};
   Object.keys(som.uit).forEach(function (v) {
@@ -290,7 +296,7 @@ function md(b) {
       const bed = t.bedrag ? geld(t.bedrag.bedrag, t.bedrag.valuta) : /\d/.test(t.bedrag_tekst || '') ? t.bedrag_tekst : '';
       let st = t.stand;
       if (t.stand === 'betaald' && t.zeker) st = 'betaald ' + korteDag(t.betaling.datum) + ' (bank)';
-      else if (t.stand === 'betaald') st = 'betaald volgens dossier: ' + t.dossier.replace(/^betaald\s*/i, '');
+      else if (t.stand === 'betaald volgens dossier') st = 'betaald volgens dossier, niet in de bank aan deze persoon (niet zeker): ' + t.dossier.replace(/^betaald\s*/i, '');
       else if (t.stand === 'mogelijk betaald') st = 'mogelijk betaald ' + korteDag(t.betaling.datum) + ' (niet zeker)';
       delen.push('toegezegd ' + korteDag(t.datum) + ' ' + t.wat + (bed ? ' ' + bed : '') + ' → ' + st);
     });
@@ -299,7 +305,7 @@ function md(b) {
       return (x.zeker ? geld(x.zeker, v) + ' zeker' : '') + (x.zeker && x.waarschijnlijk ? ' + ' : '') + (x.waarschijnlijk ? geld(x.waarschijnlijk, v) + ' niet zeker' : '');
     }).join(', ');
     if (s) delen.push('betaald sinds ' + korteDag(b.van) + ': ' + s);
-    if (p.ontvangen.length) delen.push('van hem/haar ontvangen: ' + p.ontvangen.length + '× (' + geld(p.ontvangen.reduce(function (t, x) { return t + x.bedrag; }, 0), p.ontvangen[0].valuta) + ')');
+    if (p.ontvangen.length) delen.push('van hem/haar ontvangen: ' + p.ontvangen.length + '× (' + Object.keys(p.ontvangen_som).map(function (v) { return geld(p.ontvangen_som[v], v); }).join(' en ') + ')');
     r.push('- **' + p.naam + '**: ' + (delen.join('; ') || 'niets'));
   });
   const on = {};

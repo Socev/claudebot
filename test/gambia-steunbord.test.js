@@ -51,7 +51,8 @@ t('zeker: de bank noemt de ontvanger; toezegging betaald', function () {
   assert.strictEqual(a.betaald.filter(function (x) { return x.zeker; }).length, 1);
   assert.strictEqual(a.toezeggingen[0].stand, 'betaald'); assert.strictEqual(a.toezeggingen[0].zeker, true);
   assert.strictEqual(a.toezeggingen[1].stand, 'open');
-  assert.strictEqual(a.toezeggingen[2].stand, 'betaald'); assert.strictEqual(a.toezeggingen[2].zeker, false);
+  assert.strictEqual(a.toezeggingen[2].stand, 'betaald volgens dossier'); assert.strictEqual(a.toezeggingen[2].zeker, false);   // Codex MOET 1
+  assert.strictEqual(a.open, 1); assert.strictEqual(a.niet_zeker, 1);
 });
 t('niet zeker: één dossier noemt bedrag en datum; twee dossiers = niet toe te wijzen met kandidaten', function () {
   const a = P('Abdou Jallow'), bi = P('Binta');
@@ -59,6 +60,19 @@ t('niet zeker: één dossier noemt bedrag en datum; twee dossiers = niet toe te 
   assert.ok(bi.betaald.some(function (x) { return !x.zeker && x.bedrag === 4000 && x.datum === '2026-10-12'; }));
   assert.strictEqual(bi.betaald.length, 1);
   assert.strictEqual(b.twijfel.length, 1); assert.deepStrictEqual(b.twijfel[0].kandidaten.sort(), ['Binta', 'Lamin Ceesay']);
+});
+t('Codex MOET 2: één betaling dekt hooguit één toezegging', function () {
+  const d = [{ naam: 'Abdou Jallow', aliassen: [], heeft_plek: true, stukken: [], toezeggingen: [
+    { datum: '2026-09-01', wat: 'Tank een', bedrag: { bedrag: 10000, valuta: 'GMD' }, bedrag_tekst: 'D 10.000', citaat: '', stand_dossier: 'open', stand_tekst: 'open' },
+    { datum: '2026-09-02', wat: 'Tank twee', bedrag: { bedrag: 10000, valuta: 'GMD' }, bedrag_tekst: 'D 10.000', citaat: '', stand_dossier: 'open', stand_tekst: 'open' }] }];
+  const x = S.bereken({ ecobank: [eco[0]], nl: [], dossiers: d, van: '2026-01-01' }).personen[0];
+  assert.deepStrictEqual(x.toezeggingen.map(function (t) { return t.stand; }), ['betaald', 'open']);
+});
+t('Codex MOET 3: ontvangen per valuta', function () {
+  const x = S.bereken({ ecobank: [eco[10], { datum: '2026-11-03', soort: 'bij', valuta: 'EUR', bedrag: 50, omschrijving: 'REF:7 B/O LAMIN CEESAY x' }], nl: [], dossiers: D.dossiers, van: '2026-01-01' });
+  const l = x.personen.find(function (p) { return p.naam === 'Lamin Ceesay'; });
+  assert.deepStrictEqual(l.ontvangen_som, { GMD: 1500, EUR: 50 });
+  assert.ok(/D 1\.500 en € 50/.test(S.md(x)), S.md(x));
 });
 t('kosten en maandkosten nooit aan een persoon; eigen omzetting = intern; ontvangen apart', function () {
   assert.strictEqual(b.kosten.aantal, 4);
