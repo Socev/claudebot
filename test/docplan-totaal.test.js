@@ -247,3 +247,14 @@ test('wv4011 review MOET 1: een oud, niet uitgevoerd bestand verbruikt niet de l
   assert.strictEqual(tgA(j).af_centen, 45000, 'één keer, niet twee keer');
   assert.strictEqual(tgA(j).af_n, 1);
 });
+
+test('wv4011 review ronde 2: twee afgeschreven blokken in omgekeerde volgorde geboekt, elk met een losse kopie: elk één keer', () => {
+  const f = sepaFac();
+  f.batch('g1', 'tolgaarde', '2026-11-01', [['SOCEV-TEST-g1-1', '2026-11-10', A1, 33000], ['SOCEV-TEST-g1-1', '2026-11-10', B1, 1000]]);   // eerst gemaakt, 10-11 geboekt
+  f.batch('g2', 'tolgaarde', '2026-11-02', [['SOCEV-TEST-g2-1', '2026-11-03', A1, 33000], ['SOCEV-TEST-g2-1', '2026-11-03', B1, 2000]]);   // later gemaakt, 3-11 geboekt
+  f.tx('tolgaarde', '2026-11-10', -34000, null, { kenmerk: 'SOCEV-TEST-g1-1' });
+  f.tx('tolgaarde', '2026-11-03', -35000, null, { kenmerk: 'SOCEV-TEST-g2-1' });
+  f.tx('tolgaarde', '2026-11-05', -33000, A1);
+  f.tx('tolgaarde', '2026-11-10', -33000, A1);
+  assert.strictEqual(tgA(M.totaal(docplan(), f.db, '2026', NU)).af_centen, 66000, 'twee betalingen, elk één keer');
+});

@@ -74,8 +74,14 @@ function sepaBetalingen(fac, ibans) {
     }
   }
   const losGebruikt = new Set();
-  const losDekt = (r, van, tot) => {
-    const x = (los.get(r.entiteit + '|' + r.iban + '|' + Number(r.centen)) || []).find((t) => !losGebruikt.has(t.id) && t.d >= van && t.d <= tot);
+  // de ongebruikte losse regel binnen [van, tot] die het dichtst bij ref ligt (review ronde 2: niet de eerste in de lijst)
+  const afstand = (a, b) => Math.abs(Date.parse(a + 'T00:00:00Z') - Date.parse(b + 'T00:00:00Z'));
+  const losDekt = (r, van, tot, ref) => {
+    let x = null;
+    for (const t of los.get(r.entiteit + '|' + r.iban + '|' + Number(r.centen)) || []) {
+      if (losGebruikt.has(t.id) || t.d < van || t.d > tot) continue;
+      if (!x || afstand(t.d, ref) < afstand(x.d, ref)) x = t;
+    }
     if (x) losGebruikt.add(x.id);
     return !!x;
   };
@@ -103,18 +109,18 @@ function sepaBetalingen(fac, ibans) {
   }
   // stap 2: eerst de afgeschreven blokken ontdubbelen tegen losse bankregels, pas daarna de niet afgeschreven blokken (review MOET 1: anders kan
   // een oud, niet uitgevoerd bestand de losse regel verbruiken die een later, wél uitgevoerd bestand moet ontdubbelen → dubbel geteld)
-  for (const k of blokken) {
-    if (!k.bank) continue;
+  // afgeschreven blokken op volgorde van hun boekdatum (review ronde 2)
+  for (const k of blokken.filter((x) => x.bank).sort((a, b) => (a.bank.boekdatum < b.bank.boekdatum ? -1 : a.bank.boekdatum > b.bank.boekdatum ? 1 : 0))) {
     for (const r of k.rs) {
       if (!wn.has(r.iban)) continue;
-      if (losDekt(r, isoPlus(k.bank.boekdatum, -LOS_DAGEN), isoPlus(k.bank.boekdatum, LOS_DAGEN))) continue;   // telt al als losse bankregel
+      if (losDekt(r, isoPlus(k.bank.boekdatum, -LOS_DAGEN), isoPlus(k.bank.boekdatum, LOS_DAGEN), k.bank.boekdatum)) continue;   // telt al als losse bankregel
       uit.geteld.push({ entiteit: r.entiteit, iban: r.iban, boekdatum: k.bank.boekdatum, bedrag_centen: -Number(r.centen), bank_id: k.bank.id, regel_id: r.rid });
     }
   }
   for (const k of blokken) {
     if (k.bank) continue;
     for (const r of k.rs) {
-      if (!wn.has(r.iban) || losDekt(r, k.vroegst, isoPlus(r.uitvoer, NA_UITVOER))) continue;
+      if (!wn.has(r.iban) || losDekt(r, k.vroegst, isoPlus(r.uitvoer, NA_UITVOER), r.uitvoer)) continue;
       uit.niet.push({ entiteit: r.entiteit, iban: r.iban, uitvoerdatum: r.uitvoer, centen: Number(r.centen), regel_id: r.rid });
     }
   }
