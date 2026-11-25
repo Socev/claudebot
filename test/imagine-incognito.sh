@@ -74,5 +74,15 @@ for k in kwacht:"B8 geheugenwacht" kfree:"B3 /free vóór het indienen" khist:"B
   elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"
   else echo "ROOD  kruisproef ${k%%:*} werd rood, maar niet op ${k#*:}"; grep -E "^ROOD" /tmp/imagine-toets.$$ | head -3; f=1; fi
 done
+# wv4092: opruimronde (telweek, rem, echt beeld blijft), hangende taak, Opnieuw, herstart, server te vol, stapel; vier kruisproeven moeten ROOD
+node --no-warnings test/imagine-opruim.test.js > /tmp/imagine-toets.$$ 2>&1; r=$?
+tail -n 1 /tmp/imagine-toets.$$; grep -E "^ROOD" /tmp/imagine-toets.$$
+[ $r = 0 ] || { echo "ROOD  test/imagine-opruim.test.js"; f=1; }
+for k in kecht:"1g kruisproef: echt beeld" ktel:"1c telweek: niets gewist" kafrond:"2e afronding gooit" kstapel:"4c niet zolang de server bezig is"; do
+  IMAGINE_KRUIS=${k%%:*} node --no-warnings test/imagine-opruim.test.js > /tmp/imagine-toets.$$ 2>&1
+  if [ $? = 0 ]; then echo "ROOD  kruisproef ${k%%:*} bleef groen"; f=1
+  elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"
+  else echo "ROOD  kruisproef ${k%%:*} werd rood, maar niet op ${k#*:}"; grep -E "^ROOD" /tmp/imagine-toets.$$ | head -3; f=1; fi
+done
 rm -f /tmp/imagine-toets.$$
 exit $f

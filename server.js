@@ -21329,7 +21329,10 @@ const imagineApp = (function () {
   try {
     return require(p).maak({ dir: IMAGINE_DIR, studio: studio, primair: function () { return rolPrimair(); },
       immich: function () { try { return immichMl; } catch (e) { return null; } },
-      log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: function (w) { logError(w, new Error('imagine')); } });
+      log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: function (w) { logError(w, new Error('imagine')); },
+      // wv4092 (L17): één seintje als de filmstapel leeg is — de gewone push zonder inhoud ("Socev heeft iets voor je"), alleen naar de
+      // apparaten die seintjes aan hebben; stille uren regelt imagine.js (dan alleen de regel bovenaan in Imagine). Nooit Telegram.
+      seintje: function () { return appPushAlle('antwoord', 'imagine', function (id) { return appPushMag(id); }); } });
   } catch (e) { logError('imagine', new Error('laden faalde')); return null; }
 })();
 async function appImagine(req, res, a, s, route, d) {

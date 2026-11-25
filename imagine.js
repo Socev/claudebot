@@ -111,6 +111,15 @@ const BEWEGEN_VOORKEUR = 'trouw';
 const BEWEGEN_STANDAARD = 'Lively, natural motion. Everyone in the picture moves naturally: they look at each other, smile and laugh, turn their heads '
   + 'and shift their posture a little. Slow, smooth camera zoom-in. Faces stay exactly the same, no new people, no cuts.';
 const BEWEGEN_STAND = 'bewegen';
+// wv4092 (besluitenpagina nr 20 = B121, nr 916 = L16, nr 917 = L17; David Ja 25-11-2026 21:41):
+//   OPRUIMEN: weesbestanden (geen versierij) en .nieuw.-resten in de eigen mappen beelden/ en toon/; tot OPRUIM.vanaf alleen tellen en loggen.
+//   OPNIEUW: een mislukte of onderbroken taak opnieuw met dezelfde instellingen; na een podherstart of "server te vol" (film) één keer vanzelf.
+//   STAPEL: tot vijf filmpjes in de stapel; de pod start ze één voor één als de server stil is; één seintje als de stapel leeg is.
+const OPRUIM = { vanaf: '2026-12-03T00:00:00+01:00', start_ms: 2 * 60 * 1000, elke_ms: 6 * 3600 * 1000, rest_ms: 3600 * 1000, wacht_ms: 15 * 60 * 1000 };
+const AUTO = { ms: 12 * 3600 * 1000, tussen_ms: 5 * 60 * 1000 };
+const STAPEL = { max: 5, dag_ms: 24 * 3600 * 1000 };
+const VOL_RE = /server te vol/;
+const NAAM_BEELD = /^[a-f0-9]{16}\.(jpg|png|webp|mp4)$/, NAAM_TOON = /^[a-f0-9]{16}\.jpg$/, NAAM_REST = /^[a-f0-9]{16}\.(jpg|png|webp|mp4)\.nieuw\.\d{1,10}$/;
 function bewegenModel(m) { if (m === undefined || m === null || m === '') return BEWEGEN.find(function (x) { return x.model === BEWEGEN_VOORKEUR; }) || BEWEGEN[0]; return BEWEGEN.find(function (x) { return x.model === m; }) || null; }
 function schoon(t, max) { return String(t == null ? '' : t).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max); }
 
@@ -149,8 +158,14 @@ function maak(deps) {
     const kv = kol('versie'), kt = kol('taak');
     [['masker', 'INTEGER'], ['refs', 'INTEGER'], ['naad_px', 'INTEGER'], ['vergelijk', 'TEXT']].forEach(function (c) { if (kv.indexOf(c[0]) < 0) db.exec('ALTER TABLE versie ADD COLUMN ' + c[0] + ' ' + c[1]); });
     if (kt.indexOf('vergelijk') < 0) db.exec('ALTER TABLE taak ADD COLUMN vergelijk TEXT');
-    // na een herstart loopt er niets meer (de motor hield de taak in het geheugen)
-    db.prepare("UPDATE taak SET status = 'onderbroken', reden = 'de pod herstartte tijdens deze bewerking', eind = ? WHERE status IN ('wacht','bezig')").run(iso());
+    // wv4092: Opnieuw (instel = wat nodig is om de taak opnieuw te starten; weg zodra hij klaar is), poging (0 = eerste), opnieuw (id van de
+    // herhaling), auto (ISO: tot wanneer de pod het zelf opnieuw mag proberen), stapel (groep van de filmstapel)
+    [['instel', 'TEXT'], ['poging', 'INTEGER NOT NULL DEFAULT 0'], ['opnieuw', 'TEXT'], ['auto', 'TEXT'], ['stapel', 'TEXT']].forEach(function (c) { if (kt.indexOf(c[0]) < 0) db.exec('ALTER TABLE taak ADD COLUMN ' + c[0] + ' ' + c[1]); });
+    db.exec('CREATE TABLE IF NOT EXISTS seintje (groep TEXT PRIMARY KEY, klaar INTEGER NOT NULL, mislukt INTEGER NOT NULL, op TEXT NOT NULL, gezien TEXT)');
+    // na een herstart loopt er niets meer (de motor hield de taak in het geheugen). wv4092: een eerste poging die Opnieuw kan, probeert de pod
+    // zelf nog één keer zodra de server vrij is (auto = 12 uur lang); een stapelrij (status 'stapel') blijft gewoon in de stapel.
+    const nu0 = iso(), tot0 = iso(klok() + AUTO.ms);
+    db.prepare("UPDATE taak SET status = 'onderbroken', reden = 'de pod herstartte tijdens deze bewerking', eind = ?, auto = CASE WHEN poging = 0 AND instel IS NOT NULL THEN ? ELSE NULL END WHERE status IN ('wacht','bezig')").run(nu0, tot0);
     return db;
   }
   function schijf() {
@@ -260,7 +275,10 @@ function maak(deps) {
     const lo = t.studio && (t.status === 'wacht' || t.status === 'bezig') ? S.geheugenTaak(t.studio) : null;
     return { id: t.id, bron: t.bron, voorganger: t.voorganger, stand: t.stand, status: lo ? lo.status : t.status, fase: lo ? lo.fase : null,
       procent: lo ? lo.procent : null, plek_in_rij: lo ? lo.plek_in_rij : null, reden: t.reden || null, gemaakt: t.gemaakt, eind: t.eind || null, versie: t.versie || null,
-      vergelijk: t.vergelijk || null };
+      vergelijk: t.vergelijk || null,
+      // wv4092: Opnieuw, vanzelf opnieuw, stapel
+      kan_opnieuw: !!opnieuwInstel(t), auto: !!(t.auto && t.auto > iso() && !t.opnieuw && (t.status === 'mislukt' || t.status === 'onderbroken')), opnieuw: t.opnieuw || null,
+      stapel: t.stapel || null, noot: notaVan(t) };
   }
   function bronMet(id) {
     const d = open();
@@ -323,7 +341,7 @@ function maak(deps) {
     return { bufs: bufs };
   }
   function zonderPod(o) { const v = Object.assign({}, o && typeof o === 'object' ? o : {}); Object.keys(v).forEach(function (k) { if (/^pod_/.test(k)) delete v[k]; }); return v; }
-  async function bewerk(d, ctx, apparaat, groep) {
+  async function bewerk(d, ctx, apparaat, groep, ex) {
     if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
     if (schijf().vol) return { status: 507, fout: 'de bibliotheek van Imagine is vol (5 GB); gooi eerst iets weg' };
     const v = versie(d && d.versie);
@@ -337,7 +355,10 @@ function maak(deps) {
     if (rf.status) return rf;
     const id = hex16();
     // review diff MOET 3: de taak eerst vastleggen (wacht), vóór elke await, zodat weggooien van de bron of versie intussen geweigerd wordt
-    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, vergelijk) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, s.id, 'wacht', iso(), groep || null);
+    // wv4092: instel = dezelfde aanvraag voor Opnieuw (masker en voorbeelden erbij; weg zodra de taak klaar is)
+    const instel = JSON.stringify({ soort: 'bewerk', versie: v.id, stand: s.id, velden: zonderPod(d.velden), masker: typeof d.masker === 'string' && d.masker ? d.masker : null,
+      refs: Array.isArray(d.refs) ? d.refs.map(String) : [] });
+    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, vergelijk, instel, poging) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, s.id, 'wacht', iso(), groep || null, instel, pogingVan(ex));
     let vb;
     try { vb = await voorbereid(s, bytes, d, rf.bufs); }   // wv3021: masker en voorbeelden
     catch (e) { vb = { status: 500, fout: 'het beeld kon niet klaargezet worden' }; }
@@ -348,7 +369,7 @@ function maak(deps) {
     let r;
     try {
       r = await S.maakGeheugen({ flow: vb.flow, velden: velden, beeld: vb.beeld, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
-        klaar: function (u) { return naKlaar(id, v, s, opdracht, u, extra); } }, ctx);
+        klaar: function (u) { return afrond(id, function () { return naKlaar(id, v, s, opdracht, u, extra); }); } }, ctx);
     } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
     if (r.status !== 200 || r.al) open().prepare('DELETE FROM taak WHERE id = ?').run(id);
     if (r.status !== 200) return r;
@@ -360,7 +381,7 @@ function maak(deps) {
   // Resultaat van de motor: elk beeld een nieuwe versie onder dezelfde bron (voorganger = de bewerkte versie)
   async function naKlaar(taakId, v, s, opdracht, u, x0) {
     const d = open(), ex = x0 || {};
-    const zet = function (status, reden, versieId) { d.prepare('UPDATE taak SET status = ?, reden = ?, eind = ?, versie = ? WHERE id = ?').run(status, reden || null, iso(), versieId || null, taakId); };
+    const zet = function (status, reden, versieId) { taakAf(taakId, status, reden, versieId); };
     if (u.status !== 'klaar' || !u.beelden.length) return zet(u.status === 'klaar' ? 'mislukt' : u.status, u.reden || 'geen resultaat');
     let laatste = null;
     for (const b of u.beelden) {
@@ -375,12 +396,16 @@ function maak(deps) {
       const id = hex16();
       try {
         schrijf(path.join(BEELDEN, v.bron, id + '.' + x.soort), n.bytes);
-        schrijf(toonPad(id), x.toon);
+        try { schrijf(toonPad(id), x.toon); } catch (e) { fs.rmSync(path.join(BEELDEN, v.bron, id + '.' + x.soort), { force: true }); throw e; }
         d.prepare('INSERT INTO versie (id, bron, voorganger, nr, stand, model, opdracht, gemaakt, breed, hoog, bytes, toon_bytes, ext, duur_s, masker, refs, naad_px, vergelijk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
           .run(id, v.bron, v.id, nr, s.id, u.model || null, opdracht, iso(), x.breed, x.hoog, n.bytes.length, x.toon.length, x.soort, u.duur_s || null,
             ex.masker ? 1 : 0, ex.refs || 0, n.verschil_px, ex.vergelijk || null);
         laatste = id;
-      } catch (e) { fout('imagine', new Error('resultaat bewaren mislukt')); zet('mislukt', 'het resultaat kon niet bewaard worden'); return; }
+      } catch (e) {
+        // wv4092 (B121): naKlaar ruimt zelf op — wat hier net geschreven is en geen versierij kreeg, gaat meteen weg
+        if (!d.prepare('SELECT 1 FROM versie WHERE id = ?').get(id)) { try { fs.rmSync(path.join(BEELDEN, v.bron, id + '.' + x.soort), { force: true }); fs.rmSync(toonPad(id), { force: true }); } catch (e2) {} }
+        fout('imagine', new Error('resultaat bewaren mislukt')); zet('mislukt', 'het resultaat kon niet bewaard worden'); return;
+      }
     }
     zet('klaar', null, laatste);
     log('imagine klaar taak=' + taakId + ' versies=' + u.beelden.length);
@@ -481,9 +506,11 @@ function maak(deps) {
         reden: f ? f.reden : 'deze keuze staat niet in de Studio', vers_per_keer: !!(f && f.vers_per_keer) });
     }
     return { modellen: uit, standaard: BEWEGEN_VOORKEUR, duur_s: 5, opdracht_max: GRENS.opdracht_max,
-      bezig: !!open().prepare("SELECT 1 FROM taak WHERE stand = ? AND status IN ('wacht','bezig')").get(BEWEGEN_STAND) };
+      bezig: !!open().prepare("SELECT 1 FROM taak WHERE stand = ? AND status IN ('wacht','bezig')").get(BEWEGEN_STAND),
+      stapel: { n: open().prepare("SELECT COUNT(*) AS n FROM taak WHERE status = 'stapel'").get().n, max: STAPEL.max } };   // wv4092
   }
-  async function bewegen(d, ctx, apparaat) {
+  async function bewegen(d, ctx, apparaat, ex) {
+    ex = ex || {};
     if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
     if (schijf().vol) return { status: 507, fout: 'de bibliotheek van Imagine is vol (5 GB); gooi eerst iets weg' };
     const v = versie(d && d.versie);
@@ -493,24 +520,40 @@ function maak(deps) {
     const bm = bewegenModel(d.model);
     if (!bm) return { status: 400, fout: 'onbekende keuze; kies Trouw aan gezichten of Snel' };
     const eigen = schoon(d.beweging, GRENS.opdracht_max);
-    // één filmpje tegelijk (ook niet in de rij); studio.js toetst het nog eens synchroon bij het in de rij zetten
-    if (open().prepare("SELECT 1 FROM taak WHERE stand = ? AND status IN ('wacht','bezig')").get(BEWEGEN_STAND)) return { status: 409, fout: 'er wordt al een filmpje gemaakt; wacht tot dat klaar is' };
+    const instel = JSON.stringify({ soort: 'bewegen', versie: v.id, model: bm.model, beweging: eigen });   // wv4092
+    // wv4092 (L17): in de stapel = alleen vastleggen; de ronde start hem als de server stil is (geen motoraanroep nu)
+    if (d.stapel === true) {
+      if (!fs.existsSync(bestand(v))) return { status: 410, fout: 'het beeldbestand is weg' };
+      const db = open();
+      if (db.prepare("SELECT COUNT(*) AS n FROM taak WHERE status = 'stapel'").get().n >= STAPEL.max) return { status: 429, fout: 'de stapel is vol (hooguit ' + STAPEL.max + ' filmpjes); wacht tot er een klaar is' };
+      const lopend = db.prepare("SELECT stapel FROM taak WHERE stapel IS NOT NULL AND status IN ('stapel','wacht','bezig') ORDER BY gemaakt LIMIT 1").get();
+      const sid = hex16(), groep = lopend ? lopend.stapel : hex16();
+      db.prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, instel, poging, stapel) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?)').run(sid, v.bron, v.id, BEWEGEN_STAND, 'stapel', iso(), instel, groep);
+      log('imagine stapel taak=' + sid + ' model=' + bm.model + (eigen ? ' eigen=1' : ''));
+      setImmediate(function () { ronde().catch(function () {}); });
+      return { status: 200, taak: taakUit(db.prepare('SELECT * FROM taak WHERE id = ?').get(sid)), stapel: true };
+    }
+    // één filmpje tegelijk (ook niet in de rij); studio.js toetst het nog eens synchroon bij het in de rij zetten (wv4092: de eigen stapelrij telt niet)
+    if (open().prepare("SELECT 1 FROM taak WHERE stand = ? AND status IN ('wacht','bezig') AND id != ?").get(BEWEGEN_STAND, ex.rij || '')) return { status: 409, fout: 'er wordt al een filmpje gemaakt; wacht tot dat klaar is' };
     let bytes;
     try { bytes = fs.readFileSync(bestand(v)); } catch (e) { return { status: 410, fout: 'het beeldbestand is weg' }; }
-    const id = hex16();
-    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt) VALUES (?, NULL, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, BEWEGEN_STAND, 'wacht', iso());
+    const id = ex.rij || hex16();
+    // wv4092: een stapelrij wordt zelf de taak (status stapel → wacht); anders een nieuwe rij
+    if (ex.rij) { if (!open().prepare("UPDATE taak SET status = 'wacht', instel = ? WHERE id = ? AND status = 'stapel'").run(instel, id).changes) return { status: 409, fout: 'deze stapelrij loopt al of is weg' }; }
+    else open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, instel, poging) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, BEWEGEN_STAND, 'wacht', iso(), instel, pogingVan(ex));
+    const terug = function () { if (ex.rij) open().prepare("UPDATE taak SET status = 'stapel' WHERE id = ? AND status = 'wacht'").run(id); else open().prepare('DELETE FROM taak WHERE id = ?').run(id); };
     let m;
     try { m = await S.beeldPijp(['pijp-maat', String(bm.kort_zijde), String(bm.lang_max), String(bm.veelvoud)], bytes); }
     catch (e) { m = { ok: false }; }
     bytes = null;
-    if (!m.ok || !m.bytes || !(m.breed > 0) || !(m.hoog > 0)) { open().prepare('DELETE FROM taak WHERE id = ?').run(id); return { status: 400, fout: 'de foto kon niet klaargezet worden' + (m.reden ? ': ' + m.reden : '') }; }
+    if (!m.ok || !m.bytes || !(m.breed > 0) || !(m.hoog > 0)) { terug(); return { status: 400, fout: 'de foto kon niet klaargezet worden' + (m.reden ? ': ' + m.reden : '') }; }
     const velden = { opdracht: eigen || BEWEGEN_STANDAARD, pod_b: m.breed, pod_h: m.hoog };
     let r;
     try {
       r = await S.maakGeheugen({ flow: bm.flow, velden: velden, beeld: m.bytes, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
-        klaar: function (u) { return bewegenKlaar(id, v, bm, eigen || null, u); } }, ctx);
+        klaar: function (u) { return afrond(id, function () { return bewegenKlaar(id, v, bm, eigen || null, u); }); } }, ctx);
     } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
-    if (r.status !== 200 || r.al) open().prepare('DELETE FROM taak WHERE id = ?').run(id);
+    if (r.status !== 200 || r.al) terug();
     if (r.status !== 200) return r;
     if (r.al) { const t = open().prepare('SELECT * FROM taak WHERE studio = ?').get(r.taak.id); return { status: 200, taak: t ? taakUit(t) : null, al: true }; }
     open().prepare('UPDATE taak SET studio = ? WHERE id = ?').run(r.taak.id, id);
@@ -520,10 +563,15 @@ function maak(deps) {
   // Resultaat: één mp4 als nieuwe versie (voorganger = de foto), weergaveversie = eerste beeld van de clip
   async function bewegenKlaar(taakId, v, bm, eigen, u) {
     const d = open();
-    const zet = function (status, reden, versieId) { d.prepare('UPDATE taak SET status = ?, reden = ?, eind = ?, versie = ? WHERE id = ?').run(status, reden || null, iso(), versieId || null, taakId); };
+    const zet = function (status, reden, versieId) { taakAf(taakId, status, reden, versieId); };
     const c = (u.beelden || [])[0];
     (u.beelden || []).slice(1).forEach(function (x) { x.bytes = null; x.affiche = null; });
-    if (u.status !== 'klaar' || !c || !c.video || !Buffer.isBuffer(c.bytes)) return zet(u.status === 'klaar' ? 'mislukt' : u.status, u.reden || 'geen filmpje');
+    if (u.status !== 'klaar' || !c || !c.video || !Buffer.isBuffer(c.bytes)) {
+      zet(u.status === 'klaar' ? 'mislukt' : u.status, u.reden || 'geen filmpje');
+      // wv4092 (L16): afgebroken omdat de server te vol was → één keer vanzelf opnieuw zodra hij vrij is (alleen bij de eerste poging)
+      if (u.status === 'mislukt' && VOL_RE.test(String(u.reden || ''))) d.prepare('UPDATE taak SET auto = ? WHERE id = ? AND poging = 0 AND instel IS NOT NULL').run(iso(klok() + AUTO.ms), taakId);
+      return;
+    }
     const mp4 = c.bytes;
     let toon = null;
     try { const t = await S.beeldPijp(['pijp-toon', String(GRENS.toon_px)], c.affiche); toon = t.ok && t.bytes ? t.bytes : null; } catch (e) { toon = null; }
@@ -547,7 +595,8 @@ function maak(deps) {
   }
   // ── wv2990: nieuw beeld uit tekst (gewone stand) ──
   function titelUit(opdracht) { return opdracht.length > 60 ? opdracht.slice(0, 59).trim() + '…' : opdracht; }
-  async function nieuw(d, ctx, apparaat) {
+  async function nieuw(d, ctx, apparaat, ex) {
+    ex = ex || {};
     if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
     if (schijf().vol) return { status: 507, fout: 'de bibliotheek van Imagine is vol (5 GB); gooi eerst iets weg' };
     const velden = Object.assign({}, d && d.velden && typeof d.velden === 'object' ? d.velden : {});
@@ -556,14 +605,15 @@ function maak(deps) {
     velden.opdracht = opdracht;
     const tm = tekstModel(d && d.model);   // wv3038
     if (!tm) return { status: 400, fout: 'onbekend model; kies MOSS-Image of FLUX.2 klein' };
-    const eigen = uitbKijk(apparaat, d && d.uitbreiding, false);   // wv3044: titel uit Davids eigen tekst; de uitgebreide tekst is de opdracht
+    const eigen = ex.titel !== undefined ? ex.titel : uitbKijk(apparaat, d && d.uitbreiding, false);   // wv3044: titel uit Davids eigen tekst; de uitgebreide tekst is de opdracht
     const id = hex16();
     // zoals bewerk: de taak eerst vastleggen; bron en voorganger zijn er pas als het resultaat er is
-    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt) VALUES (?, NULL, ?, ?, ?, ?, ?)').run(id, '', '', TEKST.id, 'wacht', iso());
+    const instel = JSON.stringify({ soort: 'nieuw', model: tm.model, velden: velden, titel: eigen || null });   // wv4092
+    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, instel, poging) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)').run(id, '', '', TEKST.id, 'wacht', iso(), instel, pogingVan(ex));
     let r;
     try {
       r = await S.maakGeheugen({ flow: tm.flow, velden: velden, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
-        klaar: function (u) { return nieuwKlaar(id, opdracht, u, eigen); } }, ctx);
+        klaar: function (u) { return afrond(id, function () { return nieuwKlaar(id, opdracht, u, eigen); }); } }, ctx);
     } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
     if (r.status !== 200 || r.al) open().prepare('DELETE FROM taak WHERE id = ?').run(id);
     if (r.status !== 200) return r;
@@ -576,7 +626,7 @@ function maak(deps) {
   // Resultaat: het eerste beeld wordt een nieuwe bron (versie 1 = het gemaakte beeld)
   async function nieuwKlaar(taakId, opdracht, u, eigen) {
     const d = open();
-    const zet = function (status, reden, bron, versieId) { d.prepare('UPDATE taak SET status = ?, reden = ?, eind = ?, bron = ?, voorganger = ?, versie = ? WHERE id = ?').run(status, reden || null, iso(), bron || '', versieId || '', versieId || null, taakId); };
+    const zet = function (status, reden, bron, versieId) { d.prepare('UPDATE taak SET bron = ?, voorganger = ? WHERE id = ?').run(bron || '', versieId || '', taakId); taakAf(taakId, status, reden, versieId); };
     const beelden = u.beelden || [];
     if (u.status !== 'klaar' || !beelden.length) return zet(u.status === 'klaar' ? 'mislukt' : u.status, u.reden || 'geen resultaat');
     const b = beelden[0];
@@ -596,7 +646,7 @@ function maak(deps) {
     if (soort === 'bron') {
       const b = HEX16.test(String(id)) ? d.prepare('SELECT * FROM bron WHERE id = ?').get(id) : null;
       if (!b) return { status: 404, fout: 'dit beeld bestaat niet (meer)' };
-      if (d.prepare("SELECT 1 FROM taak WHERE bron = ? AND status IN ('wacht','bezig')").get(id)) return { status: 409, fout: 'er loopt nog een bewerking op dit beeld' };
+      if (d.prepare("SELECT 1 FROM taak WHERE bron = ? AND status IN ('wacht','bezig','stapel')").get(id)) return { status: 409, fout: 'er loopt nog een bewerking op dit beeld (of het staat in de stapel)' };
       const vs = d.prepare('SELECT id FROM versie WHERE bron = ?').all(id);
       d.exec('BEGIN');
       try { d.prepare('DELETE FROM versie WHERE bron = ?').run(id); d.prepare('DELETE FROM taak WHERE bron = ?').run(id); d.prepare('DELETE FROM bron WHERE id = ?').run(id); d.exec('COMMIT'); }
@@ -608,7 +658,7 @@ function maak(deps) {
     const v = versie(id);
     if (!v) return { status: 404, fout: 'deze versie bestaat niet (meer)' };
     if (v.nr === 1) return { status: 409, fout: 'het origineel blijft staan; gooi zo nodig het hele beeld weg' };
-    if (d.prepare("SELECT 1 FROM taak WHERE voorganger = ? AND status IN ('wacht','bezig')").get(id)) return { status: 409, fout: 'er loopt nog een bewerking op deze versie' };
+    if (d.prepare("SELECT 1 FROM taak WHERE voorganger = ? AND status IN ('wacht','bezig','stapel')").get(id)) return { status: 409, fout: 'er loopt nog een bewerking op deze versie (of hij staat in de stapel)' };
     d.prepare('UPDATE versie SET voorganger = ? WHERE voorganger = ?').run(v.voorganger, id);   // de keten blijft heel
     d.prepare('DELETE FROM versie WHERE id = ?').run(id);
     try { fs.rmSync(bestand(v), { force: true }); fs.rmSync(toonPad(id), { force: true }); } catch (e) { fout('imagine', new Error('bestand weghalen mislukt')); }
@@ -799,6 +849,200 @@ function maak(deps) {
     uitb.delete(String(id)); x.tekst = null; x.eigen = null;
     if (x.studio) { try { S.stopGeheugen(x.studio, geheim ? a : undefined); } catch (e) {} x.studio = null; }
     return eigen || null;
+  }
+
+  // ── wv4092: afronden, Opnieuw, vanzelf opnieuw, stapel, seintje, opruimronde (zie de kop bij OPRUIM) ──
+  function pogingVan(ex) { return ex && Number.isInteger(ex.poging) && ex.poging > 0 ? ex.poging : 0; }
+  // Eindstand van een taak; klaar = de instellingen zijn niet meer nodig (geen masker of opdracht langer bewaren dan nodig)
+  function taakAf(taakId, status, reden, versieId) {
+    open().prepare('UPDATE taak SET status = ?, reden = ?, eind = ?, versie = ?, instel = CASE WHEN ? = \'klaar\' THEN NULL ELSE instel END WHERE id = ?')
+      .run(status, reden || null, iso(), versieId || null, status, taakId);
+  }
+  // B121 gat 1: studio.geheugenAf vangt een afwijzing van de callback alleen met een logregel; dan bleef de taak op wacht/bezig tot een herstart.
+  // Zolang een afronding loopt staat de taak in `afronden` (de ronde laat hem dan met rust).
+  const afronden = new Set(), starten = new Set();
+  async function afrond(taakId, fn) {
+    afronden.add(taakId);
+    try { await fn(); }
+    catch (e) {
+      fout('imagine', new Error('afronden mislukt'));
+      try { open().prepare("UPDATE taak SET status = 'mislukt', reden = 'het resultaat kon niet afgerond worden', eind = ? WHERE id = ? AND status IN ('wacht','bezig')").run(iso(), taakId); } catch (e2) {}
+    } finally {
+      afronden.delete(taakId);
+      try { stapelAf(taakId); } catch (e) {}
+    }
+  }
+  // Wat Opnieuw start; oude rijen (van vóór wv4092) zonder instel: film = de foto met de standaardkeuze, vaste stand zonder opdracht = lege velden
+  function opnieuwInstel(t) {
+    if (!t || (t.status !== 'mislukt' && t.status !== 'onderbroken') || t.opnieuw) return null;
+    if (t.instel) { try { const x = JSON.parse(t.instel); return x && typeof x === 'object' ? x : null; } catch (e) { return null; } }
+    if (t.stand === BEWEGEN_STAND && HEX16.test(String(t.voorganger))) return { soort: 'bewegen', versie: t.voorganger, model: '', beweging: '' };
+    const st = stand(t.stand);
+    if (st && !st.opdracht && !t.vergelijk && HEX16.test(String(t.voorganger))) return { soort: 'bewerk', versie: t.voorganger, stand: st.id, velden: {}, masker: null, refs: [] };
+    return null;
+  }
+  // L16: "Dit past sinds 18-11 wel" bij een filmpje dat vóór 18-11 op het geheugen afbrak (sinds 18-11 draait ComfyUI met --cache-none, wv3278)
+  function notaVan(t) {
+    if (t.stand === BEWEGEN_STAND && t.status === 'mislukt' && !t.opnieuw && VOL_RE.test(String(t.reden || '')) && String(t.gemaakt) < '2026-11-18') return 'Dit past sinds 18-11 wel. Opnieuw?';
+    return null;
+  }
+  async function opnieuwStart(t, ctx, apparaat, beurt) {
+    const x = opnieuwInstel(t);
+    if (!x) return { status: 409, fout: 'deze taak kan niet opnieuw' };
+    const ex = { poging: (Number(t.poging) || 0) + 1 };
+    let r;
+    if (x.soort === 'bewegen') r = await bewegen({ versie: x.versie, model: x.model || '', beweging: x.beweging || '', beurt_id: beurt }, ctx, apparaat, ex);
+    else if (x.soort === 'nieuw') r = await nieuw({ model: x.model, velden: x.velden || {}, beurt_id: beurt }, ctx, apparaat, Object.assign(ex, { titel: x.titel || null }));
+    else if (x.soort === 'bewerk') r = await bewerk({ versie: x.versie, stand: x.stand, velden: x.velden || {}, masker: x.masker || undefined, refs: x.refs || [], beurt_id: beurt }, ctx, apparaat, t.vergelijk || null, ex);
+    else return { status: 409, fout: 'deze taak kan niet opnieuw' };
+    if (r.status === 200 && r.taak && !r.al) {
+      open().prepare('UPDATE taak SET opnieuw = ?, auto = NULL, instel = NULL WHERE id = ? AND opnieuw IS NULL').run(r.taak.id, t.id);
+      log('imagine opnieuw taak=' + t.id + ' nieuw=' + r.taak.id + ' poging=' + ex.poging);
+    }
+    return r;
+  }
+  async function opnieuwRoute(id, d, ctx, apparaat) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    const beurt = String(d && d.beurt_id || '');
+    if (!/^[A-Za-z0-9-]{8,60}$/.test(beurt)) return { status: 400, fout: 'beurt_id ontbreekt' };
+    const t = open().prepare('SELECT * FROM taak WHERE id = ?').get(id);
+    if (!t) return { status: 404, fout: 'deze taak bestaat niet (meer)' };
+    if (t.opnieuw) { const n = open().prepare('SELECT * FROM taak WHERE id = ?').get(t.opnieuw); return { status: 200, al: true, taak: n ? taakUit(n) : null }; }
+    return opnieuwStart(t, ctx, apparaat, beurt);
+  }
+  // Context voor wat de pod zelf start: geen vingerafdruk (een flow op proef geeft dan 403; dan blijft het bij de knop Opnieuw)
+  const ctxZelf = { versOk: function () { return false; }, versVerbruik: function () {} };
+  function studioStil() { try { const h = S.health(); return h && h.in_rij === 0 && !h.bezig; } catch (e) { return false; } }
+  function imagineLoopt() { return !!open().prepare("SELECT 1 FROM taak WHERE status IN ('wacht','bezig')").get(); }
+  const autoGeprobeerd = new Map();
+  let rondeBezig = false;
+  async function ronde() {
+    if (rondeBezig) return;
+    rondeBezig = true;
+    try {
+      hangers();
+      if (!deps.primair()) return;
+      const db = open(), nu = iso();
+      db.prepare("UPDATE taak SET auto = NULL WHERE auto IS NOT NULL AND (auto <= ? OR opnieuw IS NOT NULL OR status NOT IN ('mislukt','onderbroken'))").run(nu);
+      if (!studioStil() || imagineLoopt()) return;
+      // 1. vanzelf opnieuw (na herstart of "server te vol"), hooguit eens per 5 min per taak
+      const a = db.prepare("SELECT * FROM taak WHERE auto > ? AND opnieuw IS NULL AND status IN ('mislukt','onderbroken') ORDER BY gemaakt").all(nu)
+        .find(function (t) { return !(klok() - (autoGeprobeerd.get(t.id) || 0) < AUTO.tussen_ms); });
+      if (a) {
+        autoGeprobeerd.set(a.id, klok());
+        const r = await opnieuwStart(a, ctxZelf, '', 'auto-' + a.id);
+        if (r.status !== 200 && [409, 429, 503, 500].indexOf(r.status) < 0) db.prepare('UPDATE taak SET auto = NULL WHERE id = ?').run(a.id);
+        log('imagine auto taak=' + a.id + ' status=' + r.status);
+        return;
+      }
+      // 2. de stapel: de oudste rij, als er geen filmpje loopt
+      const st = db.prepare("SELECT * FROM taak WHERE status = 'stapel' ORDER BY gemaakt LIMIT 1").get();
+      if (st) {
+        let x = null;
+        try { x = JSON.parse(st.instel || 'null'); } catch (e) { x = null; }
+        // een dag lang niet vrij → mislukt (Opnieuw kan); anders hooguit eens per 5 min proberen, en pas als die keuze klaarstaat
+        if (klok() - Date.parse(st.gemaakt) > STAPEL.dag_ms) { db.prepare("UPDATE taak SET status = 'mislukt', reden = 'de server was een dag lang niet vrij', eind = ? WHERE id = ? AND status = 'stapel'").run(iso(), st.id); stapelAf(st.id); return; }
+        if (klok() - (autoGeprobeerd.get(st.id) || 0) < AUTO.tussen_ms) return;
+        const bm = x ? bewegenModel(x.model || '') : null;
+        let f = null;
+        try { f = bm ? await S.flowVan(bm.flow) : null; } catch (e) { f = null; }
+        if (bm && (!f || !f.klaar)) return;
+        if (!studioStil() || imagineLoopt()) return;   // na de await opnieuw
+        autoGeprobeerd.set(st.id, klok());
+        starten.add(st.id);
+        let r;
+        try { r = x ? await bewegen({ versie: x.versie, model: x.model || '', beweging: x.beweging || '', beurt_id: 'stapel-' + st.id }, ctxZelf, '', { rij: st.id }) : { status: 400, fout: 'de stapelrij is onleesbaar' }; }
+        catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
+        finally { starten.delete(st.id); }
+        if (r.status !== 200) {
+          if ([409, 429, 503, 500].indexOf(r.status) < 0) { db.prepare("UPDATE taak SET status = 'mislukt', reden = ?, eind = ? WHERE id = ? AND status = 'stapel'").run(schoon(r.fout || 'starten lukte niet', 200), iso(), st.id); stapelAf(st.id); }
+          log('imagine stapel start taak=' + st.id + ' status=' + r.status);
+        }
+      }
+    } finally { rondeBezig = false; }
+  }
+  // B121 gat 2: taakrij op wacht/bezig zonder levende studiotaak (en geen afronding of start bezig) → onderbroken; verwijdert niets
+  function hangers() {
+    const db = open(), nu = klok();
+    let n = 0;
+    db.prepare("SELECT id, studio, gemaakt FROM taak WHERE status IN ('wacht','bezig')").all().forEach(function (t) {
+      if (afronden.has(t.id) || starten.has(t.id)) return;
+      const weg = t.studio ? !S.geheugenTaak(t.studio) : nu - Date.parse(t.gemaakt) > OPRUIM.wacht_ms;
+      if (!weg) return;
+      // nog eens nagaan vlak voor het schrijven (synchroon): de afronding kan net begonnen zijn
+      if (afronden.has(t.id)) return;
+      n += db.prepare("UPDATE taak SET status = 'onderbroken', reden = 'de beeldserver raakte deze taak kwijt', eind = ? WHERE id = ? AND status IN ('wacht','bezig')").run(iso(), t.id).changes;
+      stapelAf(t.id);
+    });
+    if (n) { opruimStand.hangers += n; log('imagine opruim hangers=' + n); }
+  }
+  // ── L17: één seintje per stapel, als de laatste rij van de groep klaar, mislukt of gestopt is ──
+  function stilleUren() { const u = Number(new Date(klok()).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false })) % 24; return u >= 23 || u < 7; }
+  function stapelAf(taakId) {
+    const db = open();
+    const t = db.prepare('SELECT stapel FROM taak WHERE id = ?').get(taakId);
+    if (!t || !t.stapel) return;
+    if (db.prepare("SELECT 1 FROM taak WHERE stapel = ? AND status IN ('stapel','wacht','bezig')").get(t.stapel)) return;
+    const k = db.prepare("SELECT SUM(status = 'klaar') AS klaar, SUM(status != 'klaar') AS mis FROM taak WHERE stapel = ?").get(t.stapel);
+    const r = db.prepare('INSERT OR IGNORE INTO seintje (groep, klaar, mislukt, op) VALUES (?, ?, ?, ?)').run(t.stapel, Number(k.klaar) || 0, Number(k.mis) || 0, iso());
+    if (!r.changes) return;
+    log('imagine stapel klaar groep=' + t.stapel + ' klaar=' + (Number(k.klaar) || 0) + ' mislukt=' + (Number(k.mis) || 0));
+    if (typeof deps.seintje === 'function' && !stilleUren()) { try { Promise.resolve(deps.seintje()).catch(function () { fout('imagine-seintje', new Error('seintje mislukt')); }); } catch (e) { fout('imagine-seintje', new Error('seintje mislukt')); } }
+  }
+  function seintjes() { return open().prepare('SELECT groep, klaar, mislukt, op FROM seintje WHERE gezien IS NULL ORDER BY op DESC LIMIT 5').all().map(function (x) { return { groep: x.groep, klaar: x.klaar, mislukt: x.mislukt, op: x.op }; }); }
+  function seintjeGezien(groep) { const r = open().prepare('UPDATE seintje SET gezien = ? WHERE groep = ? AND gezien IS NULL').run(iso(), groep); return r.changes ? { status: 200 } : { status: 404, fout: 'dit seintje is er niet (meer)' }; }
+  function stapelStop(t) {
+    const r = open().prepare("UPDATE taak SET status = 'gestopt', reden = 'uit de stapel gehaald', eind = ?, instel = NULL WHERE id = ? AND status = 'stapel'").run(iso(), t.id);
+    if (!r.changes) return { status: 409, fout: 'deze taak loopt al of is weg' };
+    stapelAf(t.id);
+    return { status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(t.id)) };
+  }
+  // ── B121: opruimronde over de eigen mappen (beelden/<bron>/<versie>.<ext>, toon/<versie>.jpg); synchroon van lijst tot wissen ──
+  const opruimStand = { stand: null, laatst: null, wees: 0, rest: 0, mappen: 0, vreemd: 0, gewist: 0, hangers: 0 };
+  function opruimVanaf() { return Date.parse(deps.opruimVanaf || OPRUIM.vanaf); }
+  function gewoonBestand(p) { try { return fs.lstatSync(p).isFile(); } catch (e) { return false; } }
+  function lijstMap(p) { try { return fs.readdirSync(p); } catch (e) { return []; } }
+  function opruim() {
+    const db = open(), nu = klok();
+    const vs = new Map(db.prepare('SELECT id, bron, ext FROM versie').all().map(function (v) { return [v.id, v]; }));
+    const bronnen = new Set(db.prepare('SELECT id FROM bron').all().map(function (b) { return b.id; }));
+    const wees = [], rest = [], mappen = [];
+    let vreemd = 0, totaal = 0;
+    const isRest = function (p, n) { if (!NAAM_REST.test(n)) return false; try { return nu - fs.lstatSync(p).mtimeMs > OPRUIM.rest_ms; } catch (e) { return false; } };
+    lijstMap(BEELDEN).forEach(function (b) {
+      const bp = path.join(BEELDEN, b);
+      let st; try { st = fs.lstatSync(bp); } catch (e) { return; }
+      if (!st.isDirectory() || !HEX16.test(b)) { vreemd++; return; }
+      const inhoud = lijstMap(bp);
+      inhoud.forEach(function (n) {
+        const p = path.join(bp, n);
+        if (!gewoonBestand(p)) { vreemd++; return; }
+        totaal++;
+        if (NAAM_BEELD.test(n)) { const v = vs.get(n.slice(0, 16)); if (!v || v.bron !== b || n !== v.id + '.' + v.ext) wees.push(p); return; }
+        if (NAAM_REST.test(n)) { if (isRest(p, n)) rest.push(p); return; }
+        vreemd++;
+      });
+      if (!inhoud.length && !bronnen.has(b)) mappen.push(bp);
+    });
+    lijstMap(TOON).forEach(function (n) {
+      const p = path.join(TOON, n);
+      if (!gewoonBestand(p)) { vreemd++; return; }
+      totaal++;
+      if (NAAM_TOON.test(n)) { if (!vs.has(n.slice(0, 16))) wees.push(p); return; }
+      if (/^[a-f0-9]{16}\.jpg\.nieuw\.\d{1,10}$/.test(n)) { if (nu - (function () { try { return fs.lstatSync(p).mtimeMs; } catch (e) { return nu; } })() > OPRUIM.rest_ms) rest.push(p); return; }
+      vreemd++;
+    });
+    let stand = nu >= opruimVanaf() ? 'opruimen' : 'tellen';
+    // rem: een fout in de koppeling rij ↔ bestand mag geen echte beelden wissen
+    if (stand === 'opruimen' && ((wees.length > 3 && wees.length * 2 > totaal) || (!vs.size && totaal > 0))) stand = 'rem';
+    let gewist = 0;
+    if (stand === 'opruimen') {
+      wees.concat(rest).forEach(function (p) { try { fs.rmSync(p, { force: true }); gewist++; } catch (e) {} });
+      mappen.forEach(function (p) { try { fs.rmdirSync(p); gewist++; } catch (e) {} });
+    }
+    Object.assign(opruimStand, { stand: stand, laatst: iso(nu), wees: wees.length, rest: rest.length, mappen: mappen.length, vreemd: vreemd, gewist: opruimStand.gewist + gewist });
+    if (wees.length || rest.length || mappen.length || vreemd) log('imagine opruim stand=' + stand + ' wees=' + wees.length + ' rest=' + rest.length + ' mappen=' + mappen.length + ' vreemd=' + vreemd + ' gewist=' + gewist);
+    return { stand: stand, wees: wees.length, rest: rest.length, mappen: mappen.length, vreemd: vreemd, gewist: gewist };
   }
 
   // ── incognito (alleen dit proces) ──
@@ -1036,8 +1280,12 @@ function maak(deps) {
     });
   }
 
-  const timer = setInterval(function () { incRonde(); uitbRonde(); }, T.ronde);
+  const timer = setInterval(function () { incRonde(); uitbRonde(); ronde().catch(function () { fout('imagine-ronde', new Error('ronde mislukt')); }); }, T.ronde);   // wv4092: ronde
   if (timer.unref) timer.unref();
+  // wv4092 (B121): opruimronde kort na de start en daarna elke 6 uur
+  const opruimEerst = setTimeout(function () { try { opruim(); } catch (e) { fout('imagine-opruim', new Error('opruimen mislukt')); } }, T.opruim_start || OPRUIM.start_ms);
+  const opruimTimer = setInterval(function () { try { opruim(); } catch (e) { fout('imagine-opruim', new Error('opruimen mislukt')); } }, T.opruim || OPRUIM.elke_ms);
+  [opruimEerst, opruimTimer].forEach(function (x) { if (x.unref) x.unref(); });
   // na een herstart: de vorige sessie is weg; de app krijgt één keer de melding
   try { incHerstart = !!S.incognito().herstart; } catch (e) { incHerstart = false; }
 
@@ -1047,7 +1295,7 @@ function maak(deps) {
     let m;
     if (!post && p === '/app/imagine') {
       const l = lijst();
-      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, standen: await standen(), bewegen: await bewegenStand(), tekst: (await standen([TEKST]))[0], teksten: await standen(TEKSTEN), tekst_standaard: TEKST.model, uitbreiden: await uitbStand(), schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
+      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, seintjes: seintjes(), standen: await standen(), bewegen: await bewegenStand(), tekst: (await standen([TEKST]))[0], teksten: await standen(TEKSTEN), tekst_standaard: TEKST.model, uitbreiden: await uitbStand(), schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
         incognito: { nog_te_wissen: S.incognito().nog_te_wissen } } };
     }
     if (!post && (m = /^\/app\/imagine\/bron\/([a-f0-9]{16})$/.exec(p))) { const b = bronMet(m[1]); return b ? { status: 200, body: Object.assign({ ok: true }, b) } : { status: 404, body: { ok: false, fout: 'dit beeld bestaat niet (meer)' } }; }
@@ -1062,8 +1310,12 @@ function maak(deps) {
     if (post && p === '/app/imagine/vergelijk') return uit(await vergelijk(d, ctx, a), 'imagine vergelijk');   // wv3021
     if (post && (m = /^\/app\/imagine\/vergelijk\/([a-f0-9]{16})\/kies$/.exec(p))) return uit(kies(m[1], d), 'imagine vergelijk kies');
     if (post && (m = /^\/app\/imagine\/v\/([a-f0-9]{16})\/snij$/.exec(p))) return uit(await snij(m[1], d), 'imagine snij');
+    if (post && (m = /^\/app\/imagine\/opnieuw\/([a-f0-9]{16})$/.exec(p))) return uit(await opnieuwRoute(m[1], d, ctx, a), 'imagine opnieuw');   // wv4092
+    if (post && (m = /^\/app\/imagine\/seintje\/([a-f0-9]{16})\/gezien$/.exec(p))) return uit(seintjeGezien(m[1]), 'imagine seintje gezien');   // wv4092
     if (post && (m = /^\/app\/imagine\/stop\/([a-f0-9]{16})$/.exec(p))) {
       const t = open().prepare('SELECT * FROM taak WHERE id = ?').get(m[1]);
+      if (t && t.status === 'stapel') return uit(stapelStop(t), 'imagine stop stapel');   // wv4092
+      if (t && t.auto && !t.opnieuw) { open().prepare('UPDATE taak SET auto = NULL WHERE id = ?').run(t.id); return uit({ status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(t.id)) }, 'imagine stop auto'); }   // wv4092: niet vanzelf opnieuw
       if (!t || !t.studio) return uit({ status: 404, fout: 'deze bewerking loopt niet meer' });
       return uit(S.stopGeheugen(t.studio), 'imagine stop');
     }
@@ -1098,10 +1350,12 @@ function maak(deps) {
     try {
       const d = open();
       return { aan: true, bronnen: d.prepare('SELECT COUNT(*) AS n FROM bron').get().n, versies: d.prepare('SELECT COUNT(*) AS n FROM versie').get().n,
-        schijf_bytes: schijf().bytes, incognito_nog_te_wissen: S.incognito().nog_te_wissen };
+        schijf_bytes: schijf().bytes, incognito_nog_te_wissen: S.incognito().nog_te_wissen,
+        opruim: Object.assign({}, opruimStand, { vanaf: deps.opruimVanaf || OPRUIM.vanaf }),   // wv4092: aantallen, geen namen
+        stapel: d.prepare("SELECT COUNT(*) AS n FROM taak WHERE status = 'stapel'").get().n, auto: d.prepare("SELECT COUNT(*) AS n FROM taak WHERE auto > ?").get(iso()).n };
     } catch (e) { return { aan: true, fout: true }; }
   }
-  return { app: app, info: info, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB, stopTimers: function () { clearInterval(timer); }, _inc: inc, _ronde: incRonde, _uitb: uitb, _uitbRonde: uitbRonde, _db: function () { return open(); } };
+  return { app: app, info: info, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB, stopTimers: function () { clearInterval(timer); clearTimeout(opruimEerst); clearInterval(opruimTimer); }, _opruim: opruim, _ronde2: ronde, _hangers: hangers, _inc: inc, _ronde: incRonde, _uitb: uitb, _uitbRonde: uitbRonde, _db: function () { return open(); } };
 }
 
-module.exports = { maak: maak, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB };
+module.exports = { OPRUIM: OPRUIM, maak: maak, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB };
