@@ -310,7 +310,8 @@ async function klaarzetten(io, B, nu, inst, uit, zet) {
 }
 
 // ── 5. Voor jou ──────────────────────────────────────────────────────────────
-const POT_DOEL = { module: 'pot', doel: { scherm: 'pot', focus: 'notas:alle' } };
+// wv4140 (A23): de kaart opent OVIS POT op pot.socev.dev (de Socev-app stuurt scherm 'pot' daarheen); het oude Nota's-scherm is weg
+const POT_DOEL = { module: 'pot', doel: { scherm: 'pot', focus: null } };
 function kaartGrens(p) { return Object.assign(p, { titel: kap(p.titel, 90), waarom: kap(p.waarom, 400), meting: kap(p.meting, 300), stappen: (p.stappen || []).slice(0, 12) }); }
 function kaartKlaar(datum, rijen, open, nuKort, bewaking) {
   const n = rijen.length;

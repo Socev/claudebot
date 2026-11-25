@@ -45,8 +45,9 @@ vm.runInContext(cFin + '\n' + cPot + '\n' + cAcc + '\n' + helpers + '\nthis.potD
   const rest = /\n\s+d1: function \(batch\) \{[^\n]*?return (\w+)\(batch\); \},\n\s+r2:/.exec(ovis);
   toets('OVIS plek 9 (rest.d1: fin.bron) leest D1 fin', rest && rest[1] === 'finD1', rest && rest[1]);
   const potApp = src.slice(src.indexOf('const potApp = (function () {'), src.indexOf('function potAppInfo()'));
-  toets('pot-app: d1 en schrijf naar pot, d1Fin naar fin (alleen SELECT)', /maak\(\{ d1: function \(batch\) \{[^\n]*return potDhD1\(batch\); \}/.test(potApp)
-    && /d1Fin: function \(batch\) \{ if \(batch\.some[^\n]*alleen lezen'\)\); return finD1\(batch\); \}/.test(potApp) && /schrijf: function \(batch\) \{ return potDhD1\(batch, 15000\); \}/.test(potApp), potApp.slice(0, 400));
+  // wv4140 (A23/C58): pot-app schrijft niet meer (geen io.schrijf); alleen lezen op pot, personeel op fin
+  toets('pot-app: d1 naar pot, d1Fin naar fin (alleen SELECT), geen schrijfweg', /maak\(\{ d1: function \(batch\) \{[^\n]*return potDhD1\(batch\); \}/.test(potApp)
+    && /d1Fin: function \(batch\) \{ if \(batch\.some[^\n]*alleen lezen'\)\); return finD1\(batch\); \}/.test(potApp) && !/schrijf:/.test(potApp), potApp.slice(0, 400));
   const vzio = src.slice(src.indexOf('const POT_VZ_IO = {'), src.indexOf('const POT_VZ_IO = {') + 200);
   toets('pot-verzend (POT_VZ_IO.d1) naar pot', /d1: function \(batch\) \{ return potDhD1\(batch\); \}/.test(vzio), vzio);
   const ronde = src.slice(src.indexOf('async function potDatahubRonde('), src.indexOf('async function potDatahubRonde(') + 6000);
