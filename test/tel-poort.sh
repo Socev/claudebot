@@ -103,7 +103,7 @@ const ctxGlobals = () => ({ require, fs, path, crypto, Buffer, console, URL, set
     N8N_MCP_URL: 'https://n8n.toets/mcp-server/http', N8N_API_KEY: 'nep-n8n', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: path.join(W, 'vault') }, pid: process.pid },
   VAULT: path.join(W, 'vault'), TOETSUUR: () => 12, agentsReg: {},
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => c, resolveKeuze: () => ({ runtime: 'claude', model: '' }),
-  rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
+  rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100, ROL_KANT: 'olares', SPAARSTAND: false, SPAAR_STIL_TEKST: '',   // wv4017: zoals socev-app-poort (wv3909)
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
 const EXPORT = '\n;globalThis.__h = { handleApp, appIsPad, handleTel, telIsPad, telStaat, appStaat, appNoodstop, appAan, appOntmasker, telAfsluiten, telSpreektekst, telOpname, telInfo, appInfo, telOpruim, TEL_ROUTE_RE, telMerkAgent, telZelfStart, telZelfNaRun, telAanwezig, telBelletje, agentsReg, TEL_ZELF_AANKONDIGING, telOnderwegVelden, telVraagzin, appBriefingLaad, telRij, telRitLaad: typeof telRitLaad === "function" ? telRitLaad : function () { return { open: {}, ritten: [] }; }, telRitNu: typeof telRitNu === "function" ? telRitNu : function () { return {}; }, telRitten: typeof telRitten === "function" ? telRitten : function () { return []; }, __zet: function (n, f) { globalThis[n] = f; }, __haal: function (n) { return globalThis[n]; } };';
@@ -1584,6 +1584,102 @@ srv.listen(0, '127.0.0.1', async () => {
     H.appStaat.tellers['tel-tik'] = [];
     toets('8y tel-audit zonder vraag of uitleg', !/proefkeuring|proefgarage|Proefoverleg|proefrapport/.test(audit()) && /tik kaart ja -> 200/.test(audit()) && /gesprek \d+ stukken/.test(audit()));
     toets('8y geen onverwachte fouten (gesprek, tik, autovragen)', !logs.some((l) => /tel-gesprek|tel-tik|briefing-autovragen/.test(l)), logs.filter((l) => /tel-gesprek|tel-tik|briefing-autovragen/.test(l)));
+    // ── 8z. wv4017 (fase 2): herhaalvraag bij een agenda- of sms-voorstel; tweede tik = de ✅ uit de app; zonder vaste zin naar de app ──
+    {
+      const sha = (x) => crypto.createHash('sha256').update(String(x), 'utf8').digest('hex');
+      const nonce = () => crypto.randomBytes(16).toString('hex'), h64 = () => crypto.randomBytes(32).toString('hex');
+      const tNu = new Date().toISOString(), tot = Date.now() + 3600000;
+      const AGT = 'Bevestig in je agenda:\nNieuwe afspraak in Davids Werk-agenda op dinsdag 1 december 2026, 15:00-16:00: "Proefoverleg salarissen", locatie "Proefzaal 3".';
+      const WZT = 'Bevestig in je agenda:\nWijzig afspraak van woensdag 2 december 2026, 09:00-10:00 in Davids hoofdagenda, "Proefafspraak tandarts": tijd van woensdag 2 december 2026, 09:00-10:00 naar woensdag 2 december 2026, 11:00-12:00.';
+      const VWT = 'Bevestig in je agenda:\nVerwijder afspraak van donderdag 3 december 2026, 09:00-10:00: "Proefafspraak weg" uit Davids hoofdagenda.';
+      const OMT = 'Bevestig in je agenda:\nNieuwe afspraak in Davids hoofdagenda op vrijdag 4 december 2026 (hele dag): "Deadline: proefformulier", omschrijving "Lange uitleg met een link https://voorbeeld.test/x.".';
+      const J = { ag: 'a1a1a1a1a1a1a1a1', wz: 'a2a2a2a2a2a2a2a2', vw: 'a3a3a3a3a3a3a3a3', om: 'a4a4a4a4a4a4a4a4', sms: 'a5a5a5a5a5a5a5a5', rk: 'a6a6a6a6a6a6a6a6', mk: 'a7a7a7a7a7a7a7a7', kl: 'a8a8a8a8a8a8a8a8', oud: 'a9a9a9a9a9a9a9a9', ge: 'aaaaaaaaaaaaaaa1' };
+      const kaart = (tekst, x) => Object.assign({ kanaal: 'hoofd', t: tNu, knoppen: { uitvoeren: { nonce: nonce(), verloopt: tot, stand: 'open', sinds: null, pagina: null, uitkomst: null, hash: h64(), th: sha(tekst) } } }, x || {});
+      const AK = {};
+      AK[J.ag] = kaart(AGT); AK[J.wz] = kaart(WZT); AK[J.vw] = kaart(VWT); AK[J.om] = kaart(OMT);
+      AK[J.sms] = { kanaal: 'hoofd', t: tNu, knoppen: { uitvoeren: { nonce: nonce(), verloopt: tot, stand: 'open', sinds: null, pagina: null, uitkomst: null } }, sms: { naar: '+31612345678', tekst: 'Proefbericht: ik ben om vijf uur thuis.', naam: 'Proefbuur' } };
+      AK[J.rk] = kaart(AGT, { reeks: { id: 'proefreeks', nr: 1, van: 2 } });
+      AK[J.mk] = kaart(AGT, { kanaal: 'machinekamer' });
+      AK[J.kl] = kaart(AGT); AK[J.kl].knoppen.uitvoeren.stand = 'klaar';
+      AK[J.oud] = kaart(AGT); delete AK[J.oud].knoppen.uitvoeren.hash;
+      AK[J.ge] = kaart(AGT); AK[J.ge].knoppen.uitvoeren.th = sha(AGT + ' (anders)');
+      const nonceAg = AK[J.ag].knoppen.uitvoeren.nonce, hashAg = AK[J.ag].knoppen.uitvoeren.hash;
+      fs.writeFileSync(path.join(DATA, 'agenda-knoppen.json'), JSON.stringify(AK)); H.appStaat.agendaKnoppen = null;
+      const lH = path.join(LOGDIR, 'hoofd.jsonl');
+      [[J.ag, AGT], [J.wz, WZT], [J.vw, VWT], [J.om, OMT], [J.rk, AGT], [J.kl, AGT], [J.oud, AGT], [J.ge, AGT]].forEach(([id, tx]) =>
+        fs.appendFileSync(lH, JSON.stringify({ t: tNu, job_id: id, soort: 'socev', bron: 'agenda', klasse: 'normaal', tekst: '', antwoord: tx, ok: true, bestanden: [] }) + '\n'));
+      const n8n = [], sms = [];
+      H.__zet('appKnopSleutel', () => 'nep-knop');
+      H.__zet('appAgendaKnopN8n', async (b) => { n8n.push(b); return b.a === 'ja' ? { pagina: 'uitgevoerd', tekst: 'In je Werk-agenda gezet: proef.' } : { pagina: 'afgewezen' }; });
+      H.__zet('appSmsKnop', async (res2, id, knop, keuze) => { sms.push({ id, knop, keuze }); return H.__haal('appStuur')(res2, 200, { ok: true, pagina: 'uitgevoerd', melding: '✅ Verstuurd.' }); });
+      r = await tel('GET', '/tel/uit?lijst=voorjou', { sleutel: OWV });
+      const VS = {}; (r.j.voorstellen || []).forEach((v) => { VS[v.id] = v; });
+      toets('8z voorjou: voorstellen = open ✅ in het hoofdkanaal (niet machinekamer, klaar), hooguit 5', r.status === 200 && Array.isArray(r.j.voorstellen) && r.j.voorstellen.length === 5 && !VS[J.mk] && !VS[J.kl], r.j.voorstellen);
+      toets('8z agendakaart: kan, tekst = herhaalzin zonder "Klopt dat?", geen nonce of hash', VS[J.ag] && VS[J.ag].kan === true && VS[J.ag].soort === 'agenda' &&
+        VS[J.ag].tekst === 'Ik zet dinsdag 1 december 2026 van 15:00 tot 16:00 "Proefoverleg salarissen" in je Werk-agenda, locatie Proefzaal 3.' && !JSON.stringify(r.j).includes(nonceAg) && !JSON.stringify(r.j).includes(hashAg), VS[J.ag]);
+      toets('8z verwijderen: kan false (altijd in de app)', VS[J.vw] && VS[J.vw].kan === false && VS[J.vw].tekst === null, VS[J.vw]);
+      toets('8z wijzigen en omschrijving: vaste zin', VS[J.wz] && VS[J.wz].kan && /^Ik wijzig in je eigen agenda de afspraak "Proefafspraak tandarts" \(woensdag 2 december 2026 van 09:00 tot 10:00\): tijd van .* naar woensdag 2 december 2026, 11:00 tot 12:00\.$/.test(VS[J.wz].tekst) &&
+        VS[J.om] && VS[J.om].kan && /de hele dag "Deadline: proefformulier" in je eigen agenda, met de omschrijving uit het voorstel\.$/.test(VS[J.om].tekst), [VS[J.wz], VS[J.om]]);
+      // reeks, oud zonder hash en gewijzigde kaarttekst staan na de eerste 5; direct toetsen
+      const vk = H.__haal('telVoorstelKnop');
+      const vRk = await vk(J.rk), vOud = await vk(J.oud), vGe = await vk(J.ge);
+      toets('8z reeks, voorstel zonder kaart-hash en gewijzigde kaarttekst: kan false', vRk && !vRk.kan && vOud && !vOud.kan && vGe && !vGe.kan && /anders dan vastgelegd/.test(vGe._waarom), [vRk, vOud, vGe]);
+      const hz = (id, h) => tel('GET', '/tel/uit?lijst=herhaal&doel=' + id + '&h=' + h, { sleutel: OWV });
+      const tv = (id, k, h, pas) => tel('GET', '/tel/uit?lijst=tik&soort=voorstel&doel=' + id + '&keuze=' + k + '&h=' + h + (pas ? '&pas=' + pas : ''), { sleutel: OWV });
+      r = await hz(J.ag, VS[J.ag].h);
+      toets('8z eerste tik (herhaal): 200, zin met "Klopt dat?", pas, niets uitgevoerd', r.status === 200 && r.j.zin === VS[J.ag].tekst + ' Klopt dat?' && /^[a-f0-9]{16}$/.test(r.j.pas) && n8n.length === 0, r.j);
+      let pas = r.j.pas;
+      r = await tv(J.ag, 'ja', VS[J.ag].h);
+      toets('8z tweede tik zonder pas: 400, niets uitgevoerd', r.status === 400 && n8n.length === 0, r.j);
+      r = await tv(J.ag, 'ja', VS[J.ag].h, pas.replace(/./, (c) => (c === 'a' ? 'b' : 'a')));
+      toets('8z tweede tik met een verkeerde pas: 409, niets uitgevoerd', r.status === 409 && /herhaalvraag/.test(r.j.fout) && n8n.length === 0, r.j);
+      r = await tv(J.ag, 'ja', VS[J.ag].h, pas);
+      toets('8z de pas is na een mislukte poging op: 409', r.status === 409 && n8n.length === 0, r.j);
+      r = await hz(J.ag, VS[J.ag].h); pas = r.j.pas;
+      Object.values(H.telStaat.herhaal).forEach((x) => { x.tot = Date.now() - 1; });
+      r = await tv(J.ag, 'ja', VS[J.ag].h, pas);
+      toets('8z verlopen pas (90 s): 409, niets uitgevoerd', r.status === 409 && n8n.length === 0, r.j);
+      // gewijzigde rij tussen de eerste en de tweede tik → 409 (Codex MOET 1)
+      r = await hz(J.ag, VS[J.ag].h); pas = r.j.pas;
+      const ak = H.__haal('appAgendaKnoppen')(), thOud = ak[J.ag].knoppen.uitvoeren.th;
+      ak[J.ag].knoppen.uitvoeren.th = sha('iets anders');
+      r = await tv(J.ag, 'ja', VS[J.ag].h, pas);
+      toets('8z vastgelegde rij gewijzigd na de herhaalzin: 409 "veranderd", niets uitgevoerd', r.status === 409 && /veranderd/.test(r.j.fout) && n8n.length === 0, r.j);
+      ak[J.ag].knoppen.uitvoeren.th = thOud;
+      r = await hz(J.ag, 'ffffffffffffffff');
+      toets('8z herhaal met een oude h: 409 "veranderd"', r.status === 409 && /veranderd/.test(r.j.fout), r.j);
+      // goed: herhaal → tweede tik = de ✅ (zelfde nonce, kaart-hash en tekst-hash naar Agenda-knoppen), zonder vingerafdruk, rijdend
+      const aT = audit().length;
+      r = await hz(J.ag, VS[J.ag].h); pas = r.j.pas;
+      r = await tv(J.ag, 'ja', VS[J.ag].h, pas);
+      toets('8z tweede tik: 200 uitgevoerd, één aanroep met n/a/h/t van de vastgelegde rij', r.status === 200 && r.j.ok === true && r.j.pagina === 'uitgevoerd' && n8n.length === 1 &&
+        n8n[0].n === nonceAg && n8n[0].a === 'ja' && n8n[0].h === hashAg && n8n[0].t === sha(AGT), { r: r.j, n8n });
+      toets('8z stand klaar; tel-audit zonder kaarttekst', H.__haal('appAgendaKnoppen')()[J.ag].knoppen.uitvoeren.stand === 'klaar' && /tik voorstel agenda ja -> 200 uitgevoerd/.test(audit().slice(aT)) && !/Proefoverleg|Proefzaal/.test(audit()), audit().slice(aT));
+      r = await tv(J.ag, 'ja', VS[J.ag].h, pas);
+      toets('8z dezelfde pas nog eens: 409, geen tweede aanroep', r.status === 409 && n8n.length === 1, r.j);
+      r = await hz(J.ag, VS[J.ag].h);
+      toets('8z na uitvoeren: herhaal 409 "niet meer open"', r.status === 409 && /niet meer open/.test(r.j.fout), r.j);
+      // verwijderen → app
+      r = await hz(J.vw, VS[J.vw].h);
+      toets('8z verwijderen: herhaal 409 app "in de Socev-app", geen pas', r.status === 409 && r.j.app === true && /Socev-app/.test(r.j.fout) && !r.j.pas, r.j);
+      // ❌ zonder herhaalvraag
+      r = await tv(J.wz, 'nee', VS[J.wz].h);
+      toets('8z ❌ zonder herhaalvraag: 200 afgewezen via de gewone ❌', r.status === 200 && r.j.pagina === 'afgewezen' && n8n.length === 2 && n8n[1].a === 'nee', { r: r.j, n8n });
+      // sms
+      r = await hz(J.sms, VS[J.sms].h);
+      toets('8z sms herhaal: naam, nummer in cijfers en de letterlijke tekst', r.status === 200 && r.j.zin === 'Ik verstuur vanaf je eigen telefoon een sms aan Proefbuur, nummer 06 12 34 56 78, met de tekst: "Proefbericht: ik ben om vijf uur thuis.". Klopt dat?', r.j);
+      r = await tv(J.sms, 'ja', VS[J.sms].h, r.j.pas);
+      toets('8z sms tweede tik: 200, één keer de sms-knop', r.status === 200 && sms.length === 1 && sms[0].id === J.sms && sms[0].keuze === 'ja', { r: r.j, sms });
+      // andere sleutels en vormen
+      r = await tel('GET', '/tel/uit?lijst=herhaal&doel=' + J.om + '&h=' + VS[J.om].h, { sleutel: TKV });
+      toets('8z herhaal met een Tasker-sleutel: 404', r.status === 404, r.j);
+      r = await tel('GET', '/tel/uit?lijst=herhaal&doel=xyz&h=' + VS[J.om].h, { sleutel: OWV });
+      toets('8z herhaal ongeldig: 400', r.status === 400, r.j);
+      r = await hz('bbbbbbbbbbbbbbbb', VS[J.om].h);
+      toets('8z herhaal zonder vastgelegde rij: 409', r.status === 409, r.j);
+      toets('8z geen onverwachte fouten (herhaal)', !logs.some((l) => /tel-herhaal|app-agenda/.test(l)), logs.filter((l) => /tel-herhaal|app-agenda/.test(l)));
+      fs.writeFileSync(path.join(DATA, 'agenda-knoppen.json'), '{}'); H.appStaat.agendaKnoppen = null;
+    }
     H.__zet('appSbRpc', sbOrig);
     toets('8 geen onverwachte fouten (wv3700)', !logs.some((l) => /tel-voorjou/.test(l) && !/databank weg/.test(l)), logs.filter((l) => /tel-voorjou/.test(l)));
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }

@@ -19311,6 +19311,7 @@ function telUitRoute(req, res, t) {
     if (q.get('lijst') === 'gesprek') return telGesprekRoute(req, res, t);   // wv4016: de briefing als gesprek
     if (q.get('lijst') === 'gesprekstem') return telGesprekStem(req, res, t, String(q.get('s') || ''));
     if (q.get('lijst') === 'tik') return telTikRoute(req, res, t, q);   // wv4016: een tik op JA/NEE = de knopdruk (niet gevoelig)
+    if (q.get('lijst') === 'herhaal') return telHerhaalRoute(req, res, t, q);   // wv4017: eerste tik op JA bij een ✅-voorstel = de herhaalzin
     return telWeiger(res, 400, 'onbekende lijst', 'lijst');
   }
   res._tel.stil = true;   // de hartslag (± 1 per minuut) niet in het auditlog; alleen weigeringen
@@ -19542,8 +19543,11 @@ async function telVoorJou(req, res, t) {
     const vs = telVoorstelVan(p.id);   // wv3771: wat er in de auto al klaargezet is (alleen als het nog op deze tekst slaat)
     lijst.push(Object.assign(k, { auto: vs && vs.tekst_id === k.tekst_id ? vs.keuze : null }));
   }
-  res._tel.reden = 'voorjou ' + lijst.length;
-  telStuur(res, 200, { ok: true, voorjou: lijst });
+  // wv4017: de open ✅-voorstellen (agenda, sms) uit het hoofdkanaal; JA = eerst de herhaalvraag (lijst=herhaal), dan de tweede tik
+  let voorstellen = [];
+  try { voorstellen = typeof telVoorstelKnoppen === 'function' ? await telVoorstelKnoppen() : []; } catch (e) { logError('tel-herhaal', e); }
+  res._tel.reden = 'voorjou ' + lijst.length + (voorstellen.length ? ' + ' + voorstellen.length + ' voorstel' : '');
+  telStuur(res, 200, { ok: true, voorjou: lijst, voorstellen: voorstellen });
 }
 
 // wv3700/wv3771: één open Ja/Nee-kaart zoals Onderweg hem krijgt (null = geen knop mogelijk); tekst_id = dezelfde als onder de knop in de app
@@ -19931,7 +19935,8 @@ async function telTikRoute(req, res, t, q) {
   if (!appTeller('tel-tik', TEL_TIK_PER_UUR, 3600000)) return telWeiger(res, 429, 'te vaak dit uur', 'grens tik');
   const soort = String(q.get('soort') || ''), doel = String(q.get('doel') || ''), keuze = String(q.get('keuze') || ''), tid = String(q.get('tekst_id') || '');
   if (['ja', 'nee'].indexOf(keuze) < 0) return telWeiger(res, 400, 'ongeldige tik', 'tik keuze');
-  if (soort === 'vraag') { if (!/^[a-f0-9]{16}:[a-f0-9]{8}$/.test(doel)) return telWeiger(res, 400, 'ongeldige tik', 'tik doel'); }
+  if (soort === 'voorstel') { if (!APP_JOB_RE.test(doel)) return telWeiger(res, 400, 'ongeldige tik', 'tik doel'); }   // wv4017
+  else if (soort === 'vraag') { if (!/^[a-f0-9]{16}:[a-f0-9]{8}$/.test(doel)) return telWeiger(res, 400, 'ongeldige tik', 'tik doel'); }
   else if (soort === 'kaart') { if (!/^[1-9]\d{0,8}$/.test(doel) || !/^[a-f0-9]{8}$/.test(tid)) return telWeiger(res, 400, 'ongeldige tik', 'tik kaart'); }
   else return telWeiger(res, 400, 'ongeldige tik', 'tik soort');
   if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (tik)');
@@ -19941,6 +19946,7 @@ async function telTikRoute(req, res, t, q) {
   if (!a) return telWeiger(res, 409, 'je telefoon is in de Socev-app niet meer gekoppeld; bevestig in de app', 'tik: app-apparaat');
   const sEcht = telAppSessieVan(t) || { apparaat: a.id, credential: a.credential.id, start: Date.now(), vers_tot: 0, tot: Date.now() + 60000, binding: null };
   const sKopie = Object.assign({}, sEcht, { credential: a.credential.id, vers_tot: 0, onderweg: t.id, onderweg_tik: true });
+  if (soort === 'voorstel') return telTikVoorstel(req, res, t, q, a, sEcht, keuze);   // wv4017: ✅/❌ van een agenda- of sms-voorstel
   const gevZin = function (r) { return r === 'agenda' ? 'dit bevestig je met je vingerafdruk als je stilstaat' : 'dit bevestig je in de Socev-app' + (r ? ' (' + r + ')' : ''); };
   let u2;
   if (soort === 'vraag') {
@@ -19992,6 +19998,143 @@ async function telBijVoor(t, tekst, bij) {
   return { extra: '\n(In de auto reageert David hiermee op ' + wat + ': ' + JSON.stringify(appKort(appOntmasker(inhoud, 'briefing'), 1500)) + '. Een gesproken beurt is nooit een knopdruk.)' };
 }
 // ── einde wv4016 ──
+// ── wv4017 (Onderweg — herhaalvraag bij agenda en versturen, fase 2; David Ja 25-11-2026 11:40 met vingerafdruk, vraag-id a86b04d1) ──
+// Ontwerp: vault 01_Ontwikkeling/Onderweg - dagbriefing als gesprek (bouwplan 24-11-2026).md § Fase 2 (Codex MOET 1: herhaalzin en
+// uitvoering alleen uit de vastgelegde voorstelrij waar de knop op werkt). Die rij is de ✅ van een bericht in het hoofdkanaal
+// (agenda-knoppen.json): een agendakaart van AI - Socev Agenda (kaarttekst door n8n opgemaakt, kaart-hash; Poortwachter vooraf) of een
+// sms-voorstel van de pod (nummer en tekst bij de knop). Een tik op ✓ JA = lijst=herhaal: de pod bouwt de zin ZELF uit die rij (geen
+// taalmodel; bij een agendakaart pas na sha256(kaarttekst) == de vastgelegde th) en geeft een eenmalige pas (90 s, per apparaat). De tweede
+// tik = lijst=tik&soort=voorstel met pas en h (hash over zin + rij): opnieuw gebouwd, gewijzigd = 409, anders precies de ✅ uit de app
+// (appAgendaRoute met een sessiekopie; de tweede tik telt als verse vingerafdruk), ook rijdend. Niet vast op te bouwen (verwijderen, een
+// reeks, onbekende vorm, geen leesbare kaarttekst) = 409 "Dit bevestig je in de Socev-app". Een ❌ hoeft geen herhaalvraag.
+// Geld: er is geen betaal- of factuurregel met een knop die Onderweg kan tonen; een geldvraag blijft "in de Socev-app" (lijst=tik 409).
+// Toets: test/tel-poort.sh § 8z.
+const TEL_HERHAAL_MS = 90 * 1000;
+const TEL_VOORSTELKNOP_MAX = 5;
+const TEL_HERHAAL_ZIN_MAX = 1200;
+telStaat.herhaal = {};
+const TEL_AG_DAG = '(?:maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|zondag) \\d{1,2} (?:januari|februari|maart|april|mei|juni|juli|augustus|september|oktober|november|december) \\d{4}';
+const TEL_AG_PER = '(' + TEL_AG_DAG + '(?:, \\d{2}:\\d{2}-\\d{2}:\\d{2}| \\(hele dag\\)| t\\/m ' + TEL_AG_DAG + ' \\(hele dagen\\)| \\d{2}:\\d{2} tot ' + TEL_AG_DAG + ' \\d{2}:\\d{2}))';
+const TEL_AG_NAAM = '([A-Za-z][A-Za-z-]{2,30})';
+const TEL_AG_NIEUW_RE = new RegExp('^Bevestig in je agenda:\\nNieuwe afspraak in Davids ' + TEL_AG_NAAM + ' op ' + TEL_AG_PER + ': "([\\s\\S]+)\\.$');
+const TEL_AG_WIJZIG_RE = new RegExp('^Bevestig in je agenda:\\nWijzig afspraak van ' + TEL_AG_PER + ' in Davids ' + TEL_AG_NAAM + ', "([\\s\\S]+?)": ([\\s\\S]+)\\.$');
+function telTelIn(s, x) { let n = 0, i = -1; while ((i = s.indexOf(x, i + 1)) >= 0) n++; return n; }
+// Periode zoals n8n hem schrijft → zoals je hem zegt
+function telAgPerSpraak(p) {
+  let m;
+  if ((m = /^(.+), (\d{2}:\d{2})-(\d{2}:\d{2})$/.exec(p))) return m[1] + ' van ' + m[2] + ' tot ' + m[3];
+  if ((m = /^(.+) \(hele dag\)$/.exec(p))) return m[1] + ', de hele dag';
+  if ((m = /^(.+) t\/m (.+) \(hele dagen\)$/.exec(p))) return 'van ' + m[1] + ' tot en met ' + m[2] + ', hele dagen';
+  if ((m = /^(.+) (\d{2}:\d{2}) tot (.+) (\d{2}:\d{2})$/.exec(p))) return 'van ' + m[1] + ' ' + m[2] + ' tot ' + m[3] + ' ' + m[4];
+  return null;
+}
+function telAgNaam(an) { return an === 'hoofdagenda' ? 'je eigen agenda' : 'je ' + an; }
+// De herhaalzin uit de kaarttekst van n8n (wat David in de app ziet en wat de kaart-hash bindt). null = niet vast op te bouwen.
+function telAgendaHerhaal(tekst) {
+  const t = String(tekst || '');
+  let m = TEL_AG_NIEUW_RE.exec(t);
+  if (m) {
+    const an = m[1], per = telAgPerSpraak(m[2]);
+    let r = m[3];
+    const nL = telTelIn(r, '", locatie "'), nO = telTelIn(r, '", omschrijving "');
+    if (!per || nL > 1 || nO > 1 || !/"$/.test(r)) return null;
+    r = r.slice(0, -1);   // de laatste " vóór de punt
+    let om = false, loc = null;
+    if (nO) { const i = r.indexOf('", omschrijving "'); om = true; r = r.slice(0, i); }
+    if (nL) { const i = r.indexOf('", locatie "'); loc = r.slice(i + '", locatie "'.length); r = r.slice(0, i); }
+    if (!r.trim() || /"/.test(loc || '')) return null;
+    return 'Ik zet ' + per + ' "' + r + '" in ' + telAgNaam(an) + (loc ? ', locatie ' + loc : '') + (om ? ', met de omschrijving uit het voorstel' : '') + '. Klopt dat?';
+  }
+  m = TEL_AG_WIJZIG_RE.exec(t);
+  if (m) {
+    const oud = telAgPerSpraak(m[1]);
+    if (!oud || telTelIn(t, '": ') !== 1) return null;
+    const wat = m[4].replace(/(\d{2}:\d{2})-(\d{2}:\d{2})/g, '$1 tot $2');
+    return 'Ik wijzig in ' + telAgNaam(m[2]) + ' de afspraak "' + m[3] + '" (' + oud + '): ' + wat + '. Klopt dat?';
+  }
+  return null;   // verwijderen, onbekende tijd of een andere vorm: in de Socev-app
+}
+function telSmsNummerSpraak(n) {
+  const m = /^\+31(\d{9})$/.exec(String(n || ''));
+  const d = m ? '0' + m[1] : String(n || '').replace(/^\+/, 'plus ');
+  return d.replace(/(\d{2})(?=\d)/g, '$1 ').trim();
+}
+function telSmsHerhaal(v) {
+  if (!v || typeof v.naar !== 'string' || typeof v.tekst !== 'string' || !v.tekst.trim()) return null;
+  return 'Ik verstuur vanaf je eigen telefoon een sms aan ' + (v.naam ? v.naam + ', nummer ' : 'nummer ') + telSmsNummerSpraak(v.naar) + ', met de tekst: "' + v.tekst + '". Klopt dat?';
+}
+// Eén open ✅-voorstel zoals Onderweg het krijgt, uit de vastgelegde rij; null = geen (meer) open ✅ in het hoofdkanaal.
+async function telVoorstelKnop(id, e) {
+  e = e || appAgendaKnoppen()[id];
+  const K = e && e.knoppen && e.knoppen.uitvoeren;
+  const nu = Date.now();
+  if (!e || e.kanaal !== 'hoofd' || !K || typeof K !== 'object' || K.stand === 'klaar' || appAgendaBezig(K, nu) || !(nu <= Number(K.verloopt))) return null;
+  let soort, zin = null, waarom = '';
+  if (e.sms) { soort = 'sms'; zin = telSmsHerhaal(e.sms); if (!zin) waarom = 'sms zonder nummer of tekst'; }
+  else if (e.reeks) { soort = 'agenda'; waarom = 'reeks'; }
+  else if (typeof K.hash === 'string' && typeof K.th === 'string') {
+    soort = 'agenda';
+    let tekst = null;
+    try { tekst = await appAndersBericht('hoofd', id); } catch (x) { logError('tel-herhaal', x); }
+    if (!tekst) waarom = 'kaarttekst niet leesbaar';
+    else if (appSha(tekst) !== K.th) waarom = 'kaarttekst anders dan vastgelegd';
+    else { zin = telAgendaHerhaal(tekst); if (!zin) waarom = 'vorm niet vast op te bouwen'; }
+  } else { soort = 'agenda'; waarom = 'geen agendakaart (oud voorstel zonder hash)'; }
+  if (zin && zin.length > TEL_HERHAAL_ZIN_MAX) { zin = null; waarom = 'te lang om voor te lezen'; }
+  const h = appSha(JSON.stringify(['wv4017', id, soort, zin, K.hash || '', K.th || '', e.sms ? [e.sms.naar, e.sms.tekst] : null])).slice(0, 16);
+  return { id: id, soort: soort, titel: soort === 'sms' ? 'Sms-voorstel' : 'Agendavoorstel', tekst: zin ? zin.replace(/ Klopt dat\?$/, '') : null, kan: !!zin, h: h,
+    _zin: zin, _waarom: waarom, verloopt: new Date(Number(K.verloopt)).toISOString() };
+}
+async function telVoorstelKnoppen() {
+  const m = appAgendaKnoppen(), uit = [];
+  const ids = Object.keys(m).filter(function (id) { return m[id] && m[id].kanaal === 'hoofd' && APP_JOB_RE.test(id); })
+    .sort(function (a, b) { return Date.parse(m[a].t) - Date.parse(m[b].t); });
+  for (const id of ids) {
+    if (uit.length >= TEL_VOORSTELKNOP_MAX) break;
+    const v = await telVoorstelKnop(id, m[id]);
+    if (v) uit.push({ id: v.id, soort: v.soort, titel: v.titel, tekst: v.tekst, kan: v.kan, h: v.h, verloopt: v.verloopt });
+  }
+  return uit;
+}
+// Eerste tik op ✓ JA: de herhaalzin + een eenmalige pas voor dít apparaat (een nieuwe vervangt de oude).
+async function telHerhaalRoute(req, res, t, q) {
+  if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'herhaal: geen onderweg-sleutel');
+  if (!telSessieOk(t)) return telWeiger(res, 423, 'open eerst even de Socev-app', 'geen app-sessie (herhaal)');
+  if (!appTeller('tel-tik', TEL_TIK_PER_UUR, 3600000)) return telWeiger(res, 429, 'te vaak dit uur', 'grens herhaal');
+  const id = String(q.get('doel') || ''), h = String(q.get('h') || '');
+  if (!APP_JOB_RE.test(id) || !/^[a-f0-9]{16}$/.test(h)) return telWeiger(res, 400, 'ongeldig voorstel', 'herhaal velden');
+  if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve', 'rol passief (herhaal)');
+  const v = await telVoorstelKnop(id);
+  if (!v) return telWeiger(res, 409, 'dit voorstel staat niet meer open', 'herhaal: niet open');
+  if (v.h !== h) return telWeiger(res, 409, 'het voorstel is intussen veranderd', 'herhaal: h anders');
+  if (!v.kan) { res._tel.reden = 'herhaal ' + v.soort + ': app (' + v._waarom + ')'; return telStuur(res, 409, { ok: false, app: true, fout: 'Dit bevestig je in de Socev-app' }); }
+  const pas = crypto.randomBytes(8).toString('hex');
+  telStaat.herhaal[t.id] = { id: id, h: h, pas: pas, tot: Date.now() + TEL_HERHAAL_MS };
+  res._tel.reden = 'herhaal ' + v.soort;
+  telStuur(res, 200, { ok: true, zin: v._zin, h: h, pas: pas, geldig_s: TEL_HERHAAL_MS / 1000 });
+}
+// Tweede tik (ja, met pas) of ❌ (nee, zonder pas): precies de ✅/❌ uit de app op die rij.
+async function telTikVoorstel(req, res, t, q, a, sEcht, keuze) {
+  const id = String(q.get('doel') || ''), h = String(q.get('h') || ''), pas = String(q.get('pas') || '');
+  if (!APP_JOB_RE.test(id) || !/^[a-f0-9]{16}$/.test(h) || (keuze === 'ja' && !/^[a-f0-9]{16}$/.test(pas))) return telWeiger(res, 400, 'ongeldige tik', 'tik voorstel velden');
+  if (keuze === 'ja') {   // de pas is eenmalig: verbruikt vóór de eerste await, ook als hierna iets niet klopt
+    const hp = telStaat.herhaal[t.id];
+    delete telStaat.herhaal[t.id];
+    if (!hp || hp.tot < Date.now() || hp.id !== id || hp.h !== h || !appGelijk(hp.pas, pas)) return telWeiger(res, 409, 'tik eerst op JA en luister naar de herhaalvraag', 'tik voorstel: pas ' + (!hp ? 'geen' : hp.tot < Date.now() ? 'verlopen' : 'anders'));
+  }
+  const v = await telVoorstelKnop(id);
+  if (!v) return telWeiger(res, 409, 'dit voorstel staat niet meer open', 'tik voorstel: niet open');
+  if (v.h !== h) return telWeiger(res, 409, 'het voorstel is intussen veranderd; luister opnieuw', 'tik voorstel: h anders');
+  if (keuze === 'ja' && !v.kan) return telWeiger(res, 409, 'Dit bevestig je in de Socev-app', 'tik voorstel: niet vast');
+  const s = Object.assign({}, sEcht, { credential: a.credential.id, vers_tot: keuze === 'ja' ? Date.now() + 30000 : 0, onderweg: t.id, onderweg_tik: true, onderweg_herhaal: keuze === 'ja' });
+  const u2 = await telViaApp(appAgendaRoute, [req, a, s, { kanaal: 'hoofd', job_id: id, knop: 'uitvoeren', keuze: keuze }]);
+  appAudit({ route: '/app/agenda', m: 'ONDERWEG', status: u2.status, apparaat: a.id, reden: (keuze === 'ja' ? 'tweede tik na herhaalvraag' : 'tik nee') + ' via onderweg ' + t.id + ' (' + v.soort + '): ' + (u2.reden || '') });
+  const ok = u2.status === 200 && u2.j.ok === true;
+  res._tel.reden = 'tik voorstel ' + v.soort + ' ' + keuze + ' -> ' + u2.status + (u2.j.pagina ? ' ' + u2.j.pagina : '');
+  telStuur(res, ok ? 200 : (u2.status >= 400 ? u2.status : 409), { ok: ok, pagina: u2.j.pagina || undefined, melding: u2.j.melding ? appAgendaPlat(u2.j.melding) : undefined,
+    fout: ok ? undefined : String(u2.j.fout || u2.j.melding || 'lukte niet').slice(0, 200) });
+}
+// ── einde wv4017 ──
 // GET /tel/uit?lijst=kaartstem&id=<kaart>: de kaart (titel, vraag, voorstel) ingesproken met de pod-stem, alleen na een tik in Onderweg
 // (passagiers). Zelfde sloten als Voor jou; 40 per dag; in het geheugen per (kaart, tekst_id).
 telStaat.kaartstem = {};
