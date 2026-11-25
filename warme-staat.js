@@ -583,7 +583,10 @@ function maak(o) {
     try { app = await appTik(); } catch (e) { app = 'fout'; }
     const nt = staat.soorten['n8n-tabellen']; if (nt) nt.geprobeerd = 0;
     const r = await ronde({ standin: false });
-    return { uitkomst: r.uitkomst, app: app, fout: r.fout || null, staat_sha256: appDataDuw() };
+    // Codex r1 MOET 1: alleen een app-data-kopie die nu op de R230 staat telt als vers; anders geen hash en uitkomst 'deels'
+    const vers = app === 'ok' || app === 'al' || app === 'gelijk';
+    return { uitkomst: vers ? r.uitkomst : (r.uitkomst === 'ok' ? 'deels' : r.uitkomst), app: app, app_vers: vers, fout: r.fout || (vers ? null : 'app-data niet vers (' + app + ')'),
+      staat_sha256: vers ? appDataDuw() : null };
   }
   // sha256 van de laatste app-data-kopie die de R230 bevestigde (olares); null = (nog) geen gedeelde kopie
   function appDataDuw() { const s = staat.soorten['app-data']; return s && /^[0-9a-f]{64}$/.test(s.sha256 || '') && s.gedeeld === s.sha256 ? s.sha256 : null; }

@@ -225,6 +225,34 @@ test('geplande wissel: echt nooit bevestigd (één logregel); passief en kant vp
   await s.dicht();
 });
 
+test('geplande wissel: proces stopte midden in de opdracht (bezig in het staatbestand) → hervat; met eindstand alleen de bevestiging (Codex r1 MOET 3)', async () => {
+  const s = await nepNood(); const d = opzet(); d.url = s.url; d.sleutel(true);
+  const id1 = hex('8', 32), id2 = hex('9', 32);
+  fs.writeFileSync(path.join(d.T, 'staat.json'), JSON.stringify({ opdrachten: {
+    [id1]: { naam: 'proef', op: 1, volg: 1, uitkomst: 'bezig', pogingen: 0 },
+    [id2]: { naam: 'proef', op: 2, volg: 2, uitkomst: 'opnieuw', pogingen: 1, eindstand: { droog: true, staat_sha256: hex('a', 64), lsn: '1/2', ronde: 'ok' } } } }));
+  const m = N.maak(d.opties());
+  s.opdracht = { id: id1, doel: 'vps', naam: 'proef', standversie: 7 };
+  await m.tik(); await m._wacht();
+  assert.strictEqual(d.warm.length, 1, 'zonder eindstand: verse ronde opnieuw');
+  s.opdracht = { id: id2, doel: 'vps', naam: 'proef', standversie: 7 };
+  await m.tik(); await m._wacht();
+  assert.strictEqual(d.warm.length, 1, 'met eindstand: geen nieuwe ronde');
+  const bv = bevestigd(s);
+  assert.deepStrictEqual(bv.map((v) => v.body.opdracht_id), [id1, id2]);
+  assert.deepStrictEqual(bv[1].body.eindstand, { droog: true, staat_sha256: hex('a', 64), lsn: '1/2', ronde: 'ok' });
+  await s.dicht();
+});
+
+test('geplande wissel: app-data niet vers = geen hash (ook niet de oude)', async () => {
+  const s = await nepNood(); const d = opzet(); d.url = s.url; d.sleutel(true);
+  s.opdracht = { id: hex('b', 32), doel: 'vps', naam: 'proef', standversie: 7 };
+  const m = N.maak(d.opties({ warmVers: async () => ({ uitkomst: 'deels', app_vers: false, staat_sha256: null }), staatSha: () => hex('7', 64) }));
+  await m.tik(); await m._wacht();
+  assert.deepStrictEqual(bevestigd(s)[0].body.eindstand, { droog: true, staat_sha256: null, lsn: '9/8E0051D0', ronde: 'deels' });
+  await s.dicht();
+});
+
 test('geplande wissel: verse ronde te laat = toch één bevestiging (ronde te laat), lsn onbekend = null', async () => {
   const s = await nepNood(); const d = opzet(); d.url = s.url; d.sleutel(true); d.lsn = null;
   s.opdracht = { id: hex('6', 32), doel: 'vps', naam: 'proef', standversie: 7 };
@@ -341,6 +369,12 @@ test('verseRonde (A2): app-data zonder 15 s-rem, geen stand-in, geeft de sha van
   assert.strictEqual(v.app, 'ok'); assert.ok(v.staat_sha256 && v.staat_sha256 !== sha1, JSON.stringify(v));
   assert.strictEqual(v.staat_sha256, m.appDataDuw());
   assert.ok(!m.stand().standin, 'geen stand-in-ronde');
+  // R230 weg bij de app-data-duw: geen hash, uitkomst niet ok (Codex r1 MOET 1)
+  fs.writeFileSync(path.join(w.thuis, 'socev-app-data/apparaten.json'), '{"apparaten":[2]}');
+  fs.writeFileSync(path.join(w.T, 'ssh'), '#!/usr/bin/env bash\nexit 255\n', { mode: 0o755 });
+  w.s.klok += 120000;
+  const v2 = await m.verseRonde(5000);
+  assert.strictEqual(v2.staat_sha256, null, JSON.stringify(v2)); assert.notStrictEqual(v2.uitkomst, 'ok'); assert.strictEqual(v2.app_vers, false);
   w.s.primair = false;
   assert.strictEqual((await m.verseRonde(1000)).uitkomst, 'rol');
 });

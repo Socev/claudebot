@@ -48,6 +48,8 @@ const toets = (n, ok, x) => { if (ok) goed++; else fout++; console.log((ok ? 'GR
   toets('B2 spaarstand: agent zelf geen browser, beurt wel zonder agent, niet naast een agent', maak(true, 0)(true) === true && maak(true, 0)(false) === false && maak(true, 1)(false) === true);
   toets('B3 aangesloten: --disallowedTools mcp__playwright, /ophalen en winkelbrowser', /spaarBrowserDicht\(!!\(opts && opts\.env && opts\.env\[EIND_MARKER\]\)\) \? 'mcp__playwright'/.test(BRON)
     && /if \(spaarBrowserDicht\(false\)\) return stuur\(200/.test(BRON) && /!browserMag\(url\) \|\| spaarBrowserDicht\(false\)/.test(BRON));
+  toets('B4 beurt mét browser houdt een agent tegen tot hij klaar is (Codex r1 MOET 2)', /spaarBrowserBeurten\.set\(spaarToken/.test(BRON) && /if \(spaarToken\) spaarBrowserBeurten\.delete\(spaarToken\)/.test(BRON)
+    && /\} else if \(SPAARSTAND && spaarBrowserBeurtLopend\(\)\) \{/.test(BRON) && /agentInfo\(\)\.lopend >= maxAgents\(\) \|\| spaarBrowserBeurtLopend\(\)/.test(BRON));
 })();
 
 // ── routes uit handleApp ──

@@ -222,13 +222,15 @@ function maak(o) {
       if (!gezien) { nieuweOpdracht(id, { naam: kort(op.naam, 12), op: nu(), uitkomst: 'onbekende naam' }); bewaar(); log('geplande wissel met onbekende naam genegeerd'); }
       return 'onbekend';
     }
-    if (gezien && gezien.uitkomst !== 'opnieuw') return 'al';
+    // 'bezig' in het bewaarde staatbestand = een vorig proces stopte midden in de opdracht (Codex r1 MOET 3): hervatten
+    if (gezien && gezien.uitkomst !== 'opnieuw' && gezien.uitkomst !== 'bezig') return 'al';
     if (gezien && (gezien.pogingen || 0) >= BEVESTIG_POGINGEN) return 'al';
     st.opdrachtBezig = id;
     try {
       let x = gezien;
-      if (!x) {
-        x = nieuweOpdracht(id, { naam: 'proef', op: nu(), uitkomst: 'bezig', pogingen: 0 }); bewaar();
+      if (!x || !x.eindstand) {
+        if (!x) x = nieuweOpdracht(id, { naam: 'proef', op: nu(), uitkomst: 'bezig', pogingen: 0 });
+        x.uitkomst = 'bezig'; bewaar();
         log('droge geplande wissel ' + id.slice(0, 8) + ': verse warme staat');
         let ronde = null;
         if (typeof o.warmVers === 'function') {
@@ -239,8 +241,10 @@ function maak(o) {
         }
         let lsn = null;
         if (typeof o.lsn === 'function') { try { lsn = await o.lsn(); } catch (e) { lsn = null; } }
+        // de hash alleen uit een verse ronde; te laat of zonder ronde: de laatst gedeelde kopie (ronde zegt dan hoe vers hij is)
         const staatSha = ronde && HEX64.test(String(ronde.staat_sha256 || '')) ? ronde.staat_sha256
-          : (typeof o.staatSha === 'function' && HEX64.test(String(o.staatSha() || '')) ? o.staatSha() : null);
+          : (ronde && ronde.app_vers === false ? null : (typeof o.staatSha === 'function' && HEX64.test(String(o.staatSha() || '')) ? o.staatSha() : null));
+        x.uitkomst = 'opnieuw';   // eindstand vast: na een herstart alleen nog de bevestiging
         x.eindstand = { droog: true, staat_sha256: staatSha, lsn: typeof lsn === 'string' && /^[0-9A-F]{1,8}\/[0-9A-F]{1,8}$/.test(lsn) ? lsn : null,
           ronde: kort(ronde ? ronde.uitkomst : 'geen warme staat', 20) };
         bewaar();

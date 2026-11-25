@@ -473,6 +473,14 @@ const SPAAR_STIL_TEKST = 'Dit ligt stil zolang Socev op de andere kant draait; h
 function spaarInfo() { return { aan: SPAARSTAND, grenzen: SPAARSTAND ? SPAAR_GRENZEN : null }; }
 // Browser dicht: in spaarstand voor elke agent, en voor al het andere zolang er een agent loopt
 function spaarBrowserDicht(isAgent) { return SPAARSTAND && (!!isAgent || agentInfo().lopend > 0); }
+// Codex r1 MOET 2: een beurt die mét browser-tools startte (geen agent liep), houdt een agent tegen tot hij klaar is (anders kon hij
+// later alsnog een browser openen naast die agent). Token → starttijd; ouder dan 3 u telt niet (vangnet als finish() nooit kwam).
+const spaarBrowserBeurten = new Map();
+function spaarBrowserBeurtLopend() {
+  const t = Date.now();
+  for (const [k, v] of spaarBrowserBeurten) { if (t - v > 3 * 3600e3) spaarBrowserBeurten.delete(k); }
+  return spaarBrowserBeurten.size;
+}
 let maxAgentsCache = { mtime: -1, max: null, tot: 0 };
 function maxAgents() {
   if (SPAARSTAND) return SPAAR_GRENZEN.agents;   // wv3909: gaat vóór env en max-agents.json
@@ -1690,6 +1698,8 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // wv3909 (spaarstand, kant vps): geen browser-tools voor een agent, en voor een beurt niet zolang er een agent loopt
     const verboden = [opts && opts.disallowedTools, spaarBrowserDicht(!!(opts && opts.env && opts.env[EIND_MARKER])) ? 'mcp__playwright' : ''].filter(Boolean).join(' ');
     if (verboden) args.push('--disallowedTools', verboden);
+    const spaarToken = SPAARSTAND && verboden.split(' ').indexOf('mcp__playwright') < 0 ? {} : null;   // beurt mét browser in spaarstand
+    if (spaarToken) spaarBrowserBeurten.set(spaarToken, Date.now());
     if (opts && opts.advisor) args.push('--advisor', opts.advisor);   // wv479: alleen achtergrondagents, waarde al getoetst (ontleedAdviseur)
     args.push.apply(args, mkTekstArgs(opts));   // wv1001: welke instructiebestanden en welk geheugen (opts.tekst mk | smal)
     args.push('--', prompt);
@@ -1811,6 +1821,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     function finish(r) {
       if (resolved) return;
       resolved = true;
+      if (spaarToken) spaarBrowserBeurten.delete(spaarToken);   // wv3909
       clearInterval(watchdog);
       if (stappenStop) stappenStop();
       progress.deel = '';   // wv3824: na het einde telt alleen het echte antwoord (of de fout)
@@ -5248,10 +5259,13 @@ function handleRequest(req, res) {
           res.writeHead(429, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ ok: false, error: 'terra-loopt', uitleg: 'er loopt al een Terra-bundel' }));
         }
-        if (SPAARSTAND && agentInfo().lopend >= maxAgents()) {   // wv3909: in spaarstand telt Terra mee
+        if (SPAARSTAND && (agentInfo().lopend >= maxAgents() || spaarBrowserBeurtLopend())) {   // wv3909: in spaarstand telt Terra mee
           res.writeHead(429, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ ok: false, error: 'max-agents', spaarstand: true, uitleg: 'Spaarstand (Socev draait op de andere kant): er loopt al een achtergrondagent (maximum ' + maxAgents() + ').' }));
         }
+      } else if (SPAARSTAND && spaarBrowserBeurtLopend()) {   // wv3909 (Codex r1 MOET 2): geen agent naast een beurt met browser
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: false, error: 'max-agents', spaarstand: true, uitleg: 'Spaarstand (Socev draait op de andere kant): er loopt een beurt met browser; de agent start daarna.' }));
       } else if (agentInfo().lopend - (SPAARSTAND ? 0 : terraLopend()) >= maxAgents()) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: false, error: 'max-agents', spaarstand: SPAARSTAND || undefined, uitleg: 'Er lopen al ' + (agentInfo().lopend - (SPAARSTAND ? 0 : terraLopend())) + ' achtergrondagents (maximum ' + maxAgents() + (SPAARSTAND ? ', spaarstand' : '') + '); wacht tot er één klaar is.' }));
