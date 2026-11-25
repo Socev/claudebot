@@ -1499,6 +1499,10 @@ srv.listen(0, '127.0.0.1', async () => {
     const bpJ = JSON.parse(fs.readFileSync(path.join(DATA, 'briefing-punten.json'), 'utf8'));
     toets('8y Reageer "Gedaan." op een punt: 200 punt-stand gedaan, geen Socev-beurt', r.status === 200 && r.j.stand === 'gedaan' && gestart.length === gBij &&
       ((bpJ.edities['briefing:' + dagY] || {}).punten || {})[pGarage.id] && bpJ.edities['briefing:' + dagY].punten[pGarage.id].stand === 'gedaan', { r: r.j, bpJ });
+    H.appStaat.tellers['briefingpunt'] = Array(200).fill(Date.now());
+    r = await bijB(sk[iO].stem, 'Klopt niet.');
+    toets('8y Reageer "Klopt niet." boven de grens: 429 met zin, geen beurt (Codex ronde 3)', r.status === 429 && /te vaak/.test(r.j.fout) && gestart.length === gBij, r.j);
+    H.appStaat.tellers['briefingpunt'] = [];
     r = await bijB(sk[iG + 1].stem, 'Ja, graag.');
     await tik();
     toets('8y Reageer "Ja, graag." op een vraag: 409 tik_ja "Tik op JA", geen beurt, kaart niet beantwoord (Codex MOET 2)', r.status === 409 && r.j.tik_ja === true && /Tik op JA/.test(r.j.fout) && gestart.length === gBij &&

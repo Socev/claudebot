@@ -19928,14 +19928,14 @@ async function telBijVoor(t, tekst, bij) {
   if (!s) return { extra: '' };
   if (s.soort === 'vraag' && TEL_KORTJA_RE.test(tekst)) return { klaar: true, status: 409, body: { ok: false, tik_ja: true, fout: 'Tik op JA om het te doen' }, reden: 'bij: gesproken ja (geen knopdruk)' };
   const stand = s.soort === 'punt' && s.punt_id ? (TEL_GEDAAN_RE.test(tekst) ? 'gedaan' : TEL_KLOPTNIET_RE.test(tekst) ? 'klopt_niet' : null) : null;
-  if (stand) {
-    try {
-      const b = await appBriefingLaad(), punt = b && b.p ? b.p.punten.find(function (x) { return x.id === s.punt_id; }) : null;
-      if (punt && appTeller('briefingpunt', APP_BRIEFING_PUNT_PER_UUR, 3600000)) {
-        await appBriefingPuntZet(b.dag, punt, stand);
-        return { klaar: true, status: 200, body: { ok: true, stand: stand, zin: stand === 'gedaan' ? 'Genoteerd: gedaan.' : 'Genoteerd: klopt niet.' }, reden: 'bij: punt ' + stand };
-      }
-    } catch (e) { logError('briefing-punten', e); }
+  if (stand) {   // Codex MOET (ronde 3): een herkend "gedaan"/"klopt niet" valt nooit stil door naar een beurt; lukt het niet, dan zegt hij dat
+    let b = null, punt = null;
+    try { b = await appBriefingLaad(); punt = b && b.p ? b.p.punten.find(function (x) { return x.id === s.punt_id; }) : null; } catch (e) { logError('briefing-punten', e); }
+    if (!punt) return { klaar: true, status: 409, body: { ok: false, fout: 'dit punt staat niet meer in de briefing van vandaag' }, reden: 'bij: punt weg' };
+    if (!appTeller('briefingpunt', APP_BRIEFING_PUNT_PER_UUR, 3600000)) return { klaar: true, status: 429, body: { ok: false, fout: 'te vaak dit uur; tik het straks in de app' }, reden: 'bij: grens briefing-punt' };
+    try { await appBriefingPuntZet(b.dag, punt, stand); }
+    catch (e) { logError('briefing-punten', e); return { klaar: true, status: 500, body: { ok: false, fout: 'opslaan lukte niet; tik het in de app' }, reden: 'bij: punt opslaan mislukt' }; }
+    return { klaar: true, status: 200, body: { ok: true, stand: stand, zin: stand === 'gedaan' ? 'Genoteerd: gedaan.' : 'Genoteerd: klopt niet.' }, reden: 'bij: punt ' + stand };
   }
   const wat = s.soort === 'vraag' ? 'de vraag die je in je ochtendbriefing stelde' : 'dit stuk uit je ochtendbriefing van vandaag';
   const inhoud = s.soort === 'vraag' ? s.tekst + ' (' + (s.uitleg || '') + ')' : s.tekst;
