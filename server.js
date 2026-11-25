@@ -17713,16 +17713,20 @@ function berichtNieuwGezien(apparaatId) {
     if (!(nu - (b[apparaatId] || 0) < BERICHT_NIEUW_SCHRIJF_MS)) { appSchrijfJson(BERICHT_NIEUW_LAATST, m); b[apparaatId] = nu; }
   } catch (e) { logError('bericht-nieuw', e); }
 }
-// Dode-mansknop (§ 4.3-3, Fable-review wv263 #1/#2): alleen de Pixel (de goedkeurder) telt; een laptop die op de praktijk open
-// staat zegt niets over de telefoon. Een stille nacht is geen dode app: pas als de Pixel 12 u niet keek ÉN een seintje van
-// overdag (07–23 u) aan de Pixel na 2 u nog onbeantwoord is (geen GET /app/nieuw erna), dan false -> n8n stuurt ook naar
-// Telegram. Register onleesbaar of geen goedkeurder: false (liever ook Telegram).
+// Dode-mansknop (§ 4.3-3, Fable-review wv263 #1/#2). Een stille nacht is geen dode app: pas als geen enkel actief apparaat 12 u
+// keek ÉN een seintje van overdag (07–23 u) aan de Pixel (de goedkeurder) na 2 u nog onbeantwoord is (geen GET /app/nieuw erna),
+// dan false. Register onleesbaar: false.
+// wv4041 (David 24-11 "waarom krijg ik agentrapporten in Telegram?"): vroeger telde alleen de Pixel; met de telefoon 12 u dicht en de
+// app open op de Spreekkamer-pc gaf dit false en ging alles als kopie naar Telegram. Nu telt elk actief apparaat (ook de pc's). Sinds
+// wv4041 stuurt niemand meer een kopie op false (n8n "Bericht aan David" en bericht.py); het veld blijft in /bericht, stand en /health.
 function berichtAppActief() {
-  let p;
-  try { p = appGoedkeurder(appRegister()); } catch (e) { return false; }
-  if (!p) return false;
-  const nu = Date.now(), keek = berichtNieuwLaatst()[p.id] || 0;
+  let reg, p;
+  try { reg = appRegister(); p = appGoedkeurder(reg); } catch (e) { return false; }
+  const laatst = berichtNieuwLaatst(), nu = Date.now();
+  let keek = 0;
+  (reg.apparaten || []).forEach(function (a) { const t = a && a.actief ? Number(laatst[a.id]) || 0 : 0; if (t > keek) keek = t; });
   if (nu - keek < BERICHT_DODE_MANS_MS) return true;
+  if (!p) return false;
   let l = null;
   try { const s = appPushLees().apparaten[p.id]; l = s && s.laatst; } catch (e) { return true; }
   const op = l ? Date.parse(l.op) : 0;
