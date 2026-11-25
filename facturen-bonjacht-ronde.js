@@ -28,7 +28,7 @@ const GRENS = {
   ms: 120000,                // na 2 min in deze stap geen nieuwe post meer
   pogingen: 4,               // een zoekfout zo vaak opnieuw; daarna blijft hij op fout staan (zichtbaar in het blok)
   berichten: 6,              // nieuwe lijstmails per ronde
-  dagen: 21,                 // zo ver kijkt de zoekvraag terug
+  dagen: 35,                 // zo ver kijkt de lijstzoekvraag terug (wv4027: 21 → 35; de echte lijst van 26-10 viel bij de eerste live ronde van 25-11 buiten 21 d)
   bijlageBytes: 5 * 1024 * 1024,
   luikMs: 60000,             // eigen time-out per luikvraag (memory leesluik-zoeken-traag-bij-25: standaard 15 s is te krap bij 25 treffers)
   pdfPaginas: 6,

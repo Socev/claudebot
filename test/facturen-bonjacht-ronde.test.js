@@ -101,13 +101,13 @@ function opzet() {
 const BON = { id: '19aa00000000b001', van: 'Webwinkel Blauwbes <orders@blauwbes.invalid>', onderwerp: 'Je bestelling 123 bij Webwinkel Blauwbes', dag: '2026-10-19',
   tekst: 'Bedankt voor je bestelling bij Webwinkel Blauwbes.\nTotaal: € 144,00 (incl. btw)\nBetaald met iDEAL.', bedragen: ['144,00'] };
 
-test('geen lijst in de mail: niets vastgelegd, alleen de twee zoekvragen (prive en dm)', async () => {
+test('geen lijst in de mail: niets vastgelegd, alleen de twee zoekvragen (prive en dm, 35 dagen)', async () => {
   const t = opzet(); const g = nepLuik(t);
   const u = await t.ronde(g);
   assert.equal(u.ok, true);
   assert.equal(t.fdb.db.prepare('SELECT count(*) AS n FROM bonjacht_lijst').get().n, 0);
   assert.equal(g.vragen.length, 2);
-  assert.ok(g.vragen.every((v) => v.actie === 'mail_zoeken' && v.query.includes('from:(' + AFZ + ')') && /newer_than:21d/.test(v.query)));
+  assert.ok(g.vragen.every((v) => v.actie === 'mail_zoeken' && v.query.includes('from:(' + AFZ + ')') && /newer_than:35d/.test(v.query)));
 });
 
 test('lijst herkend → posten aan de bank, bon gevonden en in Beoordelen met "al betaald"; pinpas niet gevonden met reden; Bevestigen koppelt aan de bankregel', async () => {
