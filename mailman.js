@@ -230,6 +230,10 @@ const L2_LIJST_MAX = 5000;                         // berichten per labellijst; 
 const L2_VENSTER_MS = 13 * 24 * 3600 * 1000;       // n8n vraagt newer_than:14d; weg alleen beoordelen voor mail die zeker in de lijst had gestaan
 const AANBOD_EIGEN_MS = 3600 * 1000;               // aangeboden maar (nog) niet teruggemeld: tot 1 uur telt het als MailMans eigen actie
 const VANGNET_MS = 3 * 24 * 3600 * 1000;           // Twijfel zonder keuze: na 3 dagen INTAKE erbij (wv2196: gerekend vanaf het labelmoment)
+// wv4093 (besluitenpagina nr 320 / 3C20; David 25-11-2026 21:50 Ja op "Wil je dat mail waar MailMan over twijfelt meteen doorgaat naar Intake in
+// plaats van eerst drie dagen te wachten?"): bij twijfel_naar intake krijgt Twijfel in labelset 2 al bij het besluit INTAKE (+ wachtrij), en het
+// vangnet wacht niet meer (0 dagen) voor wat die tak niet meenam. Intake beslist of vraagt het David. Terugrol: false (dan weer 3 dagen).
+const TWIJFEL_DIRECT = true;
 // wv2196: zichtbare labels die op de hele draad gaan (bij DRAAD_SOORTEN), en wat een nieuw bericht van de draad erft (TWIJFEL nooit meer erbij)
 const DRAAD_LABELS = ['INTAKE', 'NIEUWSBRIEF', 'SOCIAAL', 'OVERIG', 'TWIJFEL', 'TODO', 'ACTIE_DS', 'AGENDA', 'BEZORGING', 'SYSTEEM'];
 const ERF_LABELS = DRAAD_LABELS.filter(function (l) { return l !== 'TWIJFEL'; });
@@ -1908,6 +1912,9 @@ function maak(o) {
       return true;
     };
     const wachtrijErbij = function (erbij) { if (ruimte > 0) { ruimte--; erbij.push(WACHTRIJ); return true; } wacht++; return false; };
+    // David koos zelf in Gmail een categorie (geen TWIJFEL): dat is ook een keuze (vangnet en wv4093 twijfel-direct)
+    const davidKoos = function (id) { return !!db.prepare("SELECT 1 FROM label_staat WHERE postvak = ? AND gmail_id = ? AND bron = 'david' AND weg IS NULL AND label IN ('" + L2_CATEGORIE.filter(function (c) { return c !== 'TWIJFEL'; }).join("', '") + "') LIMIT 1").get(pv, id); };
+    const twDirect = TWIJFEL_DIRECT && o.twijfelDirect !== false && p.twijfel_naar !== 'info';   // wv4093 (o.twijfelDirect false: alleen de toetsen van het oude pad)
     const vanaf = new Date((p.live_sinds ? Date.parse(p.live_sinds) : nu()) - LIVE_INHAAL_MS).toISOString();
     // besluit
     for (const b of db.prepare("SELECT * FROM besluit WHERE postvak = ? AND status = 'klaar' AND inhaal = 0 AND labels_gezet IS NULL AND labels_plan IS NOT NULL AND stap != 'buiten' AND COALESCE(ontvangen, aangemaakt) >= ? ORDER BY COALESCE(ontvangen, aangemaakt), id").all(pv, vanaf)) {
@@ -1916,6 +1923,8 @@ function maak(o) {
       const plan = plan2Rij(b, instel), eff = stroomEffectief(b), gem = gemarkeerdRij(b);
       let lab = []; try { lab = JSON.parse(b.labels || '[]'); } catch (e) { lab = []; }
       const erbij = plan.labels.filter(function (l) { return mag(b.gmail_id, l) && !(Array.isArray(lab) && lab.includes(l)); });
+      // wv4093: Twijfel zonder keuze meteen INTAKE erbij (zoals het vangnet, maar zonder drie dagen), niet als David al zelf een categorie koos
+      if (twDirect && eff === 'twijfel' && plan.hoofd === 'TWIJFEL' && !erbij.includes('INTAKE') && mag(b.gmail_id, 'INTAKE') && !davidKoos(b.gmail_id) && !buitenRij(b)) erbij.push('INTAKE');
       const naarIntake = (erbij.includes('INTAKE') || lsHeeft(pv, b.gmail_id, 'INTAKE')) && intakeMag && !gem && !routeGet(pv, b.gmail_id) && !inIntake(pv, [b.gmail_id]).size;
       const wr = naarIntake && wachtrijErbij(erbij);
       const sa = st[eff] || {};
@@ -1944,7 +1953,7 @@ function maak(o) {
       voeg(b.gmail_id, 'keuze', erbij, eraf);
     }
     // vangnet
-    const drie = new Date(nu() - VANGNET_MS).toISOString();
+    const drie = new Date(nu() - (twDirect ? 0 : VANGNET_MS)).toISOString();   // wv4093: zonder wachttijd bij twijfel-direct
     // wv2196: TWIJFEL staat niet meer in Gmail; de drie dagen tellen vanaf het (oude) TWIJFEL-label, anders vanaf het labelmoment van het besluit
     // (alleen besluiten uit labelset 2, zonder wachtrijlabel). Haalde David TWIJFEL zelf weg, dan geen vangnet (zoals vóór wv2196).
     for (const b of db.prepare(`SELECT b.* FROM besluit b LEFT JOIN label_staat s ON s.postvak = b.postvak AND s.gmail_id = b.gmail_id AND s.label = 'TWIJFEL' AND s.gezet IS NOT NULL
@@ -1953,7 +1962,7 @@ function maak(o) {
         AND COALESCE(s.gezet, b.labels_tijd) <= ? ORDER BY COALESCE(s.gezet, b.labels_tijd), b.id LIMIT 100`).all(pv, '"' + WACHTRIJ + '"', p.labelset2_sinds || iso(), drie)) {
       if (vol()) break;
       // INTAKE staat al, David haalde het weg, of David koos zelf in Gmail een categorie (dat is ook een keuze)
-      const koos = db.prepare("SELECT 1 FROM label_staat WHERE postvak = ? AND gmail_id = ? AND bron = 'david' AND weg IS NULL AND label IN ('" + L2_CATEGORIE.filter(function (c) { return c !== 'TWIJFEL'; }).join("', '") + "') LIMIT 1").get(pv, b.gmail_id);
+      const koos = davidKoos(b.gmail_id);
       if (!mag(b.gmail_id, 'INTAKE') || koos || buitenRij(b)) { af.push({ k: 'vangnet', id: b.id }); continue; }
       if (teVaak(pv, b.gmail_id, 'vangnet')) continue;
       const erbij = ['INTAKE'];
@@ -2254,6 +2263,8 @@ function maak(o) {
           }
           if (a.soort === 'keuze') db.prepare('UPDATE besluit SET keuze_tijd = ? WHERE id = ?').run(iso(), b.id);
           if (a.soort === 'vangnet') db.prepare('UPDATE besluit SET vangnet_tijd = ? WHERE id = ?').run(iso(), b.id);
+          // wv4093: Twijfel die bij het besluit al INTAKE kreeg is doorgezet zoals na het vangnet (uit het vlakje en de open Twijfel-lijst)
+          if (a.soort === 'besluit' && b.stroom === 'twijfel' && b.juist == null && erbij.includes('INTAKE')) db.prepare('UPDATE besluit SET vangnet_tijd = COALESCE(vangnet_tijd, ?) WHERE id = ?').run(iso(), b.id);
           if (a.soort === 'overstap') db.prepare('UPDATE besluit SET overstap_tijd = ?, labels_gezet = COALESCE(labels_gezet, ?), labels_tijd = COALESCE(labels_tijd, ?) WHERE id = ?').run(iso(), JSON.stringify(erbij), iso(), b.id);
         }
       }
@@ -2753,6 +2764,9 @@ function maak(o) {
     db.prepare('DELETE FROM aanbod WHERE tijd < ?').run(new Date(nu() - 30 * 86400000).toISOString());   // wv2033: aanbiedingen alleen voor de terugmelding
     db.prepare('DELETE FROM zaak WHERE laatste < ?').run(new Date(nu() - ZAAK_BEWAAR_MS).toISOString());   // wv2218: alleen metadata, 60 dagen
     db.prepare("UPDATE besluit SET afzender = NULL, van_naam = NULL, aan = NULL, onderwerp = NULL, namen_weg = ? WHERE aangemaakt < ? AND namen_weg IS NULL").run(iso(), grens);
+    // wv4093 (besluitenpagina nr 47 / C37; David 25-11-2026 21:49 Ja met vingerafdruk): het voorbeeld-onderwerp uit Davids verzonden mail bij een
+    // geleerde regel ook na 14 dagen weg, gerekend vanaf de laatste doorsturing (laatst, YYYY-MM-DD; zonder: gemeten). De regel en de tellingen blijven.
+    db.prepare("UPDATE regel_herkomst SET voorbeeld = NULL WHERE voorbeeld IS NOT NULL AND COALESCE(laatst, gemeten) < ?").run(grens.slice(0, 10));
     // wv1998: de bestandsnamen van verkoopnota's (kunnen een patiëntnaam dragen) na dezelfde 14 dagen weg; nummer en bedrag blijven
     for (const v of db.prepare("SELECT id, pdfs FROM verkoop WHERE kandidaat_tijd < ? AND pdfs LIKE '%\"naam\":\"%'").all(grens)) {
       let l; try { l = JSON.parse(v.pdfs); } catch (e) { l = null; }
@@ -2833,7 +2847,8 @@ function maak(o) {
   function twijfelLijst(pv) {
     const q = "SELECT * FROM besluit WHERE postvak = ? AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? AND juist IS {X} NULL ORDER BY COALESCE(ontvangen, aangemaakt) DESC, id DESC LIMIT ?";
     const van = new Date(nu() - NAMEN_MS).toISOString();
-    return db.prepare(q.replace('{X}', '')).all(pv, van, TWIJFEL_LIJST).concat(db.prepare(q.replace('{X}', 'NOT')).all(pv, van, TWIJFEL_BEOORDEELD)).map(logRij);
+    // wv4093: open = wacht nog op een beslissing; wat het vangnet of twijfel-direct al naar Intake zette niet meer
+    return db.prepare(q.replace('{X} NULL', 'NULL AND vangnet_tijd IS NULL')).all(pv, van, TWIJFEL_LIJST).concat(db.prepare(q.replace('{X}', 'NOT')).all(pv, van, TWIJFEL_BEOORDEELD)).map(logRij);
   }
   // wv3872 (MailMan in Mail, fase B; David 22-11-2026 "Bouw maar"): GET /app/mailman/twijfel voor het vlakje "Socev twijfelt" bovenaan in
   // Mail. Alleen lezen en klein (niet het hele overzicht): per postvak de open Twijfel van de gewone rondes (14 dagen, nog geen keuze en nog
@@ -2849,7 +2864,7 @@ function maak(o) {
     }) };
   }
   function twijfelOpen(pv) {
-    return db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? AND juist IS NULL").get(pv, new Date(nu() - NAMEN_MS).toISOString()).n;
+    return db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? AND juist IS NULL AND vangnet_tijd IS NULL").get(pv, new Date(nu() - NAMEN_MS).toISOString()).n;
   }
   // wv1983: de eigen telling van de inhaal (los van de stroombalk): per stroom, de vijf grootste twijfelbronnen (domein), rondes en tokens
   function inhaalStand(pv, metLog) {
@@ -3249,7 +3264,7 @@ function maak(o) {
     if (!pvs.length) return null;
     const in_ = 'postvak IN (' + pvs.map(function () { return '?'; }).join(',') + ')';
     let rijen;
-    if (soort === 'twijfel') rijen = db.prepare("SELECT * FROM besluit WHERE " + in_ + " AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? AND juist IS NULL ORDER BY COALESCE(ontvangen, aangemaakt), id LIMIT ?").all(...pvs, new Date(nu() - NAMEN_MS).toISOString(), WS_MAX + 1);
+    if (soort === 'twijfel') rijen = db.prepare("SELECT * FROM besluit WHERE " + in_ + " AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? AND juist IS NULL AND vangnet_tijd IS NULL ORDER BY COALESCE(ontvangen, aangemaakt), id LIMIT ?").all(...pvs, new Date(nu() - NAMEN_MS).toISOString(), WS_MAX + 1);
     else if (soort === 'binnen') rijen = db.prepare("SELECT * FROM besluit WHERE " + in_ + " AND inhaal = 0 AND COALESCE(ontvangen, aangemaakt) >= ? ORDER BY COALESCE(ontvangen, aangemaakt) DESC, id DESC LIMIT ?").all(...pvs, new Date(nu() - 2 * 86400000).toISOString(), WS_MAX + 1);
     else if (soort === 'verwerkt') rijen = db.prepare("SELECT * FROM besluit WHERE " + in_ + " AND inhaal = 0 AND aangemaakt >= ? AND status = 'klaar' AND (stroom IN ('intake','factuur') OR juist IS NOT NULL) ORDER BY aangemaakt DESC, id DESC LIMIT ?").all(...pvs, new Date(nu() - 7 * 86400000).toISOString(), WS_MAX + 1);
     else return null;

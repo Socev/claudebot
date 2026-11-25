@@ -1807,9 +1807,10 @@ function l2Ronde(mm, gm, ids, o) {
   const g = mm.n8n('POST /mailman/gezet', { ronde: r.ronde, postvak: 'gmail:david', resultaten: res });
   return { r, s, l, g };
 }
-function b8Kamer() {
+// wv4093: de B8-toetsen van vóór twijfel-direct draaien op het oude pad (3 dagen vangnet; ook de terugrol); twijfel-direct eigen toetsen met { direct: true }
+function b8Kamer(x) {
   const intake = new Set();
-  const k = nieuweKamer({ intakeBerichten: function (pv, ids) { return new Set(ids.filter(function (i) { return intake.has(i); })); } });
+  const k = nieuweKamer({ twijfelDirect: !!(x && x.direct), intakeBerichten: function (pv, ids) { return new Set(ids.filter(function (i) { return intake.has(i); })); } });
   return Object.assign(k, { intake, gm: nepGmail() });
 }
 function route(mm, id) { return mm._db.prepare("SELECT * FROM route WHERE gmail_id = ? AND doel = 'intake'").get(id); }
@@ -2077,7 +2078,7 @@ test('B8 ACTIE_DS (en TODO): nooit gelezen, nooit archief; gelezen nooit bij TWI
   assert.deepEqual(a[ms[1].id].eraf, ['UNREAD'], 'gewone Intake-mail: gelezen');
   assert.deepEqual(a[ms[2].id].erbij, ['FACTUUR', 'ACTIE_DS']); assert.deepEqual(a[ms[2].id].eraf, []);
   assert.deepEqual(a[ms[3].id].eraf, ['UNREAD']);
-  assert.equal(a[ms[4].id], undefined, 'Twijfel: geen label en nooit gelezen (wv2196)');
+  assert.deepEqual([a[ms[4].id].erbij, a[ms[4].id].eraf], [['INTAKE', 'AI/MailMan'], []], 'wv4093: Twijfel meteen naar Intake, geen TWIJFEL-label en nooit gelezen');
   verwerkt.set(ms[2].id, 1); verwerkt.set(ms[3].id, 1);
   const b = l2Ronde(mm, gm, ids).l.j.acties.filter(function (x) { return x.archief; });
   assert.deepEqual(b.map(function (x) { return x.gmail_id; }), [ms[3].id], 'archief niet bij ACTIE_DS');
@@ -3622,4 +3623,90 @@ test('wv3092 review ZOU 1: nieuwer concept → label opnieuw (ook als David het 
   const x = ckRonde(mm, gm, ids, pas);
   assert.ok(x.ck.some(function (a) { return a.gmail_id === q.id && a.soort === 'concept_weg'; }));
   assert.ok(!gm.heeft(q.id, 'CONCEPT_KLAAR'), 'oud label weg: er staat geen concept meer');
+});
+
+// ── wv4093 (besluitenpagina nr 320 / 3C20 en nr 47 / C37, David 25-11-2026) ──
+const JEV_TWIJFEL = { mens: 0.5, waarde: 1.5, actie: 0.1 };
+test('wv4093 twijfel-direct: Twijfel krijgt in dezelfde ronde INTAKE + wachtrij en een route; uit het vlakje en de open lijst; nooit gelezen; één keer', () => {
+  const { mm, dir, gm } = b8Kamer({ direct: true });
+  const ms = [mail(), mail()];
+  draai(mm, 'gmail:david', ms, { jev: function (a) { return jevAntwoord(a.gmail_id === ms[1].id ? JEV_INTAKE : JEV_TWIJFEL); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); uitgangToestaan(dir, ['gmail:david']); l2Toestaan(dir);
+  vinkje(mm, 'twijfel', 'gelezen'); vinkje(mm, 'intake', 'gelezen');
+  ms.forEach(function (m) { gm.voeg(m); });
+  const ids = ms.map(function (m) { return m.id; });
+  assert.equal(rij(mm, ms[0].id).stroom, 'twijfel');
+  const a = l2Ronde(mm, gm, ids), per = perId(a.l.j.acties);
+  assert.deepEqual([per[ms[0].id].soort, per[ms[0].id].erbij, per[ms[0].id].eraf], ['besluit', ['INTAKE', 'AI/MailMan'], []], 'zelfde ronde, nooit gelezen');
+  assert.ok(gm.heeft(ms[0].id, 'INTAKE') && gm.heeft(ms[0].id, 'AI/MailMan') && !gm.heeft(ms[0].id, 'TWIJFEL'));
+  assert.equal(route(mm, ms[0].id).status, 'wachtrij');
+  const b = rij(mm, ms[0].id);
+  assert.equal(b.stroom, 'twijfel', 'intern blijft het Twijfel'); assert.equal(b.juist, null); assert.ok(b.vangnet_tijd, 'doorgezet zoals na het vangnet');
+  const p = mm.app('GET /app/mailman/twijfel', {}).j.postvakken.find(function (q) { return q.id === 'gmail:david'; });
+  assert.deepEqual([p.rijen, p.open], [[], 0], 'vlakje leeg');
+  const o = mm.app('GET /app/mailman', {}).j.postvakken.find(function (q) { return q.id === 'gmail:david'; });
+  assert.equal(o.twijfel_open, 0); assert.ok(!o.twijfel.some(function (x) { return x.id === b.id && x.juist == null; }), 'open lijst onder het tandwiel vult zich niet');
+  assert.deepEqual(perId(a.l.j.acties)[ms[1].id].eraf, ['UNREAD'], 'gewone Intake-mail ongewijzigd');
+  const c = l2Ronde(mm, gm, ids);
+  assert.ok(!c.l.j.acties.some(function (x) { return x.gmail_id === ms[0].id; }), 'één keer, geen vangnet erachteraan');
+  // Davids latere keuze in de Werkstroom/het tandwiel blijft kunnen (factuur), Info niet meer (zoals na het vangnet)
+  assert.equal(mm.app('POST /app/mailman/oordeel', { id: b.id, juist: 'info' }).status, 409);
+});
+
+test('wv4093 twijfel-direct niet: David koos zelf een categorie, haalde INTAKE weg, of twijfel_naar staat op info; restant gaat zonder drie dagen via het vangnet', () => {
+  const { mm, dir, gm } = b8Kamer({ direct: true });
+  const ms = [mail(), mail(), mail()];
+  draai(mm, 'gmail:david', ms, { jev: function () { return jevAntwoord(JEV_TWIJFEL); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  ms.forEach(function (m) { gm.voeg(m); });
+  l2Ronde(mm, gm, []);   // eerste volledige lijst = basis (wat er dan al staat telt als 'voor')
+  gm.zet(ms[0].id, 'FACTUUR');   // David koos vóór MailMans eerste labelronde op deze mail
+  const ids = ms.map(function (m) { return m.id; });
+  // twijfel_naar info: geen direct (en geen vangnet binnen drie dagen)
+  assert.equal(mm.app('POST /app/mailman/jev', { postvak: 'gmail:david', actie: 'drempels', drempel_in: 0.55, drempel_uit: 0.3, twijfel_naar: 'info' }).status, 200);
+  let a = l2Ronde(mm, gm, ids);
+  assert.ok(!a.l.j.acties.some(function (x) { return (x.erbij || []).includes('INTAKE'); }), 'twijfel_naar info: niets naar Intake');
+  assert.equal(rij(mm, ms[1].id).vangnet_tijd, null);
+  a = l2Ronde(mm, gm, ids);
+  assert.ok(!a.l.j.acties.some(function (x) { return x.soort === 'vangnet'; }), 'info: vangnet wacht nog drie dagen');
+  // terug naar intake: wat al gelabeld was (labels_gezet zonder INTAKE) gaat de eerstvolgende ronde via het vangnet, zonder wachttijd
+  assert.equal(mm.app('POST /app/mailman/jev', { postvak: 'gmail:david', actie: 'drempels', drempel_in: 0.55, drempel_uit: 0.3, twijfel_naar: 'intake' }).status, 200);
+  gm.weg(ms[2].id, 'INTAKE');   // geen effect: stond er niet
+  a = l2Ronde(mm, gm, ids);
+  const v = a.l.j.acties.filter(function (x) { return x.soort === 'vangnet'; }).map(function (x) { return x.gmail_id; }).sort();
+  const lab = rij(mm, ms[1].id).labels_gezet;
+  assert.notEqual(lab, null, 'in de info-ronde al afgehandeld (labels_gezet)');
+  assert.deepEqual(v, [ms[1].id, ms[2].id].sort(), 'restant meteen via het vangnet; Davids eigen FACTUUR niet');
+  assert.ok(!a.l.j.acties.some(function (x) { return x.gmail_id === ms[0].id && (x.erbij || []).includes('INTAKE'); }), 'David koos FACTUUR: geen INTAKE');
+  assert.ok(rij(mm, ms[1].id).vangnet_tijd);
+  // David haalt INTAKE weg: MailMan zet het nooit terug
+  gm.weg(ms[1].id, 'INTAKE');
+  for (let i = 0; i < 2; i++) assert.ok(!l2Ronde(mm, gm, ids).l.j.acties.some(function (x) { return x.gmail_id === ms[1].id && (x.erbij || []).includes('INTAKE'); }));
+});
+
+test('wv4093 opruim: voorbeeld-onderwerp uit de verzonden mail na 14 dagen weg (vanaf laatst), regel en tellingen blijven', () => {
+  const { mm } = nieuweKamer();
+  const db = mm._db;
+  const maakRegel = function (naam) {
+    return Number(db.prepare(`INSERT INTO regel (postvak, stap, volgorde, naam, voorwaarden, stroom, actief, bron, aangemaakt, bijgewerkt, versie)
+      VALUES ('gmail:david', 'in', 50, ?, ?, 'factuur', 1, 'verzonden', '2026-10-30T00:00:00Z', '2026-10-30T00:00:00Z', 1)`).run(naam, JSON.stringify({ van_adres: { op: 'is', w: naam + '@lev.invalid' }, bijlage: 'pdf' })).lastInsertRowid);
+  };
+  const oud = maakRegel('oud'), vers = maakRegel('vers'), zonder = maakRegel('zonder');
+  const zet = db.prepare(`INSERT INTO regel_herkomst (regel_id, soort, aantal, doel, voorbeeld, laatst, waarom, gemeten) VALUES (?, 'verzonden', 7, 'Proef BV', ?, ?, '7 van 7', ?)`);
+  const dag = function (n) { return new Date(klok - n * DAG).toISOString().slice(0, 10); };
+  zet.run(oud, 'Factuur 12', dag(32), dag(20));
+  zet.run(vers, 'Factuur 13', dag(8), dag(1));
+  zet.run(zonder, 'Factuur 14', null, dag(20));   // geen laatst: gemeten telt
+  const regels = db.prepare('SELECT count(*) n FROM regel').get().n;
+  mm.opruim();
+  const h = function (id) { return db.prepare('SELECT * FROM regel_herkomst WHERE regel_id = ?').get(id); };
+  assert.equal(h(oud).voorbeeld, null); assert.equal(h(oud).aantal, 7); assert.equal(h(oud).doel, 'Proef BV'); assert.equal(h(oud).laatst, dag(32));
+  assert.equal(h(vers).voorbeeld, 'Factuur 13', 'jonger dan 14 dagen blijft');
+  assert.equal(h(zonder).voorbeeld, null);
+  assert.equal(db.prepare('SELECT count(*) n FROM regel').get().n, regels, 'regels blijven');
+  const r = mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === 'gmail:david'; }).regels.find(function (x) { return x.id === oud; });
+  assert.equal(r.herkomst.voorbeeld, null); assert.equal(r.herkomst.aantal, 7);
+  klok += 10 * DAG; mm.opruim(); klok -= 10 * DAG;
+  assert.equal(h(vers).voorbeeld, null, 'na 14 dagen ook weg');
+  assert.equal(db.prepare("SELECT count(*) n FROM regel_herkomst WHERE voorbeeld IS NOT NULL").get().n, 0);
 });
