@@ -188,7 +188,9 @@ function maak(o) {
       zetFout(l && l.fouten.length ? l.fouten.join('; ') : null);
       if (met && r.j.geschreven === true) {
         staat.lijstHash = l.hash; staat.lijstOp = nu();
-        staat.geschreven = { op: nu(), passkeys: l.passkeys ? l.passkeys.length : 0, push: l.push ? l.push.length : null, bundel: !!l.bundel_sha256 };
+        // zonder passkeys-veld houdt de Worker zijn vorige lijst: dan het oude aantal onthouden (Codex r3 MOET 1)
+        const vorig = staat.geschreven ? staat.geschreven.passkeys || 0 : 0;
+        staat.geschreven = { op: nu(), passkeys: l.passkeys ? l.passkeys.length : vorig, push: l.push ? l.push.length : null, bundel: !!l.bundel_sha256 };
         bewaar();
         log('lijsten geschreven: ' + staat.geschreven.passkeys + ' passkeys, ' + (staat.geschreven.push === null ? 'push niet' : staat.geschreven.push + ' push') + (staat.geschreven.bundel ? ', bundel' : ''));
       }

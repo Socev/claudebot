@@ -170,6 +170,10 @@ test('laatste passkey ingetrokken: geen lege lijst, wel een zichtbare fout (Code
   assert.ok(!('passkeys' in b)); assert.deepStrictEqual(b.push, []);
   assert.match(m.stand().laatste_fout, /alle passkeys ingetrokken.*kent er nog 1/);
   assert.ok(d.logs.some((l) => /alle passkeys ingetrokken/.test(l)));
+  // blijft staan na volgende hartslagen, na 6 u (lijsten opnieuw zonder passkeys) en na een herstart (Codex r3 MOET 1)
+  assert.strictEqual(await m.tik(), 'hartslag'); assert.match(m.stand().laatste_fout, /alle passkeys ingetrokken/);
+  d.klok += 6 * 3600e3 + 1; assert.strictEqual(await m.tik(), 'lijsten'); assert.match(m.stand().laatste_fout, /kent er nog 1/);
+  const m2 = N.maak(d.opties()); await m2.tik(); assert.match(m2.stand().laatste_fout, /kent er nog 1/);
   await s.dicht();
 });
 
