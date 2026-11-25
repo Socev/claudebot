@@ -26641,7 +26641,9 @@ const vaultzoekRonde = (function () {
     const m = require(p);
     return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'vaultzoek', hartslag: 'vaultzoek', staatBestand: path.join(KLOKKEN_DIR, 'vaultzoek.json'),
       maxMin: 45, pogingen: 2, venster: { van: [2, 10], tot: [4, 50] }, socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env,
-      argv: ['python3', '-I', script, 'ronde', '--max-min', '40'] }) : null;
+      // wv3363 (25-11-2026): ook het mailarchief (30_Conversaties/Mail); kan sinds vaultzoek zonder rijen in de nachtdump zit
+      // (pgdump-offsite.sh --exclude-table-data, rijhash-v2). Vult binnen het dagbudget; mail komt in de volgorde als laatste.
+      argv: ['python3', '-I', script, 'ronde', '--max-min', '40', '--met-mail'] }) : null;
   } catch (e) { logError('vaultzoek-ronde', e); return null; }
 })();
 async function vaultzoekTik() {
