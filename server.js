@@ -12349,7 +12349,14 @@ function voorwerkDeadlinesRoute(req, res) {
       kkVerwerkStil('route');
       // wv4038 (3C63): alle gezette koppelingen uit ## Actueel (ook van regels die nog niet rijp zijn); Kies portie maakt er groepen van
       let koppels = null;
-      if (KK_MOD) { try { koppels = KK_MOD.registerKoppels((await dlDroog()).items, VV().lees(dlRegister(), 'utf8'), DL_LIJSTJE.cellen); } catch (e) { logError('koppel-klus koppels', e); koppels = null; } }
+      // Codex wv4038 MOET 1: regelnummers van --droog gelden alleen voor de tekst die het las: lees vóór en na, alleen bij gelijk (anders null)
+      if (KK_MOD) {
+        try {
+          const voor = VV().lees(dlRegister(), 'utf8'), items = (await dlDroog()).items, na = VV().lees(dlRegister(), 'utf8');
+          koppels = voor === na ? KK_MOD.registerKoppels(items, voor, DL_LIJSTJE.cellen) : null;
+          if (koppels === null) logError('koppel-klus koppels', new Error('register veranderde tijdens het lezen; deze ronde zonder koppels'));
+        } catch (e) { logError('koppel-klus koppels', e); koppels = null; }
+      }
       res._log.reden = 'deadlines ' + lijst.length + (koppels ? ' koppels ' + koppels.length : '');
       berichtStuur(res, 200, { ok: true, vandaag: appYmd(Date.now()), verwerkt: verwerkt, deadlines: lijst, koppels: koppels });
     }).catch(function (e) { logError('voorwerk-deadlines', e); berichtStuur(res, 500, { ok: false, fout: 'register niet te lezen' }); });
@@ -12373,7 +12380,11 @@ async function kkSluitActie(id, vandaag) {
   // Zoals Plan state (AI - Voorwerk-knoppen): status, volgende_check, laatst_gecheckt en één regel achter de bevinding; filter op gelezen status
   const data = { status: 'afgerond', volgende_check: '', laatst_gecheckt: vandaag,
     bevinding: String(r.bevinding || '') + ' ‖ AFGEROND ' + kkDm(vandaag) + ' via de gekoppelde klus in het actielijstje (David)' };
-  const j = await appN8nZend('PATCH', '/data-tables/' + KK_ACTIE_TABEL + '/rows/update', { filter: f([{ columnName: 'status', condition: 'eq', value: r.status }]), data: data, returnData: true });
+  // Codex wv4038 MOET 3: ook de gelezen bevinding in het filter (en laatst_gecheckt): veranderde de rij intussen, dan niets en volgende ronde opnieuw lezen
+  // (gemeten 25-11: in actie_state zijn beide altijd een niet-lege tekst; leeg of null = die voorwaarde weglaten, anders zou eq '' nooit treffen)
+  const extra = [{ columnName: 'status', condition: 'eq', value: r.status }];
+  ['bevinding', 'laatst_gecheckt'].forEach(function (k) { if (typeof r[k] === 'string' && r[k] !== '') extra.push({ columnName: k, condition: 'eq', value: r[k] }); });
+  const j = await appN8nZend('PATCH', '/data-tables/' + KK_ACTIE_TABEL + '/rows/update', { filter: f(extra), data: data, returnData: true });
   const n = Array.isArray(j) ? j.length : (Array.isArray(j && j.data) ? j.data.length : 0);
   return n ? { uitkomst: 'gesloten' } : { uitkomst: 'tijdelijk', reden: 'niets bijgewerkt (status veranderde?)' };
 }
@@ -12407,7 +12418,8 @@ async function kkSluitDeadline(sleutel, vandaag) {
 }
 const kkKlus = KK_MOD && KK_MOD.maak({
   mag: function () { return rolPrimair(); },
-  rijen: function () { return appN8nRijen(APP_PORTIE_TABEL, null, 100); },
+  // Codex wv4038 MOET 2: alleen de Gedaan-tikken (filter in n8n), alle pagina's tot 500 rijen (niet de laatste 100 van alles)
+  rijen: function () { return appN8nRijen(APP_PORTIE_TABEL, { type: 'and', filters: [{ columnName: 'keuze', condition: 'eq', value: 'gedaan' }, { columnName: 'status', condition: 'eq', value: 'afgehandeld' }] }, 500); },
   sluit: { actie_state: kkSluitActie, todoist: kkSluitTodoist, deadline: kkSluitDeadline },
   markeer: function (nonce, tekst) {
     return appN8nZend('PATCH', '/data-tables/' + APP_PORTIE_TABEL + '/rows/update', { filter: { type: 'and', filters: [{ columnName: 'nonce', condition: 'eq', value: nonce }] }, data: { koppel_klaar: tekst } });
