@@ -1646,6 +1646,15 @@ srv.listen(0, '127.0.0.1', async () => {
       r = await tv(J.ag, 'ja', VS[J.ag].h, pas);
       toets('8z vastgelegde rij gewijzigd na de herhaalzin: 409 "veranderd", niets uitgevoerd', r.status === 409 && /veranderd/.test(r.j.fout) && n8n.length === 0, r.j);
       ak[J.ag].knoppen.uitvoeren.th = thOud;
+      // rij vervangen terwijl de pod de kaarttekst ophaalt (Codex MOET 1 ronde 1): niet de nieuwe uitvoeren
+      r = await hz(J.ag, VS[J.ag].h); pas = r.j.pas;
+      const abOrig = H.__haal('appAndersBericht');
+      let nonceOrig = null;
+      H.__zet('appAndersBericht', async (k, id) => { const x = await abOrig(k, id); if (id === J.ag && !nonceOrig) { const K = H.__haal('appAgendaKnoppen')()[J.ag].knoppen.uitvoeren; nonceOrig = K.nonce; K.nonce = nonce(); } return x; });
+      r = await tv(J.ag, 'ja', VS[J.ag].h, pas);
+      H.__zet('appAndersBericht', abOrig);
+      toets('8z rij vervangen tijdens het ophalen van de kaarttekst: 409, niets uitgevoerd', r.status === 409 && /veranderd/.test(r.j.fout) && n8n.length === 0 && !!nonceOrig, r.j);
+      H.__haal('appAgendaKnoppen')()[J.ag].knoppen.uitvoeren.nonce = nonceOrig;
       r = await hz(J.ag, 'ffffffffffffffff');
       toets('8z herhaal met een oude h: 409 "veranderd"', r.status === 409 && /veranderd/.test(r.j.fout), r.j);
       // goed: herhaal → tweede tik = de ✅ (zelfde nonce, kaart-hash en tekst-hash naar Agenda-knoppen), zonder vingerafdruk, rijdend

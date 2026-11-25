@@ -20063,10 +20063,17 @@ function telSmsHerhaal(v) {
   if (!v || typeof v.naar !== 'string' || typeof v.tekst !== 'string' || !v.tekst.trim()) return null;
   return 'Ik verstuur vanaf je eigen telefoon een sms aan ' + (v.naam ? v.naam + ', nummer ' : 'nummer ') + telSmsNummerSpraak(v.naar) + ', met de tekst: "' + v.tekst + '". Klopt dat?';
 }
+// Identiteit van de vastgelegde rij (Codex MOET 1, ronde 1): wat de ✅ werkelijk uitvoert. Zelfde identiteit = zelfde rij.
+function telVoorstelIdent(e) {
+  const K = e && e.knoppen && e.knoppen.uitvoeren;
+  return K && typeof K === 'object' ? appSha(JSON.stringify(['wv4017', e.kanaal, K.nonce, K.hash || '', K.th || '', e.sms ? [e.sms.naar, e.sms.tekst] : null, !!e.reeks])) : null;
+}
 // Eén open ✅-voorstel zoals Onderweg het krijgt, uit de vastgelegde rij; null = geen (meer) open ✅ in het hoofdkanaal.
+// _ident wordt vóór de eerste await vastgelegd; de zin komt uit een kaarttekst die bij díe rij hoort (sha256 == th van die rij).
 async function telVoorstelKnop(id, e) {
   e = e || appAgendaKnoppen()[id];
   const K = e && e.knoppen && e.knoppen.uitvoeren;
+  const ident = telVoorstelIdent(e);
   const nu = Date.now();
   if (!e || e.kanaal !== 'hoofd' || !K || typeof K !== 'object' || K.stand === 'klaar' || appAgendaBezig(K, nu) || !(nu <= Number(K.verloopt))) return null;
   let soort, zin = null, waarom = '';
@@ -20081,9 +20088,9 @@ async function telVoorstelKnop(id, e) {
     else { zin = telAgendaHerhaal(tekst); if (!zin) waarom = 'vorm niet vast op te bouwen'; }
   } else { soort = 'agenda'; waarom = 'geen agendakaart (oud voorstel zonder hash)'; }
   if (zin && zin.length > TEL_HERHAAL_ZIN_MAX) { zin = null; waarom = 'te lang om voor te lezen'; }
-  const h = appSha(JSON.stringify(['wv4017', id, soort, zin, K.hash || '', K.th || '', e.sms ? [e.sms.naar, e.sms.tekst] : null])).slice(0, 16);
+  const h = appSha(JSON.stringify(['wv4017', id, soort, zin, ident])).slice(0, 16);
   return { id: id, soort: soort, titel: soort === 'sms' ? 'Sms-voorstel' : 'Agendavoorstel', tekst: zin ? zin.replace(/ Klopt dat\?$/, '') : null, kan: !!zin, h: h,
-    _zin: zin, _waarom: waarom, verloopt: new Date(Number(K.verloopt)).toISOString() };
+    _zin: zin, _waarom: waarom, _ident: ident, verloopt: new Date(Number(K.verloopt)).toISOString() };
 }
 async function telVoorstelKnoppen() {
   const m = appAgendaKnoppen(), uit = [];
@@ -20126,6 +20133,9 @@ async function telTikVoorstel(req, res, t, q, a, sEcht, keuze) {
   if (!v) return telWeiger(res, 409, 'dit voorstel staat niet meer open', 'tik voorstel: niet open');
   if (v.h !== h) return telWeiger(res, 409, 'het voorstel is intussen veranderd; luister opnieuw', 'tik voorstel: h anders');
   if (keuze === 'ja' && !v.kan) return telWeiger(res, 409, 'Dit bevestig je in de Socev-app', 'tik voorstel: niet vast');
+  // Codex MOET 1 (ronde 1): na de laatste await opnieuw de rij zelf, synchroon tot en met bezig in appAgendaRoute (telViaApp roept hem
+  // zonder tussenliggende await aan): is hij intussen vervangen, dan niet de nieuwe uitvoeren met de oude herhaalzin.
+  if (telVoorstelIdent(appAgendaKnoppen()[id]) !== v._ident) return telWeiger(res, 409, 'het voorstel is intussen veranderd; luister opnieuw', 'tik voorstel: rij vervangen');
   const s = Object.assign({}, sEcht, { credential: a.credential.id, vers_tot: keuze === 'ja' ? Date.now() + 30000 : 0, onderweg: t.id, onderweg_tik: true, onderweg_herhaal: keuze === 'ja' });
   const u2 = await telViaApp(appAgendaRoute, [req, a, s, { kanaal: 'hoofd', job_id: id, knop: 'uitvoeren', keuze: keuze }]);
   appAudit({ route: '/app/agenda', m: 'ONDERWEG', status: u2.status, apparaat: a.id, reden: (keuze === 'ja' ? 'tweede tik na herhaalvraag' : 'tik nee') + ' via onderweg ' + t.id + ' (' + v.soort + '): ' + (u2.reden || '') });
