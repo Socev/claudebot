@@ -264,17 +264,17 @@ function maak(io) {
       kanalen.signal = { ok: true, chats: g.length, staarten: n };
       goed('signal');
     } catch (e) { kanalen.signal = { ok: false, fout: schoon(e && e.message || e, 160) }; storing('signal', kanalen.signal.fout); }
-    // Teams: 1-op-1 (@unq.gbl.spaces) en groepschats tot 3 deelnemers (@thread.v2), geen kanalen (@thread.tacv2)
+    // Teams: alleen 1-op-1 (@unq.gbl.spaces). Groepschats (@thread.v2) niet: de databank kent de deelnemers niet, en het bouwplan
+    // wilde ≤ 3 deelnemers (Codex r2 MOET 2: afzenders ≠ deelnemers). Kanalen (@thread.tacv2) nooit.
     try {
       const vers = await io.sql("select extract(epoch from max(verwerkt_op))::bigint as t from " + T.teams);
       const versT = vers && vers[0] ? Number(vers[0].t) || 0 : 0;
       if (werkdagenSinds(versT, nu) >= 2) throw new Error('geen nieuwe Teams-rijen sinds ' + dagTijd(versT, nu) + ' (pc uit of lezer stil)');
       const g = await io.sql("select conversation_id, max(gesprek_naam) as gesprek_naam, extract(epoch from max(tijd) filter (where afzender = " + sqlTekst(TEAMS_DAVID) + "))::bigint as anker, " +
         "extract(epoch from max(tijd))::bigint as laatste, (array_agg(afzender order by tijd desc))[1] as laatste_afzender, count(distinct afzender) as mensen " +
-        "from " + T.teams + " where conversation_id like '%@unq.gbl.spaces' or conversation_id like '%@thread.v2' group by conversation_id having max(tijd) > now() - interval '8 days'");
+        "from " + T.teams + " where conversation_id like '%@unq.gbl.spaces' group by conversation_id having max(tijd) > now() - interval '8 days'");
       let n = 0;
       for (const r of g) {
-        if (/@thread\.v2$/.test(r.conversation_id) && Number(r.mensen) > 3) continue;   // alle afzenders ooit (geen ledenlijst): > 3 = te groot (Codex r1 MOET 3)
         const laatste = Number(r.laatste) || 0, vanDavid = r.laatste_afzender === TEAMS_DAVID;
         if (vanDavid || !inVenster(laatste, nu)) { items.push({ kanaal: 'teams', chat: r.conversation_id, laatste_ts: laatste, van_david: vanDavid, staart: [] }); continue; }
         const anker = Number(r.anker) || 0;
@@ -327,6 +327,10 @@ function maak(io) {
       if (!o) { fout.push(k.id + ': oordeel moet eindje of geen zijn'); continue; }
       if (o === 'eindje' && zin.length < 3) { fout.push(k.id + ': een eindje heeft een zin nodig'); continue; }
       if (zin.length > ZIN_MAX) zin = zin.slice(0, ZIN_MAX - 1).trimEnd() + '…';
+      // vaste toets (Codex r2 MOET 1): elk getal in de zin (datum, tijd, bedrag) staat letterlijk in de staart; anders terug naar de run
+      const bron = k.staart.map(function (b) { return b.tekst; }).join(' ');
+      const vreemd = o === 'eindje' ? (zin.match(/\d+/g) || []).filter(function (g) { return bron.indexOf(g) < 0; }) : [];
+      if (vreemd.length) { fout.push(k.id + ': de zin noemt ' + vreemd.slice(0, 3).join(', ') + ', dat staat niet in het bericht; laat het getal weg of neem het letterlijk over'); continue; }
       await io.sql('insert into ' + T.eindjes + ' as t (kanaal, chat, anker_ts, vraag_ts, laatste_ts, naam, link, oordeel, zin) values (' +
         [sqlTekst(k.kanaal), sqlTekst(k.chat), sqlGetal(k.anker_ts), sqlGetal(k.vraag_ts), sqlGetal(k.laatste_ts), sqlTekst(k.naam.slice(0, 80)),
           k.link ? sqlTekst(k.link) : 'null', sqlTekst(o), o === 'eindje' ? sqlTekst(zin) : 'null'].join(', ') +

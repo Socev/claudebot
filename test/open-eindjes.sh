@@ -84,10 +84,9 @@ create table ${S}.teams_berichten (like secondbrain.teams_berichten including de
     // ── haal ──
     const h = await o.haal();
     const namen = h.kandidaten.map((k) => k.naam).sort();
-    toets('haal: kandidaten = 1, 6, 7, Telegram, Signal, Teams 1-op-1 + kleine groep', JSON.stringify(namen) === JSON.stringify(['Collega Proef', 'Klein', 'Proef Een', 'Proef Zes', 'Proef Zeven', 'Sig Proef', 'Tg Proef'].sort()), namen);
-    toets('haal: geen onbekend nummer, geen praktijknummer, geen groep/kanaal, geen Teams-groep met > 3 afzenders ooit', !namen.some((n) => /Praktijk|Groepslid|Kanaal|Groot|Midden/.test(n)) && h.kanalen['whatsapp-nl'].onbekend === 1);
+    toets('haal: kandidaten = 1, 6, 7, Telegram, Signal, Teams 1-op-1 (geen Teams-groep)', JSON.stringify(namen) === JSON.stringify(['Collega Proef', 'Proef Een', 'Proef Zes', 'Proef Zeven', 'Sig Proef', 'Tg Proef'].sort()), namen);
+    toets('haal: geen onbekend nummer, geen praktijknummer, geen groep/kanaal, geen Teams-groepschat', !namen.some((n) => /Praktijk|Groepslid|Kanaal|Groot|Midden|Klein/.test(n)) && h.kanalen['whatsapp-nl'].onbekend === 1);
     toets('haal: run ziet geen chat-id of link, wel staart met tijd', h.kandidaten.every((k) => !k.chat && !k.link && Array.isArray(k.staart) && k.staart[0].tijd) && !JSON.stringify(h).includes('31600000001'));
-    toets('haal: Teams-groep krijgt afzender voor de tekst', h.kandidaten.find((k) => k.naam === 'Klein').staart[0].tekst.indexOf('E: ') === 0);
     toets('haal: één Telegram-regel in het leeslog, met de gelezen chat', leeslog.length === 1 && /Tg Proef \(7001\)/.test(leeslog[0]) && !/Tg Laat/.test(leeslog[0]), leeslog);
     const h2 = await o.haal();
     toets('haal 2× in dezelfde nacht: cache, geen tweede Telegram-lezing', h2 === h && tgAanroepen === 1 && leeslog.length === 1);
@@ -96,8 +95,10 @@ create table ${S}.teams_berichten (like secondbrain.teams_berichten including de
     const r = await o.oordeel({ oordelen: [{ id: id('Proef Een'), oordeel: 'eindje', zin: 'of je donderdag kunt invallen' }, { id: id('Proef Zes'), oordeel: 'geen' },
       { id: id('Proef Zeven'), oordeel: 'eindje', zin: 'of je het contract wilt tekenen' }, { id: id('Tg Proef'), oordeel: 'eindje', zin: 'of je zaterdag komt' },
       { id: id('Sig Proef'), oordeel: 'eindje', zin: 'of je de waarneming bevestigt' + ' en nog veel meer tekst'.repeat(6) },
-      { id: id('Collega Proef'), oordeel: 'eindje', zin: 'of je het rooster checkt' }, { id: id('Klein'), oordeel: 'eindje', zin: 'wie dit opneemt' }, { id: 'onzin', oordeel: 'eindje', zin: 'x' }] });
-    toets('oordeel: 7 opgeslagen, onbekend id gemeld', r.opgeslagen === 7 && r.onbekend.length === 1, r);
+      { id: id('Collega Proef'), oordeel: 'eindje', zin: 'of je het rooster checkt' }, { id: 'onzin', oordeel: 'eindje', zin: 'x' }] });
+    toets('oordeel: 6 opgeslagen, onbekend id gemeld', r.opgeslagen === 6 && r.onbekend.length === 1, r);
+    const getal = await o.oordeel({ oordelen: [{ id: id('Proef Zes'), oordeel: 'eindje', zin: 'of je de 250 euro terugstuurt' }] });
+    toets('oordeel: getal dat niet in het bericht staat → terug naar de run', getal.opgeslagen === 0 && /250/.test(getal.fouten[0] || ''), getal);
     const zinLang = sql(`select max(length(zin)) n from ${S}.open_eindjes`)[0].n;
     toets('oordeel: zin ingekort tot ≤ 90', zinLang <= 90, zinLang);
     const fout = await o.oordeel({ oordelen: [{ id: id('Proef Een'), oordeel: 'misschien' }, { id: id('Proef Een'), oordeel: 'eindje', zin: '' }] });
@@ -109,9 +110,10 @@ create table ${S}.teams_berichten (like secondbrain.teams_berichten including de
     W.nl[6] = wa('31600000007', NU - 1 * H, false); STAART['31600000007@c.us'] = { anker_ts: NU - 2 * H, berichten: [{ ts: NU - 1 * H, wie: 'ander', tekst: 'dank je!' }] };
     lijst = [{ sleutel: 'eindjes-2026-11-25', status: 'open' }, { sleutel: 'facturen-2026-11-25', status: 'open' }];
     staat.haal = { datum: datum };
-    // een 7e eindje (jongste vraag): 7 - 1 hercheck = 6 → 5 op de kaart, 1 schuift door
+    // twee extra eindjes (jongste vragen): 7 - 2 hercheck = 5 + … → 5 op de kaart, 1 schuift door
     sql(`insert into ${S}.open_eindjes (kanaal, chat, anker_ts, vraag_ts, laatste_ts, naam, link, oordeel, zin) values ('whatsapp-nl', '31600000098@c.us', 0, ${NU - 25 * H}, ${NU - 25 * H}, 'Proef Acht', 'https://wa.me/31600000098', 'eindje', 'of je de sleutel terugbrengt'),
-      ('whatsapp-nl', '31600000097@c.us', 0, ${NU - 24.5 * H}, ${NU - 24.5 * H}, 'Proef Negen', null, 'eindje', 'of je de map meeneemt')`);
+      ('whatsapp-nl', '31600000097@c.us', 0, ${NU - 24.5 * H}, ${NU - 24.5 * H}, 'Proef Negen', null, 'eindje', 'of je de map meeneemt'),
+      ('signal', '+31600000096', 0, ${NU - 27 * H}, ${NU - 27 * H}, 'Sig Twee', null, 'eindje', 'of je de dienst overneemt')`);
     const k1 = await o.kaartStap();
     const kt = kaarten[0];
     toets('kaart: hercheck ziet Davids antwoord ook als de ander daarna nog schreef (Telegram + WhatsApp afgerond)', k1.afgerond === 2 && Number(sql(`select count(*) n from ${S}.open_eindjes where afgerond_reden like 'David antwoordde%' and naam in ('Tg Proef', 'Proef Zeven')`)[0].n) === 2, k1);
@@ -141,7 +143,7 @@ create table ${S}.teams_berichten (like secondbrain.teams_berichten including de
     toets('vr: "hallo??" na een getoond eindje = geen kandidaat (vulbericht)', nv.indexOf('Proef Een') < 0 && hv.telling.vulsel >= 1, hv.telling);
     const zes = hv.kandidaten.find((k) => k.naam === 'Proef Zes');
     toets('vr: nieuwe vraag na een "geen" = kandidaat met eerder', !!zes && zes.eerder && zes.eerder.oordeel === 'geen' && /alleen een nieuwe, andere vraag/.test(zes.eerder.let_op), zes);
-    toets('vr: al beoordeelde chats niet opnieuw (Signal, Teams)', ['Sig Proef', 'Collega Proef', 'Klein'].every((n) => nv.indexOf(n) < 0), nv);
+    toets('vr: al beoordeelde chats niet opnieuw (Signal, Teams)', ['Sig Proef', 'Collega Proef'].every((n) => nv.indexOf(n) < 0), nv);
     const zeven = hv.kandidaten.find((k) => k.naam === 'Proef Zeven');
     toets('vr: na Davids antwoord is "dank je" een nieuwe kandidaat zonder eerder (nieuwe periode)', !!zeven && !zeven.eerder && zeven.staart.length === 1, zeven);
     await o.oordeel({ oordelen: [{ id: zes.id, oordeel: 'eindje', zin: 'of je volgende week dienst wilt ruilen' }, { id: zeven.id, oordeel: 'geen' }] });

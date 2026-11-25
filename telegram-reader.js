@@ -327,7 +327,7 @@ async function cmdEindjes(args) {
         ts: b.date, van_david: !!b.out, ongelezen: Number(d.unreadCount) || 0 };
       gesprekken.push(g);
       if (!metStaart && ankerVoor.indexOf(g.id) !== -1) {
-        for await (const m of client.iterMessages(d.entity, { limit: 40 })) { if (m && m.out && m.date) { ankers[g.id] = m.date; break; } }
+        for await (const m of client.iterMessages(d.entity, { limit: 300 })) { if (m && m.out && m.date) { ankers[g.id] = m.date; break; } }   // ver genoeg terug (Codex r2 ZOU 1)
         continue;
       }
       if (!metStaart || g.van_david || g.ts < van || g.ts > tot) continue;
