@@ -21841,7 +21841,7 @@ async function facturenBonjachtConcept(fdb, rol, lijst, o) {
     if (u.status !== 200) logError('facturen-bonjacht-concept', new Error('spoor niet gezet: ' + String(u.j && u.j.fout || u.status).slice(0, 80)));
     schrijfLog(nu() + ' facturen-bonjacht-concept ' + velden({ lijst: v.j.lijst, ok: uit.ok, onzeker: uit.onzeker, al_in_gmail: uit.al_in_gmail, los: uit.los, stukken: c.j.facturen.length, bijlagen: c.j.bijlagen.length }));
     const st = u.j && u.j.concept ? u.j.concept : { status: uit.ok ? 'klaar' : uit.onzeker ? 'onbekend' : 'mislukt', reden: uit.reden, los: !!uit.los, al_in_gmail: !!uit.al_in_gmail };
-    return { status: 200, j: { ok: true, concept: st, stukken: c.j.facturen.length } };
+    return { status: 200, j: { ok: true, concept: st, stukken: c.j.facturen.length, later: uit.ok ? c.j.later || 0 : 0 } };
   } catch (e) {
     logError('facturen-bonjacht-concept', e);
     return { status: 500, j: { ok: false, fout: 'fout op de pod' } };

@@ -1078,15 +1078,22 @@ function bonjachtConcept(fdb, r, lijstId, o) {
     if (!aan) return mislukt('de lijst kwam niet van het adres van de boekhouder');
     const onderwerpLijst = kort(String(o.kop && o.kop.onderwerp || '').replace(/^\s*((re|antw|fw|fwd)\s*:\s*)+/i, ''), 140);
     const onderwerp = onderwerpLijst ? 'Re: ' + onderwerpLijst : 'Bonnen bij je lijst van ' + bjDagLang(l.ontvangen);
-    // bijlagen: het stuk van elke bevestigde bon (pdf, anders UBL), hooguit 10 en 20 MB samen; de naam zegt welke post het is
-    const bijlagen = [], namen = new Set();
+    // bijlagen: het stuk van elke bevestigde bon (pdf, anders UBL), hooguit 10 en 20 MB samen; de naam zegt welke post het is. Review MOET 1:
+    // een bon die door die grens niet meer past, gaat NIET mee en telt niet als gehad (hij komt in een volgend concept); een bon zonder
+    // bestand gaat wel mee als regel "(geen bestand)", want een bestand komt er niet meer bij.
+    const bijlagen = [], namen = new Set(), mee_ids = [];
     let bytes = 0;
-    const regels = stukken.map((x) => {
+    const regels = [];
+    for (const x of stukken) {
       const doc = x.document || x.ubl_document ? fdb.db.prepare('SELECT * FROM document WHERE id = ?').get(x.document || x.ubl_document) : null;
-      let mee = false;
-      if (doc && bijlagen.length < BJ_MAX_BIJLAGEN && D.stukBestaat(fdb, doc.sha256)) {
+      const heeft = !!doc && D.stukBestaat(fdb, doc.sha256);
+      let mee = false, waarom = 'geen bestand';
+      if (heeft) {
+        if (bijlagen.length >= BJ_MAX_BIJLAGEN) continue;
         const inhoud = D.stukLees(fdb, doc.sha256);
-        if (bytes + inhoud.length <= BJ_MAX_BYTES) {
+        if (inhoud.length > BJ_MAX_BYTES) waarom = 'te groot voor de mail';   // past nooit: regel zonder bijlage
+        else if (bytes + inhoud.length > BJ_MAX_BYTES) continue;              // past nu niet meer: volgend concept
+        else {
           const ext = (/\.([a-z0-9]{2,5})$/i.exec(String(doc.naam || '')) || [])[1] || (doc.soort === 'ubl' ? 'xml' : 'pdf');
           let naam = kort([x.datum, kort(x.partij || x.leverancier_naam || 'bon', 50), bjEur(-x.bedrag_centen).replace('€ ', 'EUR ')].join(' ').replace(/[\\/:*?"<>|]+/g, ' '), 120) + '.' + ext.toLowerCase();
           for (let i = 2; namen.has(naam); i++) naam = naam.replace(/( \(\d+\))?\.([a-z0-9]+)$/, ' (' + i + ').$2');
@@ -1095,17 +1102,18 @@ function bonjachtConcept(fdb, r, lijstId, o) {
           bytes += inhoud.length; mee = true;
         }
       }
-      return '- ' + bjDag(x.datum) + ' · ' + bjEur(-x.bedrag_centen) + ' · ' + (kort(x.partij || x.leverancier_naam, 80) || 'onbekend') +
-        (x.f_status === 'prive_archief' ? ' (privé)' : '') + (mee ? '' : ' (bon niet in de bijlage: ' + (doc ? 'te groot' : 'geen bestand') + ')');
-    });
+      mee_ids.push(x.factuur);
+      regels.push('- ' + bjDag(x.datum) + ' · ' + bjEur(-x.bedrag_centen) + ' · ' + (kort(x.partij || x.leverancier_naam, 80) || 'onbekend') +
+        (x.f_status === 'prive_archief' ? ' (privé)' : '') + (mee ? '' : ' (bon niet in de bijlage: ' + waarom + ')'));
+    }
     if (!bijlagen.length) return mislukt('geen van de bonnen heeft een bestand om mee te sturen');
     const ent = l.naam_kort || l.e_naam;
-    const bericht = ['Ha pa,', '', 'Van je lijst van ' + (bjDagLang(l.ontvangen) || 'laatst') + (ent ? ' (' + ent + ')' : '') + ' heb ik ' + (stukken.length === 1 ? 'deze bon' : 'deze bonnen') +
+    const bericht = ['Ha pa,', '', 'Van je lijst van ' + (bjDagLang(l.ontvangen) || 'laatst') + (ent ? ' (' + ent + ')' : '') + ' heb ik ' + (mee_ids.length === 1 ? 'deze bon' : 'deze bonnen') +
       ' gevonden; ' + (bijlagen.length === 1 ? 'hij zit' : 'ze zitten') + ' in de bijlage:', ''].concat(regels, ['', 'Groet,', 'David']).join('\n');
     const thread_id = l.account === 'prive' && l.draad_id ? l.draad_id : null;
     D.audit(fdb, { wie: r.wie, wat: 'bonjacht_concept_aangevraagd', object_soort: 'bonjacht_concept', object_id: l.id, entiteit: l.entiteit,
-      na: { aanleiding: o.aanleiding || 'knop', aan, draad: !!thread_id, facturen: stukken.map((x) => x.factuur), bijlagen: bijlagen.length, bytes, nogmaals: !!o.nogmaals }, wanneer });
-    return { lijst: l.id, aan, onderwerp, bericht, thread_id, bijlagen, facturen: stukken.map((x) => x.factuur), account: l.account };
+      na: { aanleiding: o.aanleiding || 'knop', aan, draad: !!thread_id, facturen: mee_ids, bijlagen: bijlagen.length, bytes, later: stukken.length - mee_ids.length, nogmaals: !!o.nogmaals }, wanneer });
+    return { lijst: l.id, aan, onderwerp, bericht, thread_id, bijlagen, facturen: mee_ids, later: stukken.length - mee_ids.length, account: l.account };
   });
 }
 // Voor server.js: de uitkomst van het mailluik → het spoor + de stand. u = { ok, concept_id, los } of { ok: false, reden, onzeker, al_in_gmail }

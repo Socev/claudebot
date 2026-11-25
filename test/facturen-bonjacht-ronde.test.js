@@ -345,3 +345,39 @@ test('concept aan pa: lijst op het praktijkpostvak = concept zonder draad-id; ni
   const y = t.routes.bonjachtConcept.voor(t.fdb, pm, l.id, { primair: true });
   assert.equal(y.status, 403, 'alleen de eigenaar');
 });
+
+test('concept aan pa (review MOET 1): meer dan 10 bevestigde bonnen = 10 mee, de rest blijft over voor het volgende concept', async () => {
+  const { t, l, r } = await lijstMetBevestigdeBon();
+  const f = t.fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(r.factuur);
+  t.call('POST', 'bevestig', { id: f.id, versie: f.versie });
+  // elf extra bevestigde bonnen (verzonnen: kopieën van de eerste factuur met eigen document)
+  const doc = t.fdb.db.prepare('SELECT * FROM document WHERE id = ?').get(f.document);
+  const kol = t.fdb.db.prepare('PRAGMA table_info(factuur)').all().map((c) => c.name);
+  for (let i = 0; i < 11; i++) {
+    const bytes = Buffer.from('%PDF-1.4\n% proefbon ' + i + '\n%%EOF\n');
+    const sha = require('crypto').createHash('sha256').update(bytes).digest('hex');
+    D.stukSchrijf(t.fdb, bytes);
+    const did = D.nieuwId();
+    t.fdb.db.prepare('INSERT INTO document (id, sha256, naam, mime, bytes, soort, aangemaakt_op) VALUES (?,?,?,?,?,?,?)').run(did, sha, 'bon' + i + '.pdf', 'application/pdf', bytes.length, 'pdf', doc.aangemaakt_op);
+    const fid = D.nieuwId();
+    const rij = t.fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(f.id);
+    const k = kol.filter((c) => !['id', 'document', 'ubl_document', 'nummer', 'bericht'].includes(c));
+    t.fdb.db.prepare('INSERT INTO factuur (id, document, nummer, ' + k.join(', ') + ') SELECT ?, ?, ?, ' + k.join(', ') + ' FROM factuur WHERE id = ?').run(fid, did, 'PROEF-' + i, f.id);
+    t.fdb.db.prepare("INSERT INTO bonjacht_regel (lijst, nr, datum, bedrag_centen, entiteit, partij, invoer, status, factuur, bijgewerkt_op) VALUES (?,?,?,?,?,?,'{}','gevonden',?,?)")
+      .run(l.id, 10 + i, '2026-10-' + String(10 + i), -(1000 + i), 'tolgaarde', 'Proefwinkel ' + i, fid, rij.bijgewerkt_op || new Date(NU).toISOString());
+    assert.ok(rij.status !== 'te_beoordelen');
+  }
+  const n = conceptOpzet(t);
+  let b = t.call('GET', 'bonjacht').lijsten[0];
+  assert.equal(b.concept.bevestigd, 12);
+  const v = await n.klik(l.id);
+  assert.equal(v.j.concept.status, 'klaar', JSON.stringify(v.j)); assert.equal(v.j.stukken, 10); assert.equal(v.j.later, 2);
+  assert.equal(n.mail[0].bijlagen.length, 10);
+  assert.equal((n.mail[0].bericht.match(/^- /gm) || []).length, 10, 'alleen de meegestuurde bonnen als regel');
+  b = t.call('GET', 'bonjacht').lijsten[0];
+  assert.equal(b.concept.nieuw, 2, 'twee bonnen blijven over');
+  const v2 = await n.klik(l.id);
+  assert.equal(v2.j.concept.status, 'klaar'); assert.equal(v2.j.stukken, 2);
+  assert.equal(n.mail[1].bijlagen.length, 2);
+  assert.equal(t.call('GET', 'bonjacht').lijsten[0].concept.nieuw, 0);
+});
