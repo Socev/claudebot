@@ -228,3 +228,120 @@ test('vol antwoord (25) op de lijstzoekvraag: per week opnieuw zoeken, oudere li
   assert.ok(g.vragen.some((v) => /older_than:14d/.test(v.query)), 'per week gezocht');
   assert.equal(t.fdb.db.prepare("SELECT count(*) AS n FROM bonjacht_lijst WHERE status = 'klaar' OR status = 'bezig'").get().n, 1);
 });
+
+// ── wv4027 (besluit 2C57): knop "Maak concept aan pa" — de echte server.js-functies (facturenBonjachtConcept + facturenSpecMailluik) met een
+// nep-lees-luik en een nep-mailluik (fetch). Niets gaat naar Gmail. Alle data verzonnen.
+function serverFn(naam) {
+  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+  const i = src.indexOf('async function ' + naam + '(');
+  assert.ok(i >= 0, naam + ' in server.js');
+  const j = src.indexOf('\n}\n', i);
+  return src.slice(i, j + 2);
+}
+function conceptOpzet(t) {
+  const n = { luik: [], mail: [], antwoord: null, log: [] };
+  const routes = t.routes;
+  const bouw = new Function('facturenRoutes', 'rolPrimair', 'appTeller', 'appAgendaApi', 'appWebhookUrl', 'fetch', 'logError', 'schrijfLog', 'velden', 'nu', 'process', 'POT_AF_MAILWF', 'FAC_SPEC_MAX_MS', 'FAC_BJ_CONCEPT_UUR',
+    serverFn('facturenBonjachtConcept') + '\n' + serverFn('facturenSpecMailluik') + '\nreturn facturenBonjachtConcept;');
+  const fn = bouw(routes, () => true, () => true,
+    async (b) => { n.luik.push(b); return n.kop === undefined ? { id: b.id, van: 'A. Proef <' + AFZ + '>', onderwerp: 'RE: af te handelen', tekst: 'GEHEIME LIJSTTEKST' } : n.kop; },
+    async () => 'https://n8n.invalid/webhook/x', async (url, o) => {
+      const body = JSON.parse(o.body); n.mail.push(body);
+      const a = n.antwoord ? n.antwoord(body) : { status: 200, j: { ok: true, concept_id: 'r-proef-' + n.mail.length, thread_id: body.thread_id || 'nieuw', bijlagen: body.bijlagen.length } };
+      return { status: a.status, ok: a.status >= 200 && a.status < 300, json: async () => a.j, arrayBuffer: async () => new ArrayBuffer(0) };
+    }, (w, e) => n.log.push(w + ' ' + (e && e.message)), (r) => n.log.push(r), (o) => JSON.stringify(o), () => 'nu', { env: { N8N_WEBHOOK_MAILCONCEPT: 'nep' } }, 'wf', 30000, 20);
+  n.klik = (lijst, o) => fn(t.fdb, t.eig, lijst, o || {});
+  return n;
+}
+async function lijstMetBevestigdeBon() {
+  const t = opzet(); const g = nepLuik(t);
+  g.lijstMails.push({ id: '19aa00000000a001', naam: 'CflStatementsToBeCompleted (3).xlsx', bytes: lijstVoor(t.rek.iban) });
+  g.bonnen.push(BON);
+  await t.ronde(g);
+  const l = t.fdb.db.prepare("SELECT * FROM bonjacht_lijst WHERE status = 'klaar'").get();
+  const r = t.fdb.db.prepare("SELECT * FROM bonjacht_regel WHERE status = 'gevonden'").get();
+  return { t, l, r };
+}
+
+test('concept aan pa: vóór Bevestigen geen knop en geen concept; daarna één concept in de draad met alleen de bevestigde bon, geen ontbrekende post', async () => {
+  const { t, l, r } = await lijstMetBevestigdeBon();
+  const n = conceptOpzet(t);
+  let b = t.call('GET', 'bonjacht').lijsten[0];
+  assert.equal(b.concept.bevestigd, 0); assert.equal(b.concept.status, 'geen');
+  const v0 = await n.klik(l.id);
+  assert.equal(v0.status, 409); assert.equal(v0.j.code, 'geen_bon');
+  assert.equal(n.mail.length, 0, 'zonder bevestigde bon geen concept');
+  const f = t.fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(r.factuur);
+  t.call('POST', 'bevestig', { id: f.id, versie: f.versie });
+  b = t.call('GET', 'bonjacht').lijsten[0];
+  assert.equal(b.concept.bevestigd, 1); assert.equal(b.concept.nieuw, 1);
+  const v = await n.klik(l.id);
+  assert.equal(v.status, 200, JSON.stringify(v.j)); assert.equal(v.j.concept.status, 'klaar'); assert.equal(v.j.stukken, 1);
+  assert.equal(n.mail.length, 1);
+  const m = n.mail[0];
+  assert.equal(m.aan, AFZ);
+  assert.equal(m.thread_id, l.draad_id, 'in de draad van de lijst');
+  assert.equal(m.onderwerp, 'Re: af te handelen');
+  assert.match(m.bericht, /^Ha pa,/);
+  assert.match(m.bericht, /20-10-2026 · € 144,00 · Webwinkel Blauwbes/);
+  assert.ok(!/8,99|Pluim|pinbetaling|niet gevonden/i.test(m.bericht), 'ontbrekende post staat er niet in: ' + m.bericht);
+  assert.equal(m.bijlagen.length, 1); assert.equal(m.bijlagen[0].mime, 'application/pdf');
+  assert.equal(Buffer.from(m.bijlagen[0].inhoud_base64, 'base64').subarray(0, 5).toString('latin1'), '%PDF-');
+  assert.match(m.bijlagen[0].naam, /^2026-10-20 Webwinkel Blauwbes EUR 144,00\.pdf$/);
+  // lees-luik: alleen mail_lezen van de lijst zelf; geen lijsttekst in de database of de log
+  assert.deepEqual(n.luik.map((x) => x.actie + ' ' + x.id), ['mail_lezen ' + l.message_id]);
+  const audit = t.fdb.db.prepare("SELECT wat, na FROM audit WHERE object_soort = 'bonjacht_concept' ORDER BY id").all();
+  assert.deepEqual(audit.map((a) => a.wat), ['bonjacht_concept_aangevraagd', 'bonjacht_concept_klaar']);
+  assert.ok(!audit.some((a) => /GEHEIME|Ha pa|af te handelen|Blauwbes/.test(a.na)), 'geen mailtekst in de audit');
+  assert.ok(!n.log.some((x) => /GEHEIME|Ha pa|af te handelen/.test(x)), 'geen mailtekst in de log');
+  b = t.call('GET', 'bonjacht').lijsten[0];
+  assert.equal(b.concept.status, 'klaar'); assert.equal(b.concept.nieuw, 0);
+  // tweede klik: geen tweede concept, "staat al in Gmail"
+  const v2 = await n.klik(l.id);
+  assert.equal(v2.status, 409); assert.equal(v2.j.code, 'al_klaar'); assert.match(v2.j.fout, /staat al in Gmail/);
+  assert.equal(n.mail.length, 1, 'tweede klik maakt geen tweede concept');
+});
+
+test('concept aan pa: luik zegt "er staat al een concept in de draad" (409) = niets gemaakt, stand al_in_gmail; afzender niet de boekhouder = geen concept', async () => {
+  const { t, l, r } = await lijstMetBevestigdeBon();
+  const f = t.fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(r.factuur);
+  t.call('POST', 'bevestig', { id: f.id, versie: f.versie });
+  const n = conceptOpzet(t);
+  n.kop = { id: l.message_id, van: 'Iemand <iemand@elders.invalid>', onderwerp: 'af te handelen' };
+  const v0 = await n.klik(l.id);
+  assert.equal(v0.status, 200); assert.equal(v0.j.concept.status, 'mislukt'); assert.match(v0.j.concept.reden, /niet van het adres van de boekhouder/);
+  assert.equal(n.mail.length, 0);
+  n.kop = undefined;
+  n.antwoord = () => ({ status: 409, j: { ok: false, fout: 'er staat al een concept in deze draad', bestaand_concept: ['x'] } });
+  const v = await n.klik(l.id);
+  assert.equal(v.status, 200); assert.equal(v.j.concept.status, 'mislukt'); assert.equal(v.j.concept.al_in_gmail, true);
+  assert.equal(n.mail.length, 1); assert.equal(n.mail[0].thread_id, l.draad_id);
+  // onzeker (time-out): stand onbekend; opnieuw alleen met nogmaals
+  n.antwoord = () => ({ status: 504, j: null });
+  const v2 = await n.klik(l.id);
+  assert.equal(v2.j.concept.status, 'onbekend');
+  const v3 = await n.klik(l.id);
+  assert.equal(v3.status, 409); assert.equal(v3.j.code, 'misschien_al');
+  n.antwoord = null;
+  const v4 = await n.klik(l.id, { nogmaals: true });
+  assert.equal(v4.j.concept.status, 'klaar');
+});
+
+test('concept aan pa: lijst op het praktijkpostvak = concept zonder draad-id; niet-eigenaar en onbekende lijst geweigerd', async () => {
+  const { t, l, r } = await lijstMetBevestigdeBon();
+  const f = t.fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(r.factuur);
+  t.call('POST', 'bevestig', { id: f.id, versie: f.versie });
+  t.fdb.db.prepare("UPDATE bonjacht_lijst SET account = 'dm' WHERE id = ?").run(l.id);
+  const n = conceptOpzet(t);
+  const v = await n.klik(l.id);
+  assert.equal(v.j.concept.status, 'klaar');
+  assert.equal(n.mail[0].thread_id, undefined, 'geen privé-draad: geen thread_id');
+  assert.equal(n.luik[0].account, 'dm');
+  const x = await n.klik('0000000000000000');
+  assert.equal(x.status, 404);
+  t.fdb.db.prepare("UPDATE gebruiker SET actief = 1 WHERE rol = 'praktijkmanager'").run();
+  const pm = F.rolVoor(t.fdb, { ingang: 'fac', email: 'praktijkmanager@voorbeeld.invalid' });
+  assert.ok(pm, 'zaad heeft een praktijkmanager');
+  const y = t.routes.bonjachtConcept.voor(t.fdb, pm, l.id, { primair: true });
+  assert.equal(y.status, 403, 'alleen de eigenaar');
+});

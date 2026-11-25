@@ -21688,6 +21688,13 @@ async function appFacturen(req, res, a, s, d, route) {
     res._app.reden = 'facturen maandspec-concept ' + (x.j && x.j.specificatie ? x.j.specificatie.status : x.status);
     return appStuur(res, x.status, x.j);
   }
+  // wv4027 (besluit 2C57): knop "Maak concept aan pa" bij een lijst van de boekhouder (blok boven Beoordelen)
+  if (req.method === 'POST' && pad === '/app/facturen/bonjacht-concept') {
+    if (!facturenRoutes.bonjachtConcept) return appWeiger(res, 404, 'het concept aan de boekhouder zit niet in deze versie van de pod', 'bonjacht-concept ontbreekt');
+    const x = await facturenBonjachtConcept(fdb, rol, d && d.lijst, { nogmaals: !!(d && d.nogmaals === true) });
+    res._app.reden = 'facturen bonjacht-concept ' + (x.j && x.j.concept ? x.j.concept.status : x.status);
+    return appStuur(res, x.status, x.j);
+  }
   // wv3701: knop Opnieuw lezen bij een scan — eerst dezelfde poort als de route (eigenaar, Beoordelen, PDF zonder tekstlaag), dan de lokale OCR
   // (pdftoppm + tesseract op de pod, geen taalmodel, niets naar buiten); de tekst gaat als ocrTekst naar de route, nooit uit het verzoek zelf
   let ocrTekst, modelKandidaat;
@@ -21800,8 +21807,49 @@ async function facturenSpecConcept(fdb, rol, batch, o) {
     return { status: 500, j: { ok: false, fout: 'fout op de pod' } };
   }
 }
+// wv4027 (besluit 2C57; ontwerp mk-scripts/wv3916/ontwerp.md punt 6): het concept aan de boekhouder bij een bonjachtlijst. (1) facturen.js
+// bonjachtConcept.voor (eigenaar, ingang app, lijst bestaat); (2) kop van de lijstmail via het lees-luik (mail_lezen, alleen lezen; alleen
+// afzender en onderwerp gaan door, de tekst niet); (3) bonjachtConcept.concept (bevestigde bonnen, spoor aangevraagd); (4) het mailluik met
+// thread_id van de lijst (privé-draad) — staat er al een concept in die draad, dan weigert het luik (409) en maken we niets; (5) uitkomst.
+// → { status, j } (gooit nooit). David verstuurt zelf.
+const FAC_BJ_CONCEPT_UUR = 20;
+async function facturenBonjachtConcept(fdb, rol, lijst, o) {
+  try {
+    const v = facturenRoutes.bonjachtConcept.voor(fdb, rol, lijst, { primair: rolPrimair() });
+    if (v.status !== 200) return v;
+    if (!appTeller('facturen-bonjacht-concept', FAC_BJ_CONCEPT_UUR, 3600000)) return { status: 429, j: { ok: false, fout: 'te vaak dit uur; probeer het later opnieuw' } };
+    let kop;
+    try { kop = await appAgendaApi(Object.assign({ actie: 'mail_lezen', id: v.j.message_id }, v.j.account === 'dm' ? { account: 'dm' } : {}), { timeoutMs: 20000 }); }
+    catch (e) { logError('facturen-bonjacht-concept', new Error('luik: ' + String(e && (e.code || e.name) || 'fout').slice(0, 40))); return { status: 502, j: { ok: false, fout: 'Gmail is even niet bereikbaar; probeer het zo nog eens' } }; }
+    if (!kop || typeof kop !== 'object' || kop.fout || kop.melding || String(kop.id || '') !== v.j.message_id) return { status: 502, j: { ok: false, fout: 'de mail met de lijst is in Gmail niet (meer) te lezen' } };
+    const c = facturenRoutes.bonjachtConcept.concept(fdb, rol, v.j.lijst, { nu: Date.now(), primair: rolPrimair(), nogmaals: !!o.nogmaals, aanleiding: 'knop',
+      kop: { van: typeof kop.van === 'string' ? kop.van.slice(0, 400) : '', onderwerp: typeof kop.onderwerp === 'string' ? kop.onderwerp.slice(0, 300) : '' } });
+    kop = null;
+    if (c.status !== 200) return c;
+    if (c.j.klaar === false) return { status: 200, j: { ok: true, concept: { status: 'mislukt', reden: c.j.reden } } };
+    let uit;
+    try {
+      const antw = await facturenSpecMailluik(c.j);
+      uit = { ok: true, concept_id: antw.concept_id, los: !!(c.j.thread_id && antw.thread_id !== c.j.thread_id) };
+    } catch (e) {
+      logError('facturen-bonjacht-concept', new Error(String(e && e.message || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)));
+      uit = e && e.bestaand ? { ok: false, al_in_gmail: true, reden: 'er staat al een concept in de draad van deze lijst in Gmail' }
+        : e && e.zeker ? { ok: false, reden: e.reden || 'het mailluik nam het concept niet aan' }
+        : { ok: false, onzeker: true, reden: 'geen bevestiging van het mailluik; misschien staat het concept er toch' };
+    }
+    const u = facturenRoutes.bonjachtConcept.uitkomst(fdb, rol, v.j.lijst, uit, { nu: Date.now(), primair: rolPrimair() });
+    if (u.status !== 200) logError('facturen-bonjacht-concept', new Error('spoor niet gezet: ' + String(u.j && u.j.fout || u.status).slice(0, 80)));
+    schrijfLog(nu() + ' facturen-bonjacht-concept ' + velden({ lijst: v.j.lijst, ok: uit.ok, onzeker: uit.onzeker, al_in_gmail: uit.al_in_gmail, los: uit.los, stukken: c.j.facturen.length, bijlagen: c.j.bijlagen.length }));
+    const st = u.j && u.j.concept ? u.j.concept : { status: uit.ok ? 'klaar' : uit.onzeker ? 'onbekend' : 'mislukt', reden: uit.reden, los: !!uit.los, al_in_gmail: !!uit.al_in_gmail };
+    return { status: 200, j: { ok: true, concept: st, stukken: c.j.facturen.length } };
+  } catch (e) {
+    logError('facturen-bonjacht-concept', e);
+    return { status: 500, j: { ok: false, fout: 'fout op de pod' } };
+  }
+}
 // Het mailluik (zelfde webhook en grenzen als appPotConcept; skill mailconcept-aanmaken § Bijlagen): JSON met één PDF. → het antwoord, of een
 // fout met zeker = true als er zeker géén concept is (400, 502 van het luik zelf, of de aanroep kwam er niet).
+// wv4027: met c.thread_id in die draad; 409 van het luik (er staat al een concept in de draad) = zeker géén concept, e.bestaand = true.
 async function facturenSpecMailluik(c) {
   const zeker = function (m, reden) { const e = new Error(m); e.zeker = true; e.reden = reden; return e; };
   const geheim = process.env.N8N_WEBHOOK_MAILCONCEPT;
@@ -21809,13 +21857,14 @@ async function facturenSpecMailluik(c) {
   // wv2465: ook meerdere bijlagen (c.bijlagen: SEPA-batch + specificatie); anders de ene c.bijlage
   const bijl = Array.isArray(c.bijlagen) ? c.bijlagen : [c.bijlage];
   const body = JSON.stringify({ secret: geheim, aan: c.aan, onderwerp: String(c.onderwerp || '').slice(0, 150), bericht: String(c.bericht || '').slice(0, 6000),
-    bijlagen: bijl.map(function (b) { return { naam: b.naam, mime: b.mime, inhoud_base64: b.inhoud_base64 }; }) });
+    bijlagen: bijl.map(function (b) { return { naam: b.naam, mime: b.mime, inhoud_base64: b.inhoud_base64 }; }), ...(c.thread_id ? { thread_id: String(c.thread_id) } : {}) });
   for (let poging = 0; poging < 2; poging++) {
     let url;
     try { url = await appWebhookUrl(POT_AF_MAILWF, null, 'potMailUrl', poging > 0); } catch (e) { throw zeker('mailluik-webhook niet gevonden', 'het mailluik is niet te vinden'); }
     const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body, signal: AbortSignal.timeout(FAC_SPEC_MAX_MS) });
     if (r.status === 404 && poging === 0) { try { await r.arrayBuffer(); } catch (e) {} continue; }
     if (r.status === 400) throw zeker('mailconcept http 400', 'het mailluik weigerde het concept');
+    if (r.status === 409 && c.thread_id) { try { await r.arrayBuffer(); } catch (e) {} const e = zeker('mailconcept http 409', 'er staat al een concept in deze draad in Gmail'); e.bestaand = true; throw e; }
     if (r.status === 401 || r.status === 403) throw zeker('mailconcept http ' + r.status, 'het mailluik weigerde de sleutel van de pod');
     if (r.status === 502) {
       let jf = null; try { jf = await r.json(); } catch (e) { jf = null; }

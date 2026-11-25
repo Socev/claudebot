@@ -58,12 +58,12 @@ const STAPPEN = { beoordelen: ['te_beoordelen'], wachtrij: ['in_wachtrij', 'word
 // Alle routes (de toets controleert ze tegen APP_ROUTE_RE van server.js en de doorgeef-Function: [a-z0-9/-]{1,64}).
 const ROUTES = {
   GET: ['', 'lijst/<stap>', 'factuur/<id>', 'document/<id>', 'kandidaten/<id>', 'betalen', 'bank', 'bank/oranje/<week>', 'uploads', 'leveranciers', 'instellingen', 'validatie', 'regels',
-    'afzender-voorstellen', 'maand-specificatie'],
+    'afzender-voorstellen', 'maand-specificatie', 'bonjacht'],
   POST: ['bevestig', 'terugdraaien', 'nagebeld', 'geen-factuur', 'toch-factuur', 'wijzig', 'ingevoerd', 'ingevoerd-ongedaan', 'opnieuw',
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'feit', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering',
     'betaaldatum', 'sepa-batch', 'sepa-bestand', 'sepa-specificatie', 'regel', 'regel-weg', 'afzender-voorstel', 'maand-specificatie', 'bank-keuze',
-    'leverancier/verzendwijze', 'bevestig-groep', 'koppel-zeker', 'naar-cynthia', 'ontkoppel', 'herlees', 'kaart-toch-betalen', 'zoek'],
+    'leverancier/verzendwijze', 'bevestig-groep', 'koppel-zeker', 'naar-cynthia', 'ontkoppel', 'herlees', 'kaart-toch-betalen', 'zoek', 'bonjacht-concept'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (sinds wv2547 ook vanaf een vaste plek, onder het invoerslot) én die hier een verse vingerafdruk vragen.
 const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus', 'POST /app/facturen/leverancier/verzendwijze'];
@@ -974,6 +974,7 @@ function bonjacht(fdb, r, nu) {
     id: l.id, ontvangen: l.ontvangen, datum_lijst: l.datum_lijst, entiteit: l.entiteit, entiteit_naam: l.naam_kort || l.e_naam || l.entiteit, status: l.status,
     reden: l.status === 'onleesbaar' ? 'deze lijst kon ik niet lezen (' + ({ geen_exact_kop: 'andere vorm dan de Exact-export', onleesbaar: 'bestand kapot', te_groot: 'bestand te groot', te_veel_regels: 'te veel regels' }[l.reden] || 'onbekende vorm') + ')' : null,
     lijst_link: link({ account: l.account, id: l.message_id }),
+    concept: bjConceptKort(fdb, l.id, nu),   // wv4027: knop "Maak concept aan pa"
     regels: fdb.db.prepare("SELECT r.*, f.status AS f_status FROM bonjacht_regel r LEFT JOIN factuur f ON f.id = r.factuur WHERE r.lijst = ? ORDER BY r.nr").all(l.id).map((x) => {
       const tr = (json(x.treffers, []) || []).slice(0, 5);
       return { nr: x.nr, datum: x.datum, bedrag_centen: x.bedrag_centen, partij: x.partij, status: x.status, zekerheid: x.zekerheid, reden: x.reden,
@@ -981,6 +982,142 @@ function bonjacht(fdb, r, nu) {
         treffers: x.status === 'gevonden' || x.status === 'kandidaten' ? tr.map((t) => ({ dag: t.dag, van: kort(t.van, 120), onderwerp: kort(t.onderwerp, 160), link: link(t) })) : [] };
     }),
   })) };
+}
+/*
+ * wv4027 (besluitenpagina nr 157 = 2C57; ontwerp mk-scripts/wv3916/ontwerp.md punt 6): knop "Maak concept aan pa" bij een lijst van de
+ * boekhouder. Eén Gmail-concept IN DE DRAAD van de lijst, aan de boekhouder, met per bevestigde bon één regel (datum, bedrag, partij) en de
+ * bon als bijlage. Alleen posten met status gevonden waarvan David de factuur bevestigde; ontbrekende posten staan er NOOIT in (Davids les
+ * 12-11). Hier geen netwerk: server.js leest de kop van de lijstmail (afzender, onderwerp) via het lees-luik, zet het concept via het
+ * mailluik en geeft de uitkomst terug. Het spoor staat in de audit (object_soort bonjacht_concept, object_id = lijst; zoals de
+ * maandspecificatie, geen schemawijziging: een oudere release opent de database gewoon). Geen mailtekst in de database: alleen aan, aantallen,
+ * factuur-id's en het concept-id. Een tweede klik maakt geen tweede concept: staat er al een (klaar), dan 409 "staat al in Gmail"; komen er
+ * later nieuwe bevestigde bonnen bij, dan gaat alleen dat nieuwe deel in een volgend concept (het mailluik weigert een tweede concept in
+ * dezelfde draad zolang het eerste er staat).
+ */
+const BJ_AFZENDERS = ['a.schaap@actasynergia.nl'];   // gelijk aan facturen-bonjacht-ronde.js AFZENDERS; meta bonjacht_afzenders wint (zelfde regel)
+const BJ_BEVESTIGD = ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt', 'concept_verwijderd', 'prive_archief'];
+const BJ_MAX_BIJLAGEN = 10, BJ_MAX_BYTES = 20 * 1024 * 1024;
+const BJ_WAT = ['bonjacht_concept_aangevraagd', 'bonjacht_concept_klaar', 'bonjacht_concept_mislukt'];
+const BJ_MAANDEN = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+function bjAfzenders(fdb) {
+  const m = json(D.metaLees(fdb, 'bonjacht_afzenders'), null);
+  const l = (Array.isArray(m) ? m : BJ_AFZENDERS).map((x) => String(x || '').trim().toLowerCase()).filter((x) => /^[a-z0-9._%+'-]{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,24}$/.test(x));
+  return l.length ? l.slice(0, 10) : BJ_AFZENDERS;
+}
+function bjEur(c) {
+  const n = Math.abs(Number(c) || 0);
+  return (Number(c) < 0 ? '-' : '') + '€ ' + String(Math.floor(n / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + String(n % 100).padStart(2, '0');
+}
+function bjDag(s) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || '')); return m ? Number(m[3]) + '-' + Number(m[2]) + '-' + m[1] : ''; }
+function bjDagLang(s) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || '')); return m ? Number(m[3]) + ' ' + BJ_MAANDEN[Number(m[2]) - 1] : ''; }
+// De stand van het concept van één lijst: geen | bezig | klaar | onbekend | mislukt, en welke facturen al in een klaargezet concept zaten.
+function bjConceptStand(fdb, lijst, nu) {
+  const rijen = fdb.db.prepare("SELECT wat, na, wanneer FROM audit WHERE object_soort = 'bonjacht_concept' AND object_id = ? AND wat IN ('" + BJ_WAT.join("', '") + "') ORDER BY id").all(lijst);
+  const gehad = new Set();
+  let aanv = null, laatste = null;
+  for (const a of rijen) {
+    const na = json(a.na, {}) || {};
+    if (a.wat === 'bonjacht_concept_aangevraagd') aanv = na;
+    if (a.wat === 'bonjacht_concept_klaar') for (const id of (aanv && Array.isArray(aanv.facturen) ? aanv.facturen : [])) gehad.add(id);
+    laatste = { wat: a.wat, na, wanneer: a.wanneer };
+  }
+  if (!laatste) return { status: 'geen', gehad };
+  if (laatste.wat === 'bonjacht_concept_klaar') return { status: 'klaar', op: laatste.wanneer, los: !!laatste.na.los, gehad };
+  if (laatste.wat === 'bonjacht_concept_mislukt') return { status: laatste.na.onzeker ? 'onbekend' : 'mislukt', op: laatste.wanneer, reden: laatste.na.reden || null, al_in_gmail: !!laatste.na.al_in_gmail, gehad };
+  return { status: nu - Date.parse(laatste.wanneer) < SPEC_BEZIG_MS ? 'bezig' : 'onbekend', op: laatste.wanneer, gehad };
+}
+// Bevestigde bonnen van een lijst (status gevonden, factuur niet meer te beoordelen), oudste post eerst.
+function bjBevestigd(fdb, lijst) {
+  return fdb.db.prepare("SELECT r.nr, r.datum, r.bedrag_centen, r.partij, r.factuur, f.status AS f_status, f.entiteit AS f_entiteit, f.leverancier_naam, f.document, f.ubl_document " +
+    "FROM bonjacht_regel r JOIN factuur f ON f.id = r.factuur WHERE r.lijst = ? AND r.status = 'gevonden' AND f.status IN ('" + BJ_BEVESTIGD.join("', '") + "') ORDER BY r.datum, r.nr").all(lijst);
+}
+// Voor het blok in de app (bonjacht()): mag de knop er staan, en wat zegt hij.
+function bjConceptKort(fdb, lijst, nu) {
+  const st = bjConceptStand(fdb, lijst, nu);
+  const bev = bjBevestigd(fdb, lijst);
+  return { status: st.status, op: st.op || null, reden: st.reden || null, los: !!st.los, al_in_gmail: !!st.al_in_gmail, bevestigd: bev.length, nieuw: bev.filter((x) => !st.gehad.has(x.factuur)).length };
+}
+// Voor server.js vóór het lees-luik: mag dit, en welke mail is de lijst. → { message_id, account }
+function bonjachtConceptVoor(fdb, r, lijstId) {
+  eisEigenaar(r);
+  if (r.ingang !== 'app') weiger(403, 'het concept aan de boekhouder maakt David in zijn eigen app');
+  const l = typeof lijstId === 'string' && /^[0-9a-f]{16}$/.test(lijstId) ? fdb.db.prepare("SELECT * FROM bonjacht_lijst WHERE id = ? AND status IN ('bezig','klaar')").get(lijstId) : null;
+  if (!l) weiger(404, 'lijst niet gevonden');
+  bjConceptMag(fdb, l.id, Date.now(), false, true);   // vooraf (zonder lees-luik) dezelfde weigeringen als bonjachtConcept; nogmaals telt daar
+  return { lijst: l.id, message_id: l.message_id, account: l.account };
+}
+// De weigeringen vóór een concept (bezig, misschien al, al klaar, nog geen bon). → { st, stukken }
+function bjConceptMag(fdb, lijst, nu, nogmaals, vooraf) {
+  const st = bjConceptStand(fdb, lijst, nu);
+  if (st.status === 'bezig') weiger(409, 'het concept wordt al klaargezet; kijk zo in Gmail bij Concepten', { code: 'bezig' });
+  if (st.status === 'onbekend' && !nogmaals && !vooraf) weiger(409, 'er is al een concept aangevraagd, maar de bevestiging kwam niet terug; kijk eerst in Gmail bij Concepten', { code: 'misschien_al', op: st.op });
+  const stukken = bjBevestigd(fdb, lijst).filter((x) => !st.gehad.has(x.factuur));
+  if (!stukken.length) {
+    if (st.gehad.size) weiger(409, 'het concept met deze bonnen staat al in Gmail (bij Concepten, of al verstuurd)', { code: 'al_klaar', op: st.op });
+    weiger(409, 'nog geen bevestigde bon bij deze lijst; bevestig eerst een bon in Beoordelen', { code: 'geen_bon' });
+  }
+  return { st, stukken };
+}
+/*
+ * Voor server.js: het concept voorbereiden. o = { nu, kop: { van, onderwerp } (uit het lees-luik), nogmaals (na "onbekend") }.
+ * → { klaar: false, reden } of { lijst, aan, onderwerp, bericht, thread_id, bijlagen, facturen, account } (alleen voor de pod, niet bewaard).
+ */
+function bonjachtConcept(fdb, r, lijstId, o) {
+  const v = bonjachtConceptVoor(fdb, r, lijstId);
+  const nu = o.nu, wanneer = nuIso(nu);
+  return D.transactie(fdb, function () {
+    const l = fdb.db.prepare('SELECT l.*, e.naam_kort, e.naam AS e_naam FROM bonjacht_lijst l LEFT JOIN entiteit e ON e.sleutel = l.entiteit WHERE l.id = ?').get(v.lijst);
+    const { stukken } = bjConceptMag(fdb, l.id, nu, !!o.nogmaals, false);
+    const mislukt = (reden) => {
+      D.audit(fdb, { wie: r.wie, wat: 'bonjacht_concept_mislukt', object_soort: 'bonjacht_concept', object_id: l.id, entiteit: l.entiteit, na: { reden }, wanneer });
+      return { klaar: false, reden };
+    };
+    // aan = het adres van de boekhouder in de afzender van de lijstmail (nooit een ander adres uit een mail)
+    const van = String(o.kop && o.kop.van || '').toLowerCase();
+    const aan = bjAfzenders(fdb).find((a) => van.includes(a));
+    if (!aan) return mislukt('de lijst kwam niet van het adres van de boekhouder');
+    const onderwerpLijst = kort(String(o.kop && o.kop.onderwerp || '').replace(/^\s*((re|antw|fw|fwd)\s*:\s*)+/i, ''), 140);
+    const onderwerp = onderwerpLijst ? 'Re: ' + onderwerpLijst : 'Bonnen bij je lijst van ' + bjDagLang(l.ontvangen);
+    // bijlagen: het stuk van elke bevestigde bon (pdf, anders UBL), hooguit 10 en 20 MB samen; de naam zegt welke post het is
+    const bijlagen = [], namen = new Set();
+    let bytes = 0;
+    const regels = stukken.map((x) => {
+      const doc = x.document || x.ubl_document ? fdb.db.prepare('SELECT * FROM document WHERE id = ?').get(x.document || x.ubl_document) : null;
+      let mee = false;
+      if (doc && bijlagen.length < BJ_MAX_BIJLAGEN && D.stukBestaat(fdb, doc.sha256)) {
+        const inhoud = D.stukLees(fdb, doc.sha256);
+        if (bytes + inhoud.length <= BJ_MAX_BYTES) {
+          const ext = (/\.([a-z0-9]{2,5})$/i.exec(String(doc.naam || '')) || [])[1] || (doc.soort === 'ubl' ? 'xml' : 'pdf');
+          let naam = kort([x.datum, kort(x.partij || x.leverancier_naam || 'bon', 50), bjEur(-x.bedrag_centen).replace('€ ', 'EUR ')].join(' ').replace(/[\\/:*?"<>|]+/g, ' '), 120) + '.' + ext.toLowerCase();
+          for (let i = 2; namen.has(naam); i++) naam = naam.replace(/( \(\d+\))?\.([a-z0-9]+)$/, ' (' + i + ').$2');
+          namen.add(naam);
+          bijlagen.push({ naam, mime: doc.mime || (ext.toLowerCase() === 'xml' ? 'application/xml' : 'application/pdf'), inhoud_base64: inhoud.toString('base64') });
+          bytes += inhoud.length; mee = true;
+        }
+      }
+      return '- ' + bjDag(x.datum) + ' · ' + bjEur(-x.bedrag_centen) + ' · ' + (kort(x.partij || x.leverancier_naam, 80) || 'onbekend') +
+        (x.f_status === 'prive_archief' ? ' (privé)' : '') + (mee ? '' : ' (bon niet in de bijlage: ' + (doc ? 'te groot' : 'geen bestand') + ')');
+    });
+    if (!bijlagen.length) return mislukt('geen van de bonnen heeft een bestand om mee te sturen');
+    const ent = l.naam_kort || l.e_naam;
+    const bericht = ['Ha pa,', '', 'Van je lijst van ' + (bjDagLang(l.ontvangen) || 'laatst') + (ent ? ' (' + ent + ')' : '') + ' heb ik ' + (stukken.length === 1 ? 'deze bon' : 'deze bonnen') +
+      ' gevonden; ' + (bijlagen.length === 1 ? 'hij zit' : 'ze zitten') + ' in de bijlage:', ''].concat(regels, ['', 'Groet,', 'David']).join('\n');
+    const thread_id = l.account === 'prive' && l.draad_id ? l.draad_id : null;
+    D.audit(fdb, { wie: r.wie, wat: 'bonjacht_concept_aangevraagd', object_soort: 'bonjacht_concept', object_id: l.id, entiteit: l.entiteit,
+      na: { aanleiding: o.aanleiding || 'knop', aan, draad: !!thread_id, facturen: stukken.map((x) => x.factuur), bijlagen: bijlagen.length, bytes, nogmaals: !!o.nogmaals }, wanneer });
+    return { lijst: l.id, aan, onderwerp, bericht, thread_id, bijlagen, facturen: stukken.map((x) => x.factuur), account: l.account };
+  });
+}
+// Voor server.js: de uitkomst van het mailluik → het spoor + de stand. u = { ok, concept_id, los } of { ok: false, reden, onzeker, al_in_gmail }
+function bonjachtConceptUitkomst(fdb, r, lijstId, u, nu) {
+  const l = typeof lijstId === 'string' ? fdb.db.prepare('SELECT id, entiteit FROM bonjacht_lijst WHERE id = ?').get(lijstId) : null;
+  if (!l) weiger(404, 'lijst niet gevonden');
+  return D.transactie(fdb, function () {
+    D.audit(fdb, { wie: r.wie, wat: u.ok ? 'bonjacht_concept_klaar' : 'bonjacht_concept_mislukt', object_soort: 'bonjacht_concept', object_id: l.id, entiteit: l.entiteit,
+      na: u.ok ? Object.assign({ concept_id: kort(u.concept_id, 60) }, u.los ? { los: true } : {})
+        : Object.assign({ reden: kort(u.reden || 'het mailluik nam het concept niet aan', 160) }, u.onzeker ? { onzeker: true } : {}, u.al_in_gmail ? { al_in_gmail: true } : {}), wanneer: nuIso(nu) });
+    return { concept: bjConceptKort(fdb, l.id, nu) };
+  });
 }
 function leveranciers(fdb, r) {
   const lijst = leverancierLijst(fdb).filter((l) => magLeverancier(r, l));
@@ -5105,6 +5242,7 @@ function maak(opties) {
         case 'sepa-bestand': return ok(sepaBestand(fdb, r, d, nu, vo), 'sepa-bestand opnieuw');
         case 'sepa-specificatie': return ok(sepaSpecificatie(fdb, r, d, nu, stijlVoor), 'sepa-specificatie');
         case 'maand-specificatie': return ok(maandSpecificatie(fdb, r, d, nu, stijlVoor), 'maand-specificatie ' + kort(d.maand, 7));   // wv2060
+        case 'bonjacht-concept': eisEigenaar(r); weiger(503, 'het concept aan de boekhouder zet de pod klaar; probeer het zo opnieuw');   // wv4027: server.js vangt deze route vooraf af
         case 'signaal': return ok(signaalRoute(fdb, r, d, nu, vo), 'signaal ' + kort(d.knop, 30));
         case 'voorstel': return ok(voorstelRoute(fdb, r, d, nu));
         case 'feit': return ok(feitRoute(fdb, r, d, nu, vo), 'feit ' + kort(d.keuze, 10));
@@ -5140,6 +5278,21 @@ function maak(opties) {
     },
     uitkomst: (fdb, r, id, u, o) => {
       try { if (!fdb || (o && o.primair) !== true) weiger(409, 'Facturen draait alleen op de primaire kant'); return ok(specificatieUitkomst(fdb, r, id, u || {}, o.nu), 'specificatie ' + (u && u.ok ? 'klaar' : 'mislukt')); }
+      catch (e) { return alsFout(e, opties.fout); }
+    },
+  };
+  // wv4027 (besluit 2C57): het concept aan de boekhouder bij een bonjachtlijst (server.js doet lees-luik en mailluik)
+  const bonjachtConceptR = {
+    voor: (fdb, r, lijst, o) => {
+      try { if (!fdb || (o && o.primair) !== true) weiger(409, 'Facturen draait alleen op de primaire kant'); return ok(bonjachtConceptVoor(fdb, r, lijst), 'bonjacht-concept voor'); }
+      catch (e) { return alsFout(e, opties.fout); }
+    },
+    concept: (fdb, r, lijst, o) => {
+      try { if (!fdb || (o && o.primair) !== true) weiger(409, 'Facturen draait alleen op de primaire kant'); return ok(bonjachtConcept(fdb, r, lijst, o), 'bonjacht-concept'); }
+      catch (e) { return alsFout(e, opties.fout); }
+    },
+    uitkomst: (fdb, r, lijst, u, o) => {
+      try { if (!fdb || (o && o.primair) !== true) weiger(409, 'Facturen draait alleen op de primaire kant'); return ok(bonjachtConceptUitkomst(fdb, r, lijst, u || {}, o.nu), 'bonjacht-concept ' + (u && u.ok ? 'klaar' : 'mislukt')); }
       catch (e) { return alsFout(e, opties.fout); }
     },
   };
@@ -5191,7 +5344,7 @@ function maak(opties) {
   };
   // wv3701: server.js vraagt eerst de bytes van een scan (zelfde poort als de route), leest ze lokaal (OCR) en roept dan POST herlees aan
   const herleesBytes = (fdb, r, d) => { try { if (!fdb) weiger(503, 'de facturendatabase is nu niet te openen'); return herleesStuk(fdb, r, d); } catch (e) { return alsFout(e, opties.fout); } };
-  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, herleesBytes, maandspec, sepaDoor, nogBetalen, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, betaalMeldingJob, betaalMeldingKlaar, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
+  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, herleesBytes, maandspec, bonjachtConcept: bonjachtConceptR, sepaDoor, nogBetalen, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, betaalMeldingJob, betaalMeldingKlaar, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
 }
 function ok(j, reden) { return { status: 200, j: Object.assign({ ok: true }, j), reden: reden || null }; }
 // Fouten naar een status. Triggers van facturen-db.js geven vaste teksten ("opdracht_prive: …"): die mogen door. Een CHECK of UNIQUE noemt
