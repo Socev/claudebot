@@ -45,7 +45,9 @@ const FOTO_BUDGET_MS = 40000, FOTO_TEGELIJK = 3, BATCH = 40, FOTO_MAX_TIK = 40;
 // bij hooguit DAG_PER_RONDE al geplaatste foto's (± 23.000 bij de invoering: 50 D1-aanroepen per kring per ronde, binnen de Cloudflare-rem)
 const MAX_PUBLIEK_FOTOS = 300, DAG_PER_RONDE = 2000;
 const DAG_RE = /^(19|20)\d{2}-\d{2}-\d{2}$/;
-const VIDEO_BUDGET = 150 * 1000 * 1000;   // wv2938: alle video's buiten samen (R2 van het hele account stond 11-11 op 9,68 van de gratis 10 GB)
+// wv2938: alle video's buiten samen. wv4115 (David 25-11-2026, besluitenpagina nr 104 = 2C04, Ja ook als het een paar euro per maand kost):
+// 150 → 500 MB. Boven de gratis 10 GB van het hele R2-account betaalt Cloudflare per GB-maand; er wordt niets ouds gewist om ruimte te maken.
+const VIDEO_BUDGET = 500 * 1000 * 1000;
 // wv2737: de Cloudflare-API staat 1.200 aanroepen per 5 min toe (header Ratelimit-Policy q=1200;w=300, gemeten 8-11). Een foto kost 3 aanroepen
 // (2x R2 put + D1). Zonder rem haalde de lus de grens in seconden en faalde daarna ±100 uploads per seconde, die elk weer meetelden: geen foto
 // meer door, api.log elk uur vol, en ook de rondes en de oude deellinks (ml-d1) faalden. Nu hooguit FOTO_MAX_TIK pogingen per tik
@@ -140,7 +142,7 @@ function strip(b, mime) {
 function kies(o, velden) { const u = {}; for (const v of velden) if (o[v] !== undefined) u[v] = o[v]; return u; }
 function lijstItem(pid, t) {
   const u = kies(t, LIJST_VELDEN);
-  u.hid = pid; u.audio = 0; u.binnen = 0; u.vastgehouden = 0; u.stukken = 0; u.zicht = { familie: false, vrienden: false }; u.plaatje_kan = false; u.dicht = false;
+  u.hid = pid; u.audio = 0; u.binnen = 0; u.vastgehouden = 0; u.stukken = 0; u.zicht = { familie: false, vrienden: false }; u.plaatje = false; u.plaatje_kan = false; u.dicht = false;   // wv4115: zicht/plaatje vast uit (vast schema van de worker)
   u.album = t.album ? { status: t.album.status, aantal: t.album.aantal } : null;
   u.video = typeof t.video === 'number' ? t.video : null;   // wv3264: aantal video's (zonder stem, kring of punt: die gaan nooit naar buiten)
   u.personen = (t.personen || []).map(String); u.plaatsen = (t.plaatsen || []).map(String); u.voorvallen = (t.voorvallen || []).map(String);
@@ -290,7 +292,6 @@ function maak(o) {
       return;
     }
     w.huizen.set(pid, huis); w.details.set(pid, detail);
-    if (x.item.plaatje) w.gevels.set(pid, { hid: x.hid, hash: 'plaatje' });
   }
 
   // R2-sleutels (vast schema; geen titels of ids van de pod)

@@ -23,8 +23,7 @@
  *    vanzelf opnieuw (status weg; de knop kan het wel).
  *  - Foto's in de app: via de pod, alleen ids uit een gekoppeld album (anders 404), als JSON {mime, data} (het doorgeefluik geeft alleen JSON
  *    door); no-store, niets op het toestel.
- *  - Delen (wv2114-links): foto's alleen als David foto_delen per herinnering aanzet (standaard uit) én de herinnering voor die kring
- *    zichtbaar is. Dan gaan hooguit 8 miniaturen (± 250 px) naar D1 ml_foto; een miniatuur met Exif/XMP (plek, toestel) gaat niet mee.
+ *  - wv4115 (David 25-11-2026, nr 61 = C51): de oude deellinks zijn weg, en daarmee foto_delen/deel_fotos (kolommen blijven, tellen niet).
  *  - Fotospoor (wv2468, Tripper): voor een reis uit je foto's (kandidaat met spoor: true) rekent sync uit de opnamedag en GPS van de foto's
  *    (immich.js albumSpoor, alleen lezen) een periode en één punt, en bewaart alleen de uitkomst in ml_fotospoor (hid, aantallen, van/tot,
  *    lat/lon op 1 decimaal = stadsniveau, tijd; nooit titels, ids of steden). Regels (spoorUit): periode = eerste–laatste dag van het drukste
@@ -42,8 +41,8 @@ CREATE TABLE IF NOT EXISTS ml_album (hid TEXT PRIMARY KEY, sleutel TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS ml_fotospoor (hid TEXT PRIMARY KEY, aantal_bij INTEGER NOT NULL, fotos INTEGER NOT NULL, met_dag INTEGER NOT NULL,
   met_gps INTEGER NOT NULL, van TEXT, tot TEXT, lat REAL, lon REAL, op TEXT NOT NULL);
 `;
-const SYNC_ELKE_MS = 10 * 60000, RUST_NA_FOUT_MS = 5 * 60000, FOTO_CACHE_MS = 10 * 60000, TOEGANG_VERS_MS = 2 * 60000;
-const MAX_NIEUW_PER_RONDE = 30, MAX_DEEL = 8, MAX_DEEL_BYTES = 300 * 1024, MAX_FOTOS = 1000;   // wv2943: 300 → 1000 (de diashow kiest over het hele album; bezoekers blijven op 300, memorylane-publiek.js)
+const SYNC_ELKE_MS = 10 * 60000, FOTO_CACHE_MS = 10 * 60000, TOEGANG_VERS_MS = 2 * 60000;
+const MAX_NIEUW_PER_RONDE = 30, MAX_FOTOS = 1000;   // wv2943: 300 → 1000 (de diashow kiest over het hele album; bezoekers blijven op 300, memorylane-publiek.js)
 const VOORVOEGSEL = 'MemoryLane – ';   // oude vorm (wv2120): alleen nog om Socevs eigen oude namen te herkennen
 const MERK = ' (ML)', ZONDER_JAAR = '(zonder jaar)', MAX_NAAM = 200, MAX_HERNOEM_PER_RONDE = 30;
 const CODE_RE = /memorylane:([0-9a-f]{16})/;
@@ -98,7 +97,7 @@ function omschrijving(c) {
 }
 
 /*
- * maak(o) → { sync, kort, spoor, fotos, foto, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, _db }
+ * maak(o) → { sync, kort, spoor, fotos, foto, gevel, gevelBeeld, albumMaken, info, _db }
  * o = { db, immich (immich.js-client), nu() → ms, fout(label, e) }
  */
 function maak(o) {
@@ -116,8 +115,6 @@ function maak(o) {
     stand: db.prepare('UPDATE ml_album SET status = ?, aantal = ?, omslag = ?, gezien_op = ? WHERE hid = ?'),
     weg: db.prepare("UPDATE ml_album SET status = 'weg', deel_fotos = NULL WHERE hid = ?"),
     gevel: db.prepare('UPDATE ml_album SET gevel = ? WHERE hid = ?'),
-    delen: db.prepare('UPDATE ml_album SET foto_delen = ? WHERE hid = ?'),
-    deelFotos: db.prepare('UPDATE ml_album SET deel_fotos = ? WHERE hid = ?'),
     aantal: db.prepare('UPDATE ml_album SET aantal = ? WHERE hid = ?'),
     tel: db.prepare('SELECT status, count(*) n FROM ml_album GROUP BY status'),
     spoor: db.prepare('SELECT * FROM ml_fotospoor WHERE hid = ?'),
@@ -131,7 +128,6 @@ function maak(o) {
 
   function url(albumId) { return im.basis + '/albums/' + albumId; }
   function fotoStand(e) { return e && e.code === 'GEEN_SLEUTEL' ? 'geen sleutel' : 'Immich niet bereikbaar'; }
-  function rust() { return laatsteFout && nu() - laatsteFout < RUST_NA_FOUT_MS; }
 
   // kandidaten: [{ hid, soort, ref, titel, jaar, auto }] uit memorylane-delen (actieve herinneringen; auto = vanzelf een album)
   async function sync(kandidaten, dwing) {
@@ -177,13 +173,6 @@ function maak(o) {
       if (r.hernoemd >= MAX_HERNOEM_PER_RONDE || typeof im.hernoemAlbum !== 'function') continue;   // de rest de volgende ronde
       try { await im.hernoemAlbum(a.id, gewenst); a.naam = gewenst; r.hernoemd++; }
       catch (e) { laatsteFout = nu(); fout('ml-immich-naam', e); break; }
-    }
-    // foto's voor de deellinks bijhouden (alleen waar David dat aanzette); vers uit Immich, zodat een foto die David uit het album haalt
-    // binnen één ronde ook van de link verdwijnt (review MOET 1: de wijziging telt mee, memorylane-delen publiceert dan opnieuw)
-    r.deel = 0;
-    for (const rij of q.alle.all()) {
-      if (rij.status !== 'actief' || !rij.foto_delen) continue;
-      try { if (await zetDeelFotos(rij.hid, true)) r.deel++; } catch (e) { laatsteFout = nu(); fout('ml-immich-deel', e); break; }
     }
     // wv2468: fotospoor van de reizen uit je foto's (alleen lezen in Immich; nieuw of veranderd aantal eerst, daarna het oudste)
     r.spoor = 0;
@@ -253,7 +242,7 @@ function maak(o) {
     if (!rij) return null;
     const c = cache.get(hid);
     return { status: rij.status, aantal: rij.aantal, gevel: rij.status === 'actief' ? gevelVan(rij, c ? c.fotos : null) : null, gevel_gekozen: !!rij.gevel,
-      foto_delen: !!rij.foto_delen, url: rij.status === 'actief' && rij.album_id ? url(rij.album_id) : null };
+      url: rij.status === 'actief' && rij.album_id ? url(rij.album_id) : null };
   }
   async function fotos(hid) {
     const rij = q.a.get(hid);
@@ -321,56 +310,12 @@ function maak(o) {
       if (!IM.UUID_RE.test(String(id)) || !f.some((x) => x.id === id)) return { status: 400, body: { ok: false, fout: 'die foto staat niet in het album' } };
     }
     q.gevel.run(id, hid);
-    if (rij.foto_delen) { try { await zetDeelFotos(hid); } catch (e) { fout('ml-immich-deel', e); } }
     return { status: 200, body: { ok: true, album: kort(hid) } };
-  }
-  // → true als de set foto's voor de link veranderde
-  async function zetDeelFotos(hid, vers) {
-    const rij = q.a.get(hid);
-    const f = (await lijstVan(hid, !!vers)).filter((x) => x.beeld);
-    const g = gevelVan(rij, f);
-    const ids = (g ? [g] : []).concat(f.map((x) => x.id).filter((x) => x !== g)).slice(0, MAX_DEEL);
-    const json = JSON.stringify(ids);
-    if (json === rij.deel_fotos) return false;
-    q.deelFotos.run(json, hid);
-    return true;
-  }
-  async function fotoDelen(hid, d) {
-    const rij = q.a.get(hid);
-    if (!rij || rij.status !== 'actief') return { status: 404, body: { ok: false, fout: 'geen album' } };
-    if (!d || typeof d.aan !== 'boolean') return { status: 400, body: { ok: false, fout: 'aan' } };
-    if (d.aan) {
-      try { await zetDeelFotos(hid, true); } catch (e) { return { status: 503, body: { ok: false, fout: 'Immich was niet bereikbaar; probeer het zo opnieuw' } }; }
-      q.delen.run(1, hid);
-    } else { q.delen.run(0, hid); q.deelFotos.run(null, hid); }
-    return { status: 200, body: { ok: true, album: kort(hid) } };
-  }
-  // Voor de publicatie (synchroon): de asset-ids die bij een gedeelde herinnering mee mogen; [] = geen foto's
-  function voorDelen(hid) {
-    const rij = q.a.get(hid);
-    if (!rij || rij.status !== 'actief' || !rij.foto_delen || !rij.deel_fotos) return [];
-    try { const l = JSON.parse(rij.deel_fotos); return Array.isArray(l) ? l.filter((x) => IM.UUID_RE.test(String(x))).slice(0, MAX_DEEL) : []; } catch (e) { return []; }
-  }
-  // Zet de miniaturen van één gedeelde herinnering in D1 (eerst de oude weg). Gooit bij een Immich-fout (dan probeert de volgende tik opnieuw).
-  async function naarD1(d1, kring, pub, ids) {
-    if (ids.length && rust()) throw new Error('immich rust');
-    const beelden = [];
-    for (const id of ids) {
-      let b;
-      try { b = await im.beeld(id, 'klein'); } catch (e) { if (e.code === 'HTTP' && e.status === 404) continue; laatsteFout = nu(); throw e; }
-      if (b.data.length > MAX_DEEL_BYTES || IM.heeftMetadata(b.data)) continue;   // te groot of met Exif/XMP: niet naar buiten
-      beelden.push(b);
-    }
-    await d1('DELETE FROM ml_foto WHERE kring = ?1 AND pub = ?2', [kring, pub]);
-    for (let i = 0; i < beelden.length; i++) {
-      await d1('INSERT INTO ml_foto (kring, pub, nr, mime, data) VALUES (?1, ?2, ?3, ?4, ?5)', [kring, pub, i, beelden[i].mime, beelden[i].data.toString('base64')]);
-    }
-    return beelden.length;
   }
   function info() {
     const t = Object.fromEntries(q.tel.all().map((r) => [r.status, r.n]));
     const sp = q.spoorTel.get();
-    return { albums: t, delen: q.alle.all().filter((r) => r.foto_delen).length, sleutel: stand.sleutel, fout: stand.fout, laatst: stand.op,
+    return { albums: t, sleutel: stand.sleutel, fout: stand.fout, laatst: stand.op,
       fotospoor: { gerekend: sp.n || 0, periode: sp.periode || 0, punt: sp.punt || 0 } };
   }
   // wv2732: een samengevoegde herinnering geeft haar album aan de herinnering die blijft (alleen de koppelrij verhuist; in Immich verandert
@@ -395,7 +340,7 @@ function maak(o) {
     cache.delete(van); cache.delete(naar);
     return true;
   }
-  return { sync, kort, spoor, fotos, foto, isVideo, gevel, gevelBeeld, fotoDelen, albumMaken, voorDelen, naarD1, info, verhuis, terugVerhuis, _db: db, _cache: cache };
+  return { sync, kort, spoor, fotos, foto, isVideo, gevel, gevelBeeld, albumMaken, info, verhuis, terugVerhuis, _db: db, _cache: cache };
 }
 
-module.exports = { maak, code, albumNaam, socevsNaam, omschrijving, spoorUit, VOORVOEGSEL, MERK, MAX_DEEL };
+module.exports = { maak, code, albumNaam, socevsNaam, omschrijving, spoorUit, VOORVOEGSEL, MERK };

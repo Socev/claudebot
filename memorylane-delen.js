@@ -12,19 +12,12 @@
  *  - Tekst in de vault: per herinnering 20_Prive/Herinneringen/MemoryLane/<hid>.md (frontmatter titel/bron, per stuk een blok
  *    "<!-- ml:stuk <sid> -->"). Davids handwijziging in een blok wint: de pod leest de tekst uit de pagina. Tot het blok in de vault staat
  *    (onderhoud, nachtgrendel) en bij een markertreffer staat het stuk in <dir>/ml-wacht/<sid>.json (0600).
- *  - Buiten de pod staat alleen wat David zichtbaar zette, in D1 `deel` (ml_item), en alleen voor een link die aan staat. De worker op
- *    deel.socev.dev/h/<slug> (socev-app deel/site/_worker.js) leest dat en schrijft bijdragen VERSLEUTELD met de publieke sleutel van de pod
- *    (ml_sleutel); alleen de pod kan ze lezen (review MOET 1). De pod haalt ze altijd op, ook als de link uit staat (MOET 2).
- *  - Gevoelig (Privé, geen categorie, vinkje) of een vastgehouden opname is nooit zichtbaar; getoetst bij de schakelaar en bij elke publicatie.
- *  - Vóór elke publicatie: geheimenpoort (hard, ook geen "toch delen"; MOET 3) en patiëntmarker (waarschuwen: David kan per inhoudshash
- *    "toch delen").
- *  - Wachtwoorden: kluis memorylane_link_familie / memorylane_link_vrienden (David zet ze in het sleutelportaal), gelezen via o.kluis op het
- *    moment van gebruik; in D1 alleen PBKDF2-SHA256 (100.000 rondes, het maximum van Workers) met eigen zout.
- *  - Haak wv2118: verhaalVoorDelen(hid) geeft nu null; met een goedgekeurd verhaal toont de deling dat in plaats van de letterlijke opname.
- *  - Foto's (wv2120): met o.immich koppelt memorylane-fotos.js elke herinnering aan een Immich-album (ml_album). Een gedeelde herinnering
- *    neemt hooguit 8 miniaturen mee naar D1 ml_foto, alleen als David foto_delen per herinnering aanzette (standaard uit).
- *  - Plaatje maken (wv2325, ontwerp § 12.1): met o.beeld maakt memorylane-plaatje.js voor een herinnering zonder foto een gegenereerd plaatje
- *    als gevel. Alleen niet-gevoelig, met categorie, geen foto, niet in de toonmodus; de pod stelt de beschrijving voor, David past hem aan.
+ *  - wv4115 (David 25-11-2026, besluitenpagina nr 61 = C51 en nr 121 = 2C21): de oude deellinks met een wachtwoord (deel.socev.dev/h/,
+ *    D1 `deel` ml_*, kluis memorylane_link_*, Access-uitzondering /h/*) en Plaatje maken (memorylane-plaatje.js) zijn weg. Delen buiten
+ *    gaat alleen nog via memorylane.socev.dev (memorylane-publiek.js, kringen familie en shizzle). De kolommen zicht_familie/zicht_vrienden
+ *    en toon_opname blijven in ml_herinnering staan maar tellen nergens meer; de lokale tabellen ml_link, ml_pub, ml_d1, ml_blok,
+ *    ml_marker_ok, ml_plaatje en ml_plaatje_aanvraag (alleen ids en hashes) gaan bij het starten weg.
+ *  - Foto's (wv2120): met o.immich koppelt memorylane-fotos.js elke herinnering aan een Immich-album (ml_album).
  *  - Verteller in Davids eigen stem (wv2366): met o.eleven maakt memorylane-verteller.js op Davids tik de vertelling (ElevenLabs, eigen
  *    stem, v4) en bewaart hem op de pod. Alleen actief, categorie gekozen en niet Privé, niet gevoelig, geen blok, niet in de toonmodus.
  *  - Als verhaal vertellen (wv2484): met o.claude schrijft memorylane-vertelscript.js van het verhaal eerst een luisterversie met audio-tags
@@ -38,13 +31,13 @@
  *    dagen (zie de toelichting daar); losmaken(hid) zet hem terug. Register ml_koppel (alleen ids, periode, uitkomst, vlaggen).
  *    wv2932 (David 11-11-2026): ook een fotoalbum (los, google:…) bij een reis, als de dagen van zijn foto's binnen de reis vallen.
  * PRIVACY. Nooit tekst, titels of namen in logs, box, /health of fouten: alleen ids en aantallen.
- * VORM. Alleen fs, path, crypto en reizen.js (wv2136: de reispagina's, gedeeld met Tripper); D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
+ * VORM. Alleen fs, path, crypto en reizen.js (wv2136: de reispagina's, gedeeld met Tripper); marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
  *
  * WV2180 (David 1-11-2026 10:02; ontwerp fase R § 16): standaard alleen de SAMENGESTELDE herinnering; de rest staat in de LOG.
  *  - Samengesteld = opname: het verhaal van herinneringen-verhaal.js (o.verhaal.samengesteld; ghostwriter, feitentoets) met Davids correcties
  *    letterlijk toegepast; reis: Davids eigen aanvullingen; los: de bijdrage zelf. Nooit het transcript.
- *  - Log (alleen in de app, alleen David): transcript, tijdcodes, wat niet lukte, correcties, eigen aanvullingen en de bijdragen van familie
- *    en vrienden (opnemen/afwijzen). Een deellink toont nooit de log: ml_item krijgt alleen titel, wanneer en het samengestelde verhaal.
+ *  - Log (alleen in de app, alleen David): transcript, tijdcodes, wat niet lukte, correcties, eigen aanvullingen en losse bijdragen
+ *    (opnemen/afwijzen). Een bezoeker ziet nooit de log.
  *  - Wanneer: frontmatter `wanneer` op de MemoryLane-pagina, door David gezet: "JJJJ[-MM[-DD]]" of een reeks "<van>/<tot>". Davids invoer
  *    wint; anders de periode van de reis of de datum die de code uit het verhaal rekende. De lijst staat op tijd (nieuwste eerst, zoals de
  *    straat van nu naar vroeger); zonder datum achteraan, op opnamedatum.
@@ -119,17 +112,10 @@ function naamVoorReis(rel, i, tagLijst) {
   return met(naam + (jaar ? ' ' + jaar : ''));
 }
 
-const KRINGEN = ['familie', 'vrienden'];
-const PKRINGEN = ['familie', 'shizzle'];   // wv2636: de kringen van memorylane.socev.dev (los van de oude deellinks)
-const HID_RE = /^h[0-9a-f]{16}$/, SID_RE = /^s[0-9a-f]{16}$/, PUB_RE = /^[A-Za-z0-9_-]{16}$/, SLUG_RE = /^[A-Za-z0-9_-]{22}$/;
-const BIJ_ID_RE = /^[A-Za-z0-9_-]{22}$/;
+const PKRINGEN = ['familie', 'shizzle'];   // wv2636: de kringen van memorylane.socev.dev
+const HID_RE = /^h[0-9a-f]{16}$/, SID_RE = /^s[0-9a-f]{16}$/;
 const MAP = '20_Prive/Herinneringen/MemoryLane';
-const ITER = 100000;
-const MAX_TEKST = 5000, MAX_TITEL = 120, MAX_NAAM = 60;
-const NAAM_RE = /^[\p{L}][\p{L}\p{M} .'’-]{0,59}$/u;
-const KLUIS = { familie: 'memorylane_link_familie', vrienden: 'memorylane_link_vrienden' };
-const HOST = 'deel.socev.dev';
-const WW_ELKE_MS = 10 * 60000, CONTROLE_ELKE_MS = 10 * 60000, OPHAAL_RUST_MS = 10 * 60000, ACTIEF_MS = 3600000;
+const MAX_TEKST = 5000, MAX_TITEL = 120;
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS ml_herinnering (hid TEXT PRIMARY KEY, soort TEXT NOT NULL, ref TEXT, categorie TEXT, gevoelig INTEGER,
@@ -139,22 +125,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS ml_herinnering_ref ON ml_herinnering (soort, r
 CREATE TABLE IF NOT EXISTS ml_stuk (sid TEXT PRIMARY KEY, hid TEXT NOT NULL, wie TEXT NOT NULL, kring TEXT NOT NULL, vorm TEXT NOT NULL,
   soort TEXT NOT NULL, status TEXT NOT NULL, marker TEXT NOT NULL DEFAULT 'geen', sha256 TEXT NOT NULL, vault INTEGER NOT NULL DEFAULT 0,
   binnen_op TEXT NOT NULL, besluit_op TEXT, bron_id TEXT UNIQUE);
-CREATE TABLE IF NOT EXISTS ml_link (kring TEXT PRIMARY KEY, slug TEXT NOT NULL, versie INTEGER NOT NULL, aan INTEGER NOT NULL DEFAULT 0,
-  zout TEXT, ww_vinger TEXT, ww_stand TEXT, aan_op TEXT, uit_op TEXT, sync INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS ml_pub (kring TEXT NOT NULL, versie INTEGER NOT NULL, hid TEXT NOT NULL, pub TEXT NOT NULL UNIQUE, PRIMARY KEY (kring, versie, hid));
-CREATE TABLE IF NOT EXISTS ml_d1 (kring TEXT NOT NULL, pub TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (kring, pub));
-CREATE TABLE IF NOT EXISTS ml_blok (hid TEXT NOT NULL, kring TEXT NOT NULL, reden TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (hid, kring));
-CREATE TABLE IF NOT EXISTS ml_marker_ok (hid TEXT NOT NULL, kring TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (hid, kring));
 CREATE TABLE IF NOT EXISTS ml_vertel_auto (hid TEXT PRIMARY KEY, hash TEXT NOT NULL, pogingen INTEGER NOT NULL DEFAULT 0, op TEXT NOT NULL,
   weg INTEGER NOT NULL DEFAULT 0, gemeld INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS ml_koppel (hid TEXT PRIMARY KEY, sleutel TEXT NOT NULL, uitkomst TEXT NOT NULL, kandidaat TEXT, titel_gezet INTEGER NOT NULL DEFAULT 0,
   album_gezet INTEGER NOT NULL DEFAULT 0, op TEXT NOT NULL);
+DROP TABLE IF EXISTS ml_link;
+DROP TABLE IF EXISTS ml_pub;
+DROP TABLE IF EXISTS ml_d1;
+DROP TABLE IF EXISTS ml_blok;
+DROP TABLE IF EXISTS ml_marker_ok;
+DROP TABLE IF EXISTS ml_plaatje;
+DROP TABLE IF EXISTS ml_plaatje_aanvraag;
 `;
 
 function iso(ms) { return new Date(ms).toISOString(); }
 function sha256(x) { return crypto.createHash('sha256').update(x).digest('hex'); }
 function rnd(n) { return crypto.randomBytes(n); }
-function b64u(b) { return Buffer.from(b).toString('base64url'); }
 function amsDmj(ms) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
@@ -166,11 +152,6 @@ function schoon(t, max, regels) {
   s = regels ? s.replace(/[\u0000-\u0009\u000b-\u001f\u007f\u2028\u2029]/g, ' ') : s.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ');
   s = s.replace(/<!--/g, '<!‐‐').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   return Array.from(s).length > max ? null : s;
-}
-function wwNorm(w) { return String(w == null ? '' : w).normalize('NFC').trim().toLowerCase(); }   // zelfde als de worker
-// asynchroon: 100.000 rondes duren ± 50–100 ms, dat blokkeert de pod niet
-function pbkdf2(ww, zoutB64) {
-  return new Promise(function (klaar, mis) { crypto.pbkdf2(Buffer.from(wwNorm(ww), 'utf8'), Buffer.from(zoutB64, 'base64'), ITER, 32, 'sha256', function (e, b) { if (e) mis(e); else klaar(b.toString('base64')); }); });
 }
 function yaml(s) { return JSON.stringify(String(s)); }
 // "[01:00] tekst" → "tekst"; stilte en gaten weg (de bezoeker krijgt het verhaal, geen tijdcodes)
@@ -254,11 +235,10 @@ function hoofdpersonenLees(vault, vv) {
 }
 
 /*
- * maak(o) → { lijst, detail, zicht, titel, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, _db }.
- * o = { db (intake._db), vault, vv (vault-veilig), dir (/opt/data/herinneringen), d1(sql, params) → Promise<{ok, rijen}>,
- *       kluis(naam) → Promise<string|null>, marker (patientpoort: beoordeel), geheimen() → [string], categorieen (herinneringen CATEGORIEEN),
- *       onderhoudAan() → bool, nachtgrendel() → bool, nu() → ms, box(tekst), fout(label, e), host?, reisVandaag?() → 'JJJJ-MM-DD',
- *       beeld?({prompt}) → Promise<openai-hulp.beeld-uitslag> (wv2325; zonder: geen Plaatje maken) }
+ * maak(o) → { lijst, detail, titel, tekst, categorie, stukBesluit, tik, info, kringen, … , _db }.
+ * o = { db (intake._db), vault, vv (vault-veilig), dir (/opt/data/herinneringen), marker (patientpoort: beoordeel), geheimen() → [string],
+ *       categorieen (herinneringen CATEGORIEEN), onderhoudAan() → bool, nachtgrendel() → bool, nu() → ms, box(tekst), fout(label, e),
+ *       reisVandaag?() → 'JJJJ-MM-DD', immich?, video?, eleven?, claude?, verhaal? }
  */
 // wv2636: de bezoekerslijst van memorylane.socev.dev (één vaultpagina, nooit namen of adressen in code). Tabel | Naam | Kring | Mailadressen | … |;
 // kring familie of shizzle; alle mailadressen uit de derde kolom. status uit de frontmatter (alleen 'bevestigd' telt voor de deur).
@@ -294,22 +274,14 @@ function maak(o) {
     // wv2732: bij = de herinnering waarbij deze is samengevoegd (status 'samengevoegd')
     for (const k of ['kring_familie INTEGER', 'kring_shizzle INTEGER', 'kring_cat TEXT', 'bij TEXT']) if (kol.indexOf(k.split(' ')[0]) < 0) db.exec('ALTER TABLE ml_herinnering ADD COLUMN ' + k); }
   const CAT = o.categorieen || {};
-  const DIR = o.dir, WACHT = path.join(DIR, 'ml-wacht'), SLEUTEL = path.join(DIR, 'ml-inbox.pem');
+  const DIR = o.dir, WACHT = path.join(DIR, 'ml-wacht');
   for (const d of [DIR, WACHT]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); try { fs.chmodSync(d, 0o700); } catch (e) { /* niet van ons */ } }
-  const host = o.host || HOST;
   const fout = (l, e) => { if (o.fout) o.fout(l, e); };
   // wv2120: Immich-albums per herinnering (alleen met een Immich-client)
   // (ontbreekt memorylane-fotos.js in de release, dan zonder foto's: delen werkt door)
   const F = (function () { if (!o.immich) return null; try { return require('./memorylane-fotos.js').maak({ db, immich: o.immich, nu, fout }); } catch (e) { fout('ml-fotos', e); return null; } })();
   // wv2938: video's afspelen (memorylane-video.js maakt per video één kleine versie op de pod; o.video = { dir, ffmpeg }). Zonder: geen afspelen.
   const VID = (function () { if (!F || !o.video || !o.video.dir) return null; try { return require('./memorylane-video.js').maak({ dir: o.video.dir, ffmpeg: o.video.ffmpeg, spawn: o.video.spawn, immich: o.immich, nu, fout }); } catch (e) { fout('ml-video', e); return null; } })();
-  let fotoTabel = false;
-  // wv2325: gegenereerde plaatjes als gevel (alleen met o.beeld; ontbreekt memorylane-plaatje.js, dan zonder)
-  const P = (function () {
-    if (typeof o.beeld !== 'function') return null;
-    try { return require('./memorylane-plaatje.js').maak({ db, dir: DIR, nu, fout, beeld: o.beeld, geheimRaak: (t) => geheimRaak(t), markerRaak: (l) => markerRaak(l) }); }
-    catch (e) { fout('ml-plaatje', e); return null; }
-  })();
   // wv2366: de verteller in Davids eigen stem (ElevenLabs via de Router; alleen met o.eleven; ontbreekt memorylane-verteller.js, dan zonder)
   const V = (function () {
     if (!o.eleven || typeof o.eleven.sleutel !== 'function') return null;
@@ -324,7 +296,7 @@ function maak(o) {
     try { return require('./memorylane-vertelscript.js').maak({ dir: DIR, nu, fout, sleutel: o.claude.sleutel, sdk: o.claude.sdk, basisUrl: o.claude.basisUrl }); }
     catch (e) { fout('ml-vertelscript', e); return null; }
   })();
-  let laatsteWw = 0, laatsteControle = 0, laatsteOphaal = 0, vuil = new Set(KRINGEN), bezig = false, laatst = null, onleesbaar = 0, d1Fout = false;
+  let bezig = false, laatst = null;
 
   const q = {
     h: db.prepare('SELECT * FROM ml_herinnering WHERE hid = ?'),
@@ -332,9 +304,7 @@ function maak(o) {
     hNieuw: db.prepare('INSERT INTO ml_herinnering (hid, soort, ref, categorie, gevoelig, status, aangemaakt, gewijzigd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
     hAlle: db.prepare("SELECT * FROM ml_herinnering WHERE status <> 'weg' ORDER BY aangemaakt DESC, hid"),
     hStatus: db.prepare('UPDATE ml_herinnering SET status = ?, gewijzigd = ? WHERE hid = ?'),
-    hZicht: { familie: db.prepare('UPDATE ml_herinnering SET zicht_familie = ?, gewijzigd = ? WHERE hid = ?'), vrienden: db.prepare('UPDATE ml_herinnering SET zicht_vrienden = ?, gewijzigd = ? WHERE hid = ?') },
     hCat: db.prepare('UPDATE ml_herinnering SET categorie = ?, gevoelig = ?, gewijzigd = ? WHERE hid = ?'),
-    hToon: db.prepare('UPDATE ml_herinnering SET toon_opname = ?, gewijzigd = ? WHERE hid = ?'),
     hKring: db.prepare('UPDATE ml_herinnering SET kring_familie = ?, kring_shizzle = ?, kring_cat = ?, gewijzigd = ? WHERE hid = ?'),
     hKringWis: db.prepare('UPDATE ml_herinnering SET kring_familie = NULL, kring_shizzle = NULL, kring_cat = NULL, gewijzigd = ? WHERE hid = ?'),
     hGewijzigd: db.prepare('UPDATE ml_herinnering SET gewijzigd = ? WHERE hid = ?'),
@@ -346,76 +316,24 @@ function maak(o) {
       'sleutel = excluded.sleutel, uitkomst = excluded.uitkomst, kandidaat = excluded.kandidaat, titel_gezet = excluded.titel_gezet, album_gezet = excluded.album_gezet, op = excluded.op'),
     koppelUitkomst: db.prepare('UPDATE ml_koppel SET uitkomst = ?, op = ? WHERE hid = ?'),
     s: db.prepare('SELECT * FROM ml_stuk WHERE sid = ?'),
-    sBron: db.prepare('SELECT * FROM ml_stuk WHERE bron_id = ?'),
     sVan: db.prepare('SELECT * FROM ml_stuk WHERE hid = ? ORDER BY binnen_op, sid'),
     sNieuw: db.prepare('INSERT INTO ml_stuk (sid, hid, wie, kring, vorm, soort, status, marker, sha256, vault, binnen_op, bron_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)'),
     sStatus: db.prepare('UPDATE ml_stuk SET status = ?, besluit_op = ? WHERE sid = ?'),
     sVault: db.prepare('UPDATE ml_stuk SET vault = 1 WHERE sid = ?'),
     sNaarVault: db.prepare("SELECT * FROM ml_stuk WHERE vault = 0 AND status IN ('binnen', 'opgenomen', 'afgewezen') ORDER BY binnen_op"),
     sTel: db.prepare('SELECT status, count(*) n FROM ml_stuk GROUP BY status'),
-    link: db.prepare('SELECT * FROM ml_link WHERE kring = ?'),
-    linkNieuw: db.prepare('INSERT INTO ml_link (kring, slug, versie, aan) VALUES (?, ?, 1, 0)'),
-    linkAan: db.prepare('UPDATE ml_link SET aan = ?, aan_op = CASE WHEN ? = 1 THEN ? ELSE aan_op END, uit_op = CASE WHEN ? = 0 THEN ? ELSE uit_op END WHERE kring = ?'),
-    linkVernieuw: db.prepare('UPDATE ml_link SET slug = ?, versie = versie + 1, zout = NULL, ww_vinger = NULL WHERE kring = ?'),
-    linkWw: db.prepare('UPDATE ml_link SET zout = ?, ww_vinger = ?, ww_stand = ? WHERE kring = ?'),
-    linkWwStand: db.prepare('UPDATE ml_link SET ww_stand = ? WHERE kring = ?'),
-    pub: db.prepare('SELECT pub FROM ml_pub WHERE kring = ? AND versie = ? AND hid = ?'),
-    pubNieuw: db.prepare('INSERT INTO ml_pub (kring, versie, hid, pub) VALUES (?, ?, ?, ?)'),
-    pubHid: db.prepare('SELECT hid FROM ml_pub WHERE kring = ? AND pub = ?'),
-    d1: db.prepare('SELECT * FROM ml_d1 WHERE kring = ?'),
-    d1Zet: db.prepare('INSERT INTO ml_d1 (kring, pub, hash) VALUES (?, ?, ?) ON CONFLICT (kring, pub) DO UPDATE SET hash = excluded.hash'),
-    d1Weg: db.prepare('DELETE FROM ml_d1 WHERE kring = ? AND pub = ?'),
-    d1Leeg: db.prepare('DELETE FROM ml_d1 WHERE kring = ?'),
-    // review ZOU 1: per kring (de bijdragen die een kring ziet verschillen)
-    blok: db.prepare("SELECT * FROM ml_blok WHERE hid = ? ORDER BY CASE reden WHEN 'geheim' THEN 0 ELSE 1 END, kring"),
     // wv2522: de automatische vertelling als verhaal (alleen hid, verhaalhash, tellers)
     autoGet: db.prepare('SELECT * FROM ml_vertel_auto WHERE hid = ?'),
     autoZet: db.prepare('INSERT INTO ml_vertel_auto (hid, hash, pogingen, op, weg, gemeld) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT (hid) DO UPDATE SET ' +
       'hash = excluded.hash, pogingen = excluded.pogingen, op = excluded.op, weg = excluded.weg, gemeld = 0'),
     autoGemeld: db.prepare('UPDATE ml_vertel_auto SET gemeld = 1 WHERE hid = ?'),
     autoWeg: db.prepare('DELETE FROM ml_vertel_auto WHERE hid NOT IN (SELECT hid FROM ml_herinnering)'),
-    blokZet: db.prepare('INSERT INTO ml_blok (hid, kring, reden, hash) VALUES (?, ?, ?, ?) ON CONFLICT (hid, kring) DO UPDATE SET reden = excluded.reden, hash = excluded.hash'),
-    blokWeg: db.prepare('DELETE FROM ml_blok WHERE hid = ? AND kring = ?'),
-    okGet: db.prepare('SELECT hash FROM ml_marker_ok WHERE hid = ? AND kring = ?'),
-    okZet: db.prepare('INSERT INTO ml_marker_ok (hid, kring, hash) VALUES (?, ?, ?) ON CONFLICT (hid, kring) DO UPDATE SET hash = excluded.hash'),
-    linkSync: db.prepare('UPDATE ml_link SET sync = ? WHERE kring = ?'),
     ramble: db.prepare('SELECT ramble_id, status, categorie, herinnering_gevoelig, notitie, opgenomen_op, aangemaakt, proef FROM ramble WHERE ramble_id = ?'),
     rambles: db.prepare("SELECT ramble_id FROM ramble WHERE status = 'notitie' AND proef = 0 AND notitie IS NOT NULL"),
   };
   function tx(f) { db.exec('BEGIN IMMEDIATE'); try { const r = f(); db.exec('COMMIT'); return r; } catch (e) { try { db.exec('ROLLBACK'); } catch (x) { /* al weg */ } throw e; } }
   function nieuwHid() { return 'h' + rnd(8).toString('hex'); }
   function nieuwSid() { return 's' + rnd(8).toString('hex'); }
-
-  // ── sleutelpaar van de inbox (geen toegangssleutel tot een dienst: alleen om bijdragen op Cloudflare onleesbaar te houden) ──
-  let sleutel = null;
-  function inbox() {
-    if (sleutel) return sleutel;
-    let pem = null;
-    try { pem = fs.readFileSync(SLEUTEL, 'utf8'); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
-    if (!pem) {
-      const k = crypto.generateKeyPairSync('rsa', { modulusLength: 3072, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'der' } });
-      const tmp = SLEUTEL + '.' + rnd(6).toString('hex') + '.tmp';
-      fs.writeFileSync(tmp, k.privateKey, { mode: 0o600, flag: 'wx' });
-      fs.renameSync(tmp, SLEUTEL);
-      pem = k.privateKey;
-    }
-    const priv = crypto.createPrivateKey(pem);
-    const spki = crypto.createPublicKey(priv).export({ type: 'spki', format: 'der' });
-    sleutel = { priv, spki: spki.toString('base64'), id: sha256(spki).slice(0, 16) };
-    return sleutel;
-  }
-  function ontsleutel(r) {
-    const k = inbox();
-    if (r.sleutel_id !== k.id) return null;
-    const aes = crypto.privateDecrypt({ key: k.priv, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, Buffer.from(String(r.sleutel), 'base64'));
-    const ct = Buffer.from(String(r.inhoud), 'base64'), iv = Buffer.from(String(r.iv), 'base64');
-    if (aes.length !== 32 || iv.length !== 12 || ct.length < 17) return null;
-    const d = crypto.createDecipheriv('aes-256-gcm', aes, iv);
-    d.setAAD(Buffer.from(r.id + '|' + r.kring + '|' + r.versie, 'utf8'));
-    d.setAuthTag(ct.subarray(ct.length - 16));
-    const pt = Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]);
-    return JSON.parse(pt.toString('utf8'));
-  }
 
   // ── wachtrij op de pod (0600): tekst die (nog) niet in de vault staat ──
   function wachtPad(sid) { if (!SID_RE.test(sid)) throw new Error('ongeldig stuk'); return path.join(WACHT, sid + '.json'); }
@@ -548,8 +466,8 @@ function maak(o) {
     }
     for (const h of q.hAlle.all()) {
       if (h.status === 'samengevoegd') continue;   // wv2732: blijft samengevoegd, ook als de reispagina verdwijnt (zie hieronder)
-      if (h.soort === 'reis' && !gezien.has(h.ref) && !fs.existsSync(path.join(o.vault, h.ref))) { q.hStatus.run('weg', t, h.hid); vuilAlle(); }
-      if (h.soort === 'opname') { const r = q.ramble.get(h.ref); if (!r || r.status !== 'notitie') { q.hStatus.run('weg', t, h.hid); vuilAlle(); } }
+      if (h.soort === 'reis' && !gezien.has(h.ref) && !fs.existsSync(path.join(o.vault, h.ref))) q.hStatus.run('weg', t, h.hid);
+      if (h.soort === 'opname') { const r = q.ramble.get(h.ref); if (!r || r.status !== 'notitie') q.hStatus.run('weg', t, h.hid); }
     }
     // wv2732: na de ronde hierboven (die een opname weg kan zetten): is de herinnering waarbij een samengevoegde hoort weg, dan weer actief
     for (const h of q.hAlle.all()) {
@@ -562,10 +480,8 @@ function maak(o) {
         q.hBij.run('actief', null, t, h.hid, 'samengevoegd');
         if (k && k.uitkomst === 'samengevoegd' && k.kandidaat === h.hid) { if (k.album_gezet && F) F.terugVerhuis(b.hid, h.hid, h.soort, h.ref); q.koppelUitkomst.run('losgemaakt', t, b.hid); }
       });
-      vuilAlle();
     }
   }
-  function vuilAlle() { for (const k of KRINGEN) vuil.add(k); }
 
   // Categorie en gevoelig zoals ze nu gelden (opname: de ramble-rij is de bron)
   function catVan(h) {
@@ -573,15 +489,6 @@ function maak(o) {
     return { categorie: h.categorie || null, gevoeligVink: !!h.gevoelig };
   }
   function isGevoelig(h) { const c = catVan(h); return !c.categorie || !CAT[c.categorie] || !!CAT[c.categorie].gevoelig || c.gevoeligVink; }
-  // Mag deze herinnering naar buiten? → null of de reden (gewone taal)
-  function nietDeelbaar(h) {
-    if (!h || h.status !== 'actief') return h && h.status === 'voorstel' ? 'eerst opnemen' : 'niet beschikbaar';
-    if (h.soort === 'opname') { const r = q.ramble.get(h.ref); if (!r || r.status !== 'notitie' || r.proef) return 'opname niet beschikbaar'; }
-    const c = catVan(h);
-    if (!c.categorie) return 'kies eerst een categorie';
-    if (isGevoelig(h)) return 'gevoelig: nooit zichtbaar';
-    return null;
-  }
   // wv2120: herinneringen die een album krijgen. Vanzelf: een reis, of een andere herinnering zodra hij een categorie heeft.
   // wv2225: met het (begin)jaar waar de herinnering over gaat (voor de albumnaam "<jaar> <titel> (ML)"); null = onbekend
   function albumKandidaat(h) {
@@ -649,7 +556,6 @@ function maak(o) {
     }
     return { tekst: '', van: null, tot: null, precisie: null, bron: null, invoer: null, verteld };
   }
-  function wanneerVan(h, pagina, s) { const w = wanneerInfo(h, pagina, s); return w.tekst || w.verteld; }
   // Volgorde (wv2180): met een datum eerst, nieuwste eerst (de straat loopt van nu naar vroeger); zonder datum achteraan, op opnamedatum.
   function sorteerSleutel(h, w) {
     w = w || wanneerInfo(h);
@@ -692,18 +598,7 @@ function maak(o) {
     const l = q.sVan.all(h.hid).filter((x) => x.status === 'opgenomen' && x.soort === 'los').map((x) => stukTekst(x, p)).filter(Boolean).map((x) => pasToe(x, c));
     return l.length ? l.join('\n\n') : null;
   }
-  // Haak wv2118 (R2): sinds wv2180 het samengestelde verhaal (Davids opdracht: standaard alleen de samengestelde herinnering)
-  function verhaalVoorDelen(hid) { const h = vind(hid); return h ? verhaalVan(h, undefined, undefined, true) : null; }
 
-  // Het item zoals een bezoeker van kring k het ziet: titel, wanneer en het samengestelde verhaal. NOOIT de log (transcript, correcties,
-  // losse aanvullingen, bijdragen van anderen); wv2180. k telt nog mee in de hash (zelfde vorm als voorheen).
-  function itemVoor(h, k) {
-    const pagina = paginaLees(h.hid), s = sam(h, pagina);
-    const stukken = [];
-    const v = h.soort === 'opname' && !h.toon_opname ? null : verhaalVan(h, pagina, s, true);
-    if (v) stukken.push({ wie: h.soort === 'los' && !isFotoalbum(h) ? 'Verteld' : 'David', soort: 'verhaal', tekst: v });
-    return { titel: titelVan(h, pagina, s), wanneer: wanneerVan(h, pagina, s), stukken, kring: k };
-  }
   // Geheimen: letterlijke pod-geheimen + bekende vormen (zelfde soort als de geheimenpoort op de uitgangen)
   const VORMEN = [/sbp_[0-9a-f]{40}/, /sk-(ant-|proj-)?[A-Za-z0-9_-]{20,}/, /gh[pousr]_[A-Za-z0-9]{30,}/, /github_pat_[A-Za-z0-9_]{40,}/, /AKIA[0-9A-Z]{16}/,
     /xox[abpr]-[A-Za-z0-9-]{10,}/, /-----BEGIN [A-Z ]*PRIVATE KEY-----/, /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, /\b\d{9,10}:AA[A-Za-z0-9_-]{30,}/];
@@ -717,185 +612,18 @@ function maak(o) {
     try { return !!o.marker.beoordeel({ teksten }, { eigen: o.marker.maakEigen ? o.marker.maakEigen(null, {}) : undefined }).tegenhouden; }
     catch (e) { fout('ml-marker', e); return true; }   // twijfel = vasthouden
   }
-  function pubVan(k, versie, hid) {
-    const r = q.pub.get(k, versie, hid);
-    if (r) return r.pub;
-    const p = b64u(rnd(12));
-    q.pubNieuw.run(k, versie, hid, p);
-    return p;
-  }
-
-  async function d1(sql, params) {
-    const r = await o.d1(sql, params || []);
-    if (!r || !r.ok) { d1Fout = true; throw new Error('d1'); }
-    return r.rijen || [];
-  }
-
-  // Wat er voor kring k buiten hoort: [{ pub, hash, item, volgorde }], en welke herinneringen geblokkeerd zijn (geheim/marker)
-  function setVoor(k) {
-    const L = q.link.get(k);
-    if (!L || !L.aan || !L.ww_vinger) return [];
-    const uit = [];
-    for (const h of q.hAlle.all()) {
-      if (!h['zicht_' + k] || nietDeelbaar(h)) continue;
-      const item = itemVoor(h, k);
-      const alle = [item.titel, item.wanneer].concat(item.stukken.map((s) => s.wie + ' ' + s.tekst)).join('\n');
-      const ih = sha256(alle);
-      if (geheimRaak(alle)) { q.blokZet.run(h.hid, k, 'geheim', ih); continue; }
-      const ok = q.okGet.get(h.hid, k);
-      if (!(ok && ok.hash === ih) && markerRaak([alle])) { q.blokZet.run(h.hid, k, 'marker', ih); continue; }
-      q.blokWeg.run(h.hid, k);
-      item.fotos = F ? F.voorDelen(h.hid) : [];   // wv2120: alleen asset-ids; de miniaturen haalt publiceer() op
-      delete item.kring;
-      uit.push({ hid: h.hid, item, sort: sorteerSleutel(h) });
-    }
-    uit.sort((a, b) => (a.sort < b.sort ? 1 : a.sort > b.sort ? -1 : a.hid < b.hid ? -1 : 1));
-    return uit.map((x, i) => { const pub = pubVan(k, L.versie, x.hid); const json = JSON.stringify(x.item.stukken);
-      return { pub, volgorde: i, item: x.item, json, hash: sha256(L.versie + '|' + i + '|' + x.item.titel + '|' + x.item.wanneer + '|' + json + (x.item.fotos.length ? '|f' + x.item.fotos.join(',') : '')) }; });
-  }
-
-  // wv2120: D1-tabel voor de miniaturen (bestaat sinds 31-10 ook in deel/schema.sql; hier voor een D1 die hem nog niet had)
-  async function zorgFotoTabel() {
-    if (!F || fotoTabel) return;
-    await d1('CREATE TABLE IF NOT EXISTS ml_foto (kring TEXT NOT NULL, pub TEXT NOT NULL, nr INTEGER NOT NULL, mime TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (kring, pub, nr))', []);
-    fotoTabel = true;
-  }
-  async function publiceer(k, volledig) {
-    const L = q.link.get(k);
-    if (!L) return 0;
-    await zorgFotoTabel();
-    const set = setVoor(k);
-    let n = 0;
-    if (L.aan && L.ww_vinger) {
-      const had = new Map(q.d1.all(k).map((r) => [r.pub, r.hash]));
-      for (const x of set) {
-        if (had.get(x.pub) === x.hash) continue;
-        await d1('INSERT INTO ml_item (kring, versie, pub, volgorde, titel, wanneer, stukken) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ' +
-          'ON CONFLICT (kring, pub) DO UPDATE SET versie = excluded.versie, volgorde = excluded.volgorde, titel = excluded.titel, wanneer = excluded.wanneer, stukken = excluded.stukken',
-        [k, L.versie, x.pub, x.volgorde, x.item.titel, x.item.wanneer, x.json]);
-        // wv2120: foto's (of geen) bij dit item. Lukt Immich niet, dan blijft de hash staan op de oude: de volgende tik probeert het opnieuw;
-        // weghalen hieronder gaat altijd door (ook als Immich weg is).
-        if (F && (x.item.fotos.length || had.has(x.pub))) {
-          try { await F.naarD1(d1, k, x.pub, x.item.fotos); } catch (e) { if (d1Fout) throw e; n++; continue; }
-        }
-        q.d1Zet.run(k, x.pub, x.hash); n++;
-      }
-      const moet = new Set(set.map((x) => x.pub));
-      const weg = volledig ? (await d1('SELECT pub, versie FROM ml_item WHERE kring = ?1', [k])).filter((r) => !moet.has(r.pub) || r.versie !== L.versie).map((r) => r.pub)
-        : [...had.keys()].filter((p) => !moet.has(p));
-      for (const p of weg) { await d1('DELETE FROM ml_item WHERE kring = ?1 AND pub = ?2', [k, p]); if (fotoTabel) await d1('DELETE FROM ml_foto WHERE kring = ?1 AND pub = ?2', [k, p]); q.d1Weg.run(k, p); n++; }
-      if (volledig && fotoTabel) await d1('DELETE FROM ml_foto WHERE kring = ?1 AND pub NOT IN (SELECT pub FROM ml_item WHERE kring = ?1)', [k]);
-    } else {
-      // link uit of geen wachtwoord: van deze kring staat niets buiten
-      if (volledig || q.d1.all(k).length) { await d1('DELETE FROM ml_item WHERE kring = ?1', [k]); if (fotoTabel) await d1('DELETE FROM ml_foto WHERE kring = ?1', [k]); q.d1Leeg.run(k); }
-    }
-    return n;
-  }
-
-  // Wachtwoord uit de kluis → PBKDF2 in D1 als het veranderde; zonder wachtwoord blijft de link dicht
-  async function wachtwoord(k) {
-    const L = q.link.get(k);
-    if (!L) return;
-    let w = null;
-    try { w = await o.kluis(KLUIS[k]); } catch (e) { fout('ml-kluis', e); q.linkWwStand.run('fout', k); return; }
-    if (!w || !wwNorm(w)) {
-      if (L.ww_vinger || L.ww_stand !== 'leeg') {
-        await d1('UPDATE ml_link SET ww_hash = NULL, ww_zout = NULL, aan = 0 WHERE kring = ?1', [k]);
-        await d1('DELETE FROM ml_sessie WHERE kring = ?1', [k]);
-        q.linkWw.run(null, null, 'leeg', k); vuil.add(k);
-      }
-      return;
-    }
-    const zout = L.zout || rnd(16).toString('base64');
-    const hash = await pbkdf2(w, zout);
-    const vinger = sha256(zout + '|' + hash + '|' + L.versie + '|' + L.slug);
-    if (vinger === L.ww_vinger) { if (L.ww_stand !== 'ok') q.linkWwStand.run('ok', k); return; }
-    const nieuwZout = L.ww_vinger ? rnd(16).toString('base64') : zout;   // ander wachtwoord: ook een nieuw zout
-    const h2 = nieuwZout === zout ? hash : await pbkdf2(w, nieuwZout);
-    await d1('DELETE FROM ml_sessie WHERE kring = ?1', [k]);
-    await linkNaarD1(k, { zout: nieuwZout, hash: h2 });
-    q.linkWw.run(nieuwZout, sha256(nieuwZout + '|' + h2 + '|' + L.versie + '|' + L.slug), 'ok', k);
-    vuil.add(k);
-  }
-  async function linkNaarD1(k, ww) {
-    const L = q.link.get(k);
-    await d1('INSERT INTO ml_link (kring, slug, versie, aan, ww_zout, ww_hash, ww_iter) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ' +
-      'ON CONFLICT (kring) DO UPDATE SET slug = excluded.slug, versie = excluded.versie, aan = excluded.aan, ww_zout = COALESCE(excluded.ww_zout, ml_link.ww_zout), ' +
-      'ww_hash = COALESCE(excluded.ww_hash, ml_link.ww_hash), ww_iter = excluded.ww_iter',
-    [k, L.slug, L.versie, L.aan ? 1 : 0, ww ? ww.zout : null, ww ? ww.hash : null, ITER]);
-  }
-  async function sleutelNaarD1() {
-    const k = inbox();
-    await d1('INSERT INTO ml_sleutel (id, spki) VALUES (?1, ?2) ON CONFLICT (id) DO NOTHING', [k.id, k.spki]);
-    await d1('DELETE FROM ml_sleutel WHERE id <> ?1', [k.id]);
-  }
-
-  // Bijdragen ophalen: ontsleutelen, toetsen, op de pod vastleggen, dan pas uit D1 wissen
-  async function ophalen() {
-    const rijen = await d1('SELECT id, kring, versie, sleutel_id, sleutel, iv, inhoud, op FROM ml_bijdrage ORDER BY op LIMIT 50', []);
-    let n = 0;
-    for (const r of rijen) {
-      if (!BIJ_ID_RE.test(String(r.id)) || KRINGEN.indexOf(r.kring) < 0) { await d1('DELETE FROM ml_bijdrage WHERE id = ?1', [r.id]); continue; }
-      if (q.sBron.get(r.id)) { await d1('DELETE FROM ml_bijdrage WHERE id = ?1', [r.id]); continue; }   // al binnen (vorige ronde stopte vóór het wissen)
-      let x = null;
-      try { x = ontsleutel(r); } catch (e) { x = null; }
-      if (!x) { onleesbaar++; await d1('DELETE FROM ml_bijdrage WHERE id = ?1', [r.id]); continue; }
-      const naam = schoon(x.naam, MAX_NAAM, false), tekst = schoon(x.tekst, MAX_TEKST, true);
-      const titel = x.titel == null || x.titel === '' ? '' : schoon(x.titel, MAX_TITEL, false);
-      if (!naam || !NAAM_RE.test(naam) || !tekst || titel === null) { onleesbaar++; await d1('DELETE FROM ml_bijdrage WHERE id = ?1', [r.id]); continue; }
-      const vorm = x.vorm === 'spraak' ? 'spraak' : 'tekst';
-      const ph = PUB_RE.test(String(x.pub || '')) ? q.pubHid.get(r.kring, x.pub) : null;
-      const raak = geheimRaak(titel + '\n' + tekst) ? 'geheim' : markerRaak([titel, tekst]) ? 'raak' : 'geen';
-      const sid = nieuwSid(), t = iso(nu());
-      wachtZet(sid, { tekst, naam, titel_nieuw: ph ? null : (titel || 'Bijdrage van ' + naam) });
-      tx(function () {
-        let hid = ph ? ph.hid : null;
-        if (!hid) { hid = nieuwHid(); q.hNieuw.run(hid, 'los', 'los:' + r.id, null, null, 'voorstel', t, t); }
-        q.sNieuw.run(sid, hid, 'bezoeker', r.kring, vorm, ph ? 'aanvulling' : 'los', raak === 'geen' ? 'binnen' : 'vastgehouden', raak, sha256(tekst), t, r.id);
-      });
-      await d1('DELETE FROM ml_bijdrage WHERE id = ?1', [r.id]);
-      n++;
-    }
-    return n;
-  }
-  async function telling() {
-    const r = await d1("SELECT sleutel, venster, n FROM ml_poging WHERE sleutel LIKE 'link:%'", []);
-    const uit = {};
-    const uur = Math.floor(nu() / 3600000) * 3600000;   // de worker bewaart het begin van het venster in ms
-    for (const x of r) { const k = String(x.sleutel).slice(5); if (KRINGEN.indexOf(k) >= 0 && Number(x.venster) === uur && Number(x.n) >= 20) uit[k] = true; }
-    return uit;
-  }
-  let dicht = {};
-
   async function tik() {
     if (bezig) return { bezig: true };
     bezig = true;
-    const uit = { vault: 0, bijdragen: 0, d1: 0 };
+    const uit = { vault: 0 };
     try {
       bijwerken();
-      try { const k = koppel(false); if (k.samengevoegd) { uit.samengevoegd = k.samengevoegd; vuilAlle(); } } catch (e) { fout('ml-koppel', e); }   // wv2732
-      if (P) { try { P.opruim((hid) => !!q.h.get(hid)); } catch (e) { fout('ml-plaatje', e); } }
+      try { const k = koppel(false); if (k.samengevoegd) uit.samengevoegd = k.samengevoegd; } catch (e) { fout('ml-koppel', e); }   // wv2732
       if (V) { try { V.opruim((hid) => { const h = q.h.get(hid); return !!h && !vertellerNiet(h); }); } catch (e) { fout('ml-verteller', e); } }   // wv2366 (review MOET 2)
       if (S) { try { S.opruim((hid) => { const h = q.h.get(hid); return !!h && !vertellerNiet(h); }); } catch (e) { fout('ml-vertelscript', e); } }   // wv2484
       if (S) { try { const a = autoVertel(false); if (a && a.gestart) uit.vertelling = 1; } catch (e) { fout('ml-vertel-auto', e); } }   // wv2522
       uit.vault = naarVault();
-      if (F) { try { const f = await fotoSync(false); if (f && (f.nieuw || f.overgenomen || f.weg || f.deel)) { uit.albums = f.nieuw + f.overgenomen; vuilAlle(); } } catch (e) { fout('ml-immich', e); } }
-      if (!o.d1) return uit;
-      d1Fout = false;
-      const t = nu();
-      const iemandAan = KRINGEN.some((k) => { const L = q.link.get(k); return L && (L.aan || (L.uit_op && t - Date.parse(L.uit_op) < ACTIEF_MS)); });
-      try {
-        if (t - laatsteOphaal >= (iemandAan ? 0 : OPHAAL_RUST_MS)) { laatsteOphaal = t; uit.bijdragen = await ophalen(); if (uit.bijdragen) uit.vault += naarVault(); }
-        const controle = t - laatsteControle >= CONTROLE_ELKE_MS;
-        if (controle) { laatsteControle = t; await sleutelNaarD1(); dicht = await telling(); }
-        for (const k of KRINGEN) { const L = q.link.get(k); if (L && !L.sync) await syncLink(k); }
-        for (const k of KRINGEN) {
-          const L = q.link.get(k);
-          if (L && L.aan && (t - laatsteWw >= WW_ELKE_MS || !L.ww_vinger)) await wachtwoord(k);
-        }
-        if (t - laatsteWw >= WW_ELKE_MS) laatsteWw = t;
-        for (const k of KRINGEN) if (controle || vuil.has(k) || (q.link.get(k) || {}).aan) { uit.d1 += await publiceer(k, controle); vuil.delete(k); }
-      } catch (e) { if (!d1Fout) fout('ml-tik', e); uit.fout = d1Fout ? 'd1' : 'tik'; }
+      if (F) { try { const f = await fotoSync(false); if (f && (f.nieuw || f.overgenomen || f.weg || f.deel)) uit.albums = f.nieuw + f.overgenomen; } catch (e) { fout('ml-immich', e); } }
       return uit;
     } finally { bezig = false; laatst = { op: iso(nu()), ...uit }; }
   }
@@ -933,7 +661,7 @@ function maak(o) {
   function toonKort(k) {
     return { hid: k.hid, soort: k.soort, bron: k.bron, status: k.status, titel: k.titel, wanneer: k.wanneer, wanneer_bron: k.wanneer_bron, datum: k.datum, categorie: k.categorie,
       gevoelig: false, personen: k.personen, plaatsen: k.plaatsen, voorvallen: k.voorvallen, audio: k.audio, binnen: 0, vastgehouden: 0, stukken: 0,
-      zicht: { familie: false, vrienden: false }, album: k.album ? { status: k.album.status, aantal: k.album.aantal } : null, plaatje: !!k.plaatje, plaatje_kan: false,
+      album: k.album ? { status: k.album.status, aantal: k.album.aantal } : null,
       precisie: k.precisie || null, video: typeof k.video === 'number' ? k.video : null };   // wv3264: geen stem, kring of punt
   }
   // ── wv2636: kringen (MemoryLane delen op memorylane.socev.dev; ontwerp vault 01_Ontwikkeling "MemoryLane op een eigen adres" § 4) ──
@@ -1029,15 +757,12 @@ function maak(o) {
   function kort(h, pagina, s) {
     const p = pagina === undefined ? paginaLees(h.hid) : pagina;
     const x = s === undefined ? sam(h, p) : s;
-    const st = q.sVan.all(h.hid), c = catVan(h), b = q.blok.all(h.hid)[0], w = wanneerInfo(h, p, x);
+    const st = q.sVan.all(h.hid), c = catVan(h), w = wanneerInfo(h, p, x);
     return { ...facetten(x), audio: audioStukken(h).length, hid: h.hid, soort: h.soort, bron: isFotoalbum(h) ? 'google' : null, status: h.status, titel: titelVan(h, p, x), wanneer: w.tekst || w.verteld, wanneer_bron: w.bron, wanneer_invoer: w.invoer,
       verteld: w.verteld, datum: sorteerSleutel(h, w), categorie: c.categorie, gevoelig: isGevoelig(h), gevoelig_vink: c.gevoeligVink,
-      zicht: { familie: !!h.zicht_familie, vrienden: !!h.zicht_vrienden },
-      toon_opname: !!h.toon_opname, niet_deelbaar: nietDeelbaar(h), blok: b ? b.reden : null,
       verhaal_stand: h.soort === 'opname' ? (x ? x.stand : null) : null,
       stukken: st.filter((y) => y.status !== 'weggegooid').length, binnen: st.filter((y) => y.status === 'binnen').length,
       vastgehouden: st.filter((y) => y.status === 'vastgehouden').length, album: F ? F.kort(h.hid) : null,
-      plaatje: P ? P.heeft(h.hid) : false, plaatje_kan: !plaatjeNiet(h),
       // wv3264 (Levenskalender, ontwerp 17-11 § Bouwplan): precisie van de datum (dag|maand|jaar|ongeveer_jaar|decennium|null), het aantal
       // video's in het album (null = onbekend) en of er een vertelling in Davids eigen stem klaarstaat
       precisie: w.precisie || null, video: videoVan(h), stem: stemKlaar(h, p, x) };
@@ -1120,15 +845,6 @@ function maak(o) {
     uit.verteller_verhaal = vertelVerhaalKort(h, pagina, s);   // wv2484
     return { status: 200, body: { ok: true, herinnering: uit } };
   }
-  function zicht(hid, d) {
-    const h = vind(hid), k = d && d.kring;
-    if (!h) return { status: 404, body: { ok: false, fout: 'onbekend' } };
-    if (KRINGEN.indexOf(k) < 0 || typeof d.aan !== 'boolean') return { status: 400, body: { ok: false, fout: 'kring en aan' } };
-    if (d.aan) { const r = nietDeelbaar(h); if (r) return { status: 409, body: { ok: false, fout: r } }; }
-    q.hZicht[k].run(d.aan ? 1 : 0, iso(nu()), h.hid);
-    vuil.add(k);
-    return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
-  }
   function titel(hid, d) {
     const h = vind(hid);
     if (!h) return { status: 404, body: { ok: false, fout: 'onbekend' } };
@@ -1136,7 +852,7 @@ function maak(o) {
     if (!t) return { status: 400, body: { ok: false, fout: 'titel 1–' + MAX_TITEL + ' tekens' } };
     if (!kanVault()) return { status: 503, body: { ok: false, fout: 'de Second Brain is even in onderhoud; probeer het zo opnieuw' } };
     paginaZekerTitel(h, t, 'david');
-    q.hGewijzigd.run(iso(nu()), h.hid); vuilAlle();
+    q.hGewijzigd.run(iso(nu()), h.hid);
     return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
   }
   // wv2180: Davids "wanneer" (jaar, of een reeks, optioneel met maand of dag). Leeg = weg (dan weer wat de code afleidt).
@@ -1153,7 +869,7 @@ function maak(o) {
     }
     if (!kanVault()) return { status: 503, body: { ok: false, fout: 'de Second Brain is even in onderhoud; probeer het zo opnieuw' } };
     paginaVelden(h, { wanneer: waarde });
-    q.hGewijzigd.run(iso(nu()), h.hid); vuilAlle();
+    q.hGewijzigd.run(iso(nu()), h.hid);
     return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
   }
   // wv2180: voor de verhaalmodule — Davids eigen aanvullingen en correcties bij een opname (alleen David; bijdragen van anderen niet)
@@ -1172,7 +888,7 @@ function maak(o) {
     if (oud && (b === 'david' || (!b && oud !== oudeStandaard(h) && oud !== standaardTitel(h)))) return { ok: true, al: 'david' };
     if (!kanVault()) return { ok: false, fout: 'onderhoud' };
     paginaZekerTitel(h, t, 'naamgeving');
-    q.hGewijzigd.run(iso(nu()), h.hid); vuilAlle();
+    q.hGewijzigd.run(iso(nu()), h.hid);
     return { ok: true };
   }
   function tekst(hid, d) {
@@ -1186,7 +902,7 @@ function maak(o) {
     q.sNieuw.run(sid, h.hid, 'david', 'eigen', 'tekst', soort, 'opgenomen', 'geen', sha256(t), nuIso, null);
     // wv2536: een correctie naar een bekende naam ("Livia is Lyvia") komt op de namenlijst, zodat hij ook in andere verhalen geldt
     if (soort === 'correctie' && o.verhaal && o.verhaal.namen && typeof o.verhaal.namen.leer === 'function') { try { o.verhaal.namen.leer([t]); } catch (e) { fout('ml-namen', e); } }
-    naarVault(); vuilAlle();
+    naarVault();
     return { status: 200, body: { ok: true, sid, vault: !!q.s.get(sid).vault } };
   }
   function categorie(hid, d) {
@@ -1197,24 +913,8 @@ function maak(o) {
     if (!CAT[c]) return { status: 400, body: { ok: false, fout: 'onbekende categorie' } };
     const gev = CAT[c].gevoelig ? 1 : d.gevoelig ? 1 : 0;
     q.hCat.run(c, gev, iso(nu()), h.hid);
-    if (gev) { for (const k of KRINGEN) q.hZicht[k].run(0, iso(nu()), h.hid); q.hKringWis.run(iso(nu()), h.hid); }   // gevoelig = meteen nergens meer zichtbaar (wv2636: ook geen kring)
-    vuilAlle();
+    if (gev) q.hKringWis.run(iso(nu()), h.hid);   // gevoelig = meteen nergens meer zichtbaar (wv2636: ook geen kring)
     return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
-  }
-  function toonOpname(hid, d) {
-    const h = vind(hid);
-    if (!h || h.soort !== 'opname') return { status: 404, body: { ok: false, fout: 'onbekend' } };
-    q.hToon.run(d && d.aan ? 1 : 0, iso(nu()), h.hid); vuilAlle();
-    return { status: 200, body: { ok: true, herinnering: kort(q.h.get(h.hid)) } };
-  }
-  // David deelt een herinnering waarop de patiëntmarker raak was toch (verse vingerafdruk in server.js); geldt voor precies deze inhoud
-  function tochDelen(hid) {
-    const h = vind(hid), b = h ? q.blok.all(h.hid) : [];
-    if (!h || !b.length) return { status: 404, body: { ok: false, fout: 'niets tegengehouden' } };
-    if (b.some((x) => x.reden === 'geheim')) return { status: 409, body: { ok: false, fout: 'er staat een sleutel of wachtwoord in; haal dat eerst weg' } };
-    tx(function () { for (const x of b) { q.okZet.run(h.hid, x.kring, x.hash); q.blokWeg.run(h.hid, x.kring); } q.hGewijzigd.run(iso(nu()), h.hid); });
-    vuilAlle();
-    return { status: 200, body: { ok: true } };
   }
   function stukBesluit(sid, actie) {
     const s = SID_RE.test(String(sid)) ? q.s.get(sid) : null;
@@ -1232,7 +932,7 @@ function maak(o) {
       if (actie === 'opnemen' && h.status === 'voorstel') q.hStatus.run('actief', t, h.hid);
       if (actie === 'afwijzen' && q.sVan.all(h.hid).every((x) => x.status !== 'opgenomen')) q.hStatus.run('afgewezen', t, h.hid);
     }
-    naarVault(); vuilAlle();
+    naarVault();
     return { status: 200, body: { ok: true, status: q.s.get(s.sid).status } };
   }
   // wv2306: open koppelvoorstellen (persoon, voorval) van de verhalen van deze opname; koppelen pas na Davids Ja (besluit)
@@ -1310,79 +1010,26 @@ function maak(o) {
     return b ? { stand: 'klaar', data: b, grootte: b.length } : { stand: 'kan-niet', reden: 'te groot' };
   }
   // wv2314 (R6): de gevel van één huis in de straat; in de toonmodus alleen van een toonbare herinnering (anders 404, zoals f/<id>)
-  // wv2325: zonder foto-gevel het gegenereerde plaatje (in de toonmodus alleen bij een toonbare); heeft het album foto's, dan wint de foto
   async function gevelBeeld(hid, opt) {
     const h = metAlbum(hid);
-    if (!h || (opt && (opt.toon || opt.kring) && !magZien(h, opt)) || (!F && !P)) return { status: 404, body: { ok: false, fout: 'onbekend' } };
-    const plaatje = () => { const b = P ? P.beeld(h.hid) : null; return b ? { status: 200, body: { ok: true, mime: b.mime, data: b.data, plaatje: true } } : null; };
-    if (!F || !heeftFoto(h)) return plaatje() || (F ? F.gevelBeeld(hid) : { status: 404, body: { ok: false, fout: 'geen gevel' } });
-    const u = await F.gevelBeeld(hid);
-    return u.status === 404 ? plaatje() || u : u;
+    if (!h || (opt && (opt.toon || opt.kring) && !magZien(h, opt)) || !F) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    return F.gevelBeeld(hid);
   }
-  async function gevel(hid, d) { if (!F || !metAlbum(hid)) return { status: 404, body: { ok: false, fout: 'onbekend' } }; const u = await F.gevel(hid, d); if (u.status === 200) vuilAlle(); return u; }
-  async function fotoDelen(hid, d) {
-    const h = F && metAlbum(hid);
-    if (!h) return { status: 404, body: { ok: false, fout: 'onbekend' } };
-    const u = await F.fotoDelen(hid, d);
-    if (u.status === 200) vuilAlle();
-    return u;
-  }
+  async function gevel(hid, d) { if (!F || !metAlbum(hid)) return { status: 404, body: { ok: false, fout: 'onbekend' } }; return F.gevel(hid, d); }
   async function albumMaken(hid) {
     const h = F && metAlbum(hid);
     if (!h || h.status !== 'actief') return { status: 404, body: { ok: false, fout: 'onbekend' } };
     return F.albumMaken(albumKandidaat(h));
   }
-  // ── wv2325: Plaatje maken (ontwerp § 12.1) ──
-  // Heeft de herinnering een foto (album met ≥ 1 foto)? Dan geen plaatje: de foto wint.
-  function heeftFoto(h) { const a = F ? F.kort(h.hid) : null; return !!(a && a.status === 'actief' && a.aantal > 0); }
-  // Mag er een plaatje voor deze herinnering gemaakt worden? → null of de reden (gewone taal). Zelfde regels als delen (actief, categorie,
-  // niet gevoelig, opname met notitie en geen proef), plus: geen foto, niet in de toonmodus.
-  function plaatjeNiet(h, opt) {
-    if (!P) return 'plaatjes maken zit niet in deze versie';
-    if (opt && opt.toon) return 'niet in de toonmodus';
-    const r = nietDeelbaar(h);
-    if (r) return r === 'gevoelig: nooit zichtbaar' ? 'gevoelig: geen plaatje' : r;
-    if (heeftFoto(h)) return 'er is al een foto';
-    return null;
-  }
-  function plaatjeVoorstel(hid, opt) {
-    const h = vind(hid);
-    if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
-    if (opt && opt.toon) return NIET_TOON;
-    const r = plaatjeNiet(h, opt);
-    if (r) return { status: 409, body: { ok: false, fout: r } };
-    const p = paginaLees(h.hid), s = sam(h, p), w = wanneerInfo(h, p, s);
-    return P.voorstel({ soort: isFotoalbum(h) ? 'fotoalbum' : h.soort, jaar: w.van ? String(w.van).slice(0, 4) : null, titel: titelVan(h, p, s) });
-  }
-  async function plaatjeMaken(hid, d, opt) {
-    const h = vind(hid);
-    if (!h || h.status === 'weg') return { status: 404, body: { ok: false, fout: 'onbekend' } };
-    if (opt && opt.toon) return NIET_TOON;
-    const r = plaatjeNiet(h, opt);
-    if (r) return { status: 409, body: { ok: false, fout: r } };
-    const u = await P.maak(h.hid, d);
-    if (u.status === 200) u.body.herinnering = kort(q.h.get(h.hid));
-    return u;
-  }
-  // Weghalen mag altijd (ook als de herinnering intussen gevoelig werd of een foto kreeg), behalve in de toonmodus
-  function plaatjeWeg(hid, opt) {
-    const h = vind(hid);
-    if (!h || !P) return { status: 404, body: { ok: false, fout: 'onbekend' } };
-    if (opt && opt.toon) return NIET_TOON;
-    const u = P.weg(h.hid);
-    if (u.status === 200 && h.status !== 'weg') u.body.herinnering = kort(q.h.get(h.hid));
-    return u;
-  }
   // ── wv2366: de verteller in Davids eigen stem ──
   // Mag de verteller deze herinnering vertellen? → null of de reden (gewone taal). Actief, categorie gekozen en niet Privé, niet gevoelig,
-  // geen blok (geheim of patiëntmarker gezien), niet in de toonmodus. Zelfde regel bij maken, afspelen en opruimen.
+  // niet in de toonmodus. Zelfde regel bij maken, afspelen en opruimen.
   function vertellerNiet(h, opt) {
     if (!V) return 'de verteller in je eigen stem zit niet in deze versie';
     if (opt && opt.toon) return 'niet in de toonmodus';
     if (!h || h.status !== 'actief') return 'deze herinnering is (nog) niet actief';
     const c = catVan(h);
     if (!c.categorie || c.categorie === 'prive' || isGevoelig(h)) return 'Bij Privé of gevoelig vertelt de verteller niet.';
-    if (q.blok.all(h.hid).length) return 'Hier vertelt de verteller niet: er staat iets in dat niet naar buiten mag.';
     return null;
   }
   // de tekst die de verteller voorleest (titel + het volledige samengestelde verhaal, zoals de kamer het toont)
@@ -1598,50 +1245,6 @@ function maak(o) {
     if (u.status === 200 && actueel) { try { q.autoZet.run(hid, actueel, 0, iso(nu()), 1); } catch (e) { fout('ml-vertel-auto', e); } }
     return u;
   }
-  function zorgLink(k) { if (!q.link.get(k)) q.linkNieuw.run(k, b64u(rnd(16)).slice(0, 22)); return q.link.get(k); }
-  function delenStand() {
-    const links = KRINGEN.map((k) => {
-      const L = zorgLink(k);
-      return { kring: k, aan: !!L.aan, url: 'https://' + host + '/h/' + L.slug, wachtwoord: L.ww_stand === 'ok' ? 'gezet' : L.ww_stand === 'fout' ? 'onbekend' : L.aan ? 'ontbreekt' : 'onbekend',
-        dicht: !!dicht[k], zichtbaar: q.hAlle.all().filter((h) => h['zicht_' + k] && !nietDeelbaar(h) && !q.blok.all(h.hid).some((b) => b.kring === k)).length, kluisnaam: KLUIS[k],
-        buiten_bijgewerkt: !!L.sync };
-    });
-    return { status: 200, body: { ok: true, links, laatst: laatst ? laatst.op : null, d1_fout: d1Fout } };
-  }
-  // aan (verse vingerafdruk in server.js), uit, vernieuw. De lokale stand gaat meteen om en krijgt sync = 0; syncLink zet D1 recht. Lukt
-  // dat niet (D1 onbereikbaar), dan herhaalt elke tik het tot het lukt en toont de app "buiten nog niet bijgewerkt" (review MOET 4).
-  async function link(k, actie) {
-    if (KRINGEN.indexOf(k) < 0) return { status: 404, body: { ok: false, fout: 'onbekend' } };
-    zorgLink(k);
-    const t = iso(nu());
-    if (actie === 'aan') q.linkAan.run(1, 1, t, 1, null, k);
-    else if (actie === 'uit') q.linkAan.run(0, 0, null, 0, t, k);
-    else if (actie === 'vernieuw') q.linkVernieuw.run(b64u(rnd(16)).slice(0, 22), k);
-    else return { status: 400, body: { ok: false, fout: 'onbekende keuze' } };
-    q.linkSync.run(0, k);
-    vuil.add(k);
-    if (o.d1) {
-      try { await syncLink(k); }
-      catch (e) { if (!d1Fout) fout('ml-link', e); return { status: 502, body: { ok: false, fout: 'de deelpagina was niet bereikbaar; de server zet hem zo recht (tot dan staat hij buiten nog in de oude stand)', stand: delenStand().body } }; }
-    }
-    return delenStand();
-  }
-  async function syncLink(k) {
-    const L = q.link.get(k);
-    await zorgFotoTabel();
-    if (!L.aan) { if (await ophalen()) naarVault(); }   // MOET 2: eerst leeghalen
-    await d1('DELETE FROM ml_sessie WHERE kring = ?1 AND versie <> ?2', [k, L.versie]);
-    if (!L.aan) {
-      await d1('UPDATE ml_link SET aan = 0 WHERE kring = ?1', [k]);
-      await d1('DELETE FROM ml_sessie WHERE kring = ?1', [k]);
-      await d1('DELETE FROM ml_item WHERE kring = ?1', [k]); if (fotoTabel) await d1('DELETE FROM ml_foto WHERE kring = ?1', [k]); q.d1Leeg.run(k);
-    }
-    await linkNaarD1(k, null);
-    if (L.aan) { await sleutelNaarD1(); await wachtwoord(k); }
-    await publiceer(k, true);
-    q.linkSync.run(1, k);
-    vuil.delete(k);
-  }
   // ── wv2732 (David 8-11-2026, Ja op "een opname voortaan bij de bestaande herinnering zetten"; bouwplan wv2730) ──
   // Een opname over een reis of fotoalbum dat al in MemoryLane staat werd een tweede los huis met een eigen album. Nu: zodra het verhaal van
   // een actieve opname klaar is en een datum op dagniveau heeft, zoekt de pod actieve reis- en fotoalbum-herinneringen waarvan de periode
@@ -1692,9 +1295,8 @@ function maak(o) {
       if (!Number.isFinite(ov) || !Number.isFinite(ot) || ot - ov >= KOPPEL_MAX_DAGEN) continue;
       const rk = kandidaten().filter((c) => c.van <= ot + 1 && ov <= c.tot + 1), raak = rk.map((c) => c.h);
       const beletsel = (c) => {
-        const a = F ? F.kort(c.hid) : null;
         if (q.sVan.all(c.hid).some((x) => x.status !== 'weggegooid')) return 'kandidaat heeft eigen stukken';
-        if (c.zicht_familie || c.zicht_vrienden || c.kring_familie === 1 || c.kring_shizzle === 1 || (a && a.foto_delen)) return 'kandidaat staat zichtbaar gezet';
+        if (c.kring_familie === 1 || c.kring_shizzle === 1) return 'kandidaat staat zichtbaar gezet';
         if (vastgehouden().has(c.hid)) return 'kandidaat wordt vastgehouden';   // wv2932 (review MOET 1): kandidaat van een rij 'wacht'
         const kk = q.koppel.get(c.hid);   // wv2932: een reis met een samengevoegd fotoalbum (album is van dat fotoalbum; losmaken zou het niet terugvinden)
         if (kk && kk.uitkomst === 'samengevoegd') return 'kandidaat heeft al een samengevoegd fotoalbum';
@@ -1761,7 +1363,7 @@ function maak(o) {
     const beletsel = (x, r) => {
       if (reizen0.filter((y) => binnen(x, y)).length > 1) return 'fotoalbum past bij meer reizen';
       if (q.sVan.all(x.h.hid).some((s) => s.status !== 'weggegooid')) return 'fotoalbum heeft eigen stukken';
-      if (x.h.zicht_familie || x.h.zicht_vrienden || x.h.kring_familie === 1 || x.h.kring_shizzle === 1 || x.a.foto_delen) return 'fotoalbum staat zichtbaar gezet';
+      if (x.h.kring_familie === 1 || x.h.kring_shizzle === 1) return 'fotoalbum staat zichtbaar gezet';
       if (PKRINGEN.some((k) => magKring(r.h, k) && !magKring(x.h, k)) || (toonbaar(r.h) && !toonbaar(x.h))) return 'reis is zichtbaar waar het fotoalbum dat niet is';
       const ra = F.kort(r.h.hid);
       if (ra && ra.status === 'actief' && ra.aantal > 0) return 'reis heeft al foto\'s';
@@ -1820,7 +1422,6 @@ function maak(o) {
         try { paginaVelden(h, { titel: yaml(standaardTitel(h)), titel_bron: 'standaard' }); titel = true; } catch (e) { fout('ml-koppel-titel', e); }
       }
     }
-    vuilAlle();
     return { status: 200, body: { ok: true, hid: c.hid, bij: h ? h.hid : null, album, titel } };
   }
   // wv2136 (Tripper): de herinnering bij een reispagina (hid, aantal opgenomen stukken, album als status/aantal); alleen lezen, geen bijwerken()
@@ -1858,15 +1459,14 @@ function maak(o) {
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
     const ks = Object.fromEntries(db.prepare('SELECT uitkomst, count(*) n FROM ml_koppel GROUP BY uitkomst').all().map((r) => [r.uitkomst, r.n]));
-    return { lijst_ms: Object.assign({}, lijstDuur), herinneringen: q.hAlle.all().length, samengevoegd: q.hAlle.all().filter((h) => h.status === 'samengevoegd').length, koppel: ks, stukken: st, immich: F ? F.info() : null, video: VID ? VID.info() : null, plaatjes: P ? P.info() : null, verteller: V ? V.info() : null, vertelscript: S ? S.info() : null,
-      vertel_auto: S ? { uit: fs.existsSync(AUTO_UIT), laatst: autoLaatst } : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
-      laatst, d1_fout: d1Fout, onleesbaar };
+    return { lijst_ms: Object.assign({}, lijstDuur), herinneringen: q.hAlle.all().length, samengevoegd: q.hAlle.all().filter((h) => h.status === 'samengevoegd').length, koppel: ks, stukken: st, immich: F ? F.info() : null, video: VID ? VID.info() : null, verteller: V ? V.info() : null, vertelscript: S ? S.info() : null,
+      vertel_auto: S ? { uit: fs.existsSync(AUTO_UIT), laatst: autoLaatst } : null,
+      laatst };
   }
-  return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), zicht, titel, wanneer, davidStukken, naamgeving, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, video, videoDeel, videoBestand, gevel, gevelBeeld, fotoDelen, albumMaken, reisKoppeling, fotoReizen,
-    plaatjeVoorstel, plaatjeMaken, plaatjeWeg, _P: P, vertellerMaken, vertellerDeel, vertellerWeg, _V: V,
+  return { lijst, detail, audio, voorstel, toonbaar: (hid) => toonbaar(vind(hid)), titel, wanneer, davidStukken, naamgeving, tekst, categorie, stukBesluit, tik, info, fotos, foto, video, videoDeel, videoBestand, gevel, gevelBeeld, albumMaken, reisKoppeling, fotoReizen,
+    vertellerMaken, vertellerDeel, vertellerWeg, _V: V,
     vertelVerhaalMaken, vertelVerhaalDeel, vertelVerhaalWeg, _S: S, autoVertel,
-    fotoSync, koppel, losmaken, hoofdpersonen, kring, kringVoorstelTerug, kringen, publiekLijst, magKring, tekstRaak: (l) => (l.some((t) => geheimRaak(t)) ? 'geheim' : markerRaak(l) ? 'marker' : null), _db: db, _setVoor: setVoor, _F: F,
-    _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
+    fotoSync, koppel, losmaken, hoofdpersonen, kring, kringVoorstelTerug, kringen, publiekLijst, magKring, tekstRaak: (l) => (l.some((t) => geheimRaak(t)) ? 'geheim' : markerRaak(l) ? 'marker' : null), _db: db, _F: F };
 }
 
-module.exports = { maak, bezoekersLees, _bezoekersTabel: bezoekersTabel, BEZOEKERS_PAGINA, PKRINGEN, wanneerUit, wanneerTekst, codeWanneer, naamVoorReis, KRINGEN, KLUIS, MAP, ITER, MAX_TEKST, MAX_TITEL, MAX_NAAM, HID_RE, SID_RE, _pbkdf2: pbkdf2, _wwNorm: wwNorm, _kaleOpname: kaleOpname, _schoon: schoon, HOOFD_PAGINA, _hoofdDatum: hoofdDatum, _hoofdTabel: hoofdTabel };
+module.exports = { maak, bezoekersLees, _bezoekersTabel: bezoekersTabel, BEZOEKERS_PAGINA, PKRINGEN, wanneerUit, wanneerTekst, codeWanneer, naamVoorReis, MAP, MAX_TEKST, MAX_TITEL, HID_RE, SID_RE, _kaleOpname: kaleOpname, _schoon: schoon, HOOFD_PAGINA, _hoofdDatum: hoofdDatum, _hoofdTabel: hoofdTabel };

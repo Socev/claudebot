@@ -27280,22 +27280,21 @@ function docsDelenInfo() {
   if (!docsDelen) return { aan: false };
   try { return docsDelen.health(); } catch (e) { return { aan: true, fout: true }; }
 }
-// ── MemoryLane delen (wv2114, 31-10-2026; ontwerp vault fase R § 14, review vooraf OpenAI verwerkt). Logica en waarom in
-// memorylane-delen.js; hier alleen: D1 (zelfde databank `deel` als Docs › Delen), de twee wachtwoorden uit de kluis (niet op de witte lijst:
-// op het moment van gebruik via de Management-API, 10 min in het geheugen, nooit in process.env), de app-routes en de tik.
+// ── MemoryLane (wv2114, 31-10-2026; ontwerp vault fase R § 14). Logica en waarom in memorylane-delen.js; hier alleen de kluis (Immich en
+// het smalle Cloudflare-token; op het moment van gebruik via de Management-API, 10 min in het geheugen, nooit in process.env), de app-routes
+// en de tik. wv4115 (David 25-11-2026, besluitenpagina nr 61 = C51 en nr 121 = 2C21): de oude deellinks met wachtwoord (deel.socev.dev/h/,
+// /app/memorylane/link/…, zicht, toch-delen, foto-delen, toon-opname, delen) en Plaatje maken zijn weg; delen alleen via memorylane.socev.dev.
 //   GET  /app/memorylane/lijst | /app/memorylane/h/<hid> | /app/memorylane/delen | /app/memorylane/personen (wv2449, hoofdpersonen + geboortedatum; niet in de toonmodus)
 //   GET  /app/memorylane/h/<hid>/gevel/k (wv2314, de straat: miniatuur van de gevel, zonder fotolijst; toonmodus alleen toonbaar, anders 404)
-//   POST /app/memorylane/h/<hid>/zicht {kring, aan} · titel {titel} · wanneer {van, tot} (wv2180) · tekst {tekst, soort} · categorie {categorie, gevoelig} · toon-opname {aan} · toch-delen
-//   POST /app/memorylane/stuk/<sid>/opnemen|afwijzen|bewaren|weggooien · POST /app/memorylane/link/<kring>/aan|uit|vernieuw
+//   POST /app/memorylane/h/<hid>/titel {titel} · wanneer {van, tot} (wv2180) · tekst {tekst, soort} · categorie {categorie, gevoelig}
+//   POST /app/memorylane/stuk/<sid>/opnemen|afwijzen|bewaren|weggooien
 //   POST /app/memorylane/h/<hid>/verteller (verse vingerafdruk; 202, maakt op de achtergrond) · POST …/verteller/weg · GET …/verteller/<n> (wv2366)
 //   POST /app/memorylane/h/<hid>/verteller-verhaal {opnieuw?} (verse vingerafdruk; 202: eerst het vertelscript via Claude, dan ElevenLabs) ·
 //        POST …/verteller-verhaal/weg · GET …/verteller-verhaal/<n> (wv2484, Als verhaal vertellen)
-//   POST /app/memorylane/h/<hid>/plaatje/voorstel → {beschrijving} · POST …/plaatje {beschrijving} (naar OpenAI: verse vingerafdruk, niet vanaf
-//        een vaste plek; wv2325) · POST …/plaatje/weg. Niet in de toonmodus (niet in ML_TOON_ROUTES); de gevelroute geeft het plaatje.
-// Naar buiten (zicht aan, link aan, toch delen): verse vingerafdruk en nooit vanaf een vaste plek (zoals Docs › Delen). Dichter maken mag altijd.
+// Naar buiten (een kring aan, noodstop open): verse vingerafdruk en nooit vanaf een vaste plek (zoals Docs › Delen). Dichter maken mag altijd.
 // wv2120: ook immich_api_key (David maakte hem 31-10 in Immich; rechten ruimer dan nodig, de witte lijst in immich.js is de grens)
 // wv2738: ook cloudflare_memorylane (Davids smalle Cloudflare-token: alleen D1 + R2) voor memorylanePubliek hieronder
-const ML_KLUIS = { memorylane_link_familie: true, memorylane_link_vrienden: true, immich_api_key: true, cloudflare_memorylane: true };
+const ML_KLUIS = { immich_api_key: true, cloudflare_memorylane: true };
 const mlKluisCache = new Map();   // naam → { w, tot }; alleen in het geheugen
 async function mlKluis(naam) {
   if (!ML_KLUIS[naam]) return null;
@@ -27320,25 +27319,16 @@ const memorylaneDelen = (function () {
   const p = path.join(__dirname, 'memorylane-delen.js');
   if (!fs.existsSync(p) || !intake || !herinneringen || !HERINNERINGEN_MOD) return null;
   try {
-    return require(p).maak({ db: intake._db, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, host: DOCS_HOST, kluis: mlKluis, immich: immichMl, verhaal: herinneringenVerhaal,
+    return require(p).maak({ db: intake._db, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, immich: immichMl, verhaal: herinneringenVerhaal,
       // wv2938: video's afspelen — kleine versie per video in herinneringen/video (cache), statische ffmpeg op het volume (niet in het image)
       video: { dir: path.join(HERINNERINGEN_DIR, 'video'), ffmpeg: process.env.ML_FFMPEG || '/opt/data/tools/ffmpeg/ffmpeg' },
-      // wv2325: Plaatje maken via openai-hulp (alleen de beschrijving gaat naar OpenAI; teller en maandgrens daar)
-      beeld: function (x) { return openaiHulp && typeof openaiHulp.beeld === 'function' ? openaiHulp.beeld({ afnemer: 'memorylane-plaatje', prompt: x && x.prompt, kwaliteit: 'medium' }) : Promise.resolve({ ok: false, status: 'uit' }); },
       marker: require(path.join(__dirname, 'intake', 'patientpoort.js')), geheimen: function () { try { return openaiPodGeheimen(); } catch (e) { return []; } },
       // wv2366: de verteller in Davids eigen stem via de Olares Router (zelfde sleutel en route als Studio/Bandjes, eigen plafond in de module)
       eleven: { sleutel: function () { return studioSleutel(); }, routerUrl: process.env.STUDIO_ROUTER_URL, credits: elevenCredits || undefined },
       // wv2484: het vertelscript voor "Als verhaal vertellen" via Claude (zelfde sleutel en SDK als het verhaal en de PDF-lezer)
       claude: { sleutel: pdfSleutel, sdk: pdfSdk },
       categorieen: HERINNERINGEN_MOD.CATEGORIEEN, onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
-      fout: logError, box: function (t) { ovisBoxRij(t); },
-      d1: SERVER_ECHT || process.env.ML_D1_TOETS ? async function (sql, params) {
-        if (!process.env.CLOUDFLARE_API_TOKEN) return { ok: false, rijen: null };
-        const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/d1/database/' + DOCS_D1_ID + '/query', { sql: sql, params: params || [] });
-        const q = r.status === 200 && r.j && r.j.success && Array.isArray(r.j.result) ? r.j.result[0] : null;
-        if (!q || !q.success) logError('ml-d1', new Error('D1 gaf HTTP ' + r.status));   // nooit sql of waarden in het log
-        return { ok: !!(q && q.success), rijen: q && Array.isArray(q.results) ? q.results : null };
-      } : null });
+      fout: logError, box: function (t) { ovisBoxRij(t); } });
   } catch (e) { logError('memorylane-delen', e); return null; }
 })();
 function memorylaneDelenInfo() { if (!memorylaneDelen) return { module: false }; try { return Object.assign({ module: true }, memorylaneDelen.info()); } catch (e) { return { fout: true }; } }
@@ -27455,7 +27445,6 @@ async function appMemorylane(req, res, a, s, route, d) {
       return antw('toon ' + (d.aan ? 'aan' : 'uit'), { status: 200, body: { ok: true, toon: d.aan } });
     }
     if (route === 'GET /app/memorylane/lijst') return antw('lijst', memorylaneDelen.lijst(toon));
-    if (route === 'GET /app/memorylane/delen') return antw('delen', memorylaneDelen.delenStand());
     // wv2449: de hoofdpersonen met geboortedatum voor het notitieboekje (vaultpagina 20_Prive/Herinneringen/Hoofdpersonen.md); niet in de toonmodus
     if (route === 'GET /app/memorylane/personen') return antw('personen', typeof memorylaneDelen.hoofdpersonen === 'function' ? memorylaneDelen.hoofdpersonen(toon) : { status: 404, body: { ok: false, fout: 'niet in deze versie' } });
     if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})$/.exec(route))) return antw('detail', memorylaneDelen.detail(m[1], toon));
@@ -27466,9 +27455,8 @@ async function appMemorylane(req, res, a, s, route, d) {
     }
     // wv2120: foto's van het gekoppelde album; gevel kiezen; foto's bij de deellinks (aan = naar buiten: verse vingerafdruk); album (opnieuw) maken
     if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/fotos$/.exec(route))) return antw('fotos', await memorylaneDelen.fotos(m[1], toon));
-    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(gevel|foto-delen|album)$/.exec(route))) {
-      if (m[2] === 'foto-delen' && d && d.aan === true && !naarBuiten('foto-delen')) return;
-      const u = m[2] === 'gevel' ? await memorylaneDelen.gevel(m[1], d) : m[2] === 'foto-delen' ? await memorylaneDelen.fotoDelen(m[1], d) : await memorylaneDelen.albumMaken(m[1]);
+    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(gevel|album)$/.exec(route))) {
+      const u = m[2] === 'gevel' ? await memorylaneDelen.gevel(m[1], d) : await memorylaneDelen.albumMaken(m[1]);
       if (u.status === 200) daarna();
       return antw(m[2], u);
     }
@@ -27487,19 +27475,9 @@ async function appMemorylane(req, res, a, s, route, d) {
       return antw('verteller-verhaal', memorylaneDelen.vertelVerhaalMaken(m[1], d, toon));
     }
     if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/verteller-verhaal\/([1-9])$/.exec(route))) return antw('verteller-verhaal deel', memorylaneDelen.vertelVerhaalDeel(m[1], Number(m[2]), toon));
-    // wv2325: Plaatje maken (ontwerp fase R § 12.1). Maken = de beschrijving gaat naar OpenAI: verse vingerafdruk en niet vanaf een vaste plek.
-    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/plaatje(\/voorstel|\/weg)?$/.exec(route))) {
-      if (m[2] === '/voorstel') return antw('plaatje voorstel', memorylaneDelen.plaatjeVoorstel(m[1], toon));
-      if (m[2] === '/weg') { const u = memorylaneDelen.plaatjeWeg(m[1], toon); return antw('plaatje weg', u); }
-      if (!naarBuiten('plaatje')) return;
-      return antw('plaatje', await memorylaneDelen.plaatjeMaken(m[1], d, toon));
-    }
-    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(zicht|titel|wanneer|tekst|categorie|toon-opname|toch-delen)$/.exec(route))) {
+    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(titel|wanneer|tekst|categorie)$/.exec(route))) {
       const hid = m[1], wat = m[2];
-      if (wat === 'zicht' && d && d.aan === true && !naarBuiten('zicht')) return;
-      if (wat === 'toch-delen' && !naarBuiten('toch-delen')) return;
-      const u = wat === 'zicht' ? memorylaneDelen.zicht(hid, d) : wat === 'titel' ? memorylaneDelen.titel(hid, d) : wat === 'wanneer' ? memorylaneDelen.wanneer(hid, d) : wat === 'tekst' ? memorylaneDelen.tekst(hid, d)
-        : wat === 'categorie' ? memorylaneDelen.categorie(hid, d) : wat === 'toon-opname' ? memorylaneDelen.toonOpname(hid, d) : memorylaneDelen.tochDelen(hid);
+      const u = wat === 'titel' ? memorylaneDelen.titel(hid, d) : wat === 'wanneer' ? memorylaneDelen.wanneer(hid, d) : wat === 'tekst' ? memorylaneDelen.tekst(hid, d) : memorylaneDelen.categorie(hid, d);
       if (u.status === 200) daarna();
       return antw(wat, u);
     }
@@ -27532,10 +27510,6 @@ async function appMemorylane(req, res, a, s, route, d) {
       if (!st.bevestigd) return antw('noodstop', { status: 503, body: { ok: false, publiek: st,
         fout: (d.dicht ? 'Nog niet dicht' : 'Nog niet open') + ': memorylane.socev.dev bevestigde het niet. De pod blijft het elke minuut proberen; druk gerust nog een keer.' } });
       return antw('noodstop', { status: 200, body: { ok: true, publiek: st } });
-    }
-    if ((m = /^POST \/app\/memorylane\/link\/(familie|vrienden)\/(aan|uit|vernieuw)$/.exec(route))) {
-      if (m[2] === 'aan' && !naarBuiten('link aan')) return;
-      return antw('link ' + m[2], await memorylaneDelen.link(m[1], m[2]));
     }
   } catch (e) { logError('memorylane', e); return appWeiger(res, 503, 'MemoryLane kon dit nu niet doen; probeer het zo opnieuw', 'ml fout'); }
   return appWeiger(res, 404, 'onbekend', 'ml pad');

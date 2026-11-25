@@ -20,13 +20,6 @@ const M = require(path.join(ROOT, 'memorylane-delen.js'));
 const VV = require(path.join(ROOT, 'vault-veilig.js'));
 const P = require(path.join(ROOT, 'intake', 'patientpoort.js'));
 
-const D1_SCHEMA = `
-CREATE TABLE ml_link (kring TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, versie INTEGER NOT NULL, aan INTEGER NOT NULL DEFAULT 0, ww_zout TEXT, ww_hash TEXT, ww_iter INTEGER);
-CREATE TABLE ml_item (kring TEXT NOT NULL, versie INTEGER NOT NULL, pub TEXT NOT NULL, volgorde INTEGER NOT NULL, titel TEXT NOT NULL, wanneer TEXT NOT NULL, stukken TEXT NOT NULL, PRIMARY KEY (kring, pub));
-CREATE TABLE ml_sleutel (id TEXT PRIMARY KEY, spki TEXT NOT NULL);
-CREATE TABLE ml_sessie (token TEXT PRIMARY KEY, kring TEXT NOT NULL, versie INTEGER NOT NULL, csrf TEXT NOT NULL, tot INTEGER NOT NULL);
-CREATE TABLE ml_poging (sleutel TEXT PRIMARY KEY, venster INTEGER NOT NULL, n INTEGER NOT NULL);
-CREATE TABLE ml_bijdrage (id TEXT PRIMARY KEY, kring TEXT NOT NULL, versie INTEGER NOT NULL, sleutel_id TEXT NOT NULL, sleutel TEXT NOT NULL, iv TEXT NOT NULL, inhoud TEXT NOT NULL, op TEXT NOT NULL);`;
 
 const uuid = () => crypto.randomUUID();
 // verzonnen beelden: alleen de kop die heeftMetadata leest
@@ -97,17 +90,9 @@ function omgeving(extra) {
     primair: () => true, vv: VV, nu: () => klok.t, fout: () => {}, marker: P, nachtgrendel: () => false, vrijeBytes: () => 50 * 1024 ** 3, stuur: () => {} });
   H.maak({ dir: hdir, intake: ing, vault, vv: VV, nu: () => klok.t, fout: () => {}, whisper: async () => '', kanUitschrijven: () => false,
     onderhoudAan: () => false, nachtgrendel: () => false, primair: () => true, kaartZet: async () => ({}), kaartLijst: async () => ({}), box: () => {}, offsiteAan: () => false });
-  const d1db = new DatabaseSync(':memory:');
-  d1db.exec(D1_SCHEMA);
-  const staat = { d1Uit: false };
-  const d1 = async (sql, params) => {
-    if (staat.d1Uit) return { ok: false, rijen: null };
-    const st = d1db.prepare(sql);
-    return { ok: true, rijen: /^\s*SELECT/i.test(sql) ? st.all(...params) : (st.run(...params), []) };
-  };
   const im = nepImmich();
   const fouten = [];
-  const ml = M.maak({ db: ing._db, vault, vv: VV, dir: hdir, d1, kluis: async (n) => (n === 'memorylane_link_familie' ? 'Kaasschaaf Zeven' : null), marker: P, geheimen: () => [],
+  const ml = M.maak({ db: ing._db, vault, vv: VV, dir: hdir, marker: P, geheimen: () => [],
     categorieen: H.CATEGORIEEN, onderhoudAan: () => false, nachtgrendel: () => false, nu: () => klok.t, fout: (l, e) => fouten.push(l + ': ' + (e && e.message)),
     reisVandaag: () => '2026-10-31', immich: im.client, ...(extra || {}) });
   function opname(id, cat) {
@@ -120,10 +105,9 @@ function omgeving(extra) {
     fs.writeFileSync(path.join(vault, '20_Prive/Reizen', naam), '---\ntype: reis\nonderwerp: "' + naam.replace(/\.md$/, '') + '"\nperiode: "' + periode + '"\n---\n# Reis\n');
   }
   const tik = async () => { klok.t += 11 * 60000; return ml.tik(); };   // elke ronde ook de 10-minutenstappen (album-sync, controle)
-  return { basis, vault, ing, ml, d1db, staat, klok, im, fouten, opname, reis, tik, hdir,
+  return { basis, vault, ing, ml, klok, im, fouten, opname, reis, tik, hdir,
     hid: (soort, ref) => ing._db.prepare('SELECT hid FROM ml_herinnering WHERE soort = ? AND ref = ?').get(soort, ref).hid,
     album: (hid) => ing._db.prepare('SELECT * FROM ml_album WHERE hid = ?').get(hid),
-    fotosD1: (k) => d1db.prepare('SELECT * FROM ml_foto WHERE kring = ? ORDER BY pub, nr').all(k),
     sluit: () => { ing.sluit(); fs.rmSync(basis, { recursive: true, force: true }); } };
 }
 const RA = 'r20261031-0123456789abcdef', RB = 'r20261031-fedcba9876543210';
@@ -375,83 +359,11 @@ test("wv2943 foto's: dag, tijd (plaatselijk), plaats, duur bij een video en favo
   } finally { o.sluit(); }
 });
 
-test("delen: foto's alleen met foto_delen (standaard uit), hooguit 8, gevel eerst, zonder Exif; weg bij uit, gevoelig of link uit; Immich weg blokkeert weghalen niet", async () => {
-  const o = omgeving();
-  try {
-    o.reis('2020 - Proefrally Noorwegen.md', '2020-02-09 – 2020-02-15');
-    o.opname(RA, 'shizzle');
-    await o.tik();
-    const hr = o.hid('reis', REIS), ha = o.hid('opname', RA);
-    const al = o.im.albums.find((a) => a.id === o.album(hr).album_id);
-    const vid = o.im.foto(al, webp(false)); o.im.video.add(vid);   // een video gaat nooit mee naar buiten
-    const ids = [];
-    for (let i = 0; i < 11; i++) ids.push(o.im.foto(al, webp(i === 2)));   // nr 2 heeft Exif
-    const ala = o.im.albums.find((a) => a.id === o.album(ha).album_id);
-    o.im.foto(ala, webp(false));
-    o.ml.zicht(hr, { kring: 'familie', aan: true }); o.ml.zicht(ha, { kring: 'familie', aan: true });
-    await o.ml.link('familie', 'aan');
-    await o.tik();
-    assert.strictEqual(o.d1db.prepare("SELECT count(*) n FROM ml_item WHERE kring = 'familie'").get().n, 2);
-    assert.strictEqual(o.fotosD1('familie').length, 0, "standaard: geen foto's naar buiten");
-    assert.strictEqual(o.album(hr).foto_delen, 0);
-    await o.ml.gevel(hr, { asset: ids[5] });
-    assert.strictEqual((await o.ml.fotoDelen(hr, { aan: true })).status, 200);
-    await o.tik();
-    const pubR = o.ing._db.prepare("SELECT pub FROM ml_pub WHERE kring = 'familie' AND hid = ?").get(hr).pub;
-    let f = o.fotosD1('familie');
-    assert.ok(f.every((x) => x.pub === pubR), "alleen de reis heeft foto's (de opname niet aangezet)");
-    assert.strictEqual(f.length, 7, '8 gekozen, de miniatuur met Exif valt af');
-    assert.deepStrictEqual(Buffer.from(f[0].data, 'base64'), webp(false)); assert.strictEqual(f[0].mime, 'image/webp');
-    assert.ok(o.im.log.filter((x) => x.includes('/thumbnail')).every((x) => x.endsWith('size=thumbnail')), 'naar buiten alleen miniaturen');
-    assert.ok(o.im.log.some((x) => x.includes(ids[5] + '/thumbnail')), 'gevel zit erbij');
-    assert.ok(!o.im.log.some((x) => x.includes(ids[10] + '/thumbnail')), 'hooguit 8');
-    assert.ok(!o.im.log.some((x) => x.includes(vid + '/thumbnail')), 'geen video naar buiten');
-    // vrienden-link uit: daar nooit iets
-    assert.strictEqual(o.fotosD1('vrienden').length, 0);
-    // review MOET 1: haalt David een gedeelde foto uit het Immich-album, dan verdwijnt hij in de volgende ronde ook van de link
-    const weg1 = ids[0];
-    al.assets = al.assets.filter((x) => x !== weg1);
-    const telWeg = () => o.im.log.filter((x) => x.includes(weg1 + '/thumbnail')).length, voor = telWeg();
-    await o.tik();
-    const na = o.fotosD1('familie');
-    assert.strictEqual(na.length, 7, 'aangevuld met de volgende foto');
-    assert.ok(o.im.log.filter((x) => x.includes(ids[8] + '/thumbnail')).length >= 1, 'de volgende foto schoof erbij');
-    assert.strictEqual(telWeg(), voor, 'de weggehaalde foto niet opnieuw opgehaald voor de link');
-    al.assets.unshift(weg1); await o.tik();
-    // Immich weg + foto's uit → toch meteen weg uit D1
-    o.im.uit = true;
-    await o.ml.fotoDelen(hr, { aan: false });
-    await o.tik();
-    assert.strictEqual(o.fotosD1('familie').length, 0, "foto's uit = weg uit D1, ook met Immich weg");
-    o.im.uit = false;
-    await o.ml.fotoDelen(hr, { aan: true }); await o.tik();
-    assert.strictEqual(o.fotosD1('familie').length, 7);
-    // Immich weg terwijl de tekst verandert: tekst gaat wel naar buiten, foto's blijven staan tot het weer lukt
-    o.im.uit = true;
-    o.ml.tekst(hr, { tekst: 'De auto startte pas na een uur.', soort: 'aanvulling' });
-    await o.tik();
-    assert.match(o.d1db.prepare('SELECT stukken FROM ml_item WHERE pub = ?').get(pubR).stukken, /startte pas/);
-    o.im.uit = false;
-    // herinnering gevoelig → item en foto's weg
-    o.ml.categorie(hr, { categorie: 'reizen', gevoelig: true });
-    await o.tik();
-    assert.strictEqual(o.d1db.prepare('SELECT count(*) n FROM ml_item WHERE pub = ?').get(pubR).n, 0);
-    assert.strictEqual(o.fotosD1('familie').length, 0, "gevoelig: ook de foto's weg");
-    o.ml.categorie(hr, { categorie: 'reizen', gevoelig: false }); o.ml.zicht(hr, { kring: 'familie', aan: true });
-    await o.tik();
-    assert.strictEqual(o.fotosD1('familie').length, 7);
-    // link uit → niets meer
-    await o.ml.link('familie', 'uit');
-    assert.strictEqual(o.fotosD1('familie').length, 0);
-    assert.strictEqual(o.d1db.prepare('SELECT count(*) n FROM ml_item').get().n, 0);
-  } finally { o.sluit(); }
-});
-
 test('zonder Immich-sleutel: geen albums, lijst zegt het, geen fout in de tik', async () => {
   const o = omgeving();
   try {
     o.im.sleutel = 'andere';   // nep-Immich kent de sleutel van de client niet
-    const zonder = M.maak({ db: o.ing._db, vault: o.vault, vv: VV, dir: path.join(o.basis, 'h2'), d1: null, kluis: async () => null, marker: P, geheimen: () => [],
+    const zonder = M.maak({ db: o.ing._db, vault: o.vault, vv: VV, dir: path.join(o.basis, 'h2'), marker: P, geheimen: () => [],
       categorieen: H.CATEGORIEEN, nu: () => o.klok.t, fout: () => {}, reisVandaag: () => '2026-10-31',
       immich: IM.maak({ basis: 'https://immich.proef.invalid', sleutel: async () => null, fetch: o.im.fetch }) });
     o.reis('2020 - Proefrally Noorwegen.md', '2020-02-09 – 2020-02-15');
@@ -508,164 +420,6 @@ test('wv2314 gevel: omslag zonder de fotolijst op te halen, gekozen gevel alleen
   } finally { o.sluit(); }
 });
 
-// ── wv2325: Plaatje maken ──
-const PL = require(path.join(ROOT, 'memorylane-plaatje.js'));
-// verzonnen webp zoals OpenAI hem geeft: beeldstuk + C2PA-herkomstblok (+ desgewenst EXIF)
-function oaiWebp(exif) {
-  const chunk = (id, data) => { const l = Buffer.alloc(4); l.writeUInt32LE(data.length); return Buffer.concat([Buffer.from(id, 'latin1'), l, data, data.length % 2 ? Buffer.alloc(1) : Buffer.alloc(0)]); };
-  const body = Buffer.concat([Buffer.from('WEBP', 'latin1'), chunk('VP8 ', Buffer.from([9, 8, 7, 6, 5])), chunk('C2PA', Buffer.from('herkomst-verzonnen-openai')),
-    exif ? chunk('EXIF', Buffer.from('Exif\0\0GPS-verzonnen')) : Buffer.alloc(0)]);
-  const l = Buffer.alloc(4); l.writeUInt32LE(body.length);
-  return Buffer.concat([Buffer.from('RIFF', 'latin1'), l, body]);
-}
-function nepBeeld() {
-  const st = { aanvragen: [], antwoord: null };
-  st.beeld = async (x) => { st.aanvragen.push(JSON.parse(JSON.stringify(x))); return st.antwoord || { ok: true, mime: 'image/webp', data: oaiWebp(true), model: 'gpt-image-1-mini', usd: 0.0086, ms: 5 }; };
-  return st;
-}
-
-test('wv2325 webpZonderMetadata: alleen beeldstukken, C2PA/EXIF/XMP/ICCP eraf, VP8X-vlaggen uit; geen webp of geen beeld = null', () => {
-  const s = PL.webpZonderMetadata(oaiWebp(true));
-  assert.ok(s && !IM.heeftMetadata(s));
-  assert.ok(!s.includes(Buffer.from('C2PA')) && !s.includes(Buffer.from('herkomst')) && !s.includes(Buffer.from('GPS')));
-  assert.strictEqual(s.readUInt32LE(4), s.length - 8, 'RIFF-lengte klopt');
-  assert.ok(s.includes(Buffer.from([9, 8, 7, 6, 5])), 'beeld blijft');
-  // VP8X met ICC/EXIF/XMP-vlaggen
-  const chunk = (id, data) => { const l = Buffer.alloc(4); l.writeUInt32LE(data.length); return Buffer.concat([Buffer.from(id, 'latin1'), l, data, data.length % 2 ? Buffer.alloc(1) : Buffer.alloc(0)]); };
-  const vp8x = Buffer.alloc(10); vp8x[0] = 0x20 | 0x08 | 0x04 | 0x10;
-  const body = Buffer.concat([Buffer.from('WEBP', 'latin1'), chunk('VP8X', vp8x), chunk('ICCP', Buffer.from('profiel')), chunk('VP8L', Buffer.from([1, 2, 3])), chunk('XMP ', Buffer.from('<x/>'))]);
-  const l = Buffer.alloc(4); l.writeUInt32LE(body.length);
-  const x = PL.webpZonderMetadata(Buffer.concat([Buffer.from('RIFF', 'latin1'), l, body]));
-  assert.ok(x && !IM.heeftMetadata(x) && !x.includes(Buffer.from('ICCP')) && !x.includes(Buffer.from('profiel')));
-  assert.strictEqual(x[20], 0x10, 'alleen de alfavlag blijft');
-  assert.strictEqual(PL.webpZonderMetadata(jpeg(false)), null);
-  assert.strictEqual(PL.webpZonderMetadata(Buffer.from('RIFF\x10\0\0\0WEBPC2PA\x02\0\0\0ab', 'latin1')), null, 'zonder beeldstuk');
-  assert.strictEqual(PL.webpZonderMetadata(oaiWebp(false).subarray(0, 23)), null, 'afgekapt');
-});
-
-test('wv2325 voorstel en opdracht: soort, jaar en titel; ≤ 200 tekens; vaste opdracht eromheen', () => {
-  assert.strictEqual(PL.voorstelTekst('reis', '2019', 'Zomervakantie 2019 - Proefeiland'), 'Reis, 2019: Zomervakantie 2019 - Proefeiland');
-  assert.strictEqual(PL.voorstelTekst('opname', null, 'Op de camping'), 'Herinnering: Op de camping');
-  assert.strictEqual(PL.voorstelTekst('fotoalbum', '2005', 'x'.repeat(300)).length, 200);
-  assert.strictEqual(PL.opdracht('Reis, 2019: strand.'), PL.OPDRACHT_BEGIN + 'Reis, 2019: strand' + PL.OPDRACHT_EIND);
-  assert.strictEqual(PL.schoon('  a\nb‮ c '), 'a b c');
-  assert.strictEqual(PL.schoon('x'.repeat(201)), null);
-  assert.strictEqual(PL.schoon(''), null);
-});
-
-test('wv2325 plaatje: alleen de beschrijving naar buiten; weigeringen (Privé, gevoelig, zonder categorie, met foto, toonmodus, marker, geheim, daggrens, 10 s); bestand 0600 zonder metadata en weg; gevel = plaatje, foto wint', async () => {
-  const nb = nepBeeld();
-  const o = omgeving({ beeld: nb.beeld });
-  try {
-    o.reis('2020 - Proefrally Noorwegen.md', '2020-02-09 – 2020-02-15');
-    o.opname(RA, 'prive');
-    o.opname(RB, null);   // zonder categorie
-    await o.tik();
-    const hr = o.hid('reis', REIS), hp = o.hid('opname', RA), hz = o.hid('opname', RB);
-    // lijst: plaatje_kan alleen bij de reis (categorie reizen, geen foto)
-    const l = o.ml.lijst().body.herinneringen;
-    const kan = Object.fromEntries(l.map((x) => [x.hid, x.plaatje_kan]));
-    assert.deepStrictEqual([kan[hr], kan[hp], kan[hz]], [true, false, false]);
-    assert.ok(l.every((x) => x.plaatje === false));
-    // voorstel: soort, jaar, titel; geen verhaal
-    const v = o.ml.plaatjeVoorstel(hr);
-    assert.strictEqual(v.status, 200); assert.match(v.body.beschrijving, /^Reis, 2020: /);
-    assert.strictEqual(o.ml.plaatjeVoorstel(hp).status, 409, 'Privé: geen voorstel');
-    assert.strictEqual(o.ml.plaatjeVoorstel(hr, { toon: true }).status, 403, 'toonmodus');
-    // weigeringen vóór het beeldmodel
-    for (const [hid, d, opt, st, wat] of [[hp, { beschrijving: 'Herinnering: camping' }, null, 409, 'Privé'], [hz, { beschrijving: 'Herinnering: camping' }, null, 409, 'zonder categorie'],
-      [hr, { beschrijving: 'Reis, 2020: rally' }, { toon: true }, 403, 'toonmodus'], [hr, { beschrijving: '' }, null, 400, 'leeg'], [hr, { beschrijving: 'x'.repeat(201) }, null, 400, '> 200'],
-      [hr, { beschrijving: 'Betreft: mw. J. Jansen, geboortedatum 12-03-1958. Bovengenoemde patiënt is bekend met diabetes mellitus; wij zagen haar op de polikliniek.' }, null, 409, 'marker'],
-      [hr, { beschrijving: 'Reis sk-proj-abcdefghijklmnopqrstuvwxyz0123' }, null, 409, 'geheim'], ['h0000000000000000', { beschrijving: 'x' }, null, 404, 'onbekend']]) {
-      const u = await o.ml.plaatjeMaken(hid, d, opt);
-      assert.strictEqual(u.status, st, wat + ': ' + JSON.stringify(u.body));
-    }
-    // gevoelig vinkje op een niet-Privé-categorie
-    o.ing._db.prepare('UPDATE ramble SET categorie = ?, herinnering_gevoelig = 1 WHERE ramble_id = ?').run('gezin', RB);
-    assert.strictEqual((await o.ml.plaatjeMaken(hz, { beschrijving: 'Herinnering: camping' })).status, 409, 'gevoelig vinkje');
-    assert.strictEqual(nb.aanvragen.length, 0, 'geen enkele weigering bij het beeldmodel');
-    // maken: alleen de beschrijving in de vaste opdracht
-    const u = await o.ml.plaatjeMaken(hr, { beschrijving: '  Reis, 2020: een rally door de sneeuw ' });
-    assert.strictEqual(u.status, 200, JSON.stringify(u.body));
-    assert.deepStrictEqual(nb.aanvragen, [{ prompt: PL.opdracht('Reis, 2020: een rally door de sneeuw') }]);
-    assert.strictEqual(u.body.herinnering.plaatje, true);
-    const bestand = path.join(o.hdir, 'plaatjes', hr + '.webp');
-    assert.strictEqual(fs.statSync(bestand).mode & 0o777, 0o600);
-    assert.strictEqual(fs.statSync(path.dirname(bestand)).mode & 0o777, 0o700);
-    const b = fs.readFileSync(bestand);
-    assert.ok(!IM.heeftMetadata(b) && !b.includes(Buffer.from('C2PA')), 'zonder metadata bewaard');
-    // register zonder tekst
-    const rij = o.ing._db.prepare('SELECT * FROM ml_plaatje WHERE hid = ?').get(hr);
-    assert.strictEqual(rij.model, 'gpt-image-1-mini'); assert.strictEqual(rij.usd, 0.0086);
-    assert.strictEqual(rij.hash, crypto.createHash('sha256').update('Reis, 2020: een rally door de sneeuw').digest('hex'));
-    const dump = JSON.stringify(o.ing._db.prepare('SELECT * FROM ml_plaatje').all()) + JSON.stringify(o.ing._db.prepare('SELECT * FROM ml_plaatje_aanvraag').all());
-    assert.ok(!/rally|sneeuw|Reis/.test(dump), 'geen tekst in intake.sqlite');
-    // binnen 10 s opnieuw = 429 zonder aanvraag
-    assert.strictEqual((await o.ml.plaatjeMaken(hr, { beschrijving: 'Reis, 2020: rally' })).status, 429);
-    assert.strictEqual(nb.aanvragen.length, 1);
-    // gevel = het plaatje (zonder foto), ook in de toonmodus (reis is toonbaar)
-    const g = await o.ml.gevelBeeld(hr);
-    assert.strictEqual(g.status, 200); assert.strictEqual(g.body.mime, 'image/webp'); assert.strictEqual(g.body.plaatje, true);
-    assert.deepStrictEqual(Buffer.from(g.body.data, 'base64'), b);
-    assert.strictEqual((await o.ml.gevelBeeld(hr, { toon: true })).status, 200);
-    // komt er een foto in het album, dan wint de foto en vervalt de knop
-    const al = o.im.albums.find((a) => a.id === o.album(hr).album_id);
-    o.im.foto(al, jpeg(false), 'image/jpeg');
-    await o.tik();
-    const g2 = await o.ml.gevelBeeld(hr);
-    assert.strictEqual(g2.status, 200); assert.strictEqual(g2.body.mime, 'image/jpeg', 'foto wint'); assert.ok(!g2.body.plaatje);
-    assert.strictEqual(o.ml.lijst().body.herinneringen.find((x) => x.hid === hr).plaatje_kan, false);
-    o.klok.t += 11000;
-    assert.strictEqual((await o.ml.plaatjeMaken(hr, { beschrijving: 'Reis, 2020: rally' })).status, 409, 'met foto: geen nieuw plaatje');
-    // weghalen mag altijd (niet in de toonmodus); bestand en rij weg
-    assert.strictEqual(o.ml.plaatjeWeg(hr, { toon: true }).status, 403);
-    assert.strictEqual(o.ml.plaatjeWeg(hr).status, 200);
-    assert.ok(!fs.existsSync(bestand)); assert.strictEqual(o.ing._db.prepare('SELECT count(*) n FROM ml_plaatje').get().n, 0);
-    // toonmodus: een plaatje van een niet-toonbare herinnering komt niet via de gevelroute
-    o.ing._db.prepare('UPDATE ramble SET categorie = ?, herinnering_gevoelig = 0 WHERE ramble_id = ?').run('gezin', RB);
-    o.klok.t += 11000;
-    assert.strictEqual((await o.ml.plaatjeMaken(hz, { beschrijving: 'Herinnering: camping' })).status, 200);
-    o.ing._db.prepare('UPDATE ramble SET herinnering_gevoelig = 1 WHERE ramble_id = ?').run(RB);
-    assert.strictEqual((await o.ml.gevelBeeld(hz)).status, 200, 'David ziet hem nog');
-    assert.strictEqual((await o.ml.gevelBeeld(hz, { toon: true })).status, 404, 'toonmodus: gevoelig = 404');
-    // beeldmodel weigert / budget op: geen bestand, nette zin
-    o.ing._db.prepare('UPDATE ramble SET herinnering_gevoelig = 0 WHERE ramble_id = ?').run(RB);
-    nb.antwoord = { ok: false, status: 'grens' };
-    o.klok.t += 11000;
-    const gr = await o.ml.plaatjeMaken(hz, { beschrijving: 'Herinnering: tent' });
-    assert.strictEqual(gr.status, 502); assert.match(gr.body.fout, /budget/);
-    assert.strictEqual(o.ml.lijst().body.herinneringen.find((x) => x.hid === hz).plaatje, true, 'het vorige plaatje blijft bij een mislukte vervanging');
-    nb.antwoord = { ok: true, mime: 'image/webp', data: jpeg(false), model: 'gpt-image-1-mini', usd: 0.0086 };
-    o.klok.t += 11000;
-    assert.strictEqual((await o.ml.plaatjeMaken(hz, { beschrijving: 'Herinnering: tent' })).status, 502, 'geen webp terug');
-    // daggrens: 20 aanvragen per Nederlandse dag (ook mislukte)
-    nb.antwoord = null;
-    const n0 = o.ing._db.prepare('SELECT count(*) n FROM ml_plaatje_aanvraag').get().n;
-    let st = [];
-    for (let i = n0; i < 21; i++) { o.klok.t += 11000; st.push((await o.ml.plaatjeMaken(hz, { beschrijving: 'Herinnering: tent ' + i })).status); }
-    assert.strictEqual(st[st.length - 1], 429, 'de 21e van de dag geweigerd: ' + st.join(','));
-    assert.ok(st.slice(0, -1).every((x) => x === 200));
-    assert.strictEqual(nb.aanvragen.length, 20);
-    o.klok.t += 864e5;
-    assert.strictEqual((await o.ml.plaatjeMaken(hz, { beschrijving: 'Herinnering: tent' })).status, 200, 'volgende dag weer');
-    assert.ok(!o.fouten.length, o.fouten.join(' | '));
-    assert.ok(o.ml.info().plaatjes.plaatjes === 1);
-  } finally { o.sluit(); }
-});
-
-test('wv2325 zonder beeldmodel (o.beeld ontbreekt): geen knop, 409, gevel zoals voorheen', async () => {
-  const o = omgeving();
-  try {
-    o.reis('2020 - Proefrally Noorwegen.md', '2020-02-09 – 2020-02-15');
-    await o.tik();
-    const hr = o.hid('reis', REIS);
-    assert.strictEqual(o.ml.lijst().body.herinneringen[0].plaatje_kan, false);
-    assert.strictEqual((await o.ml.plaatjeMaken(hr, { beschrijving: 'x' })).status, 409);
-    assert.strictEqual((await o.ml.gevelBeeld(hr)).status, 404);
-  } finally { o.sluit(); }
-});
-
-// ── wv2468 (Tripper): fotospoor — periode en één afgerond punt uit de foto's van een reis uit je foto's (verzonnen tijden en plekken) ──
 test('wv2468 witte lijst: withCoordinates alleen "true" en alleen op de maandvraag; plaatselijkeDag', () => {
   const a = uuid();
   assert.strictEqual(IM.weiger('GET', '/api/timeline/bucket', { albumId: a, timeBucket: '2020-02-01', order: 'asc', withCoordinates: 'true' }), null);
