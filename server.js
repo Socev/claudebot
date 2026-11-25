@@ -21857,7 +21857,7 @@ async function facturenSpecMailluik(c) {
   // wv2465: ook meerdere bijlagen (c.bijlagen: SEPA-batch + specificatie); anders de ene c.bijlage
   const bijl = Array.isArray(c.bijlagen) ? c.bijlagen : [c.bijlage];
   const body = JSON.stringify({ secret: geheim, aan: c.aan, onderwerp: String(c.onderwerp || '').slice(0, 150), bericht: String(c.bericht || '').slice(0, 6000),
-    bijlagen: bijl.map(function (b) { return { naam: b.naam, mime: b.mime, inhoud_base64: b.inhoud_base64 }; }), ...(c.thread_id ? { thread_id: String(c.thread_id) } : {}) });
+    ...(bijl.length ? { bijlagen: bijl.map(function (b) { return { naam: b.naam, mime: b.mime, inhoud_base64: b.inhoud_base64 }; }) } : {}), ...(c.thread_id ? { thread_id: String(c.thread_id) } : {}) });   // wv4027: zonder bijlage = gewoon tekstconcept
   for (let poging = 0; poging < 2; poging++) {
     let url;
     try { url = await appWebhookUrl(POT_AF_MAILWF, null, 'potMailUrl', poging > 0); } catch (e) { throw zeker('mailluik-webhook niet gevonden', 'het mailluik is niet te vinden'); }

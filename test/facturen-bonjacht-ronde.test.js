@@ -247,7 +247,7 @@ function conceptOpzet(t) {
     async (b) => { n.luik.push(b); return n.kop === undefined ? { id: b.id, van: 'A. Proef <' + AFZ + '>', onderwerp: 'RE: af te handelen', tekst: 'GEHEIME LIJSTTEKST' } : n.kop; },
     async () => 'https://n8n.invalid/webhook/x', async (url, o) => {
       const body = JSON.parse(o.body); n.mail.push(body);
-      const a = n.antwoord ? n.antwoord(body) : { status: 200, j: { ok: true, concept_id: 'r-proef-' + n.mail.length, thread_id: body.thread_id || 'nieuw', bijlagen: body.bijlagen.length } };
+      const a = n.antwoord ? n.antwoord(body) : { status: 200, j: { ok: true, concept_id: 'r-proef-' + n.mail.length, thread_id: body.thread_id || 'nieuw', bijlagen: (body.bijlagen || []).length } };
       return { status: a.status, ok: a.status >= 200 && a.status < 300, json: async () => a.j, arrayBuffer: async () => new ArrayBuffer(0) };
     }, (w, e) => n.log.push(w + ' ' + (e && e.message)), (r) => n.log.push(r), (o) => JSON.stringify(o), () => 'nu', { env: { N8N_WEBHOOK_MAILCONCEPT: 'nep' } }, 'wf', 30000, 20);
   n.klik = (lijst, o) => fn(t.fdb, t.eig, lijst, o || {});
@@ -380,4 +380,19 @@ test('concept aan pa (review MOET 1): meer dan 10 bevestigde bonnen = 10 mee, de
   assert.equal(v2.j.concept.status, 'klaar'); assert.equal(v2.j.stukken, 2);
   assert.equal(n.mail[1].bijlagen.length, 2);
   assert.equal(t.call('GET', 'bonjacht').lijsten[0].concept.nieuw, 0);
+});
+
+test('concept aan pa (review r2): bon zonder bestand = regel zonder bijlage, toch een concept; bericht blijft onder 6000 tekens', async () => {
+  const { t, l, r } = await lijstMetBevestigdeBon();
+  const f = t.fdb.db.prepare('SELECT * FROM factuur WHERE id = ?').get(r.factuur);
+  t.call('POST', 'bevestig', { id: f.id, versie: f.versie });
+  const doc = t.fdb.db.prepare('SELECT * FROM document WHERE id = ?').get(f.document);
+  fs.rmSync(D.stukPad(t.fdb, doc.sha256));   // het bestand is weg
+  const n = conceptOpzet(t);
+  const v = await n.klik(l.id);
+  assert.equal(v.j.concept.status, 'klaar', JSON.stringify(v.j));
+  assert.equal(n.mail[0].bijlagen, undefined, 'zonder bijlage geen leeg bijlagenveld');
+  assert.match(n.mail[0].bericht, /€ 144,00 · Webwinkel Blauwbes \(bon niet in de bijlage: geen bestand\)/);
+  assert.match(n.mail[0].bericht, /kan niet mee in deze mail/);
+  assert.ok(n.mail[0].bericht.length < 6000);
 });

@@ -996,7 +996,7 @@ function bonjacht(fdb, r, nu) {
  */
 const BJ_AFZENDERS = ['a.schaap@actasynergia.nl'];   // gelijk aan facturen-bonjacht-ronde.js AFZENDERS; meta bonjacht_afzenders wint (zelfde regel)
 const BJ_BEVESTIGD = ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt', 'concept_verwijderd', 'prive_archief'];
-const BJ_MAX_BIJLAGEN = 10, BJ_MAX_BYTES = 20 * 1024 * 1024;
+const BJ_MAX_BIJLAGEN = 10, BJ_MAX_BYTES = 20 * 1024 * 1024, BJ_MAX_REGELS = 30;   // 30 regels × ≤ 140 tekens blijft ruim onder de 6000 van het mailluik
 const BJ_WAT = ['bonjacht_concept_aangevraagd', 'bonjacht_concept_klaar', 'bonjacht_concept_mislukt'];
 const BJ_MAANDEN = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
 function bjAfzenders(fdb) {
@@ -1085,6 +1085,7 @@ function bonjachtConcept(fdb, r, lijstId, o) {
     let bytes = 0;
     const regels = [];
     for (const x of stukken) {
+      if (regels.length >= BJ_MAX_REGELS) break;   // review r2 MOET 1: de rest volgt in het volgende concept (nooit afgekapt en toch geteld)
       const doc = x.document || x.ubl_document ? fdb.db.prepare('SELECT * FROM document WHERE id = ?').get(x.document || x.ubl_document) : null;
       const heeft = !!doc && D.stukBestaat(fdb, doc.sha256);
       let mee = false, waarom = 'geen bestand';
@@ -1106,10 +1107,10 @@ function bonjachtConcept(fdb, r, lijstId, o) {
       regels.push('- ' + bjDag(x.datum) + ' · ' + bjEur(-x.bedrag_centen) + ' · ' + (kort(x.partij || x.leverancier_naam, 80) || 'onbekend') +
         (x.f_status === 'prive_archief' ? ' (privé)' : '') + (mee ? '' : ' (bon niet in de bijlage: ' + waarom + ')'));
     }
-    if (!bijlagen.length) return mislukt('geen van de bonnen heeft een bestand om mee te sturen');
+    // review r2 MOET 2: ook zonder bijlage (alleen bonnen zonder of met een te groot bestand) een concept met de regels
     const ent = l.naam_kort || l.e_naam;
     const bericht = ['Ha pa,', '', 'Van je lijst van ' + (bjDagLang(l.ontvangen) || 'laatst') + (ent ? ' (' + ent + ')' : '') + ' heb ik ' + (mee_ids.length === 1 ? 'deze bon' : 'deze bonnen') +
-      ' gevonden; ' + (bijlagen.length === 1 ? 'hij zit' : 'ze zitten') + ' in de bijlage:', ''].concat(regels, ['', 'Groet,', 'David']).join('\n');
+      ' gevonden' + (!bijlagen.length ? ' (de bon zelf kan niet mee in deze mail):' : '; ' + (bijlagen.length === 1 ? 'hij zit' : 'ze zitten') + ' in de bijlage:'), ''].concat(regels, ['', 'Groet,', 'David']).join('\n');
     const thread_id = l.account === 'prive' && l.draad_id ? l.draad_id : null;
     D.audit(fdb, { wie: r.wie, wat: 'bonjacht_concept_aangevraagd', object_soort: 'bonjacht_concept', object_id: l.id, entiteit: l.entiteit,
       na: { aanleiding: o.aanleiding || 'knop', aan, draad: !!thread_id, facturen: mee_ids, bijlagen: bijlagen.length, bytes, later: stukken.length - mee_ids.length, nogmaals: !!o.nogmaals }, wanneer });
