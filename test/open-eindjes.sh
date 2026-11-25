@@ -37,7 +37,7 @@ create table ${S}.teams_berichten (like secondbrain.teams_berichten including de
     // ── een nepwereld ──
     let nu = NU, datum = '2026-11-26';
     const W = { nl: [], gambia: [] }, STAART = {}, CONTACT = { '+31600000001': 'Proef Een', '+31600000002': 'Proef Twee', '+31600000004': 'Proef Vier', '+31600000005': 'Proef Vijf', '+31600000006': 'Proef Zes', '+31600000007': 'Proef Zeven', '+31334941210': 'Praktijk' };
-    let TG = { gesprekken: [], staarten: {}, ankers: {} }, tgAanroepen = 0, tgFout = null, waFout = null;
+    let TG = { gesprekken: [], staarten: {}, ankers: {} }, tgAanroepen = 0, tgFout = null, waFout = null, tgAnkerVoor = null, faalGetoond = false;
     const box = [], leeslog = [], kaarten = [], status = []; let staat = {}; let zetFout = false;
     let lijst = [];
     const io = {
@@ -45,11 +45,11 @@ create table ${S}.teams_berichten (like secondbrain.teams_berichten including de
       wa: async (s) => { if (waFout) throw new Error(waFout); return { chats: W[s] }; },
       waStaart: async (s, id, max) => { const x = STAART[id] || { anker_ts: null, berichten: [] }; return { anker_ts: x.anker_ts, spraak: 0, berichten: x.berichten, max: max }; },
       contacten: async (nrs) => { const u = {}; nrs.forEach((n) => { if (CONTACT[n]) u[n] = CONTACT[n]; }); return u; },
-      tg: async (o) => { tgAanroepen++; if (tgFout) throw new Error(tgFout); return o.staart ? TG : { gesprekken: TG.gesprekken }; },
-      sql: async (q) => sql(q),
+      tg: async (o) => { tgAanroepen++; if (tgFout) throw new Error(tgFout); if (!o.staart) tgAnkerVoor = o.ankerVoor; return o.staart ? TG : { gesprekken: TG.gesprekken, ankers: TG.hercheckAnkers || {} }; },
+      sql: async (q) => { if (faalGetoond && /set getoond_op = now\(\), kaart =/.test(q)) { faalGetoond = false; throw new Error('databank weg'); } return sql(q); },
       rpc: async (naam, a) => {
         if (naam === 'mk_voor_jou_lijst') return { punten: lijst };
-        if (naam === 'mk_voor_jou_zet') { if (zetFout) throw new Error('zet faalt'); kaarten.push(a.p); lijst.push({ sleutel: a.p.sleutel, status: 'open' }); return { sleutel: a.p.sleutel }; }
+        if (naam === 'mk_voor_jou_zet') { if (zetFout) throw new Error('zet faalt'); kaarten.push(a.p); lijst.push({ sleutel: a.p.sleutel, status: 'open', herkomst: JSON.parse(JSON.stringify(a.p.herkomst)) }); return { sleutel: a.p.sleutel }; }
         if (naam === 'mk_voor_jou_status') { status.push(a); const p = lijst.find((x) => x.sleutel === a.p_sleutel); if (p) p.status = a.p_naar; return { ok: true }; }
         throw new Error('onbekende rpc ' + naam);
       },
@@ -77,13 +77,15 @@ create table ${S}.teams_berichten (like secondbrain.teams_berichten including de
       ('t3', '19:kanaal@thread.tacv2', 'Kanaal', 'Iemand', 'vraag aan iedereen?', ${tijd(NU - 30 * H)}, now(), 'zakelijk'),
       ('t4', '19:groot@thread.v2', 'Groot', 'A', 'vraag?', ${tijd(NU - 30 * H)}, now(), 'zakelijk'), ('t5', '19:groot@thread.v2', 'Groot', 'B', 'x', ${tijd(NU - 31 * H)}, now(), 'zakelijk'),
       ('t6', '19:groot@thread.v2', 'Groot', 'C', 'y', ${tijd(NU - 32 * H)}, now(), 'zakelijk'), ('t7', '19:groot@thread.v2', 'Groot', 'D', 'z', ${tijd(NU - 33 * H)}, now(), 'zakelijk'),
-      ('t8', '19:klein@thread.v2', 'Klein', 'E', 'wie neemt dit op?', ${tijd(NU - 29 * H)}, now(), 'zakelijk')`);
+      ('t8', '19:klein@thread.v2', 'Klein', 'E', 'wie neemt dit op?', ${tijd(NU - 29 * H)}, now(), 'zakelijk'),
+      ('t9', '19:midden@thread.v2', 'Midden', 'F', 'vraag aan de groep?', ${tijd(NU - 30 * H)}, now(), 'zakelijk'), ('t10', '19:midden@thread.v2', 'Midden', 'G', 'a', ${tijd(NU - 40 * 86400)}, now(), 'zakelijk'),
+      ('t11', '19:midden@thread.v2', 'Midden', 'H', 'b', ${tijd(NU - 41 * 86400)}, now(), 'zakelijk'), ('t12', '19:midden@thread.v2', 'Midden', 'I', 'c', ${tijd(NU - 42 * 86400)}, now(), 'zakelijk')`);
     const o = M.maak(io);
     // ── haal ──
     const h = await o.haal();
     const namen = h.kandidaten.map((k) => k.naam).sort();
     toets('haal: kandidaten = 1, 6, 7, Telegram, Signal, Teams 1-op-1 + kleine groep', JSON.stringify(namen) === JSON.stringify(['Collega Proef', 'Klein', 'Proef Een', 'Proef Zes', 'Proef Zeven', 'Sig Proef', 'Tg Proef'].sort()), namen);
-    toets('haal: geen onbekend nummer, geen praktijknummer, geen groep/kanaal', !namen.some((n) => /Praktijk|Groepslid|Kanaal|Groot/.test(n)) && h.kanalen['whatsapp-nl'].onbekend === 1);
+    toets('haal: geen onbekend nummer, geen praktijknummer, geen groep/kanaal, geen Teams-groep met > 3 afzenders ooit', !namen.some((n) => /Praktijk|Groepslid|Kanaal|Groot|Midden/.test(n)) && h.kanalen['whatsapp-nl'].onbekend === 1);
     toets('haal: run ziet geen chat-id of link, wel staart met tijd', h.kandidaten.every((k) => !k.chat && !k.link && Array.isArray(k.staart) && k.staart[0].tijd) && !JSON.stringify(h).includes('31600000001'));
     toets('haal: Teams-groep krijgt afzender voor de tekst', h.kandidaten.find((k) => k.naam === 'Klein').staart[0].tekst.indexOf('E: ') === 0);
     toets('haal: één Telegram-regel in het leeslog, met de gelezen chat', leeslog.length === 1 && /Tg Proef \(7001\)/.test(leeslog[0]) && !/Tg Laat/.test(leeslog[0]), leeslog);
@@ -101,14 +103,20 @@ create table ${S}.teams_berichten (like secondbrain.teams_berichten including de
     const fout = await o.oordeel({ oordelen: [{ id: id('Proef Een'), oordeel: 'misschien' }, { id: id('Proef Een'), oordeel: 'eindje', zin: '' }] });
     toets('oordeel: ongeldig oordeel en eindje zonder zin geweigerd', fout.fouten.length === 2 && fout.opgeslagen === 0, fout);
     // ── kaart (donderdag): 6 eindjes, 1 hercheck-antwoord (Telegram) → 5 op de kaart, 0 door; daarna 6e-geval apart ──
-    TG.gesprekken[0] = Object.assign({}, TG.gesprekken[0], { ts: NU - 1 * H, van_david: true });   // David antwoordde om 05:50
+    // hercheck: Telegram — David antwoordde om 04:50, daarna schreef de ander nog iets (laatste bericht niet van David; anker zegt het)
+    TG.gesprekken[0] = Object.assign({}, TG.gesprekken[0], { ts: NU - 1 * H, van_david: false }); TG.hercheckAnkers = { '7001': NU - 2 * H };
+    // WhatsApp — idem bij Proef Zeven ("dank je" na Davids antwoord)
+    W.nl[6] = wa('31600000007', NU - 1 * H, false); STAART['31600000007@c.us'] = { anker_ts: NU - 2 * H, berichten: [{ ts: NU - 1 * H, wie: 'ander', tekst: 'dank je!' }] };
     lijst = [{ sleutel: 'eindjes-2026-11-25', status: 'open' }, { sleutel: 'facturen-2026-11-25', status: 'open' }];
     staat.haal = { datum: datum };
     // een 7e eindje (jongste vraag): 7 - 1 hercheck = 6 → 5 op de kaart, 1 schuift door
-    sql(`insert into ${S}.open_eindjes (kanaal, chat, anker_ts, vraag_ts, laatste_ts, naam, link, oordeel, zin) values ('whatsapp-nl', '31600000098@c.us', 0, ${NU - 25 * H}, ${NU - 25 * H}, 'Proef Acht', 'https://wa.me/31600000098', 'eindje', 'of je de sleutel terugbrengt')`);
+    sql(`insert into ${S}.open_eindjes (kanaal, chat, anker_ts, vraag_ts, laatste_ts, naam, link, oordeel, zin) values ('whatsapp-nl', '31600000098@c.us', 0, ${NU - 25 * H}, ${NU - 25 * H}, 'Proef Acht', 'https://wa.me/31600000098', 'eindje', 'of je de sleutel terugbrengt'),
+      ('whatsapp-nl', '31600000097@c.us', 0, ${NU - 24.5 * H}, ${NU - 24.5 * H}, 'Proef Negen', null, 'eindje', 'of je de map meeneemt')`);
     const k1 = await o.kaartStap();
     const kt = kaarten[0];
-    toets('kaart: Telegram-eindje afgerond door de hercheck', k1.afgerond === 1 && Number(sql(`select count(*) n from ${S}.open_eindjes where afgerond_reden like 'David antwoordde%'`)[0].n) === 1, k1);
+    toets('kaart: hercheck ziet Davids antwoord ook als de ander daarna nog schreef (Telegram + WhatsApp afgerond)', k1.afgerond === 2 && Number(sql(`select count(*) n from ${S}.open_eindjes where afgerond_reden like 'David antwoordde%' and naam in ('Tg Proef', 'Proef Zeven')`)[0].n) === 2, k1);
+    toets('kaart: Telegram-hercheck vraagt alleen het anker van de wachtende chat', Array.isArray(tgAnkerVoor) && tgAnkerVoor.length === 1 && tgAnkerVoor[0] === '7001', tgAnkerVoor);
+    toets('kaart: eindje-id\'s op de kaart (herstelpad)', Array.isArray(kaarten[0].herkomst.eindjes) && kaarten[0].herkomst.eindjes.length === 5);
     toets('kaart: 5 eindjes, oudste vraag eerst (Signal 80 u)', kt && kt.stappen.length === 5 && /^Sig Proef \(Signal/.test(kt.stappen[0]), kt && kt.stappen);
     toets('kaart: lengtes (titel ≤ 90, waarom ≤ 400, stap ≤ 400, ≤ 12)', kt.titel.length <= 90 && kt.waarom.length <= 400 && kt.stappen.every((s) => s.length <= 400) && kt.stappen.length <= 12, [kt.titel.length, kt.waarom.length]);
     toets('kaart: titel "Nog beantwoorden — 5 berichten …", sleutel eindjes-<datum>, soort doen, herkomst module open-eindjes', kt.titel === 'Nog beantwoorden — 5 berichten wachten op je antwoord' && kt.sleutel === 'eindjes-2026-11-26' && kt.soort === 'doen' && kt.herkomst.module === 'open-eindjes');
@@ -123,7 +131,8 @@ create table ${S}.teams_berichten (like secondbrain.teams_berichten including de
     // ── vrijdag: nieuwe haal; "?" na getoond = geen kandidaat; nieuwe vraag na getoond = wel (met eerder); de 6e komt nu op de kaart ──
     nu = NU + 86400; datum = '2026-11-27';
     W.nl[0] = wa('31600000001', NU - 4 * H, false);   // nieuw laatste bericht, nog steeds niet van David
-    STAART['31600000001@c.us'] = { anker_ts: NU - 40 * H, berichten: STAART['31600000001@c.us'].berichten.concat([{ ts: NU - 4 * H, wie: 'ander', tekst: 'hallo??' }]) };
+    // Davids laatste bericht valt nu buiten het leesvenster (anker null): het blijft dezelfde open vraag (Codex r1 MOET 5)
+    STAART['31600000001@c.us'] = { anker_ts: null, berichten: STAART['31600000001@c.us'].berichten.concat([{ ts: NU - 4 * H, wie: 'ander', tekst: 'hallo??' }]) };
     W.nl[5] = wa('31600000006', NU - 5 * H, false);
     STAART['31600000006@c.us'] = { anker_ts: NU - 60 * H, berichten: STAART['31600000006@c.us'].berichten.concat([{ ts: NU - 5 * H, wie: 'ander', tekst: 'en kun je volgende week dienst ruilen?' }]) };
     TG.gesprekken[0] = Object.assign({}, TG.gesprekken[0], { ts: NU - 1 * H, van_david: true });
@@ -132,17 +141,23 @@ create table ${S}.teams_berichten (like secondbrain.teams_berichten including de
     toets('vr: "hallo??" na een getoond eindje = geen kandidaat (vulbericht)', nv.indexOf('Proef Een') < 0 && hv.telling.vulsel >= 1, hv.telling);
     const zes = hv.kandidaten.find((k) => k.naam === 'Proef Zes');
     toets('vr: nieuwe vraag na een "geen" = kandidaat met eerder', !!zes && zes.eerder && zes.eerder.oordeel === 'geen' && /alleen een nieuwe, andere vraag/.test(zes.eerder.let_op), zes);
-    toets('vr: al beoordeelde chats niet opnieuw (Signal, Teams, Proef Zeven)', ['Sig Proef', 'Collega Proef', 'Klein', 'Proef Zeven'].every((n) => nv.indexOf(n) < 0), nv);
-    await o.oordeel({ oordelen: [{ id: zes.id, oordeel: 'eindje', zin: 'of je volgende week dienst wilt ruilen' }] });
+    toets('vr: al beoordeelde chats niet opnieuw (Signal, Teams)', ['Sig Proef', 'Collega Proef', 'Klein'].every((n) => nv.indexOf(n) < 0), nv);
+    const zeven = hv.kandidaten.find((k) => k.naam === 'Proef Zeven');
+    toets('vr: na Davids antwoord is "dank je" een nieuwe kandidaat zonder eerder (nieuwe periode)', !!zeven && !zeven.eerder && zeven.staart.length === 1, zeven);
+    await o.oordeel({ oordelen: [{ id: zes.id, oordeel: 'eindje', zin: 'of je volgende week dienst wilt ruilen' }, { id: zeven.id, oordeel: 'geen' }] });
     const k2 = await o.kaartStap();
     const kv = kaarten[1];
-    toets('vr: kaart met de doorgeschoven 6e (Proef Acht) + de nieuwe vraag; getoonde nooit terug', kv && kv.stappen.length === 2 && kv.stappen.some((s) => /^Proef Acht/.test(s)) && kv.titel === 'Nog beantwoorden — 2 berichten wachten op je antwoord' && !kv.stappen.some((s) => /Sig Proef|Proef Een|Proef Zeven/.test(s)), kv && kv.stappen);
+    toets('vr: kaart met de doorgeschoven 6e (Proef Negen) + de nieuwe vraag; getoonde nooit terug', kv && kv.stappen.length === 2 && kv.stappen.some((s) => /^Proef Negen/.test(s)) && kv.titel === 'Nog beantwoorden — 2 berichten wachten op je antwoord' && !kv.stappen.some((s) => /Sig Proef|Proef Een|Proef Zeven/.test(s)), kv && kv.stappen);
     toets('vr: kaart van do dicht', status.some((s) => s.p_sleutel === 'eindjes-2026-11-26' && s.p_naar === 'vervallen'));
     // ── zaterdag: Teams-eindje wacht tot maandag; zet faalt = niets getoond ──
     sql(`insert into ${S}.open_eindjes (kanaal, chat, anker_ts, vraag_ts, laatste_ts, naam, oordeel, zin) values ('teams', '19:zat_x@unq.gbl.spaces', 0, ${NU + 86400}, ${NU + 86400}, 'Weekend Teams', 'eindje', 'of je het weekendrooster ziet'),
       ('whatsapp-nl', '31600000099@c.us', 0, ${NU + 86400}, ${NU + 86400}, 'Za Proef', 'eindje', 'of je komt eten')`);
     nu = NU + 2 * 86400; datum = '2026-11-28';
+    faalGetoond = true; let viel = false; try { await o.kaartStap(); } catch (e) { viel = true; }
+    const zaVoor = sql(`select getoond_op from ${S}.open_eindjes where naam = 'Za Proef'`)[0].getoond_op;
     const k3 = await o.kaartStap();
+    const zaNa = sql(`select getoond_op, kaart from ${S}.open_eindjes where naam = 'Za Proef'`)[0];
+    toets('za: kaart gezet maar markeren faalt → volgende tik herstelt getoond_op via de kaart (Codex r1 MOET 4)', viel && zaVoor === null && k3.al_gedaan === true && zaNa.getoond_op !== null && zaNa.kaart === 'eindjes-2026-11-28', { viel, zaVoor, k3, zaNa });
     toets('za: Teams-eindje niet op de kaart (alleen werkdagen), WhatsApp wel', kaarten[2] && kaarten[2].stappen.length === 1 && /Za Proef/.test(kaarten[2].stappen[0]), kaarten[2] && kaarten[2].stappen);
     nu = NU + 4 * 86400; datum = '2026-11-30'; zetFout = true;
     let gegooid = false; try { await o.kaartStap(); } catch (e) { gegooid = true; }

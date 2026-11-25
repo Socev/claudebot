@@ -94,7 +94,9 @@ function kies(items, rijen, nu) {
     if (!staart.length) { telling.leeg++; return; }
     const anker = Math.max(0, Number(it.anker_ts) || 0);
     const laatste = Number(it.laatste_ts);
-    const zelfde = (rijen || []).filter(function (r) { return r.kanaal === it.kanaal && r.chat === it.chat && Number(r.anker_ts) === anker; });
+    // zelfde open vraag = een eerder oordeel in dit gesprek ná Davids laatste bericht. Niet op gelijkheid van het anker: valt Davids laatste
+    // bericht buiten het leesvenster, dan wordt het anker 0 en zou een getoonde vraag na een "?" opnieuw verschijnen (Codex r1 MOET 5).
+    const zelfde = (rijen || []).filter(function (r) { return r.kanaal === it.kanaal && r.chat === it.chat && Number(r.vraag_ts) > anker; });
     if (zelfde.some(function (r) { return Number(r.laatste_ts) >= laatste; })) { telling.al_beoordeeld++; return; }
     const eerder = zelfde.sort(function (a, b) { return Number(b.laatste_ts) - Number(a.laatste_ts); })[0] || null;
     if (eerder) {
@@ -133,7 +135,8 @@ function kaart(datum, eindjes, rest, nu) {
     waarom: ('In ' + (n === 1 ? 'dit gesprek' : 'deze gesprekken') + ' vroeg iemand je iets en kwam er na een dag nog geen antwoord van jou. ' +
       'Elk bericht staat hier één keer' + (rest > 0 ? '; nog ' + rest + ' schuiven door naar morgen' : '') + '. Gedaan of Hoeft niet sluit de kaart.').slice(0, 400),
     stappen: stappen, meting: klok + ': nagekeken dat je hier nog niet antwoordde.',
-    herkomst: { module: 'open-eindjes', handmatig: 'open-eindjes', links: links } };
+    herkomst: { module: 'open-eindjes', handmatig: 'open-eindjes', links: links,
+      eindjes: eindjes.map(function (e) { return Number(e.id); }).filter(function (x) { return Number.isInteger(x) && x > 0; }) } };
 }
 function sqlTekst(s) { return "'" + String(s == null ? '' : s).replace(/\u0000/g, '').replace(/'/g, "''") + "'"; }
 function sqlGetal(n) { const x = Math.floor(Number(n)); if (!Number.isFinite(x)) throw new Error('geen getal'); return String(x); }
@@ -268,10 +271,10 @@ function maak(io) {
       if (werkdagenSinds(versT, nu) >= 2) throw new Error('geen nieuwe Teams-rijen sinds ' + dagTijd(versT, nu) + ' (pc uit of lezer stil)');
       const g = await io.sql("select conversation_id, max(gesprek_naam) as gesprek_naam, extract(epoch from max(tijd) filter (where afzender = " + sqlTekst(TEAMS_DAVID) + "))::bigint as anker, " +
         "extract(epoch from max(tijd))::bigint as laatste, (array_agg(afzender order by tijd desc))[1] as laatste_afzender, count(distinct afzender) as mensen " +
-        "from " + T.teams + " where tijd > now() - interval '30 days' and (conversation_id like '%@unq.gbl.spaces' or conversation_id like '%@thread.v2') group by conversation_id");
+        "from " + T.teams + " where conversation_id like '%@unq.gbl.spaces' or conversation_id like '%@thread.v2' group by conversation_id having max(tijd) > now() - interval '8 days'");
       let n = 0;
       for (const r of g) {
-        if (/@thread\.v2$/.test(r.conversation_id) && Number(r.mensen) > 3) continue;
+        if (/@thread\.v2$/.test(r.conversation_id) && Number(r.mensen) > 3) continue;   // alle afzenders ooit (geen ledenlijst): > 3 = te groot (Codex r1 MOET 3)
         const laatste = Number(r.laatste) || 0, vanDavid = r.laatste_afzender === TEAMS_DAVID;
         if (vanDavid || !inVenster(laatste, nu)) { items.push({ kanaal: 'teams', chat: r.conversation_id, laatste_ts: laatste, van_david: vanDavid, staart: [] }); continue; }
         const anker = Number(r.anker) || 0;
@@ -346,13 +349,22 @@ function maak(io) {
         if (kanaal === 'whatsapp-nl' || kanaal === 'whatsapp-gambia') {
           const lijst = await waLijst(kanaal === 'whatsapp-nl' ? 'nl' : 'gambia');
           const op = {}; lijst.forEach(function (c) { op[c.id] = c; });
-          per[kanaal].forEach(function (r) { const c = op[r.chat]; uit[r.id] = !!(c && c.van_david === true && Number(c.ts) > Number(r.laatste_ts)); });
+          for (const r of per[kanaal]) {
+            const c = op[r.chat];
+            if (!c || Number(c.ts) <= Number(r.laatste_ts)) { uit[r.id] = false; continue; }
+            if (c.van_david === true) { uit[r.id] = true; continue; }
+            // na de vraag kwam er meer, maar niet als laatste van David: antwoordde hij tussendoor? (anker = zijn laatste bericht; Codex r1 ZOU 1)
+            const st = await io.waStaart(kanaal === 'whatsapp-nl' ? 'nl' : 'gambia', r.chat, 0);
+            if (!st || !Array.isArray(st.berichten)) throw new Error('staart zonder berichten');
+            uit[r.id] = Number(st.anker_ts) > Number(r.laatste_ts);
+          }
         } else if (kanaal === 'telegram') {
-          const j = await io.tg({ staart: false });
+          const j = await io.tg({ staart: false, ankerVoor: per[kanaal].map(function (r) { return r.chat; }) });
           if (!j || !Array.isArray(j.gesprekken)) throw new Error('lezer gaf geen gesprekken');
           const op = {}; j.gesprekken.forEach(function (g) { op[String(g.id)] = g; });
-          per[kanaal].forEach(function (r) { const g = op[r.chat]; uit[r.id] = !!(g && g.van_david && Number(g.ts) > Number(r.laatste_ts)); });
-          try { io.leeslog('| ' + io.datum() + ' | *(dialogenlijst, ' + j.gesprekken.length + ' privé)* | — | Open Eindjes-wachter (pod, hercheck 06:50): alleen of Davids laatste bericht nieuwer is, geen inhoud |'); } catch (e) {}
+          const ankers = j.ankers || {};
+          per[kanaal].forEach(function (r) { const g = op[r.chat]; uit[r.id] = !!(g && g.van_david && Number(g.ts) > Number(r.laatste_ts)) || Number(ankers[r.chat]) > Number(r.laatste_ts); });
+          try { io.leeslog('| ' + io.datum() + ' | *(dialogenlijst, ' + j.gesprekken.length + ' privé)* + tijd van Davids laatste bericht in ' + per[kanaal].length + ' gesprek(ken) | — | Open Eindjes-wachter (pod, hercheck 06:50): alleen of David na de vraag antwoordde, geen inhoud |'); } catch (e) {}
         } else if (kanaal === 'signal') {
           for (const r of per[kanaal]) {
             const q = await io.sql("select count(*) as n from " + T.signal + " where gesprek_id = " + sqlTekst(r.chat) + " and eigen and envelop_ts > " + sqlGetal(Number(r.laatste_ts) * 1000));
@@ -379,6 +391,11 @@ function maak(io) {
     const lijst = await io.rpc('mk_voor_jou_lijst', { p_alles: true });
     if (!lijst || !Array.isArray(lijst.punten)) throw new Error('kaartenlijst onleesbaar');
     const vandaag = 'eindjes-' + datum;
+    // herstel (Codex r1 MOET 4): stond een kaart er al maar faalde daarna het markeren, dan zet deze ronde de eindjes van die kaart alsnog op getoond
+    for (const p of lijst.punten) {
+      const ids = p && SLEUTEL_RE.test(String(p.sleutel)) && p.herkomst && Array.isArray(p.herkomst.eindjes) ? p.herkomst.eindjes.filter(function (x) { return Number.isInteger(x) && x > 0; }).slice(0, KAART_MAX) : [];
+      if (ids.length) await io.sql("update " + T.eindjes + " set getoond_op = coalesce(getoond_op, now()), kaart = coalesce(kaart, " + sqlTekst(p.sleutel) + ") where getoond_op is null and id in (" + ids.map(sqlGetal).join(',') + ')');
+    }
     if (lijst.punten.some(function (p) { return p && p.sleutel === vandaag; })) { zetStaat(function (x) { x.kaart = { datum: datum, al: true }; }); return Object.assign(uit, { al_gedaan: true }); }
     for (const p of lijst.punten) {
       if (!p || !SLEUTEL_RE.test(String(p.sleutel)) || p.sleutel === vandaag || (p.status !== 'open' && p.status !== 'later')) continue;

@@ -25204,6 +25204,7 @@ async function eindjesSql(q) {
 }
 function eindjesTg(o) {
   const args = ['eindjes', '--staart', o.staart ? '1' : '0'];
+  if (!o.staart && Array.isArray(o.ankerVoor) && o.ankerVoor.length) args.push('--anker-voor', o.ankerVoor.filter(function (x) { return /^-?\d{1,20}$/.test(String(x)); }).join(','));
   if (o.staart) args.push('--van', String(Math.floor(o.van)), '--tot', String(Math.floor(o.tot)), '--niet', (o.niet || []).join(','));
   const tgEnv = {};
   ['PATH', 'HOME', 'TZ', 'LANG', 'TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 'TELEGRAM_SESSIE', 'TELEGRAM_LOCK'].forEach(function (k) { if (process.env[k] != null) tgEnv[k] = process.env[k]; });

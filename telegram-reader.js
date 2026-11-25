@@ -5,7 +5,7 @@
  * Drie commando's:
  *   node telegram-reader.js dialogen [--aantal N]
  *   node telegram-reader.js lees --chat <naam-of-id> --dagen N
- *   node telegram-reader.js eindjes [--van <unix>] [--tot <unix>] [--staart 0|1] [--niet <nr,nr>]   (wv4007, JSON)
+ *   node telegram-reader.js eindjes [--van <unix>] [--tot <unix>] [--staart 0|1] [--niet <nr,nr>] [--anker-voor <id,id>]   (wv4007, JSON)
  *
  * WAAROM DIT BESTAND ALLEEN LEEST, EN HOE DAT IS AFGEDWONGEN.
  * Een MTProto-sessie is een volwaardige accountsleutel: dezelfde sessie kán
@@ -307,6 +307,8 @@ async function cmdEindjes(args) {
   const tot = parseInt(args.tot || '', 10) || nu - 86400;
   const metStaart = String(args.staart || '1') !== '0';
   const niet = String(args.niet === true ? '' : (args.niet || '')).split(',').map(function (x) { return x.replace(/\D/g, ''); }).filter(Boolean);
+  // --anker-voor id,id (hercheck): alleen de tijd van Davids laatste bericht in die gesprekken, geen tekst
+  const ankerVoor = String(args['anker-voor'] === true ? '' : (args['anker-voor'] || '')).split(',').filter(function (x) { return /^-?\d{1,20}$/.test(x); }).slice(0, 20);
   const client = await maakClient();
   try {
     const dialogen = await client.getDialogs({ limit: 100 });
@@ -324,6 +326,10 @@ async function cmdEindjes(args) {
         gebruikersnaam: typeof e.username === 'string' && /^[A-Za-z0-9_]{4,40}$/.test(e.username) ? e.username : null,
         ts: b.date, van_david: !!b.out, ongelezen: Number(d.unreadCount) || 0 };
       gesprekken.push(g);
+      if (!metStaart && ankerVoor.indexOf(g.id) !== -1) {
+        for await (const m of client.iterMessages(d.entity, { limit: 40 })) { if (m && m.out && m.date) { ankers[g.id] = m.date; break; } }
+        continue;
+      }
       if (!metStaart || g.van_david || g.ts < van || g.ts > tot) continue;
       const lijst = [];
       for await (const m of client.iterMessages(d.entity, { limit: 40 })) {
