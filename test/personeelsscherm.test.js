@@ -417,7 +417,7 @@ test('fase 2 infoschermen: zonder Ja niets; met Ja op precies deze kaart wel; ei
   await f.m.publiceer();
   let h = html(f.D);
   assert.match(h, /<section class="paneel aan" data-s="30">/); assert.strictEqual((h.match(/class="paneel info"/g) || []).length, 2);
-  assert.match(h, /Proefinfo een/); assert.match(h, /Bron: Verzonnen bron 1/); assert.match(h, /Info 1\/2/);
+  assert.match(h, /Proefinfo een/); assert.match(h, /Bron: Verzonnen bron 1/); assert.match(h, /aria-label="1 van 2"/); assert.doesNotMatch(h, /Info 1\/2/);
   // kruisproeven: Nee, andere hash, tekst na de Ja gewijzigd, vraag-id van een andere kaart, rij zonder het woord infoschermen
   const kruis = [
     ['Nee', fase2({ vragen: jaVoor(SET, { keuze: 'nee' }) })],
@@ -503,7 +503,7 @@ test('wv3020 uit: meteen een nieuwe envelop zonder dat scherm (hoger volgnr), bl
   await f.m.tik();
   assert.match(html(f.D), /Proefinfo een/);
   const st = await f.m.appStand();
-  const [een, twee] = st.schermen.filter((x) => x.soort === 'info');
+  const [een, twee] = st.schermen.filter((x) => x.soort === 'info' && x.id !== PS.JARIG_ID);
   assert.strictEqual(een.titel, 'Proefinfo een'); assert.strictEqual(een.aan, true); assert.strictEqual(twee.aan, true);
   const v0 = f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr;
   t += 1000; f.zet(t);
@@ -511,7 +511,7 @@ test('wv3020 uit: meteen een nieuwe envelop zonder dat scherm (hoger volgnr), bl
   assert.strictEqual(r.status, 200);
   assert.ok(f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr > v0, 'nieuwe envelop');
   let h = html(f.D);
-  assert.doesNotMatch(h, /Proefinfo een/); assert.match(h, /Proefinfo twee/); assert.match(h, /Info 1\/1/);
+  assert.doesNotMatch(h, /Proefinfo een/); assert.match(h, /Proefinfo twee/); assert.doesNotMatch(h, /class="stip"/);   // wv4141: één scherm = geen stipjes
   t += 5 * 60000; f.zet(t); await f.m.tik();
   assert.doesNotMatch(html(f.D), /Proefinfo een/, 'blijft uit na de tik');
   t += 31 * 60000; f.zet(t); await f.m.tik();
@@ -523,17 +523,20 @@ test('wv3020 uit: meteen een nieuwe envelop zonder dat scherm (hoger volgnr), bl
   // weer aan
   const r2 = await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: een.id, aan: true } });
   assert.strictEqual(r2.status, 200);
-  h = html(f.D); assert.match(h, /Proefinfo een/); assert.match(h, /Info 2\/2/);
+  h = html(f.D); assert.match(h, /Proefinfo een/); assert.match(h, /aria-label="2 van 2"/);
   // alles uit = alleen Komende weken (geen wissel meer)
   await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: een.id, aan: false } });
   await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: twee.id, aan: false } });
   assert.strictEqual((html(f.D).match(/class="paneel info/g) || []).length, 0);
+  assert.strictEqual((await f.m.appStand()).schermen[0].looptijd_s, 30, 'wv4141: Fenna is jarig op 16-11, de felicitatiepagina wisselt nog');
+  await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.JARIG_ID, aan: false } });
+  assert.doesNotMatch(html(f.D), /paneel jarig/);
   assert.strictEqual((await f.m.appStand()).schermen[0].looptijd_s, null);
 });
 
 test('wv3020 aan alleen met Ja en binnen de looptijd: andere/onbekende id, Ja weg, tekst gewijzigd of verlopen = geweigerd (kruisproeven)', async () => {
   const t = Date.parse('2026-11-16T09:00:00Z');
-  const mk = async () => { const f = fase2({ vragen: jaVoor(SET) }); f.zet(t); await f.m.tik(); const st = await f.m.appStand(); return { f, ids: st.schermen.filter((x) => x.soort === 'info').map((x) => x.id) }; };
+  const mk = async () => { const f = fase2({ vragen: jaVoor(SET) }); f.zet(t); await f.m.tik(); const st = await f.m.appStand(); return { f, ids: st.schermen.filter((x) => x.soort === 'info' && x.id !== PS.JARIG_ID).map((x) => x.id) }; };
   let { f, ids } = await mk();
   const aan = (id) => f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id, aan: true } });
   assert.strictEqual((await aan('nietgoed')).status, 400);
@@ -566,13 +569,14 @@ test('wv3020 voorbeeld per scherm: eigen doek met dat paneel zichtbaar, titel, l
   const f = fase2({ vragen: jaVoor(SET) });
   f.zet(Date.parse('2026-11-16T09:00:00Z')); await f.m.tik();
   const st = await f.m.appStand();
-  assert.strictEqual(st.schermen.length, 3);
-  assert.deepStrictEqual(st.schermen.map((x) => [x.soort, x.titel, x.looptijd_s]), [['hoofd', 'Komende weken', 30], ['info', 'Proefinfo een', 20], ['info', 'Proefinfo twee', 20]]);
+  assert.strictEqual(st.schermen.length, 4);   // wv4141: + felicitatiepagina
+  assert.deepStrictEqual(st.schermen.map((x) => [x.soort, x.titel, x.looptijd_s]), [['hoofd', 'Komende weken', 30], ['info', 'Gefeliciteerd (jarig vandaag)', 20], ['info', 'Proefinfo een', 20], ['info', 'Proefinfo twee', 20]]);
   assert.strictEqual(st.schermen[0].html, undefined); assert.strictEqual(st.voorbeeld_html, html(f.D));
-  const h = st.schermen[2].html;
-  assert.match(h, /<section class="paneel info aan" data-s="20"/); assert.match(h, /<section class="paneel" data-s="30">/); assert.match(h, /Info 2\/2/);
+  const h = st.schermen[3].html;
+  assert.match(h, /<section class="paneel info aan" data-s="20"/); assert.match(h, /<section class="paneel" data-s="30">/); assert.match(h, /aria-label="2 van 2"/);
   assert.doesNotMatch(h, /Proefinfo een/); assert.doesNotMatch(h, /data:image\/svg/, 'zonder logo (klein)');
-  assert.strictEqual(st.schermen[1].van, '2026-11-13'); assert.strictEqual(st.schermen[1].tot, '2026-12-11');
+  assert.strictEqual(st.schermen[2].van, '2026-11-13'); assert.strictEqual(st.schermen[2].tot, '2026-12-11');
+  assert.match(st.schermen[1].html, /<section class="paneel jarig aan"/); assert.match(st.schermen[1].html, /Fenna/);
   // bouwHtml zonder toon = hoofdscherm zichtbaar (zoals de tv zonder script)
   const d = PS.bouwHtml({ gemaakt: 0, houdbaar_tot: 1, leeg: false, inhoud: { agenda: [], info: [Object.assign({}, SET.schermen[0], { set: SET.set })] } });
   assert.match(d, /<section class="paneel aan" data-s="30">/); assert.match(d, /<section class="paneel info" data-s="20"/);
@@ -914,7 +918,8 @@ test('wv3154 zonder eigen registerrij: wel opgehaald voor Davids proef in de app
     assert.deepStrictEqual([md.proef, md.aan, bl.proef, bl.aan], [true, false, true, false], w);
     assert.match(md.html, /Proefbericht NHG over duurzaam werken/); assert.match(bl.html, /Proefsubsidie voor opleiden/);
     assert.ok(md.berichten.length > 0 && bl.berichten.length > 0);
-    assert.strictEqual(st.schermen[0].looptijd_s, null, 'hoofdscherm staat er de hele tijd');
+    assert.strictEqual(st.schermen[0].looptijd_s, 30, w + ': alleen de felicitatiepagina (Fenna 16-11) wisselt nog');   // wv4141
+    assert.doesNotMatch(html(f.D), /paneel med/, w);
     assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.MEDISCH_ID, aan: true } })).status, 409, w);
     assert.strictEqual(f.m.info().medisch.mag, false);
   }
@@ -1042,11 +1047,13 @@ test('wv3154 rotatie: elke keer dat Medisch nieuws langskomt het volgende blad (
     vm.runInNewContext(scr, ctx);
     return { zicht: panelen.map((p) => p.cls.has('aan')), blad: panelen[1].bladen.findIndex((b) => b.cls.has('aan')) };
   };
-  const S = 100000, b = Math.floor(MT0 / S) * S, c = Math.floor(MT0 / S);
+  // wv4141: Komende weken komt na elke twee pagina's terug: H(30) med(25) bel(25) H(30) info(20) = 130 s
+  const S = 130000, b = Math.floor(MT0 / S) * S, c = Math.floor(MT0 / S);
   assert.deepStrictEqual(op(b + 5000).zicht, [true, false, false, false]);
   assert.deepStrictEqual(op(b + 40000).zicht, [false, true, false, false]);
   assert.deepStrictEqual(op(b + 60000).zicht, [false, false, true, false]);
-  assert.deepStrictEqual(op(b + 85000).zicht, [false, false, false, true]);
+  assert.deepStrictEqual(op(b + 85000).zicht, [true, false, false, false]);
+  assert.deepStrictEqual(op(b + 115000).zicht, [false, false, false, true]);
   const bladen = [0, 1, 2, 3].map((k) => op(b + k * S + 40000).blad);
   assert.deepStrictEqual(bladen, [0, 1, 2, 0].map((k) => (k + c) % 3), 'elke ronde het volgende blad');
   // toon: index in de app; info staat na de twee medische panelen
@@ -1078,4 +1085,119 @@ test('wv3438 + wv3560: agendatitel met volle naam komt op de tv; een lange titel
   assert.doesNotMatch(h, /oncologisc…/);
   assert.match(h, /\.tt\{[^}]*-webkit-line-clamp:2/); assert.doesNotMatch(h, /\.tt\{[^}]*nowrap/);
   assert.match(h, /<section class="paneel aan" data-s="\d+"><div class="ph"><h1 id="agenda">Komende weken<\/h1>/); assert.match(h, /function p\(\)/);
+});
+
+// ── wv4141 (2C55): zichzelf opruimen (nieuw vervangt oud, einddatum per punt), felicitatiepagina, Komende weken na elke twee pagina's ──
+test('wv4141 zonder einddatum per punt: kaart-hash en scherm-id bit-gelijk aan vóór wv4141 (bestaande Ja en uit-standen blijven geldig)', () => {
+  const k = PS._t.setKaart(SET);
+  assert.strictEqual(PS._t.kaartHash(k.kaart), '99d058a2fac4b8fa3669c8c0144c6b3b5498ad7cd47658219f3e29d0e30fb66d');
+  assert.strictEqual(PS._t.schermId('wv9001', k.schermen[0]), '8df0de79fbe9c337');
+  assert.ok(!('tot' in k.schermen[0].punten[0]));
+});
+
+const SET_PT = { set: '2026-11-13', sleutel: 'wv9004', kaart: SET.kaart, schermen: [
+  { kop: 'Proefdata', intro: '', punten: [{ titel: 'Bijeenkomst', tekst: 'Middag.', tot: '2026-11-17' }, { titel: 'Blijft', tekst: 'Tekst.' }], bron: 'Verzonnen bron 4', tot: '2026-12-11' },
+  { kop: 'Alleen datum', intro: '', punten: [{ titel: 'Eenmalig', tekst: 'Kort.', tot: '2026-11-16' }], bron: 'Verzonnen bron 5', tot: '2026-12-11' }] };
+SET_PT.vraag_id = PS._t.fnv('voorjou:' + SET_PT.sleutel + ':kaart');
+
+test('wv4141 einddatum per punt: op de kaart, op de tv, daarna weg; scherm zonder punten weg; ongeldige datum = set ongeldig', async () => {
+  const k = PS._t.setKaart(SET_PT);
+  assert.match(k.kaart.stappen[0], /Bijeenkomst: Middag\. \(tot en met 17-11-2026\) \| Blijft: Tekst\. \(bron/);
+  const fout = (pt) => PS._t.setKaart(Object.assign({}, SET_PT, { schermen: [Object.assign({}, SET_PT.schermen[0], { punten: [Object.assign({ titel: 'X', tekst: 'Y' }, pt)] })] }));
+  assert.strictEqual(fout({ tot: '2026-02-30' }), null, 'geen echte datum');
+  assert.strictEqual(fout({ tot: '2026-12-12' }), null, 'na het scherm');
+  assert.strictEqual(fout({ tot: '2026-11-12' }), null, 'vóór de set');
+  assert.ok(fout({ tot: '' }), 'leeg = geen einddatum');
+  const f = fase2({ set: SET_PT, vragen: jaVoor(SET_PT) });
+  f.zet(Date.parse('2026-11-16T09:00:00Z')); await f.m.tik();
+  let h = html(f.D);
+  assert.match(h, /Bijeenkomst/); assert.match(h, /t\/m 17 nov/); assert.match(h, /Eenmalig/);
+  f.zet(Date.parse('2026-11-18T09:00:00Z')); await f.m.tik();
+  h = html(f.D);
+  assert.doesNotMatch(h, /Bijeenkomst/, 'punt van gisteren weg'); assert.match(h, /Blijft/); assert.doesNotMatch(h, /Eenmalig|Alleen datum/, 'scherm zonder punten weg');
+  const st = await f.m.appStand();
+  const pd = st.schermen.find((x) => x.titel === 'Proefdata');
+  assert.ok(pd && pd.aan); assert.doesNotMatch(pd.html, /Bijeenkomst/);
+});
+
+const SET_OUD = { set: '2026-11-13', sleutel: 'wv9002', kaart: SET.kaart, schermen: [
+  { kop: 'In het nieuws', intro: '', punten: [{ titel: 'Oud bericht', tekst: 'Oud.' }], bron: 'Verzonnen bron 6', tot: '2026-12-01' },
+  { kop: 'Blijvend', intro: '', punten: [{ titel: 'Anders', tekst: 'Eigen kop.' }], bron: 'Verzonnen bron 7', tot: '2026-12-01' }] };
+const SET_NIEUW = { set: '2026-11-15', sleutel: 'wv9003', kaart: SET.kaart, schermen: [
+  { kop: 'In het Nieuws ', intro: '', punten: [{ titel: 'Nieuw bericht', tekst: 'Nieuw.' }], bron: 'Verzonnen bron 8', tot: '2026-12-10' }] };
+for (const x of [SET_OUD, SET_NIEUW]) x.vraag_id = PS._t.fnv('voorjou:' + x.sleutel + ':kaart');
+
+test('wv4141 nieuw vervangt oud: één scherm per kop; oud in de app als vervangen, weer aan = naast het nieuwe; nieuw uit = oud komt niet terug', async () => {
+  const f = fase2({ set: SET_OUD, vragen: Object.assign(jaVoor(SET_OUD), jaVoor(SET_NIEUW)) });
+  fs.writeFileSync(path.join(f.dir, 'infoschermen.json'), JSON.stringify({ sets: [SET_NIEUW, SET_OUD] }));   // volgorde in het bestand telt niet, de setdatum wel
+  f.zet(Date.parse('2026-11-16T09:00:00Z')); await f.m.tik();
+  let h = html(f.D);
+  assert.match(h, /Nieuw bericht/); assert.doesNotMatch(h, /Oud bericht/); assert.match(h, /Eigen kop/);
+  assert.strictEqual((h.match(/class="paneel info/g) || []).length, 2);
+  let st = await f.m.appStand();
+  const oud = st.schermen.find((x) => x.titel === 'In het nieuws · vervangen door nieuwer'), nw = st.schermen.find((x) => x.titel === 'In het Nieuws');
+  assert.deepStrictEqual([oud.aan, oud.uit, oud.vervangen], [false, true, true]); assert.match(oud.html, />Vervangen</);
+  assert.deepStrictEqual([nw.aan, nw.uit, !!nw.vervangen], [true, false, false]);
+  const zet = (id, aan) => f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id, aan } });
+  // MOET 1 (ontwerpreview): het nieuwe uit → het oude komt niet vanzelf terug
+  assert.strictEqual((await zet(nw.id, false)).status, 200);
+  h = html(f.D); assert.doesNotMatch(h, /Nieuw bericht|Oud bericht/);
+  f.zet(Date.parse('2026-11-16T09:10:00Z')); await f.m.tik(); assert.doesNotMatch(html(f.D), /Oud bericht/, 'ook niet na de tik');
+  // David zet het oude bewust weer aan: naast het nieuwe
+  assert.strictEqual((await zet(nw.id, true)).status, 200);
+  assert.strictEqual((await zet(oud.id, true)).status, 200);
+  h = html(f.D); assert.match(h, /Nieuw bericht/); assert.match(h, /Oud bericht/);
+  st = await f.m.appStand(); assert.deepStrictEqual(['aan', 'titel'].map((k) => st.schermen.find((x) => x.id === oud.id)[k]), [true, 'In het nieuws'], 'naast het nieuwe = gewone titel');
+  // weer uit = weg, en de keuze 'naast' is vergeten
+  assert.strictEqual((await zet(oud.id, false)).status, 200);
+  assert.doesNotMatch(html(f.D), /Oud bericht/);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(f.dir, 'stand.json'), 'utf8')).info_naast[oud.id], undefined);
+});
+
+test('wv4141 felicitatiepagina: alleen op de dag zelf, maandag ook het weekend; alleen voornaam; registerrij uit of in de app uit = weg', async () => {
+  const meds = [{ voornaam: 'Fenna', naam: 'x', geboren: '11-16', actief: true }, { voornaam: 'Zara', naam: 'y', geboren: '11-14', actief: true },
+    { voornaam: 'Zeno', naam: 'z', geboren: '11-15', actief: true }, { voornaam: 'Oud', naam: 'o', geboren: '11-16', actief: false }, { voornaam: 'Leeg', naam: 'l', geboren: null, actief: true }];
+  assert.deepStrictEqual(PS._t.jarigDag(meds, '2026-11-16'), [{ naam: 'Fenna', wanneer: 'vandaag' }, { naam: 'Zara', wanneer: 'zaterdag' }, { naam: 'Zeno', wanneer: 'zondag' }], 'maandag');
+  assert.deepStrictEqual(PS._t.jarigDag(meds, '2026-11-15'), [{ naam: 'Zeno', wanneer: 'vandaag' }], 'zondag: geen terugblik');
+  assert.deepStrictEqual(PS._t.jarigDag(meds, '2026-11-17'), [], 'dinsdag');
+  const f = fase2({ set: null });
+  f.zet(Date.parse('2026-11-16T09:00:00Z')); await f.m.tik();
+  const h = html(f.D);
+  const sec = /<section class="paneel jarig" data-s="20" data-tot="(\d+)">([\s\S]*?)<\/section>/.exec(h);
+  assert.ok(sec, 'felicitatiepagina in de wissel');
+  assert.strictEqual(Number(sec[1]), Date.parse('2026-11-17T00:00:00+01:00'), 'weg om middernacht (wandklok)');
+  assert.match(sec[2], /Gefeliciteerd!/); assert.match(sec[2], /Fenna/); assert.match(sec[2], /is vandaag jarig/);
+  assert.doesNotMatch(sec[2], /Testerink|1990|\bjaar\b|Oud/, 'geen achternaam, jaar, leeftijd of oud-collega');
+  assert.ok(h.indexOf('paneel jarig') < h.indexOf('paneel info') || h.indexOf('paneel info') < 0, 'direct na Komende weken');
+  f.zet(Date.parse('2026-11-17T09:00:00Z')); await f.m.tik();
+  assert.doesNotMatch(html(f.D), /paneel jarig/, 'dinsdag niemand jarig');
+  // kruisproef: registerrij uit
+  const u = fase2({ set: null, aan: 'uit' });
+  u.zet(Date.parse('2026-11-16T09:00:00Z')); await u.m.tik();
+  assert.doesNotMatch(html(u.D), /paneel jarig|Fenna/);
+  assert.strictEqual((await u.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.JARIG_ID, aan: true } })).status, 409);
+  // in de app uit en weer aan
+  const g = fase2({ set: null });
+  g.zet(Date.parse('2026-11-16T09:00:00Z')); await g.m.tik();
+  assert.strictEqual((await g.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.JARIG_ID, aan: false } })).status, 200);
+  assert.doesNotMatch(html(g.D), /paneel jarig/);
+  assert.strictEqual((await g.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.JARIG_ID, aan: true } })).status, 200);
+  assert.match(html(g.D), /paneel jarig/);
+});
+
+test('wv4141 wissel: Komende weken na elke twee pagina\'s (H a b H c d H e), verlopen panelen eerst eruit', () => {
+  const vm = require('vm');
+  const mk = (s, tot) => { const cls = new Set(['paneel']); return { cls, getAttribute: (k) => (k === 'data-s' ? String(s) : k === 'data-tot' ? (tot ? String(tot) : null) : null),
+    classList: { remove: (c) => cls.delete(c), toggle: (c, on) => (on ? cls.add(c) : cls.delete(c)) }, querySelectorAll: () => [] }; };
+  const doc = PS.bouwHtml({ gemaakt: 0, houdbaar_tot: Date.parse('2027-01-01T00:00:00Z'), leeg: false, inhoud: { agenda: [] } });
+  const scr = /<script>([\s\S]*?)<\/script>/.exec(doc)[1];
+  const T = Date.parse('2026-11-16T09:00:00Z');
+  const panelen = [mk(30), mk(20), mk(20), mk(20), mk(20), mk(20, T - 1), mk(20)];   // paneel 5 is verlopen
+  const zicht = (ms) => { vm.runInNewContext(scr, { document: { getElementById: () => null, querySelectorAll: () => panelen, body: {} }, innerWidth: 1920, innerHeight: 1080,
+    addEventListener() {}, setInterval() {}, Date: class extends Date { constructor(...a) { super(...(a.length ? a : [ms])); } } }); return panelen.findIndex((p) => p.cls.has('aan')); };
+  // geldig: H 1 2 3 4 6 → H 1 2 H 3 4 H 6 = 30+20+20+30+20+20+30+20 = 190 s
+  const S = 190000, b = Math.ceil(T / S) * S;
+  const reeks = [5, 35, 55, 85, 105, 125, 155, 175].map((s) => zicht(b + s * 1000));
+  assert.deepStrictEqual(reeks, [0, 1, 2, 0, 3, 4, 0, 6]);
+  assert.ok(panelen.filter((p) => p.cls.has('aan')).length === 1, 'altijd precies één paneel');
 });

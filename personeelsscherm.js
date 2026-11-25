@@ -19,7 +19,11 @@
  * deze letterlijke tekst goed. Elk scherm heeft een einddatum (tot); daarna valt het weg (pod bij de dagwissel, kastje op de wandklok).
  * Nieuws (wv3023, 13-11-2026, Davids Ja op de kaart van wv3022): paneel met de vijf nieuwste NOS-koppen (kop + tijd + "Bron: NOS"), alleen als
  * de registertekst NIEUWS_ZIN bevat; de pod haalt de feed hooguit elk kwartier (server.js o.nieuws), weg bij storing, kapotte feed of > 6 uur
- * oud; in de app aan/uit als infoscherm met vaste id NIEUWS_ID. Codex-review 3 rondes (lineaire, structuurbewuste parser). Deze module:
+ * oud; in de app aan/uit als infoscherm met vaste id NIEUWS_ID. Codex-review 3 rondes (lineaire, structuurbewuste parser).
+ * Zichzelf opruimen + jarige (wv4141, 25-11-2026, Davids Ja op 2C55): per kop telt alleen het scherm uit de nieuwste set (oud = 'vervangen',
+ * in de app weer aan te zetten via stand.info_naast); een punt kan een eigen einddatum (tot) hebben, op de kaart en de tv, daarna weg (zonder
+ * het veld blijven kaart-hash en schermId gelijk); felicitatiepagina (voornaam; maandag ook het weekend; JARIG_ID aan/uit); Komende weken
+ * komt na elke twee pagina's terug (klokscript); stipjes in plaats van "Info k/n". Deze module:
  *  - bouwt het scherm (één HTML-bestand, alles inline) en zet het als ondertekende envelop (Ed25519 over de exacte bytes) in D1 `personeel`;
  *    de Worker (socev-app personeel/worker.ts) geeft hem door, het kastje controleert de handtekening en het volgnr (geen terugrol);
  *    elke 6 uur opnieuw getekend, houdbaar 36 uur; de noodknop tekent meteen een zwarte envelop met een hoger volgnr;
@@ -103,9 +107,10 @@ function z(n){return(n<10?'0':'')+n}function s(){var e=document.getElementById('
 function p(){var A=document.getElementById('agenda');A=A&&A.parentNode&&A.parentNode.parentNode;if(!A||A.getAttribute('data-pas')||!A.clientHeight)return;var T=A.querySelectorAll('.tt'),i,g;for(i=0;i<T.length;i++){g=44;while(T[i].scrollHeight>T[i].clientHeight+1&&g>30){g-=2;T[i].style.fontSize=g+'px';}}g=44;while(A.scrollHeight>A.clientHeight+1&&g>26){g-=2;for(i=0;i<T.length;i++){if((parseFloat(T[i].style.fontSize)||44)>g)T[i].style.fontSize=g+'px';}}A.setAttribute('data-pas','1');}
 function t(){var n=new Date();var k=document.getElementById('klok'),w=document.getElementById('wd'),d=document.getElementById('dag');if(k)k.textContent=z(n.getHours())+':'+z(n.getMinutes());if(w)w.textContent=D[n.getDay()];if(d)d.textContent=n.getDate()+' '+M[n.getMonth()];
 if(n.getTime()>T){document.body.className='oud';}
-var P=document.querySelectorAll('.paneel');if(P.length>1){var L=[],S=0,i;for(i=0;i<P.length;i++){var x=+P[i].getAttribute('data-tot')||0;if(x&&n.getTime()>x){P[i].classList.remove('aan');continue;}var u=+P[i].getAttribute('data-s')||20;L.push([P[i],S,u]);S+=u;}
-var q=Math.floor(n.getTime()/1000)%S,c=Math.floor(n.getTime()/1000/S);for(i=0;i<L.length;i++){L[i][0].classList.toggle('aan',q>=L[i][1]&&q<L[i][1]+L[i][2]);
-var B=L[i][0].querySelectorAll('.blad');for(var j=0;j<B.length;j++){B[j].classList.toggle('aan',j===c%B.length);}}}p();}t();setInterval(t,1000);})();`;
+var P=document.querySelectorAll('.paneel');if(P.length>1){var V=[],L=[],S=0,i,j,a=null;for(i=0;i<P.length;i++){var x=+P[i].getAttribute('data-tot')||0;if(x&&n.getTime()>x){P[i].classList.remove('aan');continue;}V.push(P[i]);}
+function r(e){var u=+e.getAttribute('data-s')||20;L.push([e,S,u]);S+=u;}for(i=0,j=0;i<V.length;i++){if(j===2){r(V[0]);j=0;}r(V[i]);if(i>0)j++;}
+var q=Math.floor(n.getTime()/1000)%S,c=Math.floor(n.getTime()/1000/S);for(i=0;i<L.length;i++){if(q>=L[i][1]&&q<L[i][1]+L[i][2])a=L[i][0];}
+for(i=0;i<V.length;i++){V[i].classList.toggle('aan',V[i]===a);var B=V[i].querySelectorAll('.blad');for(j=0;j<B.length;j++){B[j].classList.toggle('aan',j===c%B.length);}}}p();}t();setInterval(t,1000);})();`;
   if (leeg) {
     return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta http-equiv="refresh" content="60"><title>OVIS Scherm</title>
 <style>*{cursor:none!important}html,body{margin:0;height:100%;background:#000;color:#444;font-family:'Liberation Sans',Arial,Helvetica,sans-serif;overflow:hidden}#doek{position:relative;width:1920px;height:1080px;transform-origin:0 0;background:#000}#klok{position:absolute;right:38px;bottom:38px;font-size:46px}#dag,#wd{display:none}</style></head>
@@ -130,10 +135,18 @@ var B=L[i][0].querySelectorAll('.blad');for(var j=0;j<B.length;j++){B[j].classLi
   const md = i.medisch && typeof i.medisch === 'object' ? i.medisch : null;
   const mdN = md && Array.isArray(md.nieuws) && (md.nieuws.length || md.leeg_tonen) ? md.nieuws : null;
   const mdB = md && Array.isArray(md.belangrijk) && (md.belangrijk.length || md.leeg_tonen) ? md.belangrijk : null;
-  const nPan = info.length + (nw ? 1 : 0) + (mdN ? 1 : 0) + (mdB ? 1 : 0);
+  // wv4141 (2C55): felicitatiepagina op de verjaardag zelf (maandag ook wie za/zo jarig was): alleen voornaam, vaste tekst, weg om middernacht
+  const jd = Array.isArray(i.jarig_dag) && (i.jarig_dag.length || i.jarig_leeg) ? i.jarig_dag : null;
+  const nPan = info.length + (jd ? 1 : 0) + (nw ? 1 : 0) + (mdN ? 1 : 0) + (mdB ? 1 : 0);
   const zicht = Number.isInteger(toon) && toon >= 0 && toon <= nPan ? toon : 0;
   const nwTijd = (ms) => { const a = amsDelen(ms); return a.datum === nwDag ? String(a.uur).padStart(2, '0') + ':' + String(a.min).padStart(2, '0') : 'gisteren'; };
-  const nieuwsHtml = nw ? `<section class="paneel nieuws${zicht === 1 ? ' aan' : ''}" data-s="${INFO_S}"${nw.items.length ? ` data-tot="${Number(nw.nieuwste) + NIEUWS_OUD_MS}"` : ''}><div class="ph"><h1>Nieuws</h1><div class="lab">NOS</div></div>`
+  let plek = 0;
+  const jarigHtml = jd ? `<section class="paneel jarig${zicht === ++plek ? ' aan' : ''}" data-s="${INFO_S}" data-tot="${Date.parse(plusDag(nwDag, 1) + 'T00:00:00+01:00')}"><div class="ph"><h1>Gefeliciteerd!</h1><div class="lab">Jarig</div></div>`
+    + `<div class="slinger">${SLINGER_SVG}</div>`
+    + (jd.length ? `<div class="jarigen">${jd.slice(0, 6).map((x) => `<div class="jr"><div class="jn">${esc(x.naam)}</div><div class="jw">${x.wanneer === 'vandaag' ? 'is vandaag jarig' : 'was ' + esc(x.wanneer) + ' jarig'}</div></div>`).join('')}</div>`
+      : '<div class="niets">Op een verjaardag staat hier de felicitatie (alleen de voornaam). Op maandag ook wie in het weekend jarig was.</div>')
+    + '<div class="voet">Van harte gefeliciteerd!</div></section>' : '';
+  const nieuwsHtml = nw ? `<section class="paneel nieuws${zicht === ++plek ? ' aan' : ''}" data-s="${INFO_S}"${nw.items.length ? ` data-tot="${Number(nw.nieuwste) + NIEUWS_OUD_MS}"` : ''}><div class="ph"><h1>Nieuws</h1><div class="lab">NOS</div></div>`
     + (nw.items.length ? nw.items.slice(0, NIEUWS_N).map((x) => `<div class="nws"><span class="nt">${esc(nwTijd(x.ms))}</span><span class="nk">${esc(x.kop)}</span></div>`).join('')
       : '<div class="niets">Nu geen recent nieuws: de NOS is niet bereikbaar of het nieuwste bericht is ouder dan 6 uur. Dan staat dit scherm niet op de tv.</div>')
     + '<div class="voet">Bron: NOS</div></section>' : '';
@@ -149,12 +162,14 @@ var B=L[i][0].querySelectorAll('.blad');for(var j=0;j<B.length;j++){B[j].classLi
       }).join('')}</div>`).join('') : `<div class="niets">${leegTekst}</div>`)
       + `<div class="voet">${voet}</div></section>`;
   };
-  let plek = nw ? 1 : 0;
   const medHtml = (mdN ? mdPaneel(mdN, ++plek, 'Medisch nieuws', 'NHG · LHV · RIVM', 'Bron: nieuwsberichten van NHG, LHV en RIVM · elk uur bijgewerkt', 'Nog geen berichten van de afgelopen 30 dagen binnen.') : '')
     + (mdB ? mdPaneel(mdB, ++plek, 'Belangrijk', 'LHV · NHG', 'Blijft enkele weken staan · bron: LHV en NHG', 'Nu geen belangrijke berichten. Een bericht van LHV of NHG over een standaard, cao, tarief, subsidie of oproep komt hier vanzelf; jij kunt er een vastzetten.') : '');
-  const infoHtml = nieuwsHtml + medHtml + info.map((sc, k) => `<section class="paneel info${zicht === k + 1 + plek ? ' aan' : ''}" data-s="${INFO_S}" data-tot="${Date.parse(plusDag(sc.tot, 1) + 'T00:00:00+01:00')}"><div class="ph"><h1>${esc(sc.kop)}</h1><div class="lab">${sc.lab ? esc(sc.lab) : `Info ${k + 1}/${info.length}`}</div></div>`
+  // wv4141 (2C55): stipjes (k van n) in plaats van "Info k/n"; sc.lab (alleen app-voorbeeld) = tekst, sc.stip = [k, n] (app-voorbeeld)
+  const stip = (k, n) => n > 1 ? `<span class="stip" aria-label="${k + 1} van ${n}">${Array.from({ length: n }, (_, m) => `<i${m === k ? ' class="op"' : ''}></i>`).join('')}</span>` : '';
+  const ptDatum = (d) => { const x = datumDelen(d); return x.dg + ' ' + x.mn; };
+  const infoHtml = jarigHtml + nieuwsHtml + medHtml + info.map((sc, k) => `<section class="paneel info${zicht === k + 1 + plek ? ' aan' : ''}" data-s="${INFO_S}" data-tot="${Date.parse(plusDag(sc.tot, 1) + 'T00:00:00+01:00')}"><div class="ph"><h1>${esc(sc.kop)}</h1><div class="lab">${sc.lab ? esc(sc.lab) : Array.isArray(sc.stip) ? stip(sc.stip[0], sc.stip[1]) : stip(k, info.length)}</div></div>`
     + (sc.intro ? `<p class="intro">${esc(sc.intro)}</p>` : '')
-    + `<div class="punten">${sc.punten.map((x) => `<div class="punt"><div class="pt">${esc(x.titel)}</div>${x.tekst ? `<div class="px">${esc(x.tekst)}</div>` : ''}</div>`).join('')}</div>`
+    + `<div class="punten">${sc.punten.map((x) => `<div class="punt"><div class="pt">${esc(x.titel)}</div>${x.tekst ? `<div class="px">${esc(x.tekst)}</div>` : ''}${x.tot ? `<div class="ptot">t/m ${esc(ptDatum(x.tot))}</div>` : ''}</div>`).join('')}</div>`
     + `<div class="voet">Bron: ${esc(sc.bron)}</div></section>`).join('');
   return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta http-equiv="refresh" content="60"><title>OVIS Scherm</title>
 <style>
@@ -191,6 +206,11 @@ html,body{margin:0;height:100%;background:#fff;color:#5B5C60;font-family:'Libera
 .mm{display:flex;align-items:center;gap:18px;font-size:26px;font-weight:bold;color:#88898C}.mm .chip{font-size:20px;padding:3px 12px}.mtot{margin-left:auto;color:#ED1C24}
 .mk{font-size:38px;font-weight:bold;color:#3E3F42;line-height:1.18;margin-top:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .mt{font-size:29px;line-height:1.28;margin-top:6px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.stip{display:inline-flex;gap:12px;align-items:center}.stip i{display:inline-block;width:18px;height:18px;border-radius:50%;border:3px solid #ED1C24}.stip i.op{background:#ED1C24}
+.ptot{font-size:24px;font-weight:bold;color:#ED1C24;margin-top:6px}
+.slinger{height:110px;margin:-10px 0 10px}.slinger svg{width:100%;height:110px}
+.jarigen{display:flex;flex-wrap:wrap;gap:40px 80px;align-content:center;flex:1;padding:10px 0 30px}.jr{min-width:0}
+.jn{font-size:120px;font-weight:bold;color:#ED1C24;line-height:1.05;overflow-wrap:anywhere}.jw{font-size:42px;color:#3E3F42;margin-top:8px}
 .oud-tekst{display:none;font-size:44px;color:#3E3F42}body.oud .podium>*,body.oud .weer-blok,body.oud .blok{display:none}body.oud .podium .oud-tekst{display:block}
 </style></head>
 <body data-soort="scherm" data-gemaakt="${Number(gemaakt)}" data-houdbaar="${Number(houdbaar_tot)}">
@@ -234,6 +254,10 @@ const NIEUWS_ZIN = 'Nieuws: de vijf nieuwste koppen van de NOS (alleen kop en ti
 const NIEUWS_N = 5, NIEUWS_KOP_MAX = 110, NIEUWS_MS = 15 * 60000, NIEUWS_OUD_MS = 6 * 3600000, NIEUWS_ITEM_OUD_MS = 24 * 3600000;
 const NIEUWS_BYTES_MAX = 2 * 1024 * 1024, NIEUWS_TIMEOUT_MS = 20000, NIEUWS_ITEMS_MAX = 200;
 const NIEUWS_ID = crypto.createHash('sha256').update('nieuws:nos').digest('hex').slice(0, 16);   // vaste id voor aan/uit in de app (zelfde vorm als schermId)
+// wv4141 (2C55): felicitatiepagina, vaste id voor aan/uit in de app (zelfde vorm als schermId)
+const JARIG_ID = crypto.createHash('sha256').update('jarig:vandaag').digest('hex').slice(0, 16);
+const SLINGER_SVG = '<svg viewBox="0 0 1200 110" preserveAspectRatio="none" aria-hidden="true"><path d="M0 8 Q600 70 1200 8" fill="none" stroke="#88898C" stroke-width="3"/>'
+  + Array.from({ length: 13 }, (_, k) => { const x = 40 + k * 86, y = 8 + 62 * (1 - Math.pow((x - 600) / 600, 2)) * 0.97; return `<path d="M${x - 26} ${y.toFixed(0)} L${x + 26} ${y.toFixed(0)} L${x} ${(y + 44).toFixed(0)} Z" fill="${k % 2 ? '#D9DADC' : '#ED1C24'}"/>`; }).join('') + '</svg>';
 const NIEUWS_WEG = /https?:|www\.|@/i;   // een kop met een adres of link komt er niet op
 function nieuwsEntiteit(m, x) {
   const vast = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
@@ -447,6 +471,23 @@ function jarigen(meds, vandaag) {
   }
   return uit;
 }
+// wv4141 (2C55): wie vandaag jarig is; op maandag ook wie zaterdag of zondag jarig was ('zaterdag' / 'zondag'). Alleen voornaam.
+function jarigDag(meds, vandaag) {
+  const schrikkel = (j) => (j % 4 === 0 && j % 100 !== 0) || j % 400 === 0;
+  const dagen = [[0, 'vandaag']].concat(datumDelen(vandaag).wd === 'ma' ? [[-2, 'zaterdag'], [-1, 'zondag']] : []);
+  const uit = [], gezien = new Set();
+  for (const [n, wanneer] of dagen) {
+    const d = plusDag(vandaag, n), md = d.slice(5);
+    for (const m of meds) {
+      if (!m.actief || !m.geboren) continue;
+      const mmdd = m.geboren === '02-29' && !schrikkel(Number(d.slice(0, 4))) ? '02-28' : m.geboren;
+      if (mmdd !== md || gezien.has(m.voornaam + md)) continue;
+      gezien.add(m.voornaam + md);
+      uit.push({ naam: m.voornaam, wanneer });
+    }
+  }
+  return uit;
+}
 function dagdeel(titel) {
   const m = /(\d{1,2})(?:[:.]\d{2})?\s*[-–]\s*(\d{1,2})/.exec(String(titel || ''));
   if (!m) return 'hele dag';
@@ -509,7 +550,10 @@ function datumNl(d) { const [j, m, dd] = String(d).split('-'); return Number(dd)
 function infoNorm(sc) {
   if (!sc || typeof sc !== 'object') return null;
   const kop = schoon(sc.kop), intro = schoon(sc.intro), bron = schoon(sc.bron), tot = String(sc.tot || '');
-  const punten = Array.isArray(sc.punten) ? sc.punten.map((x) => ({ titel: schoon(x && x.titel), tekst: schoon(x && x.tekst) })) : [];
+  // wv4141 (2C55): een punt met een eigen datum heeft een einddatum (tot); alleen als het veld er staat (zonder veld: zelfde punt, hash en id als vóór wv4141)
+  const punten = Array.isArray(sc.punten) ? sc.punten.map((x) => Object.assign({ titel: schoon(x && x.titel), tekst: schoon(x && x.tekst) },
+    x && x.tot != null && x.tot !== '' ? { tot: String(x.tot) } : {})) : [];
+  if (punten.some((x) => x.tot !== undefined && !echteDatum(x.tot))) return null;
   if (!kop || kop.length > 40 || intro.length > 160 || !bron || bron.length > 130) return null;
   if (!punten.length || punten.length > 4 || punten.some((x) => !x.titel || x.titel.length > 50 || x.tekst.length > 130)) return null;
   if (!echteDatum(tot)) return null;
@@ -519,7 +563,7 @@ function infoNorm(sc) {
 // de stap op Davids kaart: de volledige schermtekst, letterlijk
 function stapTekst(sc, van) {
   return 'Infoscherm «' + sc.kop + '» van ' + datumNl(van) + ' tot en met ' + datumNl(sc.tot) + ': ' + (sc.intro ? sc.intro + ' ' : '') +
-    sc.punten.map((x) => x.titel + (x.tekst ? ': ' + x.tekst : '')).join(' | ') + ' (bron: ' + sc.bron + ')';
+    sc.punten.map((x) => x.titel + (x.tekst ? ': ' + x.tekst : '') + (x.tot ? ' (tot en met ' + datumNl(x.tot) + ')' : '')).join(' | ') + ' (bron: ' + sc.bron + ')';
 }
 // zelfde vingerafdruk als server.js appVjInhoudHash (wv3010) en toestemming.py inhoud_hash
 function kaartHash(k) {
@@ -533,6 +577,7 @@ function setKaart(set) {
   if (!set || !echteDatum(set.set)) return null;
   const sch = Array.isArray(set.schermen) ? set.schermen.map(infoNorm) : [];
   if (!sch.length || sch.length > INFO_SET_MAX || sch.some((x) => !x || x.tot < set.set || x.tot > plusDag(set.set, INFO_DAGEN_MAX))) return null;
+  if (sch.some((x) => x.punten.some((y) => y.tot !== undefined && (y.tot < set.set || y.tot > x.tot)))) return null;   // wv4141: punt binnen zijn scherm
   return { schermen: sch, kaart: { titel: k.titel, waarom: k.waarom, stappen: sch.map((x) => stapTekst(x, set.set)).concat(Array.isArray(k.na) ? k.na.map(String) : []), waar: k.waar, deadline: k.deadline } };
 }
 // set geldig = vorm klopt, kaarttitel noemt infoschermen, vraag-id hoort bij de kaartsleutel en in vragen.json staat op dat id een Ja
@@ -672,14 +717,22 @@ function maak(o) {
       if (!g) continue;
       for (const x of g) if (x.set <= vandaag && x.tot >= vandaag) uit.push(Object.assign({ id: schermId(set.sleutel, x), sleutel: set.sleutel }, x));
     }
-    return uit;
+    // wv4141 (2C55): nieuw vervangt oud — per kop (zonder hoofdletters) telt alleen het scherm uit de nieuwste set (gelijke datum: de laatste in
+    // het bestand); de rest is vervangen. Bepaald vóór het uit-filter (Codex MOET 1): zet David het nieuwe uit, dan komt het oude niet terug.
+    const nieuwst = new Map();
+    uit.forEach((x, k) => { const kk = schoon(x.kop).toLowerCase(), b = nieuwst.get(kk); if (b === undefined || x.set >= uit[b].set) nieuwst.set(kk, k); });
+    return uit.map((x, k) => Object.assign(x, { vervangen: nieuwst.get(schoon(x.kop).toLowerCase()) !== k }));
   }
   // wv3020: wat David in de app uitzette (stand.info_uit, op id) blijft van de tv tot hij het weer aanzet of het scherm verloopt
   const uitLijst = () => { const u = leesStand().info_uit; return u && typeof u === 'object' ? u : {}; };
   // vrijgegeven infoschermen van vandaag die op de tv horen: goedgekeurd, binnen de looptijd, niet uitgezet; hooguit INFO_MAX (de nieuwste)
+  // wv4141: een vervangen scherm alleen als David het in de app weer aanzette (stand.info_naast); punten over hun einddatum vallen weg,
+  // een scherm zonder punten ook
+  const naastLijst = () => { const u = leesStand().info_naast; return u && typeof u === 'object' ? u : {}; };
   function infoSchermen(vandaag) {
-    const u = uitLijst();
-    return infoKandidaten(vandaag).filter((x) => !u[x.id]).slice(-INFO_MAX);
+    const u = uitLijst(), nb = naastLijst();
+    return infoKandidaten(vandaag).filter((x) => !u[x.id] && (!x.vervangen || nb[x.id]))
+      .map((x) => Object.assign({}, x, { punten: x.punten.filter((y) => !y.tot || y.tot >= vandaag) })).filter((x) => x.punten.length).slice(-INFO_MAX);
   }
   // ── nieuws (wv3023) ──
   const nieuwsMag = () => rijMag(NIEUWS_ZIN);
@@ -761,6 +814,7 @@ function maak(o) {
       agenda: rijen ? agendaPunten(rijen, vandaag, eigenPunten()) : (Array.isArray(oud.agenda) ? oud.agenda : []),
       artsen: aan ? (rijen ? artsenVandaag(rijen, vandaag, meds, vol) : (oud.datum === vandaag && Array.isArray(oud.artsen) && !!oud.volle_naam === vol ? oud.artsen : [])) : null,
       jarig: aan ? jarigen(meds, vandaag) : null,
+      jarig_dag: aan ? jarigDag(meds, vandaag) : null,   // wv4141
       persoonsvakken: aan,
       volle_naam: vol,
       info: aan ? infoSchermen(vandaag) : [],
@@ -781,7 +835,7 @@ function maak(o) {
   // vaste delen van het moment (voorbeeld zonder script): dag en klok in Amsterdamse tijd
   function schermInhoud(s, t) {
     const a = amsDelen(t), d = datumDelen(a.datum);
-    const i = s.inhoud && s.inhoud.datum === a.datum ? s.inhoud : Object.assign({}, s.inhoud || {}, { artsen: s.inhoud && s.inhoud.artsen ? [] : null, jarig: s.inhoud && s.inhoud.jarig ? [] : null });
+    const i = s.inhoud && s.inhoud.datum === a.datum ? s.inhoud : Object.assign({}, s.inhoud || {}, { artsen: s.inhoud && s.inhoud.artsen ? [] : null, jarig: s.inhoud && s.inhoud.jarig ? [] : null, jarig_dag: null });
     // persoonsvakken nooit zonder rij, ook niet uit een oude stand
     const aan = toestemming();
     // wv3015: volle namen nooit zonder de zin in de rij (ook niet uit een oude stand); infoschermen alleen met de rij en vóór hun einddatum
@@ -792,7 +846,9 @@ function maak(o) {
     const nieuws = aan && nieuwsActief() && nieuwsGeldig(i.nieuws, t) ? i.nieuws : null;
     // wv3154: medisch nieuws ook bij elke publicatie opnieuw tegen registerzin, uit-knoppen, vasthoudtermijn en leeftijd
     const medisch = medischOpTv(s, t);
-    return Object.assign({}, i, { artsen: aan ? artsen : null, jarig: aan ? i.jarig : null, info, nieuws, medisch,
+    // wv4141: felicitatiepagina alleen met de registerrij, van vandaag en niet uitgezet
+    const jarig_dag = aan && Array.isArray(i.jarig_dag) && i.jarig_dag.length && !uitLijst()[JARIG_ID] ? i.jarig_dag : null;
+    return Object.assign({}, i, { artsen: aan ? artsen : null, jarig: aan ? i.jarig : null, jarig_dag, info, nieuws, medisch,
       wd_tekst: d.wdl, dag_tekst: d.dg + ' ' + d.mnl, klok_tekst: String(a.uur).padStart(2, '0') + ':' + String(a.min).padStart(2, '0') });
   }
   function inhoudSha(i) { const c = Object.assign({}, i || {}); delete c.bronnen; return crypto.createHash('sha256').update(JSON.stringify(c)).digest('hex'); }
@@ -861,6 +917,7 @@ function maak(o) {
     // wv3023: het nieuwsscherm heeft een vaste id; kandidaat zolang de registerzin er staat (uit blijft uit tot David het weer aanzet)
     const x = id === NIEUWS_ID ? (toestemming() && nieuwsMag() ? { tot: '9999-12-31' } : null)
       : id === MEDISCH_ID || id === BELANGRIJK_ID ? (toestemming() && medischMag() ? { tot: '9999-12-31' } : null)   // wv3154: zelfde als het NOS-scherm
+      : id === JARIG_ID ? (toestemming() ? { tot: '9999-12-31' } : null)   // wv4141: felicitatiepagina
       : infoKandidaten(vandaag).find((y) => y.id === id);
     if (aan && !x) return { status: 409, body: { ok: false, fout: 'Dit scherm kan niet meer aan: het is niet (meer) door jou goedgekeurd of de looptijd is voorbij.' } };
     if (!aan && !x && !uitLijst()[id]) return { status: 404, body: { ok: false, fout: 'Dit scherm staat niet (meer) op de tv.' } };
@@ -869,6 +926,11 @@ function maak(o) {
       for (const k of Object.keys(u)) if (!u[k] || !(String(u[k].tot) >= vandaag)) delete u[k];   // verlopen = weg
       if (aan) delete u[id]; else u[id] = { op: nu(), tot: x ? x.tot : vandaag };
       s.info_uit = u;
+      // wv4141: een vervangen scherm weer aan = naast het nieuwe tonen (tot zijn einddatum); uit = die keuze weg
+      const nb = s.info_naast && typeof s.info_naast === 'object' ? s.info_naast : {};
+      for (const k of Object.keys(nb)) if (!nb[k] || !(String(nb[k].tot) >= vandaag)) delete nb[k];
+      if (aan && x && x.vervangen) nb[id] = { op: nu(), tot: x.tot }; else delete nb[id];
+      s.info_naast = nb;
       if (id === NIEUWS_ID) { s.nieuws_poging = null; if (!aan) s.nieuws = null; }   // wv3023: aan = de volgende tik haalt meteen vers; uit = niets bewaren
     });
     try { await publiceer(); }
@@ -932,11 +994,17 @@ function maak(o) {
     const vandaag = ymd(t), kand = infoKandidaten(vandaag), u = uitLijst();
     const opTv = infoSchermen(vandaag).map((x) => x.id);
     const inh = schermInhoud(s, t);
-    const lijst = [{ id: 'hoofd', soort: 'hoofd', titel: 'Komende weken', looptijd_s: opTv.length || inh.nieuws || inh.medisch ? INFO_HOOFD_S : null, aan: true, uit: false }];
+    const lijst = [{ id: 'hoofd', soort: 'hoofd', titel: 'Komende weken', looptijd_s: opTv.length || inh.nieuws || inh.medisch || inh.jarig_dag ? INFO_HOOFD_S : null, aan: true, uit: false }];
+    // wv4141: felicitatiepagina (alleen met de registerrij); voorbeeld met wie vandaag jarig is, of de uitlegregel
+    if (toestemming()) {
+      const jdNu = s.inhoud && s.inhoud.datum === vandaag && Array.isArray(s.inhoud.jarig_dag) ? s.inhoud.jarig_dag : [];
+      lijst.push({ id: JARIG_ID, soort: 'info', titel: 'Gefeliciteerd (jarig vandaag)', looptijd_s: INFO_S, van: null, tot: null, aan: !!inh.jarig_dag, uit: !!u[JARIG_ID],
+        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [], nieuws: null, medisch: null, jarig_dag: jdNu, jarig_leeg: true }), toon: 1 }) });
+    }
     // wv3023: nieuwsscherm (alleen met de registerzin); voorbeeld met de koppen die nu op de tv staan, of de uitlegregel als er geen vers nieuws is
     if (toestemming() && nieuwsMag()) {
       lijst.push({ id: NIEUWS_ID, soort: 'info', titel: 'Nieuws (NOS)', looptijd_s: INFO_S, van: null, tot: null, aan: !!inh.nieuws, uit: !!u[NIEUWS_ID],
-        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [], nieuws: inh.nieuws || { items: [] }, medisch: null }), toon: 1 }) });
+        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [], jarig_dag: null, nieuws: inh.nieuws || { items: [] }, medisch: null }), toon: 1 }) });
     }
     // wv3154: Medisch nieuws en Belangrijk; vóór de Ja (geen registerzin) alleen als proef: niet op de tv, wel het voorbeeld en de berichtenlijst
     if (toestemming() && (typeof o.medisch === 'function' || medischMag())) {   // pod zonder ophaler en zonder zin: geen lege proefpagina's
@@ -944,7 +1012,7 @@ function maak(o) {
       const m = s.medisch && s.medisch.items ? s.medisch.items : {};
       const lijstVan = (sel) => Object.keys(m).map((id) => Object.assign({ id }, m[id])).filter(sel).sort((a, c) => c.ms - a.ms).slice(0, 20)
         .map((x) => ({ id: x.id, bron: (MEDISCH_BRONNEN.find((y) => y.id === x.bron) || { naam: '' }).naam, kop: x.kop, ms: x.ms, vast: Number.isFinite(x.vast_tot) && x.vast_tot > t, tot: Number.isFinite(x.vast_tot) && x.vast_tot > t ? x.vast_tot : null, door: x.door || null }));
-      const vb = (md, toon) => bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [], nieuws: null, medisch: md }), toon });
+      const vb = (md, toon) => bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [], jarig_dag: null, nieuws: null, medisch: md }), toon });
       lijst.push({ id: MEDISCH_ID, soort: 'info', titel: 'Medisch nieuws', looptijd_s: MEDISCH_S, van: null, tot: null, proef: !mag, aan: opT.nieuws.length > 0, uit: !!u[MEDISCH_ID],
         html: vb({ nieuws: b.nieuws, belangrijk: null, leeg_tonen: true }, 1),
         berichten: lijstVan((x) => !(Number.isFinite(x.vast_tot) && x.vast_tot > t) && t - x.ms <= MEDISCH_OUD_MS) });
@@ -954,9 +1022,11 @@ function maak(o) {
     }
     for (const x of kand) {
       const k = opTv.indexOf(x.id);
-      const sc = Object.assign({}, x, { lab: k >= 0 ? 'Info ' + (k + 1) + '/' + opTv.length : (u[x.id] ? 'Staat uit' : 'Wacht op een plek') });
-      lijst.push({ id: x.id, soort: 'info', titel: x.kop, looptijd_s: INFO_S, van: x.set, tot: x.tot, aan: k >= 0, uit: !!u[x.id],
-        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [sc], nieuws: null, medisch: null }), toon: 1 }) });
+      // wv4141: vervangen (zelfde kop in een nieuwere set) = niet op de tv, in de app 'Weer op de tv' (dan naast het nieuwe)
+      const verv = !!x.vervangen && k < 0 && !u[x.id];
+      const sc = Object.assign({}, x, { punten: x.punten.filter((y) => !y.tot || y.tot >= vandaag) }, k >= 0 ? { stip: [k, opTv.length] } : { lab: u[x.id] ? 'Staat uit' : verv ? 'Vervangen' : 'Wacht op een plek' });
+      lijst.push({ id: x.id, soort: 'info', titel: verv ? x.kop + ' · vervangen door nieuwer' : x.kop, looptijd_s: INFO_S, van: x.set, tot: x.tot, aan: k >= 0, uit: !!u[x.id] || verv, vervangen: verv,
+        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [sc], jarig_dag: null, nieuws: null, medisch: null }), toon: 1 }) });
     }
     let sets = [], vr = {};
     try { const j = JSON.parse(infoBestand() || '{}'); sets = Array.isArray(j.sets) ? j.sets : []; vr = JSON.parse(fs.readFileSync(vragenPad, 'utf8')); } catch (e) { /* stand blijft wacht */ }
@@ -1186,5 +1256,5 @@ function maak(o) {
 }
 
 module.exports = { maak, bouwHtml, D1_SCHEMA, inWerktijd, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
-  VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, MEDISCH_ZIN, MEDISCH_RIJ, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN,
-  _t: { medischTekst, medischItems, medischBijwerken, medischBeeld, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, artsenVandaag, jarigen, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };
+  VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, JARIG_ID, MEDISCH_ZIN, MEDISCH_RIJ, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN,
+  _t: { medischTekst, medischItems, medischBijwerken, medischBeeld, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, artsenVandaag, jarigen, jarigDag, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };
