@@ -132,7 +132,8 @@ function pasToe(tekst, items, t) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(t.later_tot))) return { niets: 'later zonder datum' };
     merk = '**GESEIND ' + dm(t.vandaag) + ' (' + plek + '; verzet naar ' + dmj(t.later_tot) + ').** ';
   } else if (t.keuze === 'gedaan' || t.keuze === 'laten_vallen') {
-    merk = t.keuze === 'gedaan' ? '**AFGEHANDELD ' + dmj(t.vandaag) + ' (Gedaan ' + plek + ').** '
+    // wv4038 (3C63): gesloten omdat David een gekoppelde klus (actiepunt of Todoist-taak) op Gedaan zette
+    merk = t.keuze === 'gedaan' ? '**AFGEHANDELD ' + dmj(t.vandaag) + ' (Gedaan ' + plek + (t.gekoppeld ? ', via de gekoppelde klus' : '') + ').** '
       : '**VERVALLEN ' + dmj(t.vandaag) + ' (' + (vj ? 'Niet meer nodig, ' : 'Hoeft niet, ') + plek + ').** ';
   } else return { niets: 'onbekende keuze' };
   if (t.keuze === 'getoond' && MERK_RE.test(wat)) {   // getoond overschrijft nooit een verzet-merkteken

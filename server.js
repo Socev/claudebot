@@ -12290,6 +12290,8 @@ async function appActieRoute(req, res, a, d) {
   res._app.reden = 'actie ' + keuze + ' ' + datum + '#' + positie + ' -> ' + uitkomst;
   // wv3707: een tik op een deadline-regel werkt het register bij zodra ↩️ niet meer kan (deadline-lijstje.js)
   if (uitkomst === 'ok' && rij.bron === 'deadline' && DL_LIJSTJE) setTimeout(function () { dlVerwerkStil('tik'); }, DL_LIJSTJE.TIK_RUST_MS + 10000).unref();
+  // wv4038 (3C63): Gedaan op een gekoppelde klus sluit na de ↩️-tijd ook de andere plekken (koppel-klus.js)
+  if (uitkomst === 'ok' && keuze === 'gedaan' && KK_MOD && String(rij.koppel_json || '[]') !== '[]') setTimeout(function () { kkVerwerkStil('tik'); }, KK_MOD.TIK_RUST_MS + 15000).unref();
   // Verse stand van het lijstje terug, en het geheugen van Vandaag bijwerken (anders toont Ververs 3 min de oude stand)
   let acties = null;
   try {
@@ -12344,12 +12346,77 @@ function voorwerkDeadlinesRoute(req, res) {
       if (!primair) return berichtStuur(res, 409, { ok: false, fout: 'passief' });
       const verwerkt = await dlVerwerkStil('route');
       const lijst = await dlLijstje.deadlines();
-      res._log.reden = 'deadlines ' + lijst.length;
-      berichtStuur(res, 200, { ok: true, vandaag: appYmd(Date.now()), verwerkt: verwerkt, deadlines: lijst });
+      kkVerwerkStil('route');
+      // wv4038 (3C63): alle gezette koppelingen uit ## Actueel (ook van regels die nog niet rijp zijn); Kies portie maakt er groepen van
+      let koppels = null;
+      if (KK_MOD) { try { koppels = KK_MOD.registerKoppels((await dlDroog()).items, VV().lees(dlRegister(), 'utf8'), DL_LIJSTJE.cellen); } catch (e) { logError('koppel-klus koppels', e); koppels = null; } }
+      res._log.reden = 'deadlines ' + lijst.length + (koppels ? ' koppels ' + koppels.length : '');
+      berichtStuur(res, 200, { ok: true, vandaag: appYmd(Date.now()), verwerkt: verwerkt, deadlines: lijst, koppels: koppels });
     }).catch(function (e) { logError('voorwerk-deadlines', e); berichtStuur(res, 500, { ok: false, fout: 'register niet te lezen' }); });
   });
 }
 if (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setInterval(function () { if (rolPrimair()) dlVerwerkStil('ronde'); }, 10 * 60000).unref(); }   // wv3955: poort- en UI-toets laden dit blok zonder SERVER_ECHT
+
+// ── Eén tik Gedaan sluit dezelfde klus overal (wv4038, nr 363 = 3C63; waarom en werking in koppel-klus.js) ──
+// De pod sluit na een Gedaan op een gekoppelde klus (koppel_json in voorwerk_portie, gevuld door Kies portie uit gezette sleutels) de andere
+// plekken: actiepunt (actie_state) → afgerond, deadline → ## Afgehandeld, Todoist-taak → voltooid. Pas na de ↩️-tijd; na de tik en elke 10 min.
+const KK_MOD = (function () { try { return require(path.join(__dirname, 'koppel-klus.js')); } catch (e) { logError('koppel-klus', e); return null; } })();
+const KK_ACTIE_TABEL = process.env.KK_ACTIE_TABEL || 'vNAY2dVRpSx1l3Ri';   // n8n Data Table actie_state
+const KK_DAVID_TODOIST = '58247764';   // zoals Kies portie (DAVID_TODOIST)
+function kkDm(iso) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || '')); return m ? (+m[3]) + '-' + (+m[2]) : '?'; }
+async function kkSluitActie(id, vandaag) {
+  const f = function (extra) { return { type: 'and', filters: [{ columnName: 'actie_id', condition: 'eq', value: id }].concat(extra || []) }; };
+  const rijen = await appN8nRijen(KK_ACTIE_TABEL, f(), 5);
+  const r = rijen.find(function (x) { return x && x.actie_id === id; });
+  if (!r) return { uitkomst: 'bestaat_niet' };
+  if (r.status !== 'open' && r.status !== 'gemeld') return { uitkomst: 'al_dicht', reden: r.status };
+  // Zoals Plan state (AI - Voorwerk-knoppen): status, volgende_check, laatst_gecheckt en één regel achter de bevinding; filter op gelezen status
+  const data = { status: 'afgerond', volgende_check: '', laatst_gecheckt: vandaag,
+    bevinding: String(r.bevinding || '') + ' ‖ AFGEROND ' + kkDm(vandaag) + ' via de gekoppelde klus in het actielijstje (David)' };
+  const j = await appN8nZend('PATCH', '/data-tables/' + KK_ACTIE_TABEL + '/rows/update', { filter: f([{ columnName: 'status', condition: 'eq', value: r.status }]), data: data, returnData: true });
+  const n = Array.isArray(j) ? j.length : (Array.isArray(j && j.data) ? j.data.length : 0);
+  return n ? { uitkomst: 'gesloten' } : { uitkomst: 'tijdelijk', reden: 'niets bijgewerkt (status veranderde?)' };
+}
+async function kkSluitTodoist(id) {
+  const tok = process.env.TODOIST_MCP_TOKEN;
+  if (!tok) throw new Error('todoist niet ingericht');
+  const t = await appTodoistTaak(id);
+  if (!t) return { uitkomst: 'bestaat_niet' };
+  if (t.checked || t.is_deleted) return { uitkomst: 'al_dicht' };
+  if (t.due && t.due.is_recurring) return { uitkomst: 'overgeslagen', reden: 'herhaaltaak' };
+  if (t.responsible_uid != null && String(t.responsible_uid) !== KK_DAVID_TODOIST) return { uitkomst: 'overgeslagen', reden: 'taak van een ander' };
+  const pr = await fetch('https://api.todoist.com/api/v1/projects/' + encodeURIComponent(t.project_id), { headers: { Authorization: 'Bearer ' + tok, accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
+  if (!pr.ok) throw new Error('todoist project http ' + pr.status);
+  const p = await pr.json();
+  if (!p || p.is_shared !== false) return { uitkomst: 'overgeslagen', reden: 'gedeeld project' };
+  const r = await fetch('https://api.todoist.com/api/v1/tasks/' + encodeURIComponent(id) + '/close', { method: 'POST', headers: { Authorization: 'Bearer ' + tok }, signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new Error('todoist close http ' + r.status);
+  return { uitkomst: 'gesloten' };
+}
+async function kkSluitDeadline(sleutel, vandaag) {
+  if (!DL_LIJSTJE) throw new Error('deadline-lijstje.js ontbreekt');
+  const items = (await dlDroog()).items;
+  const it = items.find(function (i) { return i && i.sleutel === sleutel; });
+  if (!it) return { uitkomst: 'bestaat_niet', reden: 'niet in ## Actueel' };
+  const o = { mag: function () { return rolPrimair(); }, droog: dlDroog, lees: function () { return VV().lees(dlRegister(), 'utf8'); }, wijzig: function (f) { return VV().wijzig(dlRegister(), f); } };
+  const { u, ok } = await DL_LIJSTJE.schrijf(o, { sleutel: sleutel, datum: it.datum, titel: String(it.titel || ''), keuze: 'gedaan', vandaag: vandaag, gekoppeld: true });
+  if (u && u.tekst && ok) return { uitkomst: 'gesloten', reden: 'regel ' + u.regel };
+  if (u && u.niets === 'al afgehandeld') return { uitkomst: 'al_dicht' };
+  if (u && (u.niets === 'pagina veranderde' || !ok && u.tekst)) return { uitkomst: 'tijdelijk', reden: u.niets || 'niet geschreven' };
+  return { uitkomst: 'bestaat_niet', reden: u ? u.niets : 'geen uitkomst' };
+}
+const kkKlus = KK_MOD && KK_MOD.maak({
+  mag: function () { return rolPrimair(); },
+  rijen: function () { return appN8nRijen(APP_PORTIE_TABEL, null, 100); },
+  sluit: { actie_state: kkSluitActie, todoist: kkSluitTodoist, deadline: kkSluitDeadline },
+  markeer: function (nonce, tekst) {
+    return appN8nZend('PATCH', '/data-tables/' + APP_PORTIE_TABEL + '/rows/update', { filter: { type: 'and', filters: [{ columnName: 'nonce', condition: 'eq', value: nonce }] }, data: { koppel_klaar: tekst } });
+  },
+  vandaag: function () { return appYmd(Date.now()); },
+  log: function (s) { schrijfLog(nu() + ' ' + s); },
+});
+function kkVerwerkStil(waar) { if (!kkKlus || !rolPrimair()) return Promise.resolve(null); return kkKlus.verwerk().catch(function (e) { logError('koppel-klus ' + waar, e); return null; }); }
+if (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setInterval(function () { if (rolPrimair()) kkVerwerkStil('ronde'); }, 10 * 60000).unref(); }
 
 // ── Herinneringen als Voor jou-kaart (wv3905, nr 356 = 3C56; waarom en werking in herinnering-kaart.js) ──
 // POST /herinnering/kaart (Socev met SOCEV_AGENT_SLEUTEL, of het pod-geheim): de heartbeat maakt van een herinnering die iets van David
