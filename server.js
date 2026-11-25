@@ -4752,6 +4752,7 @@ function handleRequest(req, res) {
       zoek_snel: typeof zoekSnelInfo === 'function' ? zoekSnelInfo() : { aan: false },   // wv1252: Zoek snel (module, schakelaar, laatste uitkomst en duur; geen inhoud)
       secondbrain: secondbrainInfo(),
       omzet: omzetInfo(),   // wv1854: Download als… (pandoc/chromium aanwezig, huisstijlen, bezig/wachtend, tellers; geen inhoud)
+      docs_aanpas: typeof docsAanpasInfo === 'function' ? docsAanpasInfo() : null,   // wv4023 (3C151): Wat moet er anders? (aantallen, eur; nooit tekst)
       docs_delen: docsDelenInfo(),   // wv1382: OVIS Docs › Delen (aan? host, aantal delingen; geen links)   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       terra: { module: !!CODEX_MK, lopend: terraLopend() },   // wv2081: Terra-nacontrolebundel (geen inhoud)
       mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
@@ -29453,6 +29454,45 @@ function appWerkNieuw(res, a, d) {
   } catch (e) { logError('app-werk-nieuw', e); try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e2) {} return appWeiger(res, 500, 'het document maken lukte niet', 'werk nieuw fout'); }
   return appStuur(res, 200, { ok: true, pad: 'werk:' + id + '/1', job_id: id, n: 1, naam: naam, al: false });
 }
+// wv4023 (besluitenpagina nr 451 = 3C151, David Ja 22-11 18:17): "Wat moet er anders?" — een voorstel met één zin. De pod leest de pagina
+// zelf (Brain via de bewerk-logica van secondbrain.js, werkbestand via appWerkZoek/appWerkLees), alleen als Docs hem mag bewerken; Claude
+// maakt vervangingen (docs-aanpas.js), de app toont voor en na. Er wordt hier NIETS geschreven: Bewaar = de bestaande opslag (versie, 409).
+// Nooit paginatekst of de zin in het log: alleen waar, h, status, aantal, ms en eur.
+const docsAanpas = (function () {
+  try {
+    const p = path.join(__dirname, 'docs-aanpas.js');
+    if (!fs.existsSync(p)) return null;
+    return require(p).maak({ sleutel: function () { return pdfSleutel(); }, sdk: function () { return pdfSdk(); }, fout: logError });
+  } catch (e) { logError('docs-aanpas', e); return null; }
+})();
+function docsAanpasInfo() { if (!docsAanpas) return { aan: false }; try { return docsAanpas.info(); } catch (e) { return { fout: true }; } }
+async function appDocsVoorstel(res, a, d) {
+  res._app.reden = 'docs voorstel';
+  if (!docsAanpas) return appWeiger(res, 404, 'Aanpassen met een zin zit niet in deze versie van de pod', 'docs voorstel ontbreekt');
+  let S = null;
+  try { S = require(path.join(__dirname, 'secondbrain.js')); } catch (e) { S = null; }
+  if (!S || typeof S.masker !== 'function') return appWeiger(res, 503, 'een voorstel maken kan in deze versie van de pod niet', 'docs voorstel masker');
+  let r;
+  try {
+    r = await docsAanpas.verzoek(d, {
+      vast: appVastBeheerDicht(a),
+      masker: function (t) { return S.masker(t, false, null); },
+      leesBrain: function (pad) { return secondbrain ? secondbrain.app('POST /app/secondbrain/bewerk', { pad: pad }, {}) : Promise.resolve({ status: 404, j: { ok: false, fout: 'Second Brain zit niet in deze versie van de pod' } }); },
+      leesWerk: function (pad) {
+        const z = appWerkZoek(pad);
+        const h = crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(z ? z.pad : pad).slice(0, 600)).digest('hex').slice(0, 16);
+        if (!z) return { status: 404, fout: 'dit werkbestand is er niet (meer); de pod bewaart werkbestanden 30 dagen', h: h };
+        let t;
+        try { t = appWerkLees(z.abs); } catch (e) { return { status: 404, fout: 'dit werkbestand is er niet (meer)', h: h }; }
+        if (t == null) return { status: 403, fout: 'dit werkbestand is te groot om hier aan te passen', h: h };
+        return { status: 200, versie: appWerkSha(t), md: appWerkDeel(t).body, naam: z.naam, h: h };
+      },
+      teller: function () { return appTeller('docs-voorstel', 20, 3600000); },
+    });
+  } catch (e) { logError('docs-voorstel', e); return appWeiger(res, 500, 'het voorstel maken lukte niet; er is niets veranderd', 'docs voorstel fout'); }
+  res._app.reden = r.reden;
+  return appStuur(res, r.status, r.j);
+}
 // wv3946 (3C135): de app meldt waarom haar editor een pagina niet aankon (soort, waar; nooit tekst). Alleen een logregel.
 const APP_DOCS_WEIGER_SOORT = new Set(['merkteken', 'commentaar', 'opmaak', 'start']);
 async function appDocs(req, res, a, s, d, route) {
@@ -29464,6 +29504,7 @@ async function appDocs(req, res, a, s, d, route) {
     if (!appTeller('docs-werk-nieuw', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens docs werk-nieuw');
     return appWerkNieuw(res, a, d || {});
   }
+  if (route === 'POST /app/docs/voorstel') return appDocsVoorstel(res, a, d || {});   // wv4023 (3C151)
   if (route === 'POST /app/docs/weiger') {
     if (!appTeller('docs-weiger', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs weiger');
     const so = d && APP_DOCS_WEIGER_SOORT.has(d.soort) ? d.soort : 'onbekend', waar = d && d.waar === 'werk' ? 'werk' : 'brain';
