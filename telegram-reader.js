@@ -2,9 +2,10 @@
 /*
  * telegram-reader.js — LEZEND luik op Davids Telegram-account (MTProto/GramJS).
  *
- * Twee commando's:
+ * Drie commando's:
  *   node telegram-reader.js dialogen [--aantal N]
  *   node telegram-reader.js lees --chat <naam-of-id> --dagen N
+ *   node telegram-reader.js eindjes [--van <unix>] [--tot <unix>] [--staart 0|1] [--niet <nr,nr>]   (wv4007, JSON)
  *
  * WAAROM DIT BESTAND ALLEEN LEEST, EN HOE DAT IS AFGEDWONGEN.
  * Een MTProto-sessie is een volwaardige accountsleutel: dezelfde sessie kán
@@ -289,6 +290,60 @@ async function cmdLees(args) {
   }
 }
 
+// ── Commando: eindjes (wv4007, Open Eindjes-wachter; David Ja 25-11-2026) ────────
+// Eén proces voor de hele nacht: de gesprekkenlijst (laatste bericht: tijd en richting) en, alleen voor een kandidaat, de staart
+// = de berichten ná Davids laatste bericht (hooguit 8). Kandidaat = privégesprek met een mens (geen bot, niet zichzelf, geen
+// zorgpraktijknummer), laatste bericht niet van David en tussen --van en --tot. --staart 0 = alleen de lijst (hercheck 06:50).
+// Uitvoer: één regel JSON op stdout. Spraak wordt benoemd ([spraak]), nooit gedownload. Niets wordt als gelezen gemarkeerd.
+function eindjesNiet(e, niet) {
+  const tel = String((e && e.phone) || '').replace(/\D/g, '');
+  if (tel && niet.indexOf(tel) !== -1) return true;
+  const naam = [e && e.firstName, e && e.lastName].filter(Boolean).join(' ');
+  return /huisarts|praktijk|tolgaarde|groenhouten|doktersdienst|zorggroep/i.test(naam);
+}
+async function cmdEindjes(args) {
+  const nu = Math.floor(Date.now() / 1000);
+  const van = parseInt(args.van || '', 10) || nu - 7 * 86400;
+  const tot = parseInt(args.tot || '', 10) || nu - 86400;
+  const metStaart = String(args.staart || '1') !== '0';
+  const niet = String(args.niet === true ? '' : (args.niet || '')).split(',').map(function (x) { return x.replace(/\D/g, ''); }).filter(Boolean);
+  const client = await maakClient();
+  try {
+    const dialogen = await client.getDialogs({ limit: 100 });
+    const gesprekken = [];
+    const staarten = {};
+    const ankers = {};   // Davids laatste bericht vóór de staart (unix s), de sleutel van het eindje op de pod
+    let gelezen = 0;
+    for (const d of dialogen) {
+      if (!d.isUser) continue;
+      const e = d.entity || {};
+      if (e.bot || e.self || e.deleted || eindjesNiet(e, niet)) continue;
+      const b = d.message;
+      if (!b || !b.date || b.className === 'MessageService') continue;   // 'lid van Telegram' e.d. is geen bericht
+      const g = { id: String(d.id), naam: [e.firstName, e.lastName].filter(Boolean).join(' ').trim() || String(d.title || d.name || d.id),
+        gebruikersnaam: typeof e.username === 'string' && /^[A-Za-z0-9_]{4,40}$/.test(e.username) ? e.username : null,
+        ts: b.date, van_david: !!b.out, ongelezen: Number(d.unreadCount) || 0 };
+      gesprekken.push(g);
+      if (!metStaart || g.van_david || g.ts < van || g.ts > tot) continue;
+      const lijst = [];
+      for await (const m of client.iterMessages(d.entity, { limit: 40 })) {
+        if (!m || !m.date) continue;
+        if (m.out) { ankers[g.id] = m.date; break; }   // nieuw → oud: stop bij Davids laatste bericht
+        const media = mediaLabel(m);
+        const tekst = (m.message || '').trim();
+        const inhoud = (media === '[spraak]' ? '[stuurde een spraakbericht]' : media) + (media && tekst ? ' ' : '') + tekst;
+        if (lijst.length < 8) lijst.push({ ts: m.date, wie: 'ander', tekst: (inhoud || '[leeg]').slice(0, 1500) });   // de nieuwste 8; verder lezen tot het anker
+      }
+      lijst.reverse();
+      staarten[g.id] = lijst;
+      gelezen++;
+    }
+    process.stdout.write(JSON.stringify({ ok: true, gesprekken: gesprekken, staarten: staarten, ankers: ankers, staarten_gelezen: gelezen }) + '\n');
+  } finally {
+    await client.disconnect().catch(() => {});
+  }
+}
+
 // ── Hoofd ───────────────────────────────────────────────────────────────────
 (async function () {
   const args = parseArgs(process.argv.slice(2));
@@ -297,14 +352,16 @@ async function cmdLees(args) {
     process.stdout.write(
       'telegram-reader.js — alleen lezen\n\n' +
       '  dialogen [--aantal N]              lijst gesprekken (geen inhoud)\n' +
-      '  lees --chat <naam-of-id> --dagen N berichten van de laatste N dagen\n');
+      '  lees --chat <naam-of-id> --dagen N berichten van de laatste N dagen\n' +
+      '  eindjes [--van U] [--tot U] [--staart 0|1] [--niet nrs]  laatste bericht per privégesprek + staart van kandidaten (JSON)\n');
     return;
   }
-  if (['dialogen', 'lees'].indexOf(cmd) === -1) fout('onbekend commando: ' + cmd);
+  if (['dialogen', 'lees', 'eindjes'].indexOf(cmd) === -1) fout('onbekend commando: ' + cmd);
 
   if (!pakLock()) fout('reader is bezig - probeer het zo opnieuw.', 75);
   try {
     if (cmd === 'dialogen') await cmdDialogen(args);
+    else if (cmd === 'eindjes') await cmdEindjes(args);
     else await cmdLees(args);
   } catch (e) {
     laatLockLos();

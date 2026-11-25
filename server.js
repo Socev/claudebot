@@ -4799,7 +4799,8 @@ function handleRequest(req, res) {
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
       weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
-      contactringen: typeof contactringenInfo === 'function' ? contactringenInfo() : { aan: false },   // wv2894: zondagseintje binnenste kring (stand, geen namen of nummers)
+      contactringen: typeof contactringenInfo === 'function' ? contactringenInfo() : { aan: false },
+      open_eindjes: typeof openEindjesInfo === 'function' ? openEindjesInfo() : { aan: false },   // wv4007: stand, storingen (geen namen of inhoud)   // wv2894: zondagseintje binnenste kring (stand, geen namen of nummers)
       agenda_potlood: typeof agendaPotloodInfo === 'function' ? agendaPotloodInfo() : { aan: false },   // wv3741: potloodlaag (laatste ronde, alleen aantallen)
       kalender: typeof kalenderInfo === 'function' ? kalenderInfo() : { aan: false },   // wv2333: OVIS Calendar in de app (laatste lijst: aantal, duur; geen titels)
       shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
@@ -13491,6 +13492,10 @@ async function appVoorJouDetail(req, res, a, idTekst) {
     herkomst.push({ soort: 'todoist', tekst: 'Todoist-taak', link: 'https://app.todoist.com/app/task/' + t });
   });
   if (typeof h.bericht === 'string' && h.bericht) herkomst.push({ soort: 'bericht', tekst: 'Bericht of rapport van Socev' });   // wv646: zonder job-id
+  // wv4007: een link die het gesprek opent (Open Eindjes-wachter); alleen WhatsApp, Telegram, Signal en Teams, hooguit 6
+  (Array.isArray(h.links) ? h.links : []).filter(function (l) { return l && typeof l.link === 'string' && /^https:\/\/(wa\.me|t\.me|signal\.me|teams\.microsoft\.com)\/[^\s"<>]{1,280}$/.test(l.link); }).slice(0, 6).forEach(function (l) {
+    herkomst.push({ soort: 'link', tekst: appKort(appVjGewoon(String(l.tekst || 'Gesprek openen')), 80), link: l.link });
+  });
   const stappen = (Array.isArray(p.stappen) ? p.stappen : []).slice(0, 12).map(appVjStap);
   const sw = await appSwSetVoor(p);   // wv3250: steekwoordkeuzes per woord; dan geen Ja / Nee / Anders voor de hele rij
   appStuur(res, 200, Object.assign(appVjKort(p, vandaag), { ok: true, woorden: sw || undefined,
@@ -25182,6 +25187,72 @@ const contactringen = (function () {
   } catch (e) { logError('contactringen', e); return null; }
 })();
 function contactringenInfo() { if (!contactringen) return { aan: false }; try { return contactringen.info(); } catch (e) { return { aan: true, fout: true }; } }
+// ── Open Eindjes-wachter (wv4007, bouwplan vault 01_Ontwikkeling "Open Eindjes-wachter (bouwplan 23-11-2026)", David Ja 25-11) ──
+// Voorselectie (POST /smal/eindjes, beurtpas correspondentie-wachter 03:40 of API_SECRET), oordeel terug (/smal/eindjes/oordeel) en om
+// 06:50 één kaart "Nog beantwoorden" (eindjesTik). Logica en grenzen in open-eindjes.js; hier alleen de io. Staat in /opt/data/open-eindjes
+// (700/600, geen inhoud), state in machinekamer.open_eindjes (wis na 30 d). Alles lezen: niets verstuurd, beantwoord of als gelezen gemarkeerd.
+const EINDJES_DIR = process.env.EINDJES_DIR || '/opt/data/open-eindjes';
+const EINDJES_LEES_WF = 'GIuod668nbn9YPXI';   // Chat Reader (modus staart, geen bijlagen)
+async function eindjesSql(q) {
+  const r = await sbBeheerQuery(q, { ua: 'socev-open-eindjes/1', ms: 30000 });
+  if (!r) throw new Error('geen databanktoegang');
+  const t = await r.text();
+  if (!r.ok) throw new Error('databank ' + r.status + ': ' + String(t).replace(/\s+/g, ' ').slice(0, 160));
+  const j = t ? JSON.parse(t) : [];
+  if (!Array.isArray(j)) throw new Error('databank: ' + String((j && j.message) || 'geen rijen').slice(0, 160));
+  return j;
+}
+function eindjesTg(o) {
+  const args = ['eindjes', '--staart', o.staart ? '1' : '0'];
+  if (o.staart) args.push('--van', String(Math.floor(o.van)), '--tot', String(Math.floor(o.tot)), '--niet', (o.niet || []).join(','));
+  const tgEnv = {};
+  ['PATH', 'HOME', 'TZ', 'LANG', 'TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 'TELEGRAM_SESSIE', 'TELEGRAM_LOCK'].forEach(function (k) { if (process.env[k] != null) tgEnv[k] = process.env[k]; });
+  return smalKind(process.execPath, [SMAL_TG_SCRIPT].concat(args), '', 150000, tgEnv).then(function (r) {
+    if (r.code !== 0) throw new Error('telegram-reader exit ' + r.code + ': ' + String(r.stderr || '').trim().slice(-160));
+    return JSON.parse(String(r.stdout || '').trim().split('\n').pop());
+  });
+}
+const openEindjes = (function () {
+  const p = path.join(__dirname, 'open-eindjes.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const ams = function () { return new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); };
+    return require(p).maak({
+      nu: function () { return Math.floor(Date.now() / 1000); }, datum: ams,
+      wa: function (sessie) { return crPost(CR_WA_WF, null, 'crWaUrl', process.env.N8N_WEBHOOK_WHATSAPP, { sessie: sessie, modus: 'overzicht' }); },
+      waStaart: function (sessie, chatId, max) { return crPost(EINDJES_LEES_WF, null, 'eindjesLeesUrl', process.env.N8N_WEBHOOK_WHATSAPP, { sessie: sessie, chatId: chatId, modus: 'staart', max_spraak: max, dagen: 8, limit: 80 }); },
+      contacten: async function (nrs) {
+        const l = (nrs || []).filter(function (n) { return /^\+\d{6,15}$/.test(n); });
+        if (!l.length) return {};
+        const rijen = await eindjesSql("select t, min(c.weergavenaam) as naam from secondbrain.contacten c, unnest(c.telefoons_e164) t where t in (" + l.map(function (n) { return "'" + n + "'"; }).join(',') + ") group by t");
+        const uit = {}; rijen.forEach(function (r) { if (r && r.t && r.naam) uit[r.t] = String(r.naam); }); return uit;
+      },
+      tg: eindjesTg, sql: eindjesSql, rpc: function (naam, args) { return appSbRpc(naam, args); },
+      leeslog: function (regel) {
+        const ok = VV().wijzig(path.join(VAULT, '30_Conversaties', 'Telegram', '_leeslog.md'), function (t) { return String(t).replace(/\s*$/, '\n') + regel + '\n'; }, { grendel: 5 });
+        if (!ok) throw new Error('leeslog niet bijgeschreven');
+      },
+      box: function (t) { return ovisBoxRij(t); },
+      staat: function () { try { return JSON.parse(fs.readFileSync(path.join(EINDJES_DIR, 'staat.json'), 'utf8')); } catch (e) { return {}; } },
+      staatZet: function (o) {
+        fs.mkdirSync(EINDJES_DIR, { recursive: true, mode: 0o700 });
+        const tmp = path.join(EINDJES_DIR, '.staat.' + process.pid + '.tmp');
+        fs.writeFileSync(tmp, JSON.stringify(o), { mode: 0o600 }); fs.renameSync(tmp, path.join(EINDJES_DIR, 'staat.json'));
+      },
+      log: function (o) { schrijfLog(nu() + ' open-eindjes ' + JSON.stringify(o).replace(/\d{9,}/g, '#').slice(0, 600)); } });
+  } catch (e) { logError('open-eindjes', e); return null; }
+})();
+function openEindjesInfo() { if (!openEindjes) return { aan: false }; try { return openEindjes.info(); } catch (e) { return { aan: true, fout: true }; } }
+// 06:50-06:59 (een kaart van ná 07:05 wacht tot 12:30); na een podherstart in het venster tot 11:00 alsnog (dan om 12:30 in Voor jou)
+let eindjesTikBezig = false;
+async function eindjesTik() {
+  if (!openEindjes || eindjesTikBezig || !rolPrimair()) return;
+  const hm = new Date().toLocaleTimeString('sv-SE', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' });
+  if (hm < '06:50' || hm >= '11:00') return;
+  eindjesTikBezig = true;
+  try { await openEindjes.kaartStap(); } catch (e) { logError('open-eindjes-kaart', e); } finally { eindjesTikBezig = false; }
+}
+if (openEindjes && SERVER_ECHT) { setInterval(function () { eindjesTik(); }, 60000).unref(); }
 // ── Box-archief (wv2902, MrLean ML7/ML8, Davids Ja 11-11-2026): wekelijkse archiefstap van de machinekamer-box en Open vragen aan David;
 // waarom en regels in box-archief.js. Nachtketen-stap box-archief (in-process, eigen weekstempel in scripts-staat/box-archief/laatste.json).
 // De open/uitgestelde Voor jou-kaarten komen uit de databank: een registerrij die bij zo'n kaart hoort, blijft staan (plek 5 vergelijkt ze).
@@ -31873,6 +31944,7 @@ async function podRondeDraai(manager, prompt) {
 // DEKT NIET: een ander proces met dezelfde uid kan het bestand lezen zolang de beurt loopt (zie MK_SESSIES, Fable wv689 #9).
 const SESSIE_ROUTES = {
   'personeels-wachter': ['state:personeel'],
+  'correspondentie-wachter': ['eindjes', 'eindjes/oordeel'],   // wv4007: Open Eindjes-wachter (kandidaten halen, oordeel terug)
   'vault-concierge': ['state:concierge', 'sync-fouten'],
   'cijfer-meester': ['zorgdata'],                     // app-kanaal
   'cijfermeester': ['zorgdata']                       // @cijfermeester_bot
@@ -31953,9 +32025,9 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, eindjes: 6, 'eindjes/oordeel': 20 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
-const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata']);   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
+const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata', 'eindjes', 'eindjes/oordeel']);   // wv4007: eindjes alleen beurtpas of API_SECRET   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
 const SMAL_CF_ACCOUNT = '23df9b0607bb70f6d7f15a63ec843d6d';
 const SMAL_CF_BASIS = process.env.SMAL_CF_BASIS || 'https://api.cloudflare.com';   // alleen de toets wijst elders heen
@@ -32233,6 +32305,13 @@ async function smalActie(actie, d, wie) {
     return r;
   }
   // wv3083: noodknop machinekamer (zie mkNoodknop). Socev-sleutel = door socev (alleen met vraag_id van Davids verse Ja); API_SECRET = machinekamer.
+  // wv4007: Open Eindjes-wachter — kandidaten (staarten) en oordeel; alleen de beurtpas van de Correspondentie-Wachter of API_SECRET
+  if (actie === 'eindjes' || actie === 'eindjes/oordeel') {
+    if (!openEindjes) return { status: 404, j: { ok: false, fout: 'open-eindjes.js zit niet in deze release' } };
+    if (actie === 'eindjes') return { status: 200, j: await openEindjes.haal({ vers: d.vers === true && !!(wie && wie.mk) }) };
+    const r = await openEindjes.oordeel(d);
+    return { status: r.fout && !r.opgeslagen ? 400 : 200, j: r };
+  }
   if (actie === 'mk-noodknop') return mkNoodknop(d, socevAgentSleutelOk(d.secret) ? 'socev' : 'machinekamer');
   // wv895: een manager-ronde op afroep. Socev-sleutel = door socev (alleen met vraag_id van Davids verse Ja); API_SECRET = machinekamer.
   if (actie === 'manager-ronde') {
