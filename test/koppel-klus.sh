@@ -123,12 +123,12 @@ const ctx = { process: { env: { TODOIST_MCP_TOKEN: 'nep' } }, KK_ACTIE_TABEL: 'n
     const c = /tasks\/(.+)\/close$/.exec(url); if (c && o.method === 'POST') { ctx.gesloten.push(decodeURIComponent(c[1])); return { ok: true, status: 204 }; } return { ok: false, status: 500 }; } };
 vm.createContext(ctx);
 vm.runInContext(kkDm + knip('kkSluitActie') + '\n' + knip('kkSluitTodoist') + '\nthis.A = kkSluitActie; this.T = kkSluitTodoist;', ctx);
-tabel.push({ actie_id: 'proef-open', status: 'open', bevinding: 'AANGELEGD proef', volgende_check: '2030-03-12' }, { actie_id: 'proef-dicht', status: 'afgerond', bevinding: '' }, { actie_id: 'proef-gemeld', status: 'gemeld', bevinding: 'x' });
+tabel.push({ actie_id: 'proef-open', status: 'open', bevinding: 'AANGELEGD proef', volgende_check: '2030-03-12', laatst_gecheckt: '2030-03-09' }, { actie_id: 'proef-dicht', status: 'afgerond', bevinding: '' }, { actie_id: 'proef-gemeld', status: 'gemeld', bevinding: 'x', laatst_gecheckt: '2030-03-01' }, { actie_id: 'proef-leeg', status: 'open', bevinding: '', laatst_gecheckt: '2030-03-01' });
 let a = await ctx.A('proef-open', '2030-03-10');
 toets('4a actiepunt open → afgerond, één regel achter de bevinding, volgende_check leeg', a.uitkomst === 'gesloten' && tabel[0].status === 'afgerond' && /AANGELEGD proef ‖ AFGEROND 10-3 via de gekoppelde klus/.test(tabel[0].bevinding) && tabel[0].volgende_check === '' && tabel[0].laatst_gecheckt === '2030-03-10', [a, tabel[0]]);
-toets('4b PATCH filtert op sleutel, gelezen status én gelezen bevinding (Codex MOET 3)', ctx.gepatcht[0].filter.filters.length === 3 && ctx.gepatcht[0].filter.filters[1].value === 'open' && ctx.gepatcht[0].filter.filters[2].value === 'AANGELEGD proef', ctx.gepatcht[0]);
+toets('4b PATCH filtert op sleutel, gelezen status én gelezen bevinding (Codex MOET 3)', ctx.gepatcht[0].filter.filters.length === 4 && ctx.gepatcht[0].filter.filters[1].value === 'open' && ctx.gepatcht[0].filter.filters[2].value === 'AANGELEGD proef', ctx.gepatcht[0]);
 // Codex MOET 3: bevinding veranderde tussen lezen en schrijven → niets overschreven, tijdelijk (volgende ronde opnieuw)
-{ const zend = ctx.appN8nZend; tabel.push({ actie_id: 'proef-race', status: 'open', bevinding: 'oud' });
+{ const zend = ctx.appN8nZend; tabel.push({ actie_id: 'proef-race', status: 'open', bevinding: 'oud', laatst_gecheckt: '2030-03-01' });
   ctx.appN8nZend = async (m, p, b) => { tabel[tabel.length - 1].bevinding = 'nieuw van de wachter'; return zend(m, p, b); };
   const ra = await ctx.A('proef-race', '2030-03-10'); ctx.appN8nZend = zend;
   toets('4b2 bevinding intussen gewijzigd: niets overschreven, tijdelijk', ra.uitkomst === 'tijdelijk' && tabel[tabel.length - 1].status === 'open' && tabel[tabel.length - 1].bevinding === 'nieuw van de wachter', [ra, tabel[tabel.length - 1]]); }
@@ -139,6 +139,8 @@ a = await ctx.A('proef-bestaat-niet', '2030-03-10');
 toets('4d actiepunt bestaat niet = niets', a.uitkomst === 'bestaat_niet' && ctx.gepatcht.length === np, a);
 a = await ctx.A('proef-gemeld', '2030-03-10');
 toets('4e gemeld → afgerond', a.uitkomst === 'gesloten' && tabel[2].status === 'afgerond', a);
+{ const np2 = ctx.gepatcht.length, lg = await ctx.A('proef-leeg', '2030-03-10');
+  toets('4e2 lege bevinding (Codex r2): niet schrijven, overgeslagen', lg.uitkomst === 'overgeslagen' && ctx.gepatcht.length === np2 && tabel[3].status === 'open', lg); }
 ctx.taken = { t1open: { id: 't1open', project_id: 'p1', checked: false }, t2herh: { id: 't2herh', project_id: 'p1', due: { is_recurring: true } }, t3ander: { id: 't3ander', project_id: 'p1', responsible_uid: '111' },
   t4gedeeld: { id: 't4gedeeld', project_id: 'p2' }, t5dicht: { id: 't5dicht', project_id: 'p1', checked: true }, t6van: { id: 't6van', project_id: 'p1', responsible_uid: '58247764' } };
 ctx.projecten = { p1: { is_shared: false }, p2: { is_shared: true } };

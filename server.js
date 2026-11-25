@@ -12381,9 +12381,10 @@ async function kkSluitActie(id, vandaag) {
   const data = { status: 'afgerond', volgende_check: '', laatst_gecheckt: vandaag,
     bevinding: String(r.bevinding || '') + ' ‖ AFGEROND ' + kkDm(vandaag) + ' via de gekoppelde klus in het actielijstje (David)' };
   // Codex wv4038 MOET 3: ook de gelezen bevinding in het filter (en laatst_gecheckt): veranderde de rij intussen, dan niets en volgende ronde opnieuw lezen
-  // (gemeten 25-11: in actie_state zijn beide altijd een niet-lege tekst; leeg of null = die voorwaarde weglaten, anders zou eq '' nooit treffen)
-  const extra = [{ columnName: 'status', condition: 'eq', value: r.status }];
-  ['bevinding', 'laatst_gecheckt'].forEach(function (k) { if (typeof r[k] === 'string' && r[k] !== '') extra.push({ columnName: k, condition: 'eq', value: r[k] }); });
+  // (gemeten 25-11: in actie_state zijn beide altijd een niet-lege tekst.) Codex r2 MOET 1: leeg of null is niet veilig te vergelijken
+  // (eq '' treft geen null) = niet schrijven; David ziet het actiepunt dan nog en tikt het zelf af.
+  if (typeof r.bevinding !== 'string' || r.bevinding === '' || typeof r.laatst_gecheckt !== 'string' || r.laatst_gecheckt === '') return { uitkomst: 'overgeslagen', reden: 'lege bevinding of laatst_gecheckt' };
+  const extra = [{ columnName: 'status', condition: 'eq', value: r.status }, { columnName: 'bevinding', condition: 'eq', value: r.bevinding }, { columnName: 'laatst_gecheckt', condition: 'eq', value: r.laatst_gecheckt }];
   const j = await appN8nZend('PATCH', '/data-tables/' + KK_ACTIE_TABEL + '/rows/update', { filter: f(extra), data: data, returnData: true });
   const n = Array.isArray(j) ? j.length : (Array.isArray(j && j.data) ? j.data.length : 0);
   return n ? { uitkomst: 'gesloten' } : { uitkomst: 'tijdelijk', reden: 'niets bijgewerkt (status veranderde?)' };
