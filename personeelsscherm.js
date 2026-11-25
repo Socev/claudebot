@@ -451,7 +451,10 @@ function leesMedewerkers(vault, vandaag) {
     const eind = /^\d{4}-\d{2}-\d{2}$/.test(fm.einddatum || '') ? fm.einddatum : null;
     const actief = !/uit dienst|oud-|gestopt|vertrokken|beëindigd|beeindigd|overleden/i.test(status) && !(eind && eind < vandaag);
     const g = /^(\d{4})-(\d{2})-(\d{2})$/.exec(fm.geboortedatum || '');
-    uit.push({ voornaam: vn, naam: String(fm.naam).trim().toLowerCase(), geboren: g ? g[2] + '-' + g[3] : null, actief });
+    // wv4141: zonder geboortedatum mag 'verjaardag: MM-DD' (alleen dag en maand; David geeft geen jaar door)
+    const v = /^(\d{2})-(\d{2})$/.exec(fm.verjaardag || '');
+    const geboren = g ? g[2] + '-' + g[3] : v && echteDatum('2024-' + v[0]) ? v[0] : null;
+    uit.push({ voornaam: vn, naam: String(fm.naam).trim().toLowerCase(), geboren, actief });
   }
   return uit;
 }

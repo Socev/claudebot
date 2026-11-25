@@ -1201,3 +1201,14 @@ test('wv4141 wissel: Komende weken na elke twee pagina\'s (H a b H c d H e), ver
   assert.deepStrictEqual(reeks, [0, 1, 2, 0, 3, 4, 0, 6]);
   assert.ok(panelen.filter((p) => p.cls.has('aan')).length === 1, 'altijd precies één paneel');
 });
+
+test('wv4141 verjaardag zonder jaar: veld verjaardag MM-DD telt als er geen geboortedatum is; ongeldig = niets', () => {
+  const vault = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-vj-'));
+  const map = path.join(vault, '10_Zakelijk/Tolgaarde/Medewerkers'); fs.mkdirSync(map, { recursive: true });
+  const pag = (f, fm) => fs.writeFileSync(path.join(map, f + '.md'), '---\n' + Object.entries(fm).map(([k, v]) => k + ': ' + v).join('\n') + '\n---\n');
+  pag('a', { type: 'medewerker', naam: 'Proef Een', verjaardag: '"03-12"' });
+  pag('b', { type: 'medewerker', naam: 'Proef Twee', verjaardag: '02-30' });
+  pag('c', { type: 'medewerker', naam: 'Proef Drie', geboortedatum: '1980-05-01', verjaardag: '06-06' });
+  const m = PS._t.leesMedewerkers(vault, '2026-11-25').sort((x, y) => x.voornaam.localeCompare(y.voornaam));
+  assert.deepStrictEqual(m.map((x) => x.geboren).sort(), ['03-12', '05-01', null].sort());
+});
