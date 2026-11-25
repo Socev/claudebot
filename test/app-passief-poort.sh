@@ -50,6 +50,14 @@ const toets = (n, ok, x) => { if (ok) goed++; else fout++; console.log((ok ? 'GR
     && /if \(spaarBrowserDicht\(false\)\) return stuur\(200/.test(BRON) && /!browserMag\(url\) \|\| spaarBrowserDicht\(false\)/.test(BRON));
   toets('B4 beurt mét browser houdt een agent tegen tot hij klaar is (Codex r1 MOET 2)', /spaarBrowserBeurten\.set\(spaarToken/.test(BRON) && /if \(spaarToken\) spaarBrowserBeurten\.delete\(spaarToken\)/.test(BRON)
     && /\} else if \(SPAARSTAND && spaarBrowserBeurtLopend\(\)\) \{/.test(BRON) && /agentInfo\(\)\.lopend >= maxAgents\(\) \|\| spaarBrowserBeurtLopend\(\)/.test(BRON));
+  toets('B5 /ophalen en winkelbrowser reserveren een browserplek zolang ze lopen (Codex r2 MOET 2)', /spaarBrowserMet\(function \(\) \{ return ophalen\.haal\(/.test(BRON) && /spaarBrowserMet\(function \(\) \{ return winkelBrowser\.lees\(url\)/.test(BRON));
+  (async function () {   // spaarBrowserMet geknipt: plek bezet tijdens fn, weer vrij na een fout
+    const i = BRON.indexOf('async function spaarBrowserMet('), j = BRON.indexOf('\nfunction spaarBrowserBeurtLopend(');
+    const kaart = new Map(), f = new Function('SPAARSTAND', 'spaarBrowserBeurten', BRON.slice(i, j) + '\n;return spaarBrowserMet;')(true, kaart);
+    let tijdens = -1; await f(async () => { tijdens = kaart.size; });
+    let fout = false; try { await f(async () => { throw new Error('x'); }); } catch (e) { fout = true; }
+    toets('B6 spaarBrowserMet: bezet tijdens het werk, vrij na afloop en na een fout', tijdens === 1 && kaart.size === 0 && fout);
+  })();
 })();
 
 // ── routes uit handleApp ──

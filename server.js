@@ -476,6 +476,12 @@ function spaarBrowserDicht(isAgent) { return SPAARSTAND && (!!isAgent || agentIn
 // Codex r1 MOET 2: een beurt die mét browser-tools startte (geen agent liep), houdt een agent tegen tot hij klaar is (anders kon hij
 // later alsnog een browser openen naast die agent). Token → starttijd; ouder dan 3 u telt niet (vangnet als finish() nooit kwam).
 const spaarBrowserBeurten = new Map();
+// Codex r2 MOET 2: ook /ophalen en de winkelbrowser reserveren zo'n plek zolang ze lopen (in spaarstand)
+async function spaarBrowserMet(fn) {
+  const t = SPAARSTAND ? {} : null;
+  if (t) spaarBrowserBeurten.set(t, Date.now());
+  try { return await fn(); } finally { if (t) spaarBrowserBeurten.delete(t); }
+}
 function spaarBrowserBeurtLopend() {
   const t = Date.now();
   for (const [k, v] of spaarBrowserBeurten) { if (t - v > 3 * 3600e3) spaarBrowserBeurten.delete(k); }
@@ -5113,7 +5119,7 @@ function handleRequest(req, res) {
       if (typeof ophalen === 'undefined' || !ophalen) return stuur(404, { ok: false, fout: 'ophalen zit niet in deze versie van de pod' });
       if (typeof d.url !== 'string' || d.url.length > 2000) return stuur(400, { ok: false, fout: 'url ontbreekt of is te lang' });
       if (spaarBrowserDicht(false)) return stuur(200, { ok: false, spaarstand: true, fout: 'spaarstand: geen browser terwijl er een achtergrondagent loopt; probeer het later' });   // wv3909
-      ophalen.haal(d.url, { pdfs: d.pdfs, geenCache: d.geen_cache === true }).then(function (r) { stuur(200, r); })
+      spaarBrowserMet(function () { return ophalen.haal(d.url, { pdfs: d.pdfs, geenCache: d.geen_cache === true }); }).then(function (r) { stuur(200, r); })
         .catch(function (e) { logError('ophalen', e); stuur(500, { ok: false, fout: 'ophalen faalde in de pod' }); });
     });
   }
@@ -28885,7 +28891,7 @@ const shopper = (function () {
   const lezerScriptAlleen = lezer;
   if (lezer && winkelBrowser && winkelBrowser.info().aan) lezer = async function (url) {
     if (!browserMag(url) || spaarBrowserDicht(false)) return lezerScriptAlleen(url);   // wv3909: spaarstand, geen browser naast een agent
-    const r = await winkelBrowser.lees(url);
+    const r = await spaarBrowserMet(function () { return winkelBrowser.lees(url); });   // wv3909: houdt in spaarstand een agent tegen
     // geen browserwinkel (bv. Tweakers, lezen: browser maar een vergelijker): het leesscript geeft zijn eigen uitleg
     return r && r.blokkade && /^browserroute alleen voor /.test(r.blokkade) ? lezerScriptAlleen(url) : r;
   };

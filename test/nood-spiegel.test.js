@@ -159,6 +159,20 @@ test('nooit een lege passkeylijst; register kapot = geen passkeys en geen push, 
   await s.dicht();
 });
 
+test('laatste passkey ingetrokken: geen lege lijst, wel een zichtbare fout (Codex r2 MOET 1, open punt Worker)', async () => {
+  const s = await nepNood(); const d = opzet(); d.url = s.url; d.sleutel(true);
+  const m = N.maak(d.opties());
+  assert.strictEqual(await m.tik(), 'lijsten');
+  d.reg.apparaten.forEach((a) => { a.actief = false; a.cookie_hash = null; });
+  d.klok += 11000;
+  await m.peil();
+  const b = spiegels(s)[spiegels(s).length - 1].body;
+  assert.ok(!('passkeys' in b)); assert.deepStrictEqual(b.push, []);
+  assert.match(m.stand().laatste_fout, /alle passkeys ingetrokken.*kent er nog 1/);
+  assert.ok(d.logs.some((l) => /alle passkeys ingetrokken/.test(l)));
+  await s.dicht();
+});
+
 test('fouten: 401, 409 en tijdslimiet zichtbaar zonder sleutel; lijsten na 409 opnieuw', async () => {
   const s = await nepNood(); const d = opzet(); d.url = s.url; d.sleutel(true);
   const m = N.maak(d.opties({ tijdMs: 300 }));

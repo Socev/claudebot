@@ -110,6 +110,9 @@ function maak(o) {
       pk.sort(function (x, y) { return x.apparaat_id < y.apparaat_id ? -1 : x.apparaat_id > y.apparaat_id ? 1 : (x.cred_id < y.cred_id ? -1 : 1); });
       if (pk.length > MAX_LIJST) uit.fouten.push('meer dan ' + MAX_LIJST + ' passkeys');
       else if (pk.length) uit.passkeys = pk;   // nooit een lege lijst (de Worker zou alles wissen; hij weigert het ook)
+      // Codex r2 MOET 1: de laatste passkey ingetrokken (register leesbaar, 0 actief) terwijl socev-nood er nog heeft. Het contract kent
+      // geen lege lijst, dus de pod kan ze daar niet wissen: zichtbare fout tot de Worker een expliciete intrekking kent (open punt).
+      else if (staat.geschreven && staat.geschreven.passkeys > 0) uit.fouten.push('alle passkeys ingetrokken, maar socev-nood kent er nog ' + staat.geschreven.passkeys + ' (contract heeft geen lege lijst)');
       let p = null;
       try { p = o.push(); if (!p || !p.apparaten || typeof p.apparaten !== 'object') throw new Error('kapot'); } catch (e) { p = null; uit.fouten.push('push.json onleesbaar'); }
       if (p) {
