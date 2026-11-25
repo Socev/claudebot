@@ -117,8 +117,8 @@ RUN id socev 2>/dev/null || { groupadd -g 1002 socev && useradd -u 1002 -g 1002 
 # Geen standaardcluster (createcluster.conf); de data staat op het volume (/opt/data/pg, gebruiker pg) en start via /app/db/db-wacht.sh.
 # OS-gebruiker pg (geen lid van claude/socev) en groep pgsock voor de socket: claude is lid, socev niet.
 ARG PGDG_VINGER=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
-ARG POSTGREST_VERSIE=v14.18
-ARG POSTGREST_SHA256=98de1c0be7787aea5f5e11a25f303ea0077634d6fc1000b687bfa825fd27d299
+ARG POSTGREST_VERSIE=v16.6
+ARG POSTGREST_SHA256=335ea29f00145705fb569b1268b9c8e53d062f8f6f9188192e92ea3781d2dca1
 COPY db/pgdg-vinger.py /tmp/pgdg-vinger.py
 RUN curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
  && python3 /tmp/pgdg-vinger.py /tmp/pgdg.asc "${PGDG_VINGER}" \

@@ -54,6 +54,28 @@ docker exec $C curl -fsS -m 3 http://127.0.0.1:8091/health; echo
 docker exec $C curl -fsS -m 3 http://127.0.0.1:8091/health >/dev/null 2>&1; ok $? "luik /health: postgres + PostgREST op"
 S=$(docker exec $C curl -s -o /dev/null -w '%{http_code}' -m 3 http://127.0.0.1:8091/rest/v1/); [ "$S" = 401 ]; ok $? "zonder sleutel 401 ($S)"
 S=$(docker exec -u claude $C sh -c 'curl -s -o /dev/null -w "%{http_code}" -m 5 -H "apikey: $(cat /tmp/k)" http://127.0.0.1:8091/rest/v1/'); [ "$S" = 200 ]; ok $? "met sleutel 200 via PostgREST ($S)"
+# wv4019: PostgREST 16 — versie, rpc met de SET's van de functie (db-hoisted-tx-settings; zware RPC's leunen erop), schrijven met
+# Prefer return=representation en merge-duplicates, telling via Content-Range, kluis buiten de Data API (CISO C3-vault-api: 406 PGRST106)
+V=$(docker exec $C /usr/local/bin/postgrest --version 2>&1); [ "$V" = "PostgREST 16.6" ]; ok $? "wv4019: PostgREST-versie ($V)"
+docker exec -i -u claude $C /app/sb-sql >/dev/null 2>&1 <<'SQL'
+create table public.rook_pgrst (id int primary key, naam text);
+grant select, insert, update on public.rook_pgrst to service_role;
+create function public.rook_pgrst_tx() returns json language sql stable
+  set statement_timeout = '90s' set default_transaction_isolation = 'repeatable read'
+  as $$ select json_build_object('iso', current_setting('transaction_isolation'), 'st', current_setting('statement_timeout')) $$;
+grant execute on function public.rook_pgrst_tx() to service_role;
+SQL
+L(){ docker exec -u claude $C sh -c 'curl -s -m 5 -w "|%{http_code}|%header{content-range}" -H "apikey: $(cat /tmp/k)" "$@"' sh "$@"; }
+for i in $(seq 1 20); do R=$(L -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8091/rest/v1/rpc/rook_pgrst_tx); case "$R" in *'|200|'*) break;; esac; sleep 0.5; done
+case "$R" in *'"iso" : "repeatable read"'*'"st" : "90s"'*'|200|'*) ok 0 "wv4019: rpc 200 met de SET's van de functie ($R)";; *) ok 1 "wv4019: rpc 200 met de SET's van de functie ($R)";; esac
+R=$(L -X POST -H 'Content-Type: application/json' -H 'Prefer: return=representation' -d '{"id":1,"naam":"a"}' http://127.0.0.1:8091/rest/v1/rook_pgrst)
+[ "$R" = '[{"id":1,"naam":"a"}]|201|*/*' ]; ok $? "wv4019: insert met Prefer return=representation ($R)"
+R=$(L -X POST -H 'Content-Type: application/json' -H 'Prefer: resolution=merge-duplicates,return=minimal' -d '{"id":1,"naam":"b"}' http://127.0.0.1:8091/rest/v1/rook_pgrst)
+[ "$R" = '|200|*/*' ]; ok $? "wv4019: upsert (bestaande rij = 200) met merge-duplicates ($R)"
+R=$(L -H 'Prefer: count=exact' 'http://127.0.0.1:8091/rest/v1/rook_pgrst?select=id,naam&id=eq.1')
+[ "$R" = '[{"id":1,"naam":"b"}]|200|0-0/1' ]; ok $? "wv4019: select met filter en count=exact ($R)"
+R=$(L -H 'Accept-Profile: vault' 'http://127.0.0.1:8091/rest/v1/secrets?select=id&limit=0')
+case "$R" in *'"code":"PGRST106"'*'|406|'*) ok 0 "wv4019: Accept-Profile vault = 406 PGRST106 ($R)";; *) ok 1 "wv4019: Accept-Profile vault = 406 PGRST106 ($R)";; esac
 # wv3895 (C40): bij de start is het oude archief weg, het Olares-segment (6/B6) staat apart in wal-olares-2211, 0640 pg:pgsock, als
 # claude leesbaar; het andere segment (AA) is weg
 docker exec $C test -e /opt/data/pg/wal-archief; [ $? != 0 ]; ok $? "wv3895: map wal-archief weg na de start"
