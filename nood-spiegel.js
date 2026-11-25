@@ -109,10 +109,12 @@ function maak(o) {
       }
       pk.sort(function (x, y) { return x.apparaat_id < y.apparaat_id ? -1 : x.apparaat_id > y.apparaat_id ? 1 : (x.cred_id < y.cred_id ? -1 : 1); });
       if (pk.length > MAX_LIJST) uit.fouten.push('meer dan ' + MAX_LIJST + ' passkeys');
-      else if (pk.length) uit.passkeys = pk;   // nooit een lege lijst (de Worker zou alles wissen; hij weigert het ook)
-      // Codex r2 MOET 1: de laatste passkey ingetrokken (register leesbaar, 0 actief) terwijl socev-nood er nog heeft. Het contract kent
-      // geen lege lijst, dus de pod kan ze daar niet wissen: zichtbare fout tot de Worker een expliciete intrekking kent (open punt).
-      else if (staat.geschreven && staat.geschreven.passkeys > 0) uit.fouten.push('alle passkeys ingetrokken, maar socev-nood kent er nog ' + staat.geschreven.passkeys + ' (contract heeft geen lege lijst)');
+      else if (pk.length) uit.passkeys = pk;
+      // Codex r2 MOET 1 (pod en socev-nood): geen enkel actief apparaat meer (laatste ingetrokken, ook na een noodstop) = expliciete
+      // intrekking: lege lijst MET alles_ingetrokken, zodat socev-nood alle sleutels wist. Zijn er wel actieve apparaten maar geen
+      // bruikbare passkey (vormfout), dan niets spiegelen en een zichtbare fout: een vormfout mag nooit alles wissen.
+      else if (actief.size === 0) { uit.passkeys = []; uit.alles_ingetrokken = true; }
+      else uit.fouten.push('actieve apparaten zonder bruikbare passkey: passkeys niet gespiegeld');
       let p = null;
       try { p = o.push(); if (!p || !p.apparaten || typeof p.apparaten !== 'object') throw new Error('kapot'); } catch (e) { p = null; uit.fouten.push('push.json onleesbaar'); }
       if (p) {
@@ -174,7 +176,7 @@ function maak(o) {
         met = !!(l.passkeys || l.push !== undefined || l.bundel_sha256) && (l.hash !== staat.lijstHash || nu() - (staat.lijstOp || 0) >= ZES_UUR);
         if (met) {
           const mb = Object.assign({}, body);
-          if (l.passkeys) mb.passkeys = l.passkeys;
+          if (l.passkeys) { mb.passkeys = l.passkeys; if (l.alles_ingetrokken) mb.alles_ingetrokken = true; }
           if (l.push !== undefined) mb.push = l.push;
           if (l.bundel_sha256) mb.bundel_sha256 = l.bundel_sha256;
           if (JSON.stringify(mb).length > MAX_BODY) { met = false; l.fouten.push('lijsten te groot voor socev-nood'); }   // dan alleen de hartslag

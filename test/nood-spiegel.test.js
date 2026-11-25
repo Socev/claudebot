@@ -31,7 +31,7 @@ function nepNood() {
       if (q.headers.authorization !== 'Bearer ' + SLEUTEL) return stuur(401, { ok: false, fout: 'sleutel onjuist' });
       if (q.url === '/pod/spiegel') {
         const lijsten = j.passkeys !== undefined || j.push !== undefined || j.bundel_sha256 !== undefined;
-        if (j.passkeys && !j.passkeys.length) return stuur(400, { ok: false, fout: 'lege passkeylijst' });
+        if (j.passkeys && !j.passkeys.length && j.alles_ingetrokken !== true) return stuur(400, { ok: false, fout: 'lege passkeylijst zonder alles_ingetrokken' });   // zoals socev-nood
         if (s.antwoord) return stuur(s.antwoord.status, s.antwoord.body);
         return stuur(200, { ok: true, geschreven: lijsten, opdracht: s.opdracht || null });
       }
@@ -143,37 +143,38 @@ test('primair: lijsten één keer, daarna alleen hartslag; bij wijziging via pei
   await s.dicht();
 });
 
-test('nooit een lege passkeylijst; register kapot = geen passkeys en geen push, wel zichtbaar', async () => {
+test('geen actief apparaat = lege lijst mét alles_ingetrokken; register kapot = geen passkeys en geen push, wel zichtbaar', async () => {
   const s = await nepNood(); const d = opzet(); d.url = s.url; d.sleutel(true);
   d.reg.apparaten.forEach((a) => { a.actief = false; });
   const m = N.maak(d.opties());
   assert.strictEqual(await m.tik(), 'lijsten');
   let b = spiegels(s)[0].body;
-  assert.ok(!('passkeys' in b), 'geen passkeys-veld'); assert.deepStrictEqual(b.push, []);
+  assert.deepStrictEqual(b.passkeys, []); assert.strictEqual(b.alles_ingetrokken, true); assert.deepStrictEqual(b.push, []);
   d.reg = 'kapot';
   assert.strictEqual(await m.tik(), 'lijsten');
   b = spiegels(s)[1].body;
   assert.ok(!('passkeys' in b) && !('push' in b) && b.bundel_sha256 === hex('e', 64));
   assert.match(m.stand().laatste_fout, /register onleesbaar/);
-  for (const v of spiegels(s)) assert.ok(!v.body.passkeys || v.body.passkeys.length > 0);
+  for (const v of spiegels(s)) assert.ok(!v.body.passkeys || v.body.passkeys.length > 0 || v.body.alles_ingetrokken === true);
   await s.dicht();
 });
 
-test('laatste passkey ingetrokken: geen lege lijst, wel een zichtbare fout (Codex r2 MOET 1, open punt Worker)', async () => {
+test('laatste passkey ingetrokken: expliciete intrekking naar socev-nood; actief zonder bruikbare passkey = niets wissen (Codex r2 MOET 1)', async () => {
   const s = await nepNood(); const d = opzet(); d.url = s.url; d.sleutel(true);
   const m = N.maak(d.opties());
   assert.strictEqual(await m.tik(), 'lijsten');
   d.reg.apparaten.forEach((a) => { a.actief = false; a.cookie_hash = null; });
   d.klok += 11000;
   await m.peil();
-  const b = spiegels(s)[spiegels(s).length - 1].body;
-  assert.ok(!('passkeys' in b)); assert.deepStrictEqual(b.push, []);
-  assert.match(m.stand().laatste_fout, /alle passkeys ingetrokken.*kent er nog 1/);
-  assert.ok(d.logs.some((l) => /alle passkeys ingetrokken/.test(l)));
-  // blijft staan na volgende hartslagen, na 6 u (lijsten opnieuw zonder passkeys) en na een herstart (Codex r3 MOET 1)
-  assert.strictEqual(await m.tik(), 'hartslag'); assert.match(m.stand().laatste_fout, /alle passkeys ingetrokken/);
-  d.klok += 6 * 3600e3 + 1; assert.strictEqual(await m.tik(), 'lijsten'); assert.match(m.stand().laatste_fout, /kent er nog 1/);
-  const m2 = N.maak(d.opties()); await m2.tik(); assert.match(m2.stand().laatste_fout, /kent er nog 1/);
+  let b = spiegels(s)[spiegels(s).length - 1].body;
+  assert.deepStrictEqual(b.passkeys, []); assert.strictEqual(b.alles_ingetrokken, true);
+  // actief maar de passkey onbruikbaar (vormfout): geen passkeys-veld, zichtbare fout
+  d.reg.apparaten.forEach((a) => { a.actief = true; a.cookie_hash = null; });
+  d.klok += 11000;
+  await m.peil();
+  b = spiegels(s)[spiegels(s).length - 1].body;
+  assert.ok(!('passkeys' in b) && !('alles_ingetrokken' in b));
+  assert.match(m.stand().laatste_fout, /zonder bruikbare passkey/);
   await s.dicht();
 });
 
