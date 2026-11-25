@@ -75,7 +75,8 @@ test('herinneringen: opnames met notitie en voorbije reizen; geplande reis en th
     assert.deepStrictEqual(l.herinneringen.map((h) => h.soort).sort(), ['opname', 'reis']);
     const r = l.herinneringen.find((h) => h.soort === 'reis');
     assert.strictEqual(r.categorie, 'reizen'); assert.strictEqual(r.gevoelig, false); assert.strictEqual(r.titel, 'Proefreis Engeland 2023', 'wv2180: vaste naamgeving');
-    assert.ok(!('zicht' in r) && !('plaatje' in r) && !('blok' in r), 'wv4115: geen velden van de oude deellinks of Plaatje maken meer');
+    assert.deepStrictEqual(r.zicht, { familie: false, vrienden: false }, 'wv4115: zicht vast uit (alleen voor een oude app-bundel)');
+    assert.ok(!('plaatje' in r) && !('blok' in r) && !('niet_deelbaar' in r), 'wv4115: geen velden van de oude deellinks of Plaatje maken meer');
     assert.ok(l.categorieen.some((c) => c.id === 'reizen'), 'categorie Reizen in de vaste lijst');
   } finally { o.sluit(); }
 });

@@ -4810,7 +4810,7 @@ function handleRequest(req, res) {
       app_nieuws: typeof appNieuwsInfo === 'function' ? appNieuwsInfo() : { aan: false },   // wv3689: redactie-loket (aantallen per laan, schaduwfouten; geen tekst)
       pakjes: typeof pakjesInfo === 'function' ? pakjesInfo() : { aan: false },   // wv2593: OVIS Pakjes (aantallen, laatste ronde; geen codes, winkels of postcodes)
       memorylane_publiek: (function () { if (!memorylanePubliek) return { aan: false }; try { return Object.assign(memorylanePubliek.health(), { token: mlPubTokenSoort }); } catch (e) { return { fout: true }; } })(),   // wv2636: alleen aantallen; wv2738: token eigen|pod|null (nog niet gebruikt)
-      memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, links aan/uit, laatste tik; geen inhoud
+      memorylane_delen: memorylaneDelenInfo(),   // wv2114: herinneringen, stukken per status, laatste tik; geen inhoud (links weg sinds wv4115)
       ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
       scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
@@ -27284,7 +27284,7 @@ function docsDelenInfo() {
 // het smalle Cloudflare-token; op het moment van gebruik via de Management-API, 10 min in het geheugen, nooit in process.env), de app-routes
 // en de tik. wv4115 (David 25-11-2026, besluitenpagina nr 61 = C51 en nr 121 = 2C21): de oude deellinks met wachtwoord (deel.socev.dev/h/,
 // /app/memorylane/link/…, zicht, toch-delen, foto-delen, toon-opname, delen) en Plaatje maken zijn weg; delen alleen via memorylane.socev.dev.
-//   GET  /app/memorylane/lijst | /app/memorylane/h/<hid> | /app/memorylane/delen | /app/memorylane/personen (wv2449, hoofdpersonen + geboortedatum; niet in de toonmodus)
+//   GET  /app/memorylane/lijst | /app/memorylane/h/<hid> | /app/memorylane/personen (wv2449, hoofdpersonen + geboortedatum; niet in de toonmodus)
 //   GET  /app/memorylane/h/<hid>/gevel/k (wv2314, de straat: miniatuur van de gevel, zonder fotolijst; toonmodus alleen toonbaar, anders 404)
 //   POST /app/memorylane/h/<hid>/titel {titel} · wanneer {van, tot} (wv2180) · tekst {tekst, soort} · categorie {categorie, gevoelig}
 //   POST /app/memorylane/stuk/<sid>/opnemen|afwijzen|bewaren|weggooien
@@ -27453,7 +27453,7 @@ async function appMemorylane(req, res, a, s, route, d) {
       const u = memorylaneDelen.voorstel(m[1] + '_' + m[2], m[3]);
       return antw('voorstel ' + m[3], u);
     }
-    // wv2120: foto's van het gekoppelde album; gevel kiezen; foto's bij de deellinks (aan = naar buiten: verse vingerafdruk); album (opnieuw) maken
+    // wv2120: foto's van het gekoppelde album; gevel kiezen; album (opnieuw) maken
     if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/fotos$/.exec(route))) return antw('fotos', await memorylaneDelen.fotos(m[1], toon));
     if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(gevel|album)$/.exec(route))) {
       const u = m[2] === 'gevel' ? await memorylaneDelen.gevel(m[1], d) : await memorylaneDelen.albumMaken(m[1]);

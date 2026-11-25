@@ -761,6 +761,7 @@ function maak(o) {
     return { ...facetten(x), audio: audioStukken(h).length, hid: h.hid, soort: h.soort, bron: isFotoalbum(h) ? 'google' : null, status: h.status, titel: titelVan(h, p, x), wanneer: w.tekst || w.verteld, wanneer_bron: w.bron, wanneer_invoer: w.invoer,
       verteld: w.verteld, datum: sorteerSleutel(h, w), categorie: c.categorie, gevoelig: isGevoelig(h), gevoelig_vink: c.gevoeligVink,
       verhaal_stand: h.soort === 'opname' ? (x ? x.stand : null) : null,
+      zicht: { familie: false, vrienden: false },   // wv4115 (review MOET 1): vast uit, één release lang voor een app-bundel van vóór wv4115 (leest h.zicht zonder vangnet)
       stukken: st.filter((y) => y.status !== 'weggegooid').length, binnen: st.filter((y) => y.status === 'binnen').length,
       vastgehouden: st.filter((y) => y.status === 'vastgehouden').length, album: F ? F.kort(h.hid) : null,
       // wv3264 (Levenskalender, ontwerp 17-11 § Bouwplan): precisie van de datum (dag|maand|jaar|ongeveer_jaar|decennium|null), het aantal
