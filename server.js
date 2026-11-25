@@ -23637,6 +23637,7 @@ const mailVoorwerk = (function () {
       poort: function (stuk) { return require(path.join(__dirname, 'intake', 'patientpoort.js')).beoordeel(stuk); },
       claude: harvesterClaude,
       stem: function () { const s = String(VV().lees(path.join(VAULT, '.claude', 'skills', 'mijn-mailstem', 'SKILL.md'), 'utf8') || ''); const i = s.indexOf('# Mijn mailstem'); return i >= 0 ? s.slice(i) : ''; },
+      correcties: function () { return String(VV().lees(path.join(VAULT, '00_Systeem', 'Mailstem - correcties van David.md'), 'utf8', { max: 262144 }) || ''); },   // nr 318, wv4095: alleen de prompt, niet de poort
       concept: function (body) { return potVzConcept(body); },
       register: function (regel) { return potVzRegister(regel); },
       versie: mailVoorwerkVersie, verwerkers: mailVoorwerkVerwerkers,

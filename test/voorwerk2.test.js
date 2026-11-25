@@ -207,7 +207,8 @@ function kamer(o) {
       const stukken = stukkenVan([DOSSIER]);
       return { ok: true, data: o.stap3 || stap3('Hoi,\n\nPetra werkt dinsdag en donderdag; haar IBAN is ' + IBAN + '.\n\nGroet, David'), verbruik: { kosten: o.kosten != null ? o.kosten : 0.5 }, stukken, log: [{ id: 'S1', soort: 'dossier', ref: DOSSIER.label }] };
     },
-    stem: function () { return '# Mijn mailstem\nKort.'; },
+    stem: function () { return o.stem || '# Mijn mailstem\nKort.'; },
+    correcties: function () { return o.correcties || ''; },
     concept: async function (body) { st.concept.push(body); return { status: 200, j: { ok: true, concept_id: 'r-1', thread_id: body.thread_id } }; },
     register: function () {}
   };
@@ -266,6 +267,22 @@ test('v2 gmail(): de definitieve (aangepaste) tekst opnieuw door de poort — BS
   assert.equal(k2.vw.toon('aa11bb22cc33dd44').j.voorwerk.toets.dicht, true);
   g = await k2.vw.gmail({ draad: 'aa11bb22cc33dd44' });
   assert.equal(g.status, 409); assert.ok(g.j.gevoelig.some(function (x) { return x.reden === 'geen_verwerker'; }));
+});
+test('wv4095: Davids correcties gaan mee in stap 1 en 2, maar maken geen waarde "bekend" voor de poort (Socev schrijft dat bestand)', async () => {
+  const corr = '# Mailstem\n\n## Correcties\n\n- 2026-11-25 — Aan het loket: altijd vanaf 5 januari 2027 noemen.\n';
+  const tekst = 'Hoi,\n\nPetra werkt dinsdag en donderdag, vanaf 5 januari 2027.\n\nGroet, David';
+  const k = kamer({ correcties: corr, stap3: stap3(tekst) });
+  await k.vw.tik();
+  assert.match(k.st.systeem2, /CORRECTIES VAN DAVID OP ZIJN MAILSTEM[\s\S]*altijd vanaf 5 januari 2027/, 'stap 2 ziet de correctie');
+  const vw = k.vw.toon('aa11bb22cc33dd44').j.voorwerk;
+  assert.ok(vw.toets.niet_onderbouwd.some(function (x) { return x.soort === 'datum'; }), 'ook de keuring na stap 2 kent de correctie niet als bron');
+  const g = await k.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst });
+  assert.equal(g.status, 409); assert.equal(g.j.toch_vragen, true, 'een waarde uit het correctiebestand blijft niet onderbouwd');
+  // kruisproef: stond dezelfde waarde in de schrijfgids (claude-bestand), dan was hij wel bekend
+  const k2 = kamer({ stem: '# Mijn mailstem\nKort. Altijd vanaf 5 januari 2027 noemen.', stap3: stap3(tekst) });
+  await k2.vw.tik();
+  assert.equal(k2.vw.toon('aa11bb22cc33dd44').j.voorwerk.toets.niet_onderbouwd.filter(function (x) { return x.soort === 'datum'; }).length, 0);
+  assert.equal((await k2.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst })).status, 200);
 });
 test('v2 gmail(): niet-onderbouwde gewone waarde vraagt één extra tik (toch), geen poortweigering', async () => {
   const k = kamer();

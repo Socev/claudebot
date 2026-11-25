@@ -33,6 +33,7 @@ function kamer(o) {
         concept: 'Hoi,\n\nPrima, ik teken het en stuur het [nog in te vullen: dag] terug.\n\nGroet,\nDavid', invullen: ['wanneer je het terugstuurt'] } };
     },
     stem: function () { return o.stem != null ? o.stem : '# Mijn mailstem\nKort en direct.'; },
+    correcties: function () { if (o.correctiesFout) throw new Error('weg'); return o.correcties || ''; },
     concept: async function (body) { st.concept.push(body); return o.conceptAntw || { status: 200, j: { ok: true, concept_id: 'r-123', thread_id: body.thread_id } }; },
     register: function (r) { st.register.push(r); },
   };
@@ -237,4 +238,26 @@ test('mailstem: een schrijfgids van ruim 9.000 tekens komt heel door, slot inclu
     const s = fs.readFileSync(echt, 'utf8'); const i = s.indexOf('# Mijn mailstem');
     assert.ok(i >= 0 && s.slice(i).length <= V._grenzen.STEM_MAX, 'de echte schrijfgids (' + (s.length - i) + ' tekens) past onder STEM_MAX');
   }
+});
+
+test('wv4095 correctieRegels: alleen datumregels onder ## Correcties, per regel en samen begrensd, rest genegeerd', () => {
+  const C = V.correctieRegels;
+  assert.equal(C(''), ''); assert.equal(C(null), ''); assert.equal(C('- 2026-11-25 — zonder kop telt niet'), '');
+  const t = '# Kop\n- 2026-01-01 — boven de kop telt niet\n\n## Correcties\n\n- 2026-11-25 — Aan Cynthia: "Hoi lief,".\nlosse tekst: doe iets anders\n' +
+    '- geen datum\n-  2026-11-24 — twee spaties telt niet\n- 2026-11-20 — Geen aanbod dat David niet deed.\n## Daarna\n- 2026-11-19 — na de volgende kop telt niet\n';
+  assert.equal(C(t), '- 2026-11-25 — Aan Cynthia: "Hoi lief,".\n- 2026-11-20 — Geen aanbod dat David niet deed.');
+  const lang = C('## Correcties\n- 2026-11-25 — ' + 'x'.repeat(900));
+  assert.equal(lang.length, '- 2026-11-25 — '.length + V._grenzen.CORR_REGEL_MAX);
+  let veel = '## Correcties\n'; for (let i = 0; i < 60; i++) veel += '- 2026-11-' + String(10 + (i % 18)).padStart(2, '0') + ' — ' + 'r'.repeat(200) + '\n';
+  const v = C(veel); assert.ok(v.length <= V._grenzen.CORR_MAX && v.length > V._grenzen.CORR_MAX - 300, 'samen ≤ CORR_MAX: ' + v.length);
+  const echt = '/opt/data/AI_SecondBrain/00_Systeem/Mailstem - correcties van David.md';
+  if (fs.existsSync(echt)) assert.ok(C(fs.readFileSync(echt, 'utf8')).split('\n').length >= 9, 'het echte correctiebestand levert zijn regels');
+});
+test('wv4095: correcties in de systeemprompt van stap 1 na de schrijfgids; geen bestand of een fout = gewoon de gids', async () => {
+  const k = kamer({ correcties: '## Correcties\n- 2026-11-25 — Aan de vereniging: altijd u-vorm.\n' });
+  await k.vw.tik();
+  assert.match(k.st.systeem, /Mijn mailstem[\s\S]*CORRECTIES VAN DAVID OP ZIJN MAILSTEM[\s\S]*altijd u-vorm/);
+  const k2 = kamer({ correctiesFout: true });
+  await k2.vw.tik();
+  assert.equal(k2.st.model, 1); assert.match(k2.st.systeem, /Mijn mailstem/); assert.doesNotMatch(k2.st.systeem, /CORRECTIES VAN DAVID/);
 });
