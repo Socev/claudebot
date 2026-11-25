@@ -23020,7 +23020,8 @@ function intakeRouterHaal() {
       live: function () { const j = intakeRouterStand(); return j && j.live && typeof j.live === 'object' ? j.live : {}; },
       lenzenLive: function () { const j = intakeRouterStand(); return j && Array.isArray(j.lenzen_live) ? j.lenzen_live : null; },
       // wv3683: het sorteermodel leert van Davids keuzes (indeling_leren true) en plaatst alleen vanzelf bij de zekerheden in indeling_auto (standaard hoog)
-      indelingLeren: function () { const j = intakeRouterStand(); return { aan: !!(j && j.indeling_leren === true), auto: j && Array.isArray(j.indeling_auto) ? j.indeling_auto : null }; },
+      indelingLeren: function () { const j = intakeRouterStand(); return { aan: !!(j && j.indeling_leren === true), auto: j && Array.isArray(j.indeling_auto) ? j.indeling_auto : null,
+        postvak: !!(j && j.postvak_terugval === true), nakijken: !!(j && j.nakijken === true) }; },   // wv4094 (3C19, 3C101)
       // wv2336: patiëntcontrole in Intake — 'schaduw' (wegen en loggen, vasthouden zoals voorheen) of 'door' (zacht gaat door met label, hard stil buiten)
       // wv2336: privékring voor de privégrens (schaduw); podbestand 0600 gebouwd door mk-scripts/wv2336/maak-prive-kring.py; mtime-cache
       priveKring: function () { const f = path.join(INTAKE_DIR, 'prive-kring.json'); try { const st = fs.statSync(f); if (!intakePriveKring || intakePriveKring.m !== st.mtimeMs) intakePriveKring = { m: st.mtimeMs, j: JSON.parse(fs.readFileSync(f, 'utf8')) }; return intakePriveKring.j; } catch (e) { return null; } },

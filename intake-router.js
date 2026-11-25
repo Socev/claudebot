@@ -896,7 +896,7 @@ function herbereken(sam, m, regels) {
  */
 function bestemmingenLive(s, afz, ent, x, lenzen) {
   const std = bestemmingen(s, afz, ent, { velden: x.velden, label_entiteit: null });
-  const autoKennis = afz.kracht === 'hoog' || ent.kracht === 'hoog' || ent.bewijs === 'model';
+  const autoKennis = afz.kracht === 'hoog' || ent.kracht === 'hoog' || ent.bewijs === 'model' || ent.bewijs === 'postvak';   // wv4094: postvak-terugval (3C19)
   const live = [], schaduw = [];
   for (const b of std) {
     if (lenzen.indexOf(b.lens) < 0) { schaduw.push(b); continue; }
@@ -916,6 +916,7 @@ function bestemmingenLive(s, afz, ent, x, lenzen) {
  * het gewoon. Een eigen keuze van David in de app (appKeuze) blijft mogelijk.
  */
 const EIGEN_VERZONDEN_LENZEN = ['facturen', 'keten', 'deadlines'];
+const NAKIJK_REDENEN = ['entiteit_niet_zeker', 'geen_entiteit'];   // wv4094 (3C101): alleen deze twijfel van de kennislens mag eerst plaatsen, daarna nakijken
 // wv2660: bij een webpagina gaat elke andere lens dan WEB_LENZEN naar de schaduw (reden 'webpagina'); blijft er niets over, dan de kennislens
 // zonder automatisch (David kiest de plek). schaduw wordt aangevuld (zelfde array).
 function webLenzen(s, bs, schaduw) {
@@ -1299,7 +1300,8 @@ function maak(o) {
   function leerStand() { let j = null; try { j = o.indelingLeren ? o.indelingLeren() : null; } catch (e) { j = null; }
     const aan = !!(j && j.aan === true);
     const auto = j && Array.isArray(j.auto) ? j.auto.filter(function (z) { return ZEKERHEDEN.indexOf(z) >= 0; }) : ['hoog'];
-    return { aan: aan, auto: auto }; }
+    // wv4094 (3C19 / 3C101): praktijkpost-terugval en "eerst plaatsen, daarna nakijken" (router.json postvak_terugval, nakijken; standaard uit)
+    return { aan: aan, auto: auto, postvak: !!(j && j.postvak === true), nakijken: !!(j && j.nakijken === true) }; }
   // Davids laatste plek-keuzes als voorbeeld (alleen keuzes met leren_mag, de laatste keuze per stuk, vóór nu, niet dit stuk zelf, niet een stuk
   // dat zich tot een AI richtte); eerst die van hetzelfde afzenderadres. Regel = postvak | afzenderadres | onderwerp (≤ 90) → plek.
   function leerVoorbeelden(s, van) {
@@ -1314,7 +1316,7 @@ function maak(o) {
       if (gezien.has(r.stuk_id)) continue;
       gezien.add(r.stuk_id);
       const w = safeJson(r.wat) || {};
-      if (w.keuze !== 'bestemming') continue;
+      if (w.keuze !== 'bestemming' && w.keuze !== 'klopt') continue;   // wv4094: Klopt op Even nakijken telt als Davids keuze
       let plek = null;
       if (w.lens === 'geen') plek = NIET_BEWAREN;
       else if (w.lens !== 'systeem') { const h = INDELING.find(function (y) { return y[1] === w.entiteit; }); plek = h ? h[0] : null; }
@@ -1644,6 +1646,9 @@ function maak(o) {
           const jevStop = live && (jv.boven || !jv.gemeten);   // boven de drempel of geen uitslag na 24 u: geen regel, geen model, twijfel
           const rg = jevStop ? null : regelZoek(regelsActief(), mk);
           let bs, schaduwLenzen = [];
+          const stand = leerStand();   // wv4094: postvak-terugval en nakijken
+          let vnUit = null, zouPrive = false, nakijk = false;
+          const priveVroeg = function () { try { const kr = o.priveKring ? o.priveKring() : null; return !!(kr && priveGrens({ kring: kr, tekst, soorten: eigen ? eigen.soorten : [] }).zou_prive); } catch (e) { return true; } };
           const eigenVerz = s.profiel === 'mail@1' && eigenVerzonden(meta, eigenAdr);
           if (!live) { bs = rg ? regelBestemmingen(rg, en, { velden: vd.velden }) : bestemmingen(so, af, en, { velden: vd.velden, label_entiteit: labels[0] || null });
             if (eigenVerz) {   // review ZOU 1: ook in de schaduw zichtbaar waarom
@@ -1663,6 +1668,14 @@ function maak(o) {
               B('vangnet', vn.knoop || 'onbekend', vn.knoop ? 'redelijk' : null, { categorie: vn.categorie || null, reden: vn.reden || null, eerder: { knoop: en.knoop || null, kracht: en.kracht },
                 zekerheid: vn.zekerheid || undefined, zin: vn.zin || undefined, vermoeden: vn.vermoeden || undefined, niet_bewaren: vn.niet_bewaren || undefined, leren: vn.leren, voorbeelden: vn.voorbeelden });   // wv3683
               if (vn.knoop) { en.knoop = vn.knoop; en.kracht = 'redelijk'; en.bewijs = 'model'; }
+              // wv4094 (besluitenpagina nr 319 / 3C19, David Ja 25-11 21:50): zegt het model na het postvak en Davids keuzes nog "Onbekend" en kwam
+              // het stuk binnen in het postvak van een praktijk, dan gaat het naar die praktijk. HAGRO- en POT-post kiest het model dus eerst; niet bij
+              // een model dat niet antwoordde, "niet bewaren" of een ander vermoeden (dat blijft een vraag of, met nakijken, een eigen afweging)
+              // review MOET 1: nooit over een privé-signaal heen (entiteit of routelabel Privé, of de privégrens zag gezin + gezondheid)
+              else if (stand.postvak && vn.reden === 'onbekend' && POSTVAK_KNOOP[s.bron] && KENNIS_MAP[POSTVAK_KNOOP[s.bron]] && en.knoop !== 'PRIVE' && labels.indexOf('PRIVE') < 0 && !priveVroeg()) {
+                en.knoop = POSTVAK_KNOOP[s.bron]; en.kracht = 'redelijk'; en.bewijs = 'postvak'; B('postvak_terugval', en.knoop, null, { bron: s.bron });
+              }
+              vnUit = vn;
             }
             if (rg) { bs = regelBestemmingen(rg, en, { velden: vd.velden }).filter(function (b) { if ((lenzenLive().indexOf(b.lens) >= 0 && !(b.lens === 'facturen' && !heeftDoc)) || b.lens === 'vragen') return true; schaduwLenzen.push(b); return false; });
               if (!bs.length) bs = [{ lens: 'kennis', doel: en.knoop || null, zou_auto: false, reden: 'regel_lens_nog_niet_live', regel: 'R' + rg.id + '@' + rg.versie }]; }
@@ -1672,7 +1685,7 @@ function maak(o) {
               if (weg.length) {
                 bs = bs.filter(function (b) { return EIGEN_VERZONDEN_LENZEN.indexOf(b.lens) < 0; });
                 schaduwLenzen = schaduwLenzen.concat(weg.map(function (b) { return Object.assign({}, b, { zou_auto: false, reden: 'eigen_verzonden' }); }));
-                const autoK = af.kracht === 'hoog' || en.kracht === 'hoog' || en.bewijs === 'model';
+                const autoK = af.kracht === 'hoog' || en.kracht === 'hoog' || en.bewijs === 'model' || en.bewijs === 'postvak';
                 if (!bs.some(function (b) { return b.lens === 'kennis'; }) && lenzenLive().indexOf('kennis') >= 0)
                   bs.push({ lens: 'kennis', doel: en.knoop || null, zou_auto: autoK && !!en.knoop, reden: autoK && en.knoop ? null : (en.knoop ? 'entiteit_niet_zeker' : 'geen_entiteit') });
               }
@@ -1689,12 +1702,41 @@ function maak(o) {
             if (kr) {
               const pg = priveGrens({ kring: kr, tekst, soorten: eigen ? eigen.soorten : [] });
               if (pg.zou_prive) {
+                zouPrive = true;
                 const doel = (bs.find(function (b) { return b.lens === 'kennis'; }) || bs[0] || {}).doel || en.knoop || null;
                 priveSchaduw = doel === 'PRIVE' ? 'prive' : (doel ? 'zakelijk' : 'onbekend');
                 B('prive_grens', 'zou_prive', null, { stand: 'schaduw', vol: pg.vol, voornaam: pg.voornaam, echt: priveSchaduw, automatisch: !bs.some(function (b) { return !b.zou_auto; }) });
               }
             }
           } catch (e) { if (o.fout) o.fout('intake-router-privegrens', e); }
+          // wv4094 (besluitenpagina nr 401 / 3C101, David Ja 25-11 21:51): eerst plaatsen, daarna "Even nakijken". Staat alleen de kennislens op
+          // twijfel omdat de plek niet zeker is, en heeft Intake één voorstel (de entiteit, anders het vermoeden van het model), dan plaatst de router
+          // het meteen en zet het stuk op de nakijklijst (Klopt / Verplaats; een week niet aangeraakt = goed). Vooraf vragen blijft bij: geen idee,
+          // twee verschillende voorstellen, privé/zakelijk (Privé in een signaal of de privégrens), geld, de AI-tekstcontrole (jevStop), een regel
+          // van David, of "niet bewaren" van het model. Mogelijk medisch telt hier niet (David: nooit filteren).
+          if (live && stand.nakijken && en.bewijs === 'postvak') nakijk = true;
+          if (live && stand.nakijken && !rg && !jevStop) {
+            const tw = bs.filter(function (b) { return !b.zou_auto; });
+            const kb = tw.length === 1 && tw[0].lens === 'kennis' && NAKIJK_REDENEN.indexOf(tw[0].reden) >= 0 ? tw[0] : null;
+            if (kb) {
+              const verm = vnUit && vnUit.vermoeden && KENNIS_MAP[vnUit.vermoeden] ? vnUit.vermoeden : null;
+              const doel = kb.doel && KENNIS_MAP[kb.doel] ? kb.doel : null;
+              let waarom = null;
+              if (vnUit && vnUit.niet_bewaren) waarom = 'niet_bewaren';
+              else if (kb.doel && !doel) waarom = 'zonder_map';
+              else if (doel && verm && doel !== verm) waarom = 'twee_voorstellen';
+              const voorstel = waarom ? null : (doel || verm);
+              if (!waarom && !voorstel) waarom = 'geen_voorstel';
+              if (!waarom && (zouPrive || [voorstel, kb.doel, verm].concat(labels).indexOf('PRIVE') >= 0)) waarom = 'prive_zakelijk';
+              if (!waarom && (geldIn(tekst) || so.soort === 'bewijsstuk' || so.soort === 'keten' || bs.concat(schaduwLenzen).some(function (b) { return EIGEN_VERZONDEN_LENZEN.indexOf(b.lens) >= 0; }))) waarom = 'geld';
+              if (waarom) B('nakijken', 'vragen', null, { waarom });
+              else {
+                bs = bs.map(function (b) { return b === kb ? Object.assign({}, b, { doel: voorstel, zou_auto: true, reden: null, nakijken: kb.reden }) : b; });
+                en.knoop = voorstel; en.bewijs = 'nakijken'; nakijk = true;
+                B('nakijken', voorstel, null, { was: kb.reden, voorstel_uit: doel ? 'entiteit' : 'model' });
+              }
+            }
+          }
           // wv2684: mag de keten-lens ook bij twijfel lopen? Alleen als de schuldeiser zakelijk herleidbaar is (herkende afzender, of een
           // niet-consumentendomein van de (oorspronkelijke) afzender)
           let ketenZakelijk = false;
@@ -1719,6 +1761,7 @@ function maak(o) {
             entiteit: en.knoop || null, entiteit_kracht: en.kracht, label_route: labels, bestemmingen: bs, twijfel, regel: rg ? 'R' + rg.id + '@' + rg.versie : null, velden: vd.velden.map(function (v) { return v.veld; }), kenmerken: vd.kenmerken, geld: geldIn(tekst) };
           if (live) { sam.live = true; sam.entiteit_bewijs = en.bewijs || (rg ? 'regel' : 'regels'); sam.jev = jv.gemeten ? (jv.boven ? 'boven' : 'onder') : 'geen_uitslag'; if (jv.overgeslagen) sam.jev_overgeslagen = jv.overgeslagen; if (schaduwLenzen.length) sam.schaduw_lenzen = schaduwLenzen.map(function (b) { return b.lens; }); if (naKeuze || zachtDoor) sam.na_keuze = true; if (zachtDoor || (naKeuze && marker !== 'geen')) sam.mogelijk_medisch = true; if (zachtDoor) sam.weging = weging && weging.hard ? 'hard' : 'zacht'; }
           sam.label_gelijk = labels.length ? labels.indexOf(en.knoop) >= 0 : null;
+          if (nakijk) sam.nakijken = true;   // wv4094: op de nakijklijst (Even nakijken)
           if (priveSchaduw) sam.prive_schaduw = priveSchaduw;   // wv2336: de privégrens zou dit stuk bij Privé zetten; echte uitkomst prive/zakelijk/onbekend
           bestem = bs;
           if (o.pdfSchaduw && !lt.deels.length && !lt.onleesbaar.length && !naKeuze && !zachtDoor) {   // review wv2336 ZOU 4: geen model op een (zacht) vrijgegeven stuk
@@ -2437,6 +2480,19 @@ function maak(o) {
       if (keuze === 'bestemming' && String(d.lens || '') === 'systeem') return { status: 409, j: { ok: false, fout: 'een vastgehouden stuk kies je eerst "gewoon verwerken"; daarna kan het naar Systeem' } };
       return { status: 400, j: { ok: false, fout: 'kies verwerken, bewaren of weggooien' } };
     }
+    // wv4094 (3C101): Klopt op een stuk dat Intake eerst plaatste (Even nakijken). Telt als Davids keuze (leren_mag 1: voorbeeld voor het model)
+    // en haalt het stuk van de nakijklijst; de plek verandert niet. Verplaats = de gewone bestemmingskeuze hieronder.
+    if (keuze === 'klopt') {
+      if (!sam.nakijken || (ls.staat !== 'automatisch' && ls.staat !== 'klaar')) return { status: 409, j: { ok: false, fout: 'dit stuk staat niet (meer) op Even nakijken; ververs' } };
+      if (ls.keuze_door && ls.keuze_door !== 'router') return { status: 200, j: { ok: true, uitkomst: 'al_zo' } };
+      const pl = plekNu(ls, sam);
+      if (!pl || !pl.lens) return { status: 409, j: { ok: false, fout: 'Intake weet niet waar dit stuk nu staat; kies Verplaats' } };
+      tx(function () {
+        correctie({ keuze: 'klopt', lens: pl.lens, entiteit: pl.entiteit || null, was: { staat: ls.staat, lens: (sam.bestemmingen || []).map(function (b) { return b.lens; }), entiteit: sam.entiteit || null, bewijs: ls.bewijs || sam.entiteit_bewijs || null } }, true);
+        db.prepare('UPDATE live_stuk SET keuze = ?, keuze_op = ?, keuze_door = ? WHERE stuk_id = ?').run(pl.lens + ':' + (pl.entiteit || ''), iso(), door || 'david', id);
+      });
+      return { status: 200, j: { ok: true, uitkomst: 'klopt' } };
+    }
     if (keuze !== 'bestemming') return { status: 400, j: { ok: false, fout: 'kies een bestemming' } };
     if (ls.staat === 'bewaard' || ls.staat === 'weg') return { status: 409, j: { ok: false, fout: 'dit stuk is al ' + (ls.staat === 'weg' ? 'weggegooid' : 'alleen bewaard') } };
     const lens = String(d.lens || '');
@@ -2679,7 +2735,7 @@ function maak(o) {
     const stand = { datum, twijfel: w.twijfel.length, marker: w.vastgehouden.length };
     if (kaartStand && kaartStand.datum === stand.datum && kaartStand.twijfel === stand.twijfel && kaartStand.marker === stand.marker) return { zelfde: true };
     const open = await o.kaartOpen();   // [{ sleutel, status }] van de intake-kaarten
-    const kaarten = kaartenVoorDag({ datum, twijfel: stand.twijfel, marker: stand.marker, focus_twijfel: w.twijfel[0] ? w.twijfel[0].stuk_id : null, focus_marker: w.vastgehouden[0] ? w.vastgehouden[0].stuk_id : null });
+    const kaarten = kaartenVoorDag({ datum, twijfel: stand.twijfel, marker: stand.marker, nakijken: leerStand().nakijken, focus_twijfel: w.twijfel[0] ? w.twijfel[0].stuk_id : null, focus_marker: w.vastgehouden[0] ? w.vastgehouden[0].stuk_id : null });
     const gezet = await zetKaarten(kaarten, { kaartZet: o.kaartZet, kaartStatus: o.kaartStatus, open: open.filter(function (k) { return k.status === 'open'; }).map(function (k) { return k.sleutel; }) });
     // niets meer van die soort: open kaarten van die soort dicht (gedaan)
     for (const k of open) {
@@ -3049,6 +3105,29 @@ function maak(o) {
       binnen: db.prepare("SELECT count(*) n FROM router_stuk r JOIN stuk s ON s.stuk_id = r.stuk_id AND s.versie = r.versie WHERE r.status <> 'buiten_router' AND r.op >= ? AND s.bron NOT LIKE 'gmail:%'").get(nuIso(nu() - 2 * DAG)).n,
       verwerkt: db.prepare("SELECT count(*) n FROM live_stuk WHERE staat IN ('automatisch','klaar','bewaard','weg') AND sinds >= ? AND bron NOT LIKE 'gmail:%'").get(nuIso(nu() - 7 * DAG)).n };
   }
+  /*
+   * EVEN NAKIJKEN (wv4094, 3C101): wat Intake de laatste NAKIJK_DAGEN zelf plaatste op een voorstel dat niet zeker was (samenvatting nakijken), nog
+   * zonder keuze van David. Zelfde vorm en privacygrens als de Geschiedenis (stukVoorApp + plek + kan). Een week niet aangeraakt = goed: het valt van
+   * de lijst (geen kaart, geen herinnering). Nieuwste eerst, hooguit NAKIJK_MAX.
+   */
+  const NAKIJK_DAGEN = 7, NAKIJK_MAX = 100;
+  function nakijkLijst(r, ctx) {
+    const rijen = db.prepare("SELECT r.stuk_id, r.versie, r.status, r.op, r.samenvatting FROM live_stuk l JOIN router_stuk r ON r.stuk_id = l.stuk_id AND r.versie = l.versie " +
+      "WHERE l.staat IN ('automatisch','klaar') AND (l.keuze_door IS NULL OR l.keuze_door = 'router') AND r.status = 'beoordeeld' AND r.op >= ? " +
+      "AND json_extract(r.samenvatting, '$.nakijken') = 1 ORDER BY r.op DESC, r.stuk_id DESC LIMIT ?").all(nuIso(nu() - NAKIJK_DAGEN * DAG), NAKIJK_MAX);
+    return rijen.map(function (row) {
+      const s = stukVoorApp(row, r, null, ctx);
+      const ls = db.prepare('SELECT * FROM live_stuk WHERE stuk_id = ?').get(row.stuk_id);
+      const inFact = !!db.prepare("SELECT 1 FROM uitvoering WHERE stuk_id = ? AND versie = ? AND lens = 'facturen'").get(row.stuk_id, ls.versie);
+      s.plek = plekNu(ls, safeJson(row.samenvatting) || {});
+      s.beslist = 'vanzelf'; s.beslist_op = ls.sinds;
+      const vn = db.prepare("SELECT bewijs FROM besluit WHERE stuk_id = ? AND versie = ? AND stap = 'vangnet' ORDER BY id DESC LIMIT 1").get(row.stuk_id, ls.versie);
+      const zin = vn ? (safeJson(vn.bewijs) || {}).zin : null;
+      if (typeof zin === 'string' && zin) s.zin = zin.slice(0, 200);   // de ene zin van het model over waar het stuk over gaat
+      s.kan = { klopt: true, verplaats: !inFact, in_facturen: inFact || undefined, toch_bewaren: false, verwijder: false };
+      return s;
+    });
+  }
   async function appOverzicht(n) {
     const r = await regVoorApp();
     const regels = regelsAlle();
@@ -3072,8 +3151,9 @@ function maak(o) {
     const bronnen = db.prepare("SELECT DISTINCT s.bron FROM router_stuk r JOIN stuk s ON s.stuk_id = r.stuk_id WHERE r.status <> 'buiten_router'").all().map(function (x) { return x.bron; }).filter(function (b) { return BRON_RE.test(b); });
     const lv = liveStand();
     const w = wachtOpDavid();
-    return { ok: true, aan: true, schaduw: !Object.keys(lv).some(function (b) { return lv[b] === true; }), regelversie: REGELVERSIE, info: info(), venster_dagen: VENSTER_DAGEN,
-      live: { bronnen: Object.keys(lv).filter(function (b) { return lv[b] === true; }), lenzen: lenzenLive(), wacht_twijfel: w.twijfel.length, wacht_vastgehouden: w.vastgehouden.length,
+    const nakijken = nakijkLijst(r, ctx);
+    return { ok: true, aan: true, nakijken, schaduw: !Object.keys(lv).some(function (b) { return lv[b] === true; }), regelversie: REGELVERSIE, info: info(), venster_dagen: VENSTER_DAGEN,
+      live: { bronnen: Object.keys(lv).filter(function (b) { return lv[b] === true; }), lenzen: lenzenLive(), wacht_twijfel: w.twijfel.length, wacht_vastgehouden: w.vastgehouden.length, nakijken: nakijken.length,
         vanzelf_week: db.prepare("SELECT count(*) n FROM live_stuk WHERE staat IN ('automatisch','klaar') AND keuze IS NULL AND sinds >= ?").get(nuIso(nu() - 7 * DAG)).n,
         verbeteringen: verbeteringen(nuIso(nu() - VENSTER_DAGEN * DAG)), kennis_entiteiten: Object.keys(KENNIS_MAP), bundel_min: BUNDEL_MIN },
       week: telling(nuIso(nu() - 7 * DAG), nuIso(nu() + 60000)), register: !!r,
@@ -3272,8 +3352,10 @@ function kaartenVoorDag(x) {
   const vast = x.marker > 0 ? ' Bij ' + (x.marker === 1 ? 'één stuk' : x.marker + ' stukken') + ' zag de patiëntcontrole iets; je ziet daar het hele stuk.' : '';
   return [{ sleutel: 'intake-wacht-' + x.datum, soort: 'doen', waar: 'overal', prive: true, duur_min: Math.min(30, 1 + n), volgorde: 25,
     titel: 'Intake: ' + (n === 1 ? '1 stuk wacht' : n + ' stukken wachten') + ' op je keuze',
-    waarom: 'Intake wist niet zeker waar ' + (n === 1 ? 'dit stuk' : 'deze stukken') + ' heen moet' + (n === 1 ? '' : 'en') + '. Zonder jouw keuze ' + (n === 1 ? 'blijft het' : 'blijven ze') + ' in Intake staan en ' + (n === 1 ? 'gaat het' : 'gaan ze') + ' nergens heen.' + vast,
-    stappen: ['Open Intake in de Socev-app; wat op je wacht staat bovenaan.', 'Tik per stuk op Klopt, of kies Andere plek.', 'Deze kaart gaat vanzelf dicht als er niets meer wacht.'],
+    // wv4094 (3C101): met nakijken aan plaatst Intake wat het een plek kan geven; vooraf vragen blijft bij geen idee, privé of zakelijk, geld en een tekst aan een AI
+    waarom: (x.nakijken ? 'Hier had Intake geen goed idee, of het gaat om geld, privé of zakelijk, of een tekst die zich tot een AI richt; dan vraagt Intake het eerst.'
+      : 'Intake wist niet zeker waar ' + (n === 1 ? 'dit stuk' : 'deze stukken') + ' heen moet' + (n === 1 ? '' : 'en') + '.') + ' Zonder jouw keuze ' + (n === 1 ? 'blijft het' : 'blijven ze') + ' in Intake staan en ' + (n === 1 ? 'gaat het' : 'gaan ze') + ' nergens heen.' + vast,
+    stappen: ['Open Intake in de Socev-app; wat op je wacht staat bovenaan.', 'Tik per stuk op Klopt, of kies Andere plek.'].concat(x.nakijken ? ['Wat Intake al zelf plaatste staat eronder bij Even nakijken; dat hoeft niet, het telt na een week als goed.'] : []).concat(['Deze kaart gaat vanzelf dicht als er niets meer wacht.']),
     herkomst: { module: 'intake', handmatig: 'intake', doel: { scherm: 'intake', focus: focus ? 'stuk:' + focus : null } } }];
 }
 const KAART_RE = /^intake-(twijfel|marker|wacht)-(\d{4}-\d{2}-\d{2})$/;

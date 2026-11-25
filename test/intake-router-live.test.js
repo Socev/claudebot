@@ -1101,3 +1101,107 @@ test('live: map@1 (wv3962) → entiteit uit de map (hoog, bewijs map), geen vang
   assert.deepEqual(lenzen, ['kennis']);
   E.r.sluit();
 });
+
+// ── wv4094 (3C19 postvak-terugval, 3C101 eerst plaatsen, daarna Even nakijken) ──
+function nkOmgeving(antw, st) {
+  const vragen = [];
+  const E = omgeving({ lenzenLive: () => ['kennis', 'geen'], live: () => ({ 'gmail:david': true, 'outlook:tolgaarde': true }),
+    indelingLeren: () => Object.assign({ aan: true, auto: ['hoog', 'redelijk'] }, st || {}),
+    indeling: async function (x) { vragen.push(x); return Object.assign({ ok: true }, antw.shift()); } });
+  E.vragen = vragen;
+  E.mail = (van, ond, o2) => E.zet({ bron: (o2 && o2.bron) || 'gmail:david', meta: Object.assign({ van, van_naam: 'Proef', onderwerp: ond, aan: ['david@voorbeeld.example'] }, (o2 && o2.meta) || {}),
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(van, ond, (o2 && o2.tekst) || GEWOON) }] });
+  E.ls = (id) => E.db.prepare('SELECT staat, bewijs, keuze, keuze_door FROM live_stuk WHERE stuk_id = ?').get(id);
+  E.sam = (id) => JSON.parse(E.db.prepare('SELECT samenvatting FROM router_stuk WHERE stuk_id = ? ORDER BY versie DESC LIMIT 1').get(id).samenvatting);
+  E.volgende = async () => { E.klok.t += 60000; };
+  return E;
+}
+const ONB = { plek: 'Onbekend', zekerheid: 'laag', zin: 'Onduidelijk stuk.' };
+
+test('wv4094 3C19: postvak-terugval uit = Onbekend in het praktijkpostvak blijft een vraag (gedrag gelijk)', async () => {
+  const E = nkOmgeving([ONB]);
+  const a = E.mail('x@ander.example', 'Een vraag', { bron: 'outlook:tolgaarde' });
+  await E.r.ronde();
+  assert.equal(E.ls(a).staat, 'twijfel'); assert.equal(E.sam(a).nakijken, undefined);
+  E.r.sluit();
+});
+
+test('wv4094 3C19: postvak-terugval aan — Onbekend in het Outlook-praktijkpostvak → Tolgaarde; niet in Davids eigen Gmail, niet bij niet bewaren, ander vermoeden, geen antwoord of privélabel', async () => {
+  const E = nkOmgeving([ONB, ONB, { plek: 'Niet bewaren', zekerheid: 'laag', zin: 'Reclame.' }, { plek: 'HAGRO', zekerheid: 'laag', zin: 'Overleg.' }, ONB], { postvak: true });
+  const a = E.mail('x@ander.example', 'Een', { bron: 'outlook:tolgaarde' });
+  await E.r.ronde();
+  assert.equal(E.ls(a).staat, 'klaar'); assert.equal(E.ls(a).bewijs, 'postvak'); assert.equal(E.sam(a).entiteit, 'TG'); assert.equal(E.sam(a).nakijken, undefined);   // nakijken uit
+  assert.ok(E.bestanden().some((f) => f.startsWith('10_Zakelijk/Tolgaarde/raw_input/')));
+  await E.volgende(); const b = E.mail('y@ander.example', 'Twee');   // gmail:david = geen praktijkpostvak
+  await E.r.ronde(); assert.equal(E.ls(b).staat, 'twijfel');
+  await E.volgende(); const c = E.mail('z@ander.example', 'Drie', { bron: 'outlook:tolgaarde' });
+  await E.r.ronde(); assert.equal(E.ls(c).staat, 'twijfel');   // niet bewaren blijft een voorstel
+  await E.volgende(); const d = E.mail('w@ander.example', 'Vier', { bron: 'outlook:tolgaarde' });
+  await E.r.ronde(); assert.equal(E.ls(d).staat, 'twijfel');   // het model denkt HAGRO: niet over het model heen
+  await E.volgende(); const e = E.mail('v@ander.example', 'Vijf', { bron: 'outlook:tolgaarde', meta: { entiteit: ['prive'] } });
+  await E.r.ronde(); assert.equal(E.ls(e).staat, 'twijfel');   // review MOET 1: privélabel → geen terugval
+  E.r.sluit();
+});
+
+test('wv4094 3C101: nakijken aan — één voorstel landt meteen, staat op Even nakijken; Klopt telt als keuze (voorbeeld), haalt hem van de lijst; dubbel = al_zo', async () => {
+  const E = nkOmgeving([{ plek: 'Huisartsenpraktijk Groenhouten (voorheen HAP Leusden)', zekerheid: 'laag', zin: 'Uitnodiging voor een overleg.' }, { plek: 'Onbekend', zekerheid: 'laag', zin: 'x' }], { nakijken: true });
+  const a = E.mail('anne@ander.example', 'Overleg roosters');
+  await E.r.ronde();
+  assert.equal(E.ls(a).staat, 'klaar'); assert.equal(E.ls(a).bewijs, 'nakijken'); assert.equal(E.sam(a).nakijken, true); assert.equal(E.sam(a).entiteit, 'GH');
+  assert.ok(E.bestanden().some((f) => f.startsWith('10_Zakelijk/Groenhouten/raw_input/')));
+  const nb = JSON.parse(E.db.prepare("SELECT bewijs FROM besluit WHERE stuk_id = ? AND stap = 'nakijken'").get(a).bewijs);
+  assert.equal(nb.was, 'geen_entiteit'); assert.equal(nb.voorstel_uit, 'model');
+  let ov = await E.r.appOverzicht(50);
+  assert.equal(ov.nakijken.length, 1); assert.equal(ov.nakijken[0].stuk_id, a); assert.deepEqual(ov.nakijken[0].plek, { lens: 'kennis', entiteit: 'GH', zeker: true });
+  assert.equal(ov.nakijken[0].zin, 'Uitnodiging voor een overleg.'); assert.equal(ov.nakijken[0].kan.klopt, true); assert.equal(ov.live.nakijken, 1); assert.equal(ov.live.wacht_twijfel, 0);
+  let k = await E.r.appKeuze({ stuk_id: a, keuze: 'klopt' }, 'app:proef');
+  assert.equal(k.status, 200); assert.equal(k.j.uitkomst, 'klopt');
+  assert.equal(E.ls(a).keuze, 'kennis:GH'); assert.equal(E.ls(a).staat, 'klaar');
+  k = await E.r.appKeuze({ stuk_id: a, keuze: 'klopt' }, 'app:proef'); assert.equal(k.j.uitkomst, 'al_zo');
+  assert.equal(E.db.prepare("SELECT count(*) n FROM correctie WHERE stuk_id = ? AND json_extract(wat, '$.keuze') = 'klopt' AND leren_mag = 1").get(a).n, 1);
+  ov = await E.r.appOverzicht(50); assert.equal(ov.nakijken.length, 0);
+  await E.volgende(); E.mail('anne@ander.example', 'Overleg roosters 2'); await E.r.ronde();
+  assert.deepEqual(E.vragen[1].voorbeelden, ['gmail:david | anne@ander.example | "Overleg roosters" → Huisartsenpraktijk Groenhouten (voorheen HAP Leusden)']);
+  E.r.sluit();
+});
+
+test('wv4094 3C101: vooraf vragen blijft bij geen idee, privé, geld, niet bewaren en twee voorstellen; Klopt op een gewone vraag weigert', async () => {
+  const E = nkOmgeving([ONB, { plek: 'Privé', zekerheid: 'laag', zin: 'z' }, { plek: 'HAGRO', zekerheid: 'laag', zin: 'z' }, { plek: 'Niet bewaren', zekerheid: 'laag', zin: 'z' }, { plek: 'HAGRO', zekerheid: 'laag', zin: 'z' }], { nakijken: true });
+  const a = E.mail('a@ander.example', 'Een'); await E.r.ronde();
+  assert.equal(E.ls(a).staat, 'twijfel');
+  assert.equal(JSON.parse(E.db.prepare("SELECT bewijs FROM besluit WHERE stuk_id = ? AND stap = 'nakijken'").get(a).bewijs).waarom, 'geen_voorstel');
+  await E.volgende(); const b = E.mail('b@ander.example', 'Twee'); await E.r.ronde(); assert.equal(E.ls(b).staat, 'twijfel');   // privé
+  await E.volgende(); const c = E.mail('c@ander.example', 'Drie', { tekst: 'Beste David, de nota voor het overleg is € 125,00 (verzonnen). Groet, Anne.' }); await E.r.ronde();
+  assert.equal(E.ls(c).staat, 'twijfel');   // geld
+  const wy = (id) => JSON.parse(E.db.prepare("SELECT bewijs FROM besluit WHERE stuk_id = ? AND stap = 'nakijken'").get(id).bewijs).waarom;
+  assert.equal(wy(b), 'prive_zakelijk'); assert.equal(wy(c), 'geld');
+  await E.volgende(); const d = E.mail('d@ander.example', 'Vier'); await E.r.ronde(); assert.equal(E.ls(d).staat, 'twijfel'); assert.equal(wy(d), 'niet_bewaren');
+  await E.volgende(); const e = E.mail('e@ander.example', 'Vijf', { bron: 'outlook:tolgaarde' }); await E.r.ronde();
+  assert.equal(E.ls(e).staat, 'twijfel');   // postvak zegt Tolgaarde, model denkt HAGRO: vragen
+  assert.equal(JSON.parse(E.db.prepare("SELECT bewijs FROM besluit WHERE stuk_id = ? AND stap = 'nakijken'").get(e).bewijs).waarom, 'twee_voorstellen');
+  const k = await E.r.appKeuze({ stuk_id: a, keuze: 'klopt' }, 'app:proef'); assert.equal(k.status, 409);
+  const ov = await E.r.appOverzicht(50); assert.equal(ov.nakijken.length, 0); assert.equal(ov.live.wacht_twijfel, 5);
+  E.r.sluit();
+});
+
+test('wv4094: postvak-terugval met nakijken staat op de lijst; Verplaats haalt hem eraf; na een week valt hij er vanzelf af', async () => {
+  const E = nkOmgeving([ONB, ONB], { postvak: true, nakijken: true });
+  const a = E.mail('x@ander.example', 'Een', { bron: 'outlook:tolgaarde' }); await E.r.ronde();
+  assert.equal(E.ls(a).bewijs, 'postvak'); assert.equal(E.sam(a).nakijken, true);
+  await E.volgende(); const b = E.mail('y@ander.example', 'Twee', { bron: 'outlook:tolgaarde' }); await E.r.ronde();
+  let ov = await E.r.appOverzicht(50); assert.equal(ov.nakijken.length, 2);
+  const k = await E.r.appKeuze({ stuk_id: a, keuze: 'bestemming', lens: 'kennis', entiteit: 'GH' }, 'app:proef');
+  assert.equal(k.status, 200);
+  assert.ok(E.bestanden().some((f) => f.startsWith('10_Zakelijk/Groenhouten/raw_input/')));
+  ov = await E.r.appOverzicht(50); assert.deepEqual(ov.nakijken.map((x) => x.stuk_id), [b]);
+  E.klok.t += 8 * 864e5;
+  ov = await E.r.appOverzicht(50); assert.equal(ov.nakijken.length, 0);
+  E.r.sluit();
+});
+
+test('wv4094: dagkaart met nakijken noemt waarom Intake nog vraagt en Even nakijken; zonder nakijken gelijk', () => {
+  const [k1] = R.kaartenVoorDag({ datum: '2026-11-25', twijfel: 2, marker: 0 });
+  assert.match(k1.waarom, /^Intake wist niet zeker waar deze stukken heen moeten\./); assert.equal(k1.stappen.length, 3);
+  const [k2] = R.kaartenVoorDag({ datum: '2026-11-25', twijfel: 2, marker: 0, nakijken: true });
+  assert.match(k2.waarom, /geld, privé of zakelijk/); assert.ok(k2.stappen.some((s) => /Even nakijken/.test(s)));
+});
