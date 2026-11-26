@@ -242,6 +242,21 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('7m shopper.js: alleen SELECT op facturen, readOnly + query_only, geen gedeelde handle', !/\b(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|ATTACH)\b/.test(bron) && /readOnly: true/.test(bron) && /query_only = ON/.test(bron) && !/facturenOpen/.test(bron));
     const srv = fs.readFileSync('server.js', 'utf8');
     toets('7n server.js geeft shopper alleen een pad (primaire kant), geen facturenOpen()', /maak\(\{ vault: VAULT, vv: VV\(\), facturenPad: facturenPad, lezer: lezer, todoistTaak: todoistTaak,/.test(srv) && !/facturenOpen/.test(srv.slice(srv.indexOf('const shopper = (function'), srv.indexOf('function shopperInfo'))) && /facturenMagOpenen\(\) \? path\.join\(FACTUREN_DIR, 'facturen\.sqlite'\) : null/.test(srv));
+
+    // wv4171 (2C96 g): bedrag uit de factuur — alleen bij gekocht zonder bedrag, alleen het bedrag van een passende factuur, nooit uit de vraag
+    const mB = S.maak({ vault: V3, vv: VV, facturenPad: () => FP }), idZ = z3('Zonder bedrag').id, idM = z3('Met bedrag').id;
+    const fZ = det('Zonder bedrag').facturen, kies = fZ.find((x) => x.bedrag_eur != null);
+    const pZ = path.join(V3, '10_Zakelijk/Groenhouten/Shopper/Zonder bedrag.md'), voorZ = fs.readFileSync(pZ, 'utf8');
+    toets('7o bedrag: extra veld / bedrag in de vraag / rare id = 400', mB.bedrag(idZ, { factuur: kies.id, bedrag_eur: 1 }).status === 400 && mB.bedrag(idZ, { factuur: 'x y' }).status === 400 && mB.bedrag(idZ, {}).status === 400);
+    toets('7p bedrag: factuur die niet bij de aankoop hoort = 409, pagina gelijk', mB.bedrag(idZ, { factuur: 'fonbekend' }).status === 409 && fs.readFileSync(pZ, 'utf8') === voorZ);
+    toets('7q bedrag: al een bedrag = 409', mB.bedrag(idM, { factuur: kies.id }).status === 409);
+    const rB = mB.bedrag(idZ, { factuur: kies.id }), naZ = fs.readFileSync(pZ, 'utf8');
+    toets('7r bedrag: 200, gekocht-regel krijgt het factuurbedrag, optie/winkel/datum gelijk, rest byte-gelijk', rB.status === 200 && rB.body.gekocht.bedrag_eur === kies.bedrag_eur
+      && det('Zonder bedrag').gekocht.bedrag_eur === kies.bedrag_eur && det('Zonder bedrag').gekocht.datum === '2026-11-02' && det('Zonder bedrag').gekocht.optie === 'o1'
+      && naZ.replace(/^gekocht: .*$/m, '') === voorZ.replace(/^gekocht: .*$/m, ''), [rB, naZ.slice(0, 300)]);
+    toets('7s bedrag: tweede keer = 409 (staat er al); facturendatabase byte-gelijk', mB.bedrag(idZ, { factuur: kies.id }).status === 409 && hashVan() === voorHash);
+    toets('7t bedrag op een open zoektocht = 409', mB.bedrag(z3('Open met gekocht-regel').id, { factuur: kies.id }).status === 409);
+    fs.writeFileSync(pZ, voorZ);
   }
 
   // ── 8. de knop Gekocht (wv2275, bouwplan "OVIS Shopper - knop Gekocht (ontwerp 2-11-2026)" § 3.2 en § 7) ──
@@ -1213,6 +1228,41 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     const bron15 = fs.readFileSync('shopper.js', 'utf8');
     toets('15j shopper.js: de telling loopt via metFacturen (readOnly + query_only), alleen SELECT', /const fac = metFacturen\(\(db\) => db\.prepare\(FAC_WINKEL_SQL\)\.all\(\)/.test(bron15)
       && /^const FAC_WINKEL_SQL = "SELECT /m.test(bron15) && !/\b(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|ATTACH)\b/.test(bron15));
+  }
+
+  // ── 16. wv4171 (2C96): "Wacht op jou" (wacht_op_jou + antwoord), link naar de zoektocht in het agentrapport ──
+  {
+    const V16 = path.join(W, 'vault16'), PR16 = path.join(V16, '20_Prive/Shopper');
+    fs.mkdirSync(PR16, { recursive: true });
+    const P16 = path.join(PR16, 'Shopper - 2026-11-02 - Proefplisse.md');
+    const fm16 = ['type: shopper-zoektocht', 'wens: "Proefplisse keuken"', 'status: open', 'wacht_op_jou: "Raambreedte en -hoogte van de keuken"', 'gezocht: 2026-11-02T17:36+01:00',
+      'eisen: ["honingraat"]', 'opties:', opt('o1', { p: 44.99, v: 0, t: 44.99, u: 'https://www.proefwinkel.nl/p/g/1/' }), 'advies: o1'];
+    const bron16 = pagina(fm16, '# Proef\n');
+    fs.writeFileSync(P16, bron16);
+    fs.writeFileSync(path.join(PR16, 'Shopper - 2026-11-03 - Gekocht met vraag.md'), pagina(['type: shopper-zoektocht', 'wens: "Gekocht met vraag"', 'status: gekocht', 'wacht_op_jou: "oude vraag"', 'gezocht: 2026-11-03T09:00+01:00']));
+    let klok = new Date('2026-11-06T09:00:00Z'), starts = [], startAntwoord = { ok: true, job_id: 'abcdef0123456789' };
+    const PP = require('./intake/patientpoort.js'), POORT = (t) => PP.beoordeel({ teksten: t }, { eigen: PP.maakEigen(null, {}) });
+    const m16 = S.maak({ vault: V16, vv: VV, nu: () => klok, opnieuwPad: path.join(W, 'opnieuw16.json'), grondwet: () => 'GRONDWET-KERN v1 — proefblok', poort: POORT,
+      agentStart: async (pr) => { starts.push(pr); return startAntwoord; }, agentStand: () => 'loopt' });
+    const L16 = m16.lijst().body.zoektochten, z16 = L16.find((x) => x.wens === 'Proefplisse keuken'), g16 = L16.find((x) => x.wens === 'Gekocht met vraag');
+    toets('16a lijst en zoektocht: wacht_op_jou bij open; bij gekocht null', z16.wacht_op_jou === 'Raambreedte en -hoogte van de keuken' && g16.wacht_op_jou === null
+      && m16.zoektocht(z16.id).body.zoektocht.wacht_op_jou === 'Raambreedte en -hoogte van de keuken', [z16, g16]);
+    let r = await m16.antwoord(z16.id, { antwoord: 'x', extra: 1 });
+    toets('16b antwoord: extra veld / leeg / te lang = 400', r.status === 400 && (await m16.antwoord(z16.id, { antwoord: '  ' })).status === 400 && (await m16.antwoord(z16.id, { antwoord: 'a'.repeat(201) })).status === 400);
+    toets('16c antwoord op gekocht = 409; onbekende id = 404', (await m16.antwoord(g16.id, { antwoord: '120 x 140' })).status === 409 && (await m16.antwoord('000000000000', { antwoord: '1' })).status === 404);
+    r = await m16.antwoord(z16.id, { antwoord: 'keuken 120 breed, 140 hoog' });
+    const na16 = fs.readFileSync(P16, 'utf8');
+    toets('16d antwoord: 200, eis erbij, wacht_op_jou weg, aangepast gezet, opnieuw gestart (één agent)', r.status === 200 && JSON.stringify(r.body.eisen) === JSON.stringify(['honingraat', 'keuken 120 breed, 140 hoog'])
+      && r.body.zoekt && r.body.zoekt.stand === 'loopt' && !/wacht_op_jou/.test(na16) && /aangepast: "2026-11-06 door David"/.test(na16) && starts.length === 1, [r, na16.slice(0, 400)]);
+    toets('16e de rest van de pagina byte-gelijk', na16.replace(/^eisen: .*\naangepast: .*\n/m, 'eisen: ["honingraat"]\n') === bron16.replace(/^wacht_op_jou: .*\n/m, ''), na16.slice(0, 400));
+    toets('16f opnieuw-opdracht: link naar deze zoektocht en de wacht_op_jou-regel', starts[0].includes('[Open de zoektocht](/?app=shopper&zt=' + z16.id + ')') && /wacht_op_jou: "<wat je van David mist/.test(starts[0]));
+    toets('16g tweede antwoord = 409 (geen vraag meer), geen tweede agent', (await m16.antwoord(z16.id, { antwoord: 'nog eens' })).status === 409 && starts.length === 1);
+    const n16 = S.nieuwOpdracht({ grondwet: 'GRONDWET-KERN v1', start_id: 'abcdef012345', wens: 'x', eisen: [] });
+    toets('16h nieuw-opdracht: link met de start_id en de wacht_op_jou-regel', n16.includes('[Open de zoektocht](/?app=shopper&zt=abcdef012345)') && n16.includes('wacht_op_jou:'));
+    toets('16i opnieuw-opdracht zonder geldige id: link naar Shopper zelf', S.opnieuwOpdracht({ grondwet: 'GRONDWET-KERN v1', pad: 'a.md', entiteit: 'prive', wens: 'x', eisen: [] }).includes('[Open Shopper](/?app=shopper)'));
+    const src16 = fs.readFileSync('server.js', 'utf8'), bl16 = src16.slice(src16.indexOf('const shopper = (function () {'), src16.indexOf('// ── einde OVIS Shopper ──'));
+    toets('16j server.js: routes antwoord (status- en opnieuw-teller) en bedrag (statusteller)', /\\\/antwoord\$\/[\s\S]{0,200}shopper_status[\s\S]{0,200}shopper_opnieuw[\s\S]{0,200}shopper\.antwoord\(m\[1\], d\)/.test(bl16)
+      && /\\\/bedrag\$\/[\s\S]{0,200}shopper_status[\s\S]{0,200}shopper\.bedrag\(m\[1\], d\)/.test(bl16));
   }
 
   fs.rmSync(W, { recursive: true, force: true });

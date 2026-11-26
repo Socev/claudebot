@@ -29538,6 +29538,8 @@ function personeelsschermInfo() {
 //   POST /app/shopper/<id>/eisen      wv2561: {wens, eisen: [..]} van een open zoektocht (alleen die regels + aangepast; deelt shopper_status 30/uur)
 //   POST /app/shopper/<id>/opnieuw    wv2561: start een achtergrondagent "socev: Shopper opnieuw" (skill ovis-shopper) op dezelfde pagina; 6/uur,
 //                                     één ronde tegelijk per zoektocht; stand in klokken/shopper-opnieuw.json (job + tijd, geen wens)
+//   POST /app/shopper/<id>/antwoord   wv4171 (2C96 h): {antwoord} op wacht_op_jou: eis erbij, wacht_op_jou weg, dan Opnieuw zoeken (6/uur)
+//   POST /app/shopper/<id>/bedrag     wv4171 (2C96 g): {factuur} bij gekocht zonder bedrag: het bedrag van die passende factuur uit Facturen
 //   POST /app/shopper/vergelijk       wv2934: {wens, aantal?, eisen[]?, refurbished?} = Snel vergelijken (pod-zoekhulp + winkel-lezen.py, ± 20 s,
 //                                     plafond 20/dag in de module en 10/uur); GET …/vergelijk/<id> = de stand (opties zodra gelezen, 24 u bewaard);
 //                                     POST …/vergelijk/<id>/bewaar {entiteit} = zoektochtpagina (bron: snel, status open, geen advies). Nieuw kreeg
@@ -29750,6 +29752,17 @@ async function appShopper(req, res, a, route, d) {
       soort = 'opnieuw';
       if (!appTeller('shopper_opnieuw', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 6)', 'grens shopper opnieuw');
       u = typeof shopper.opnieuw === 'function' ? await shopper.opnieuw(m[1]) : { status: 404, body: { ok: false, fout: 'onbekend' } };
+    }
+    else if ((m = /^POST \/app\/shopper\/([^/]*)\/antwoord$/.exec(route))) {   // wv4171 (2C96 h): antwoord op "Wacht op jou" = eis erbij + opnieuw zoeken
+      soort = 'antwoord';
+      if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
+      if (!appTeller('shopper_opnieuw', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 6)', 'grens shopper opnieuw');
+      u = typeof shopper.antwoord === 'function' ? await shopper.antwoord(m[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
+    }
+    else if ((m = /^POST \/app\/shopper\/([^/]*)\/bedrag$/.exec(route))) {   // wv4171 (2C96 g): bedrag uit de factuur (Facturen alleen lezen)
+      soort = 'bedrag';
+      if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
+      u = typeof shopper.bedrag === 'function' ? shopper.bedrag(m[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
     }
     else u = { status: 404, body: { ok: false, fout: 'onbekend' } };
   } catch (e) { logError('shopper', e); return appWeiger(res, 503, 'Shopper kon de zoektochten nu niet lezen; probeer het zo opnieuw', 'shopper fout'); }

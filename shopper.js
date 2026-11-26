@@ -261,13 +261,15 @@ function ontleed(t, rel, ent, fav) {
     opties_aantal: opties.length, advies: advies ? advies.id : null, advies_totaal: advies ? advies.totaal_eur : null, advies_winkel: advies ? advies.winkel : null,
     advies_favoriet: advies ? advies.favoriet : false, favorieten_aantal: opties.filter((x) => x.favoriet).length, _opties: opties,
     gekocht: st === 'gekocht' ? gekochtVan(t) : null, todoist_id: todoistId(fmWaarde(t, 'todoist_id')),
-    start_id: ID_RE.test(String(fmWaarde(t, 'start_id') || '')) ? String(fmWaarde(t, 'start_id')) : null };
+    start_id: ID_RE.test(String(fmWaarde(t, 'start_id') || '')) ? String(fmWaarde(t, 'start_id')) : null,
+    // wv4171 (2C96 h): wat de agent van David mist om verder te kunnen (één zin; alleen bij een open zoektocht)
+    wacht_op_jou: st === 'open' || STATUSSEN.indexOf(st) < 0 ? (tekstVeld(fmWaarde(t, 'wacht_op_jou'), MAX_WACHT) || null) : null };
 }
 // ── wv2561: Eisen aanpassen en Opnieuw zoeken ──
-const MAX_EISEN = 20, MAX_EIS = 200, MAX_WENS = 160, OPNIEUW_LOOPT = 60 * 60000, OPNIEUW_BEWAAR = 2 * 86400000;
+const MAX_EISEN = 20, MAX_EIS = 200, MAX_WENS = 160, MAX_WACHT = 300, OPNIEUW_LOOPT = 60 * 60000, OPNIEUW_BEWAAR = 2 * 86400000;
 // De nieuwe frontmatter: wens, eisen en aangepast vervangen (een blokvorm met ingesprongen regels eronder gaat mee weg) of toevoegen; de rest
 // regel voor regel gelijk. Nieuwe regels komen op de plek van de oude; ontbreekt eisen, dan direct onder wens; aangepast direct onder eisen.
-function zetEisenRegels(fm, wens, eisen, aangepast) {
+function zetEisenRegels(fm, wens, eisen, aangepast, zonderWacht) {
   // review wv2561 MOET 1: JSON-strings (geldige YAML-scalars; fmWaarde/fmLijst lezen ze met JSON.parse) bovenop mapTekst (geen " \ of regeleinde)
   const q = (x) => JSON.stringify(String(x));
   const regels = { wens: 'wens: ' + q(wens), eisen: 'eisen: [' + eisen.map(q).join(', ') + ']', aangepast: 'aangepast: ' + q(aangepast) };
@@ -276,6 +278,7 @@ function zetEisenRegels(fm, wens, eisen, aangepast) {
   for (const r of fm.split('\n')) {
     if (weg && /^[ \t]/.test(r)) continue;
     weg = false;
+    if (zonderWacht && /^wacht_op_jou:/.test(r)) { weg = true; continue; }   // wv4171: beantwoord = de vraag gaat van de pagina
     const m = /^(wens|eisen|aangepast):/.exec(r);
     if (m) { weg = true; if (!gezet[m[1]]) { uit.push(regels[m[1]]); gezet[m[1]] = true; } continue; }
     uit.push(r);
@@ -286,6 +289,12 @@ function zetEisenRegels(fm, wens, eisen, aangepast) {
   if (!gezet.aangepast) na('eisen', regels.aangepast);
   return uit.join('\n');
 }
+// wv4171 (2C96 h): de vaste regel over wat de agent van David mist (beide opdrachten); de app zet die regel bovenaan de zoektocht als invulveld
+const WACHT_TEKST = 'Mis je iets van David om verder te kunnen (een maat, een keuze, een aantal)? Zet dan in de frontmatter direct onder status één regel\n'
+  + 'wacht_op_jou: "<wat je van David mist, één zin in gewone taal, hooguit 300 tekens>" (de app zet het bovenaan als invulveld). Mis je niets,\n'
+  + 'dan staat die regel er niet (haal een oude weg).\n';
+// wv4171 (2C96 a): de link die de app meteen op deze zoektocht opent (id = 12 hex van het vaultpad, of de start_id van een nieuwe zoektocht)
+const zoektochtLink = (id) => '[Open de zoektocht](/?app=shopper&zt=' + id + ')';
 // De opdracht voor de agent van Opnieuw zoeken. Alles behalve de vaste tekst is gegeven: wens en eisen komen van de pagina (Davids tekst), het pad
 // uit paden(). grondwet = het blok uit de release (server.js); zonder blok geen opdracht.
 function opnieuwOpdracht(g) {
@@ -309,11 +318,14 @@ function opnieuwOpdracht(g) {
     + '(3) zet de nieuwe opties in de frontmatter met ids die doorlopen na de hoogste id die ooit op de pagina stond (nooit hergebruiken), en\n'
     + 'werk gezocht, aannames, advies, de inleiding, de tabel, "Waarom dit advies", "Aannames" en "Niet te lezen" bij. Laat type, entiteit, wens,\n'
     + 'eisen, aangepast, todoist_id en status (open) staan zoals ze zijn. Alleen deze pagina; geen andere bestanden.\n'
+    + WACHT_TEKST
     + 'Grenzen: nooit kopen, niets in een winkelwagen, nergens inloggen, geen formulier, geen offerte of staal aanvragen (ook geen gratis\n'
     + 'kleurstalen), geen winkel mailen of chatten. Zoekvragen alleen met de productomschrijving, nooit een naam.\n'
     + 'Todoist (als er een taak is): één nieuwe opmerking met het nieuwe advies, zonder iemand te notificeren (notifyUsers ["none"]); verder niets.\n\n'
-    + 'RAPPORT: één regel die begint met "SHOPPER OPNIEUW:" (het nieuwe advies met totaal incl. verzending, of waarom er geen opties zijn), en\n'
-    + 'eindig met de regel "Socev: geef David deze ene regel door; de opties staan in Apps › Shopper."\n';
+    + 'RAPPORT: één regel die begint met "SHOPPER OPNIEUW:" (het nieuwe advies met totaal incl. verzending, of waarom er geen opties zijn; staat er\n'
+    + 'wacht_op_jou, zeg dan in gewone taal wat je van David nodig hebt), met aan het eind van die regel letterlijk de link '
+    + (ID_RE.test(String(g.id || '')) ? zoektochtLink(g.id) : '[Open Shopper](/?app=shopper)') + ', en\n'
+    + 'eindig met de regel "Socev: geef David deze ene regel door, met de link erin; die opent de zoektocht in Apps › Shopper."\n';
 }
 // ── wv2850: advies-controle, privacypoort en Nieuwe zoektocht vanuit de app (plan "OVIS Shopper naar een 8", fase 1 volgens Fable 5.2) ──
 // WAAROM. 9-11 adviseerde Shopper een weegschaal van € 892,98 terwijl passende weegschalen € 99,90 kostten; bij de bloeddrukmeter stond een
@@ -499,10 +511,12 @@ function nieuwOpdracht(g) {
     + gegeven + '\n--- EINDE ---\n'
     + 'Zet onder `eisen` alleen deze eisen, letterlijk (ook als de lijst leeg is: dan `eisen: []`). Zelf bedachte punten zijn overwegingen.\n\n'
     + kandidatenBlok(g.kandidaten)
+    + WACHT_TEKST
     + 'Grenzen: nooit kopen, niets in een winkelwagen, nergens inloggen, geen formulier, geen offerte of staal aanvragen, geen winkel mailen of\n'
     + 'chatten. Zoekvragen alleen met de productomschrijving, nooit een naam.\n\n'
-    + 'RAPPORT: één regel die begint met "SHOPPER NIEUW:" (het advies met totaal incl. btw en verzending, of waarom er geen opties zijn), en\n'
-    + 'eindig met de regel "Socev: geef David deze ene regel door; de opties staan in Apps › Shopper."\n';
+    + 'RAPPORT: één regel die begint met "SHOPPER NIEUW:" (het advies met totaal incl. btw en verzending, of waarom er geen opties zijn; staat er\n'
+    + 'wacht_op_jou, zeg dan in gewone taal wat je van David nodig hebt), met aan het eind van die regel letterlijk de link ' + zoektochtLink(g.start_id) + ', en\n'
+    + 'eindig met de regel "Socev: geef David deze ene regel door, met de link erin; die opent de zoektocht in Apps › Shopper."\n';
 }
 function todoistId(x) { const s = String(x == null ? '' : x).trim(); return TODOIST_RE.test(s) ? s : null; }
 // ── wv2454: Nu nalezen ──
@@ -820,7 +834,7 @@ function maak(o) {
     if (v.z.status !== 'open') return { status: 409, body: { ok: false, fout: 'alleen een open zoektocht kun je opnieuw laten zoeken' } };
     const nuZoekt = zoektBij(v.z);
     if (startBezig.has(id) || (nuZoekt && nuZoekt.stand === 'loopt')) return { status: 409, body: { ok: false, fout: 'Shopper zoekt deze al opnieuw; de nieuwe opties komen hier vanzelf', zoekt: nuZoekt } };
-    const prompt = opnieuwOpdracht({ grondwet: o.grondwet(), pad: v.p.rel, entiteit: v.z.entiteit, aantal: v.z.aantal, todoist_id: v.z.todoist_id,
+    const prompt = opnieuwOpdracht({ grondwet: o.grondwet(), id, pad: v.p.rel, entiteit: v.z.entiteit, aantal: v.z.aantal, todoist_id: v.z.todoist_id,
       wens: tekstVeld(fmWaarde(v.t, 'wens'), MAX_WENS) || v.z.wens, eisen: R.fmLijst(v.t, 'eisen').map((x) => tekstVeld(x, MAX_EIS)).filter(Boolean).slice(0, MAX_EISEN) });
     if (!prompt) return { status: 503, body: { ok: false, fout: 'de pod kon de opdracht nu niet maken; probeer het later opnieuw' } };
     // wv2850 (plan § 3, MOET 2): ook Opnieuw zoeken gaat langs de privacypoort, op de wens en eisen zoals ze op de pagina staan
@@ -1018,6 +1032,68 @@ function maak(o) {
     if (reden === 'gekocht' && bestaand && nieuw === null && zelfdeGekocht(bestaand, maakNieuw(v.z))) return { status: 200, body: { ok: true, status: 'gekocht', al: true, gekocht: bestaand } };
     return { status: 409, body: { ok: false, fout: 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
   }
+  // ── wv4171 (2C96 h): "Wacht op jou" beantwoorden ──
+  // POST …/antwoord {antwoord}: Davids antwoord op wacht_op_jou komt als eis op de pagina (letterlijk, zoals Eisen aanpassen), de regel
+  // wacht_op_jou gaat weg, en daarna start Opnieuw zoeken (zelfde agent, zelfde grenzen). Eerst de privacypoort; alleen bij een open
+  // zoektocht met een vraag en zonder lopende ronde. Lukt het starten niet, dan staat het antwoord wel op de pagina (zoekt: null + fout).
+  async function antwoord(id, d) {
+    const nee = (fout) => ({ status: 400, body: { ok: false, fout } });
+    if (!d || typeof d !== 'object' || Array.isArray(d) || Object.keys(d).some((k) => k !== 'antwoord')) return nee('alleen antwoord');
+    const a = typeof d.antwoord === 'string' ? mapTekst(d.antwoord, MAX_EIS) : null;
+    if (!a) return nee('antwoord: tekst van 1 tot ' + MAX_EIS + ' tekens');
+    if (!poortVrij(o.poort, [a])) return { status: 422, body: { ok: false, fout: POORT_FOUT, poort: true } };
+    const v = vind(id);
+    if (v.fout) return v.fout;
+    if (v.z.status !== 'open') return { status: 409, body: { ok: false, fout: 'deze zoektocht staat niet meer open' } };
+    if (!v.z.wacht_op_jou) return { status: 409, body: { ok: false, fout: 'Shopper wacht hier niet (meer) op een antwoord; laad de zoektocht opnieuw' } };
+    const zk = zoektBij(v.z);
+    if (startBezig.has(id) || (zk && zk.stand === 'loopt')) return { status: 409, body: { ok: false, fout: 'Shopper zoekt hier al; je antwoord kan erbij als die ronde klaar is', zoekt: zk } };
+    const huidigeEisen = (t) => R.fmLijst(t, 'eisen').map((x) => tekstVeld(x, MAX_EIS)).filter(Boolean);
+    if (huidigeEisen(v.t).length >= MAX_EISEN) return { status: 409, body: { ok: false, fout: 'er staan al ' + MAX_EISEN + ' eisen; haal er eerst een weg bij Eisen aanpassen' } };
+    const aangepast = nlDag(nu()) + ' door David';
+    let reden = null, lijst = null;
+    const ok = o.vv.wijzig(path.join(o.vault, v.p.rel), function (t) {
+      const fm = /^---\n([\s\S]*?)\n---/.exec(t || '');
+      const z = fm ? ontleed(t, v.p.rel, v.p.ent) : null;
+      if (!z) { reden = 'weg'; return null; }
+      if (z.status !== 'open' || !z.wacht_op_jou) { reden = 'anders'; return null; }
+      const wens = tekstVeld(fmWaarde(t, 'wens'), MAX_WENS) || z.wens;
+      lijst = huidigeEisen(t).concat([a]).slice(0, MAX_EISEN);
+      return '---\n' + zetEisenRegels(fm[1], wens, lijst, aangepast, true) + '\n---' + t.slice(fm[0].length);
+    });
+    if (!ok) return { status: 409, body: { ok: false, fout: reden === 'anders' ? 'deze zoektocht veranderde intussen; laad hem opnieuw' : 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
+    const r = await opnieuw(id);
+    if (r.status === 200) return { status: 200, body: { ok: true, eisen: lijst, aangepast, zoekt: r.body.zoekt } };
+    return { status: 200, body: { ok: true, eisen: lijst, aangepast, zoekt: null, fout: (r.body && r.body.fout) || 'opnieuw zoeken startte niet' } };
+  }
+  // ── wv4171 (2C96 g): het bedrag uit de factuur ──
+  // POST …/bedrag {factuur}: bij een gekochte zoektocht zonder bedrag neemt de pod het bedrag van DIE factuur (een van de facturen die
+  // facturenBij bij deze aankoop vond, met een bedrag) over in de gekocht-regel. Het bedrag komt uit Facturen (alleen lezen), nooit uit de
+  // vraag of de optie; Davids tik "Klopt" is zijn woord. Staat er al een bedrag: 409. De rest van de gekocht-regel blijft gelijk.
+  function bedragUitFactuur(id, d) {
+    if (!d || typeof d !== 'object' || Array.isArray(d) || Object.keys(d).some((k) => k !== 'factuur') || typeof d.factuur !== 'string' || !/^[A-Za-z0-9_-]{1,40}$/.test(d.factuur)) return { status: 400, body: { ok: false, fout: 'alleen factuur (id)' } };
+    const v = vind(id);
+    if (v.fout) return v.fout;
+    if (v.z.status !== 'gekocht' || !v.z.gekocht) return { status: 409, body: { ok: false, fout: 'alleen bij een gekochte zoektocht' } };
+    if (v.z.gekocht.bedrag_eur != null) return { status: 409, body: { ok: false, fout: 'het bedrag staat er al' } };
+    const fs2 = metFacturen((db) => facturenBij(db, v.z));
+    if (fs2 == null) return { status: 503, body: { ok: false, fout: 'Facturen is nu niet te lezen; probeer het zo opnieuw' } };
+    const f = fs2.find((x) => x.id === d.factuur && x.bedrag_eur != null);
+    if (!f) return { status: 409, body: { ok: false, fout: 'die factuur hoort (niet meer) bij deze aankoop' } };
+    const b = bedrag(String(f.bedrag_eur));
+    if (b == null) return { status: 409, body: { ok: false, fout: 'het bedrag van die factuur is niet te lezen' } };
+    let nieuw = null, reden = null;
+    const ok = o.vv.wijzig(path.join(o.vault, v.p.rel), function (t) {
+      const fm = /^---\n([\s\S]*?)\n---/.exec(t || '');
+      const z = fm ? ontleed(t, v.p.rel, v.p.ent) : null;
+      const g = z && z.status === 'gekocht' ? gekochtVan(t) : null;
+      if (!g || g.bedrag_eur != null || g.datum !== v.z.gekocht.datum || g.winkel !== v.z.gekocht.winkel) { reden = 'anders'; return null; }
+      nieuw = Object.assign({}, g, { bedrag_eur: b });
+      return '---\n' + zetStatusRegels(fm[1], 'gekocht', gekochtRegel(nieuw)) + '\n---' + t.slice(fm[0].length);
+    });
+    if (ok) return { status: 200, body: { ok: true, gekocht: Object.assign({}, nieuw, { via: 'app' }) } };
+    return { status: 409, body: { ok: false, fout: reden === 'anders' ? 'de aankoop veranderde intussen; laad de zoektocht opnieuw' : 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
+  }
   // ── wv2935 fase 3: tab Winkels en de score bij de echte verkoper ──
   const winkelsMod = W ? W.maak({ scorePad: o.scorePad || null, scoreLezer: o.scoreLezer || null, nu, sleutels: { sleutelVan, hostKern, woorden } }) : null;
   function winkelsEnScores() { const t = lees(FAVORIETEN); return { pagina: t, winkels: t == null ? [] : W.winkelsVan(t), scores: winkelsMod.scores() }; }
@@ -1055,7 +1131,7 @@ function maak(o) {
     const a = o.aanwijsPad ? jsonStaat(o.aanwijsPad)[maandNl()] : null;   // wv2946: aantal tikken op Zoek met Shopper deze maand (geen tekst)
     return Object.assign({ aan: true }, laatst || { op: null, zoektochten: null, open: null, onleesbaar: null, favorieten: null }, { aanwijzen_maand: Number.isInteger(a) ? a : 0 });
   }
-  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, info, vergelijk, winkels: winkelsMod ? winkels : null, aanwijs };
+  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, antwoord, bedrag: bedragUitFactuur, info, vergelijk, winkels: winkelsMod ? winkels : null, aanwijs };
 }
 
 module.exports = { maak, kandidatenBlok, ontleed, adviesControle, eenheidStuks, poortVrij, nieuwOpdracht, POORT_FOUT, nuVan, btwVeld, zetEisenRegels, opnieuwOpdracht, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
