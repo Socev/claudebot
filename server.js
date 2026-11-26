@@ -27887,8 +27887,12 @@ const kalenderApp = (function () {
     // wv4102 (2C88 b): verlopen deadlines live uit het register; sluiten via dezelfde schrijfroute als het actielijstje (deadline-lijstje.js schrijf)
     verlopen: async function () {
       if (typeof DL_LIJSTJE === 'undefined' || !DL_LIJSTJE || typeof DL_LIJSTJE.verlopen !== 'function') throw new Error('deadline-lijstje.js ontbreekt');
-      const voor = VV().lees(dlRegister(), 'utf8'), items = (await dlDroog()).items, na = VV().lees(dlRegister(), 'utf8');
-      return DL_LIJSTJE.verlopen(items, voor === na ? voor : '', appYmd(Date.now()));   // pagina veranderde tijdens het lezen: titels uit --droog
+      // Codex wv4102 MOET 2: items en tekst moeten bij dezelfde versie horen (verzet-merk, titel); tot 3 keer lezen, anders een fout (503, opnieuw)
+      for (let i = 0; i < 3; i++) {
+        const voor = VV().lees(dlRegister(), 'utf8'), items = (await dlDroog()).items, na = VV().lees(dlRegister(), 'utf8');
+        if (voor === na) return DL_LIJSTJE.verlopen(items, voor, appYmd(Date.now()));
+      }
+      throw new Error('deadline-register veranderde tijdens het lezen');
     },
     sluit: async function (t) {
       if (typeof DL_LIJSTJE === 'undefined' || !DL_LIJSTJE || !rolPrimair()) return { u: { niets: 'passief' }, ok: false };
