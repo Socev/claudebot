@@ -2898,10 +2898,11 @@ function maak(o) {
     for (const c of db.prepare("SELECT c.wat, l.bron FROM correctie c JOIN live_stuk l ON l.stuk_id = c.stuk_id WHERE c.leren_mag = 1 AND c.tijd >= ? AND c.wat LIKE '%\"entiteit\":\"%'").all(nuIso(nu() - 90 * DAG))) {
       const w = safeJson(c.wat) || {};
       if (!c.bron || (w.lens && w.lens !== 'kennis') || !w.entiteit || !KENNIS_MAP[w.entiteit]) continue;
-      const x = uit.get(c.bron) || new Map(); x.set(w.entiteit, (x.get(w.entiteit) || 0) + 1); uit.set(c.bron, x);
+      for (const b of [c.bron, '*']) { const x = uit.get(b) || new Map(); x.set(w.entiteit, (x.get(w.entiteit) || 0) + 1); uit.set(b, x); }   // '*' = alle postvakken
     }
     return uit;
   }
+  const KANDIDAAT_VAST = ['PRIVE', 'TG', 'GH'];   // wv4100 review ZOU 1: zonder (genoeg) keuzes toch drie plekken
   function binnenbak(row, sam, ls, meta, namen, perAfzender, perPostvak) {
     const uit = { versie: ls ? ls.versie : row.versie, voorstel: null, kandidaten: [], reden: redenTekst(sam, ls),
       mogelijk_medisch: !!(sam.mogelijk_medisch || sam.na_keuze), buiten_brain: !!(ls && ls.staat === 'bewaard' && ls.keuze === 'hard') };
@@ -2917,10 +2918,6 @@ function maak(o) {
     const pa = perAfzender.get(adresVan(meta.van || ''));
     if (pa) for (const e of Array.from(pa.entries()).sort(function (a, b) { return b[1] - a[1]; })) voeg(e[0]);
     for (const l of sam.label_route || []) voeg(l);
-    // wv4100 (besluitenpagina nr 393 / 3C93, David Ja 25-11 21:50): altijd drie plekken om uit te kiezen; wat ontbreekt vullen de plekken die
-    // David in dit postvak het vaakst koos (bij gelijke stand de vaste volgorde van de sortering: eerst gekozen in de lijst)
-    const pp = perPostvak && perPostvak.get(ls.bron || sam.bron || '');
-    if (pp && k.length < 3) for (const e of Array.from(pp.entries()).sort(function (a, b) { return b[1] - a[1]; })) voeg(e[0]);
     uit.kandidaten = k.slice(0, 3).map(function (x) { return { id: x, naam: namen.get(x) || x }; });
     let lens = tw.length ? tw[0].lens : null;
     if (lens === 'vragen') lens = 'kennis';
@@ -2933,6 +2930,17 @@ function maak(o) {
     if (vnb.niet_bewaren && lenzenLive().indexOf('geen') >= 0 && (!uit.voorstel || uit.voorstel.lens === 'kennis')) { uit.voorstel = { lens: 'geen', entiteit: null }; uit.reden = 'Intake denkt: niet bewaren'; }
     else if (vnb.vermoeden && uit.voorstel && uit.voorstel.entiteit === vnb.vermoeden) uit.reden = 'Intake denkt ' + (namen.get(vnb.vermoeden) || vnb.vermoeden) + ', maar weet het niet zeker';
     uit._b = bundelSleutel(row, sam, uit);
+    // wv4100 (besluitenpagina nr 393 / 3C93, David Ja 25-11 21:50): altijd drie plekken om uit te kiezen. Pas NA voorstel en bundelsleutel: een
+    // aangevulde plek is geen signaal (geen voorstel, en een aangevuld Privé mag een bundel niet tegenhouden). Eerst de plekken die David in dit
+    // postvak het vaakst koos, dan over alle postvakken (review ZOU 1), het postvak van een praktijk zelf en als laatste een vaste rij.
+    if (k.length < 3) {
+      const vaakst = function (m) { if (m && k.length < 3) for (const e of Array.from(m.entries()).sort(function (a, b) { return b[1] - a[1]; })) voeg(e[0]); };
+      vaakst(perPostvak && perPostvak.get(ls.bron || sam.bron || ''));
+      vaakst(perPostvak && perPostvak.get('*'));
+      if (k.length < 3) voeg(POSTVAK_KNOOP[ls.bron || sam.bron || '']);
+      for (const x of KANDIDAAT_VAST) if (k.length < 3) voeg(x);
+      uit.kandidaten = k.slice(0, 3).map(function (x) { return { id: x, naam: namen.get(x) || x }; });
+    }
     return uit;
   }
   /*

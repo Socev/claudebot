@@ -1218,11 +1218,19 @@ test('wv4100 3C93/3C94: kaart zonder eigen kandidaten krijgt de vaakst gekozen p
   assert.equal(E.ls(d).staat, 'twijfel'); assert.equal(E.ls(e).staat, 'twijfel');
   const ov = await E.r.appOverzicht(50);
   const sd = ov.stukken.find((x) => x.stuk_id === d), se = ov.stukken.find((x) => x.stuk_id === e);
-  assert.deepEqual(sd.kandidaten.map((k) => k.id), ['TG', 'GH']);   // TG 2×, GH 1× in gmail:david
+  assert.deepEqual(sd.kandidaten.map((k) => k.id), ['TG', 'GH', 'PRIVE']);   // TG 2×, GH 1× in gmail:david, dan de vaste rij (review ZOU 1: altijd drie)
   assert.equal(sd.zin, 'Vraag over de planning b');   // één regel, geen hoekhaken
-  assert.ok(!se.kandidaten.some((k) => k.id === 'GH'));   // ander postvak: Davids Gmail-keuzes tellen daar niet
+  assert.equal(se.kandidaten.length, 3); assert.equal(new Set(se.kandidaten.map((k) => k.id)).size, 3);   // ander postvak: ook drie
   const g = await E.r.appGeschiedenis({});
   const alle = g.dagen.flatMap((x) => x.stukken);
   assert.equal(alle.find((x) => x.stuk_id === a).zin, 'Onduidelijk stuk.');
+  E.r.sluit();
+});
+
+test('wv4100 review ZOU 1: zonder enige keuze van David toch drie plekken (vaste rij)', async () => {
+  const E = nkOmgeving([ONB]);
+  const a = E.mail('a@ander.example', 'Een'); await E.r.ronde();
+  const ov = await E.r.appOverzicht(50);
+  assert.deepEqual(ov.stukken.find((x) => x.stuk_id === a).kandidaten.map((k) => k.id), ['PRIVE', 'TG', 'GH']);
   E.r.sluit();
 });
