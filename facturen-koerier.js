@@ -234,19 +234,12 @@ function controleer(fdb, op) {
 
 // ───────────────────────────── lees-luik: zoeken op het token ─────────────────────────────
 
-class LuikFout extends Error { constructor(soort) { super('lees-luik: ' + soort); this.code = 'luik_' + soort; } }
-// mail_zoeken; geen lijst terug = fout (nooit "niets gevonden").
+// wv4162: LuikFout en zoeken komen uit de gedeelde gmail-zoek.js (ook pot-verzend en pot-maand); geen lijst, een melding of een
+// onvolledig antwoord = fout (nooit "niets gevonden"; diffreview wv855 #1). .vol = het ruwe antwoord zat vol (vóór het filteren).
+const GZ = require('./gmail-zoek.js');
+const LuikFout = GZ.LuikFout;
 const ZOEK_MAX = 25;
-async function zoek(io, query) {
-  let j;
-  try { j = await io.luik({ actie: 'mail_zoeken', query, max: ZOEK_MAX }); } catch (e) { throw new LuikFout(foutSoort(e)); }
-  if (!j || !Array.isArray(j.mails)) throw new LuikFout('geen_lijst');
-  // het echte lees-luik meldt een Gmail-fout als 200 met { mails: [], melding: 'fout bij zoeken: …' } of 'deels mislukt: …' (diffreview
-  // wv855 #1, gemeten in AI - Agenda-Wachter API › Formatteer mails): dat is nooit "niets gevonden"
-  if (j.melding) throw new LuikFout(/^deels/.test(String(j.melding)) ? 'deels_mislukt' : 'zoekfout');
-  if (Number.isInteger(j.aantal) && j.aantal !== j.mails.length) throw new LuikFout('onvolledig');
-  return j.mails.filter((m) => m && typeof m.id === 'string');
-}
+const zoek = (io, query) => GZ.zoek(io, query, ZOEK_MAX, { metId: true });
 /*
  * Staat er al een mail met dit token (concept of verzonden)? → null (geen), of { id, verzonden, passend, opdracht }. passend = de mail gaat
  * naar dit doeladres én noemt (in de eerste regel, dus in de snippet) een opdracht van deze factuur of dit afschrift met dezelfde bijlagen
@@ -344,13 +337,13 @@ async function ronde(fdb, io, o) {
         perTok.delete(t[1]);
       }
       // wv3074: concept verdwenen? Alleen als het Verzonden-antwoord niet vol zat (een vol antwoord kan treffers missen).
-      const kand = mails.length >= ZOEK_MAX ? [] : deel.filter((op) => op.f_status === 'concept_klaar' && !inSent.has(tokenVan(op)) &&
+      const kand = mails.vol ? [] : deel.filter((op) => op.f_status === 'concept_klaar' && !inSent.has(tokenVan(op)) &&
         String(op.f_bijgewerkt || '') <= nuIso(start - GRENS.conceptMinMs));
       if (kand.length) {
         let concepten;
         try { concepten = await zoek(io, 'in:draft subject:(' + kand.map(tokenVan).join(' OR ') + ')'); }
         catch (e) { luikOk = false; fout('lees-luik', e); break; }
-        if (concepten.length < ZOEK_MAX) {
+        if (!concepten.vol) {
           const inDraft = new Set();
           for (const m of concepten) { const t = TOKEN_RE.exec(String(m.onderwerp || '')); if (t) inDraft.add(t[1]); }
           for (const op of kand) {

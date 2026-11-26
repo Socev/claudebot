@@ -219,6 +219,8 @@ COPY pot-app.js /app/release-bootstrap/pot-app.js
 COPY facturen-db.js /app/release-bootstrap/facturen-db.js
 COPY facturen.js /app/release-bootstrap/facturen.js
 COPY facturen-koerier.js /app/release-bootstrap/facturen-koerier.js
+# wv4162: gedeelde Gmail-zoekfunctie van koerier, pot-verzend en pot-maand (alle drie laden hem bovenaan)
+COPY gmail-zoek.js /app/release-bootstrap/gmail-zoek.js
 COPY facturen-ingang.js /app/release-bootstrap/facturen-ingang.js
 COPY facturen-validatie.js /app/release-bootstrap/facturen-validatie.js
 COPY fin-toewijzing.js /app/release-bootstrap/fin-toewijzing.js

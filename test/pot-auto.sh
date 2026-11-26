@@ -46,7 +46,7 @@ function autoRij(n, plan, nietVoor) {
 const st = (id) => db.prepare('select * from nota_verzending where id=?').get(id);
 const vg = (id) => db.prepare('select * from nota_vrijgave where id=?').get(id);
 const gmail = [], verstuurd = [], berichten = [], kaartStand = {}, kaartRij = {}, kaartZet = [], kaartDicht = [];
-let verstuurAntwoord = null, verzenderOk = true, luikStuk = false, pauze = null;
+let verstuurAntwoord = null, verzenderOk = true, luikStuk = false, luikMelding = false, pauze = null;
 const paginas = [
   { pad: '10_Zakelijk/HAGRO/Praktijken/Huisartsenpraktijk Korte Geer.md', tekst: '---\nfin_praktijk: [P01, P02, P03]\nfacturen_aan: pm@kg.example\n---\n' },
   { pad: '10_Zakelijk/Groenhouten/index.md', tekst: '---\nfin_praktijk: [P05]\nfacturen_aan: facturen@gh.example\n---\n' },
@@ -62,6 +62,7 @@ const io = {
   },
   luik: async (b) => {
     if (luikStuk) throw new Error('luik stuk');
+    if (luikMelding) return { mails: [], melding: 'fout bij zoeken: nep' };   // wv4162: zo meldt het echte luik een Gmail-fout
     const m = /filename:(\S+)/.exec(b.query); const f = m ? m[1] : '';
     const sent = /in:sent/.test(b.query) && !/in:draft/.test(b.query);
     return { mails: gmail.filter((x) => x.bestand.includes(f) && (!sent || x.labels.includes('SENT'))) };
@@ -217,6 +218,16 @@ async function jaKnop(vid, bevestiging) {
   gmail.push({ id: 'mD', thread_id: 'tD', onderwerp: 'Iets anders', aan: 'pm@kg.example', labels: ['SENT'], datum: NU, bestand: `SLOEL - ${n10.nummer} - x.pdf` });
   zetNu('2026-11-12T08:00:00Z'); const v10 = verstuurd.length; await ronde();
   toets('voorcontrole zonder onderwerpfilter: David verstuurde hem al → verstuurd_door_david, geen verzending', st(r10.id).status === 'verstuurd_door_david' && verstuurd.length === v10, st(r10.id).status);
+  // wv4162 (C17): zoekfout met melding bij de voorcontrole (David verstuurde hem misschien al) → niets verstuurd, terug naar auto_vrij
+  const n10b = nota('P01', 1012); const r10b = autoRij(n10b, '2026-11-20', '2026-11-20T06:00:00Z');
+  zetNu('2026-11-06T10:00:00Z'); await ronde(); await jaKnop(st(r10b.id).vrijgave_id);
+  gmail.push({ id: 'mE', thread_id: 'tE', onderwerp: 'Zelf verstuurd', aan: 'pm@kg.example', labels: ['SENT'], datum: NU, bestand: `SLOEL - ${n10b.nummer} - x.pdf` });
+  luikMelding = true;
+  zetNu('2026-11-20T08:05:00Z'); const v10b = verstuurd.length; let u10b = await ronde();
+  toets('wv4162: zoekfout met melding bij de voorcontrole → niets verstuurd, terug naar auto_vrij', verstuurd.length === v10b && st(r10b.id).status === 'auto_vrij' && u10b.fouten.includes('luik'), { s: st(r10b.id).status, u10b });
+  luikMelding = false;
+  zetNu('2026-11-20T08:10:00Z'); await ronde();
+  toets('wv4162: luik weer goed → ziet de eigen verzending, niet nog eens', verstuurd.length === v10b && st(r10b.id).status === 'verstuurd_door_david', st(r10b.id).status);
   const n11 = nota('P08', 1111); const r11 = autoRij(n11, '2026-11-13', '2026-11-13T06:00:00Z');
   zetNu('2026-11-06T10:00:00Z'); await ronde(); await jaKnop(st(r11.id).vrijgave_id);
   verstuurAntwoord = () => ({ status: 403, j: { ok: false, code: 'witte_lijst' } });

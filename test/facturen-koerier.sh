@@ -12,7 +12,7 @@ C=$(grep -vE '^\s*(\*|//)' facturen-koerier.js)
 if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|worker_threads|cluster|vm|undici|fs|fs/promises)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\(|execSync|spawnSync|\bspawn\s*\(|[^.]\bexec\s*\("; then
   echo "ROOD  CI-poort: facturen-koerier.js laadt een netwerk-, bestands- of andere procesmodule"; exit 1
 fi
-if grep -vE '^\s*(\*|//)' facturen-koerier.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|child_process|\./facturen-kern\.js|\./facturen-db\.js|\./facturen\.js|\./facturen-bonjacht-ronde\.js)'\)$"; then
+if grep -vE '^\s*(\*|//)' facturen-koerier.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|child_process|\./facturen-kern\.js|\./facturen-db\.js|\./facturen\.js|\./facturen-bonjacht-ronde\.js|\./gmail-zoek\.js)'\)$"; then
   echo "ROOD  CI-poort: facturen-koerier.js laadt een module buiten crypto, child_process en de Facturen-buren"; exit 1
 fi
 if [ "$(grep -vE '^\s*(\*|//)' facturen-koerier.js | grep -c 'execFile(')" != "1" ] || ! grep -q "^const PDFTOTEXT = '/usr/bin/pdftotext';$" facturen-koerier.js; then

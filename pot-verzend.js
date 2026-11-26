@@ -21,6 +21,7 @@
  * Geen eigen klok: wat aan de beurt is én alle tijdstempels komen van D1 (strftime('now')), want de podklok liep eerder dagen mis.
  */
 const crypto = require('crypto');
+const GZ = require('./gmail-zoek.js');   // wv4162: één zoekfunctie, een luikfout is nooit "niets gevonden"
 
 const GRENS = { perTik: 20, perDag: 40, pdfMax: 250 * 1024, onzekerPerTik: 10, meetPerUur: 15, meetDagen: 90, conceptWegUur: 2, pogingenMax: 3 };
 const D1_NU = "strftime('%Y-%m-%dT%H:%M:%SZ','now')";
@@ -152,15 +153,13 @@ const gmailDatum = (iso, dagenTerug) => { const d = new Date(Date.parse(iso) - (
 const labels = (m) => (Array.isArray(m.labels) ? m.labels : String(m.labels || '').replace(/[[\]'"\s]/g, '').split(',')).map((x) => String(x).toUpperCase());
 // Concepten/verzonden mails van deze nota: zelfde bestand (filename:<nummer>), zelfde onderwerp, eerste ontvanger in `aan`.
 async function zoekInGmail(io, rij, vanaf) {
-  const j = await io.luik({ actie: 'mail_zoeken', query: `filename:${rij.nummer} {in:draft in:sent} after:${gmailDatum(vanaf, 1)}`, max: 20 });
-  const mails = Array.isArray(j) ? j : (j && Array.isArray(j.mails) ? j.mails : null);
-  if (!mails) throw new Error('lees-luik zonder lijst');
+  const mails = await GZ.zoek(io, `filename:${rij.nummer} {in:draft in:sent} after:${gmailDatum(vanaf, 1)}`, 20, { kaal: true });
   const eerste = String(rij.aan || '').split(',')[0].trim().toLowerCase();
   const past = mails.filter((m) => String(m.onderwerp || '').trim() === String(rij.onderwerp).trim() && (!eerste || String(m.aan || '').toLowerCase().includes(eerste)));
   // verzonden ook als David onderwerp of ontvanger in het concept aanpaste: dan herkennen we hem aan de draad (Fable diffreview #6)
   const verzonden = past.find((m) => labels(m).includes('SENT')) || (rij.thread_id ? mails.find((m) => labels(m).includes('SENT') && m.thread_id === rij.thread_id) : null);
   const concept = past.find((m) => labels(m).includes('DRAFT'));
-  return { verzonden: verzonden || null, concept: concept || null };
+  return { verzonden: verzonden || null, concept: concept || null, vol: !!mails.vol };
 }
 
 // ── mail ─────────────────────────────────────────────────────────────────────
@@ -350,9 +349,7 @@ async function notasVan(io, rijen) {
 // Alleen verzonden-mails met dit bestand, zónder onderwerpfilter (Fable #8): heeft David hem zelf verstuurd, dan niet nog eens. 60 dagen terug
 // (diffreview #6): ook een eerdere poging voor dezelfde nota die opnieuw werd klaargezet.
 async function zoekVerzonden(io, r) {
-  const j = await io.luik({ actie: 'mail_zoeken', query: `filename:${r.nummer} in:sent after:${gmailDatum(r.aangevraagd_op, 60)}`, max: 20 });
-  const mails = Array.isArray(j) ? j : (j && Array.isArray(j.mails) ? j.mails : null);
-  if (!mails) throw new Error('lees-luik zonder lijst');
+  const mails = await GZ.zoek(io, `filename:${r.nummer} in:sent after:${gmailDatum(r.aangevraagd_op, 60)}`, 20, { kaal: true });
   return mails.find((m) => labels(m).includes('SENT')) || null;
 }
 
@@ -748,8 +745,14 @@ async function ronde(io, o) {
       let g;
       try { g = await zoekInGmail(io, r, r.concept_op); } catch (e) { uit.fouten.push('luik'); break; }
       if (g.verzonden) { if (await zet(r.id, { status: 'verzonden', verzonden_op: g.verzonden.datum || iso(), gemeten_op: iso() }, 'concept')) { uit.verzonden++; gewijzigd = true; } continue; }
-      if (!g.concept && Date.parse(r.concept_op) < nuMs - GRENS.conceptWegUur * 3600e3) { if (await zet(r.id, { status: 'concept_weg', gemeten_op: iso() }, 'concept')) gewijzigd = true; continue; }
-      await zet(r.id, { gemeten_op: iso() }, 'concept');
+      // wv4162 (C17): concept weg pas na twee missers ≥ 45 min uit elkaar (merkteken achter opmerking), nooit op een vol antwoord
+      if (!g.concept) {
+        const b = GZ.conceptMisser(r, r.opmerking, nuMs, GRENS.conceptWegUur * 3600e3, g.vol);
+        if (b === 'weg') { if (await zet(r.id, { status: 'concept_weg', gemeten_op: iso(), opmerking: GZ.mistWeg(r.opmerking) }, 'concept')) gewijzigd = true; continue; }
+        if (b === 'mist1') { await zet(r.id, { gemeten_op: iso(), opmerking: GZ.mistZet(r.opmerking, new Date(nuMs).toISOString()) }, 'concept'); continue; }
+        await zet(r.id, { gemeten_op: iso() }, 'concept'); continue;
+      }
+      await zet(r.id, GZ.mistVan(r.opmerking) ? { gemeten_op: iso(), opmerking: GZ.mistWeg(r.opmerking) } : { gemeten_op: iso() }, 'concept');
     }
   }
 

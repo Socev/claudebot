@@ -66,7 +66,7 @@ const status = (id) => db.prepare('select * from nota_verzending where id=?').ge
 const gmail = [];       // { id, thread_id, onderwerp, aan, labels, datum, bestand }
 const concepten = [];   // aanroepen van het mailluik
 let conceptAntwoord = null;   // functie(body) → { status, j } of throw
-let luikStuk = false;
+let luikStuk = false, luikMelding = false, luikVol = false;
 const kaartStand = {}, kaartZet = [], kaartDicht = [], register = [];
 let paginas = [
   { pad: '10_Zakelijk/HAGRO/Praktijken/Huisartsenpraktijk Korte Geer.md', tekst: '---\nfin_praktijk: [P01, P02, P03]\nfacturen_aan: pm@kg.example\n---\n' },
@@ -82,6 +82,9 @@ const io = {
   },
   luik: async (b) => {
     if (luikStuk) throw new Error('luik stuk');
+    // wv4162: het echte luik meldt een Gmail-fout als 200 met lege lijst en een melding
+    if (luikMelding) return { query: b.query, mails: [], melding: 'fout bij zoeken: nep' };
+    if (luikVol) return { query: b.query, mails: Array.from({ length: b.max }, (_, i) => ({ id: 'vol' + i, onderwerp: 'iets anders', aan: 'x@y.example', labels: ['INBOX'], bestand: 'ander.pdf' })) };
     const m = /filename:(\S+)/.exec(b.query); const f = m ? m[1] : '';
     return { query: b.query, mails: gmail.filter((x) => x.bestand.includes(f)) };
   },
@@ -206,6 +209,11 @@ const ronde = (o) => V.ronde(io, o);
   u = await ronde();
   toets('voorcontrole faalt → terug in de wachtrij, geen concept', status(r15.id).status === 'wacht' && concepten.length === v15 && u.fouten.includes('luik'), { s: status(r15.id).status, u });
   luikStuk = false;
+  // wv4162 (C17): een zoekfout met melding (200, lege lijst) is ook geen "niets gevonden": geen concept
+  luikMelding = true;
+  u = await ronde();
+  toets('wv4162: zoekfout met melding bij de voorcontrole → geen concept, terug in de wachtrij', status(r15.id).status === 'wacht' && concepten.length === v15 && u.fouten.includes('luik'), { s: status(r15.id).status, u });
+  luikMelding = false;
   await ronde();
   toets('luik weer goed → concept', status(r15.id).status === 'concept', status(r15.id).status);
 
@@ -222,8 +230,23 @@ const ronde = (o) => V.ronde(io, o);
   const s1oud = status(r1.id);
   gmail.splice(gmail.findIndex((m) => m.bestand === r1.pdf_naam), 1);
   db.prepare("update nota_verzending set concept_op=strftime('%Y-%m-%dT%H:%M:%SZ','now','-3 hours'), gemeten_op=null where id=?").run(r1.id);
+  // wv4162 (C17): zoekfout met melding → niets afgeschreven; vol antwoord → geen misser; eerste misser → merkteken; tweede ≥ 45 min → weg
+  db.prepare("update nota_verzending set opmerking='eerder: iets' where id=?").run(r1.id);
+  luikMelding = true;
+  u = await ronde({ meten: true });
+  toets('wv4162: meten met zoekfout (melding) → blijft concept, geen merkteken', status(r1.id).status === 'concept' && status(r1.id).opmerking === 'eerder: iets' && u.fouten.includes('luik'), { s: status(r1.id), u });
+  luikMelding = false; luikVol = true;
   await ronde({ meten: true });
-  toets('meten: concept niet meer in Gmail en niet verzonden (> 2 uur) → concept_weg', status(r1.id).status === 'concept_weg', status(r1.id).status);
+  toets('wv4162: meten met een vol antwoord → geen misser', status(r1.id).status === 'concept' && status(r1.id).opmerking === 'eerder: iets', status(r1.id).opmerking);
+  luikVol = false;
+  await ronde({ meten: true });
+  toets('wv4162: eerste misser → blijft concept, merkteken achter de opmerking', status(r1.id).status === 'concept' && /^eerder: iets \[concept_mist:/.test(status(r1.id).opmerking), status(r1.id).opmerking);
+  await ronde({ meten: true });
+  toets('wv4162: tweede misser binnen 45 min → nog concept', status(r1.id).status === 'concept', status(r1.id).status);
+  const oudMist = new Date(Date.now() - 50 * 60e3).toISOString();
+  db.prepare("update nota_verzending set opmerking=? where id=?").run('eerder: iets [concept_mist:' + oudMist + ']', r1.id);
+  await ronde({ meten: true });
+  toets('meten: concept niet meer in Gmail en niet verzonden (> 2 uur), twee missers ≥ 45 min → concept_weg', status(r1.id).status === 'concept_weg' && status(r1.id).opmerking === 'eerder: iets', status(r1.id));
 
   // 12. dagplafond
   for (let i = 0; i < 45; i++) { const n = nota('P01', 2000 + i); const r = rij(n); db.prepare("update nota_verzending set status='concept', concept_op=strftime('%Y-%m-%dT%H:%M:%SZ','now'), pdf_b64=null where id=?").run(r.id); }

@@ -133,6 +133,31 @@ const M = require(path.resolve('pot-maand.js'));
   conceptStatus = 200; const n0 = conceptAanroepen;
   u = await M.ronde(io, {});
   toets('onzeker → concept teruggevonden in Gmail, geen tweede aanroep', km().status === 'concept' && conceptAanroepen === n0, [km(), conceptAanroepen - n0]);
+  // ── wv4162 (C17, pot § M5): zoekfout = niets afschrijven; concept_weg pas na twee missers ≥ 45 min ──
+  {
+    const kmId = db.prepare("select id from mail_concept where soort='exact' and entiteit='KM'").get().id;
+    db.prepare("update mail_concept set concept_op=strftime('%Y-%m-%dT%H:%M:%SZ','now','-3 hours'), gemeten_op=null, reden='eerder' where id=?").run(kmId);
+    const echtLuik = io.luik;
+    io.luik = async () => ({ mails: [], melding: 'fout bij zoeken: nep' });
+    u = await M.ronde(io, { meten: true });
+    toets('wv4162: meten met zoekfout (melding) → blijft concept, geen merkteken', km().status === 'concept' && km().reden === 'eerder' && u.fouten.includes('luik'), [km(), u.fouten]);
+    io.luik = echtLuik;
+    const kmMails = gmail.filter((g) => g.aan === 'verkoop-km@proef.example');
+    kmMails.forEach((g) => { g._l = g.labels; g.labels = []; });
+    await M.ronde(io, { meten: true });
+    toets('wv4162: eerste misser → blijft concept, merkteken achter de reden', km().status === 'concept' && /^eerder \[concept_mist:/.test(km().reden), km());
+    await M.ronde(io, { meten: true });
+    toets('wv4162: tweede misser binnen 45 min → nog concept', km().status === 'concept', km());
+    kmMails.forEach((g) => { g.labels = g._l; });
+    await M.ronde(io, { meten: true });
+    toets('wv4162: concept weer gezien → merkteken weg, oude reden terug', km().status === 'concept' && km().reden === 'eerder', km());
+    kmMails.forEach((g) => { g.labels = []; });
+    db.prepare("update mail_concept set reden=? where id=?").run('eerder [concept_mist:' + new Date(Date.now() - 50 * 60e3).toISOString() + ']', kmId);
+    await M.ronde(io, { meten: true });
+    toets('wv4162: twee missers ≥ 45 min → concept_weg', km().status === 'concept_weg', km());
+    kmMails.forEach((g) => { g.labels = g._l; });
+    db.prepare("update mail_concept set status='concept', reden=null, concept_op=strftime('%Y-%m-%dT%H:%M:%SZ','now') where id=?").run(kmId);
+  }
   // ── nameten: verzonden ──
   gmail.filter((g) => g.aan === 'een@proef.example' && /POH-GGZ/.test(g.onderwerp)).forEach((g) => { g.labels = ['SENT']; });
   gmail.filter((g) => g.aan === 'twee@proef.example' && /POH-GGZ/.test(g.onderwerp)).forEach((g) => { g.labels = ['SENT']; });

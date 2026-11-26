@@ -26,6 +26,7 @@
  * PUUR. Geen netwerk, bestand of proces: D1, het lees-luik, het mailluik, pdftotext, het register, Voor jou en de bundel komen via io.
  */
 const crypto = require('crypto');
+const GZ = require('./gmail-zoek.js');   // wv4162: één zoekfunctie, een luikfout is nooit "niets gevonden"
 
 const GRENS = { perTik: 12, perDag: 40, onzekerPerTik: 10, meetPerUur: 15, meetDagen: 90, conceptWegUur: 2, pogingenMax: 3, bijlagenMax: 10, pdfMax: 250 * 1024 };
 const D1_NU = "strftime('%Y-%m-%dT%H:%M:%SZ','now')";
@@ -84,14 +85,12 @@ async function zoekInGmail(io, rij, vanaf) {
   const nrs = JSON.parse(rij.nummers || '[]');
   const eerste = String(nrs[0] || '').split(' ').pop();
   if (!/^\d{7}$/.test(eerste)) throw new Error('regel zonder nummer');
-  const j = await io.luik({ actie: 'mail_zoeken', query: `filename:${eerste} {in:draft in:sent} after:${gmailDatum(vanaf, 1)}`, max: 20 });
-  const mails = Array.isArray(j) ? j : (j && Array.isArray(j.mails) ? j.mails : null);
-  if (!mails) throw new Error('lees-luik zonder lijst');
+  const mails = await GZ.zoek(io, `filename:${eerste} {in:draft in:sent} after:${gmailDatum(vanaf, 1)}`, 20, { kaal: true });
   const aan = String(rij.aan || '').toLowerCase();
   const past = mails.filter((m) => String(m.onderwerp || '').trim() === String(rij.onderwerp || '').trim() && (!aan || String(m.aan || '').toLowerCase().includes(aan)));
   const verzonden = past.find((m) => labels(m).includes('SENT')) || (rij.thread_id ? mails.find((m) => labels(m).includes('SENT') && m.thread_id === rij.thread_id) : null);
   const concept = past.find((m) => labels(m).includes('DRAFT'));
-  return { verzonden: verzonden || null, concept: concept || null };
+  return { verzonden: verzonden || null, concept: concept || null, vol: !!mails.vol };
 }
 
 // ── 1. nota's van de maand ───────────────────────────────────────────────────
@@ -454,8 +453,14 @@ async function ronde(io, o) {
       let g;
       try { g = await zoekInGmail(io, r, r.concept_op); } catch (e) { uit.fouten.push('luik'); break; }
       if (g.verzonden) { if (await zet(r.id, { status: 'verzonden', verzonden_op: g.verzonden.datum || nu.iso, gemeten_op: nu.iso }, 'concept')) { uit.verzonden++; uit.gewijzigd = true; } continue; }
-      if (!g.concept && Date.parse(r.concept_op) < Date.parse(nu.iso) - GRENS.conceptWegUur * 3600e3) { if (await zet(r.id, { status: 'concept_weg', gemeten_op: nu.iso }, 'concept')) uit.gewijzigd = true; continue; }
-      await zet(r.id, { gemeten_op: nu.iso }, 'concept');
+      // wv4162 (C17, pot § M5): concept weg pas na twee missers ≥ 45 min uit elkaar (merkteken achter reden), nooit op een vol antwoord
+      if (!g.concept) {
+        const b = GZ.conceptMisser(r, r.reden, Date.parse(nu.iso), GRENS.conceptWegUur * 3600e3, g.vol);
+        if (b === 'weg') { if (await zet(r.id, { status: 'concept_weg', gemeten_op: nu.iso, reden: 'twee keer niet in Gmail gevonden (concept weggegooid)' }, 'concept')) uit.gewijzigd = true; continue; }
+        if (b === 'mist1') { await zet(r.id, { gemeten_op: nu.iso, reden: GZ.mistZet(r.reden, nu.iso) }, 'concept'); continue; }
+        await zet(r.id, { gemeten_op: nu.iso }, 'concept'); continue;
+      }
+      await zet(r.id, GZ.mistVan(r.reden) ? { gemeten_op: nu.iso, reden: GZ.mistWeg(r.reden) } : { gemeten_op: nu.iso }, 'concept');
     }
   }
   // 5 kaarten (bij een wijziging of op verzoek)
