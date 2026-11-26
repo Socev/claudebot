@@ -23627,6 +23627,56 @@ function voorwerkLuikRoute(req, res) {
     stuur(200, r);
   });
 }
+function mailStemGids() { const s = String(VV().lees(path.join(VAULT, '.claude', 'skills', 'mijn-mailstem', 'SKILL.md'), 'utf8') || ''); const i = s.indexOf('# Mijn mailstem'); return i >= 0 ? s.slice(i) : ''; }
+// wv4098: één Gmail-draad (privé) via het lees-luik, alleen lezen. → { berichten } of een fout
+async function mailGesprekLees(draad) {
+  const j = await appAgendaApi({ actie: 'mail_gesprek', draad: String(draad) }, { timeoutMs: 45000 });
+  if (!j || typeof j !== 'object' || j.fout || j.melding || !Array.isArray(j.berichten)) throw new Error('lees-luik gaf het gesprek niet');
+  return j;
+}
+// ── wv4098 (besluitenpagina nr 348 = 3C48 en nr 339 = 3C39, David Ja 25-11-2026 21:46): mailconcept in de chatroute ─────────────────
+// WAAROM. Socev zei bij elk draadconcept "cc zie ik niet" en niets keek of een bedrag of datum in een chatconcept ergens vandaan kwam.
+// WAT. POST /smal/mailconcept {secret, opdracht, …} (SOCEV_AGENT_SLEUTEL of API_SECRET; 60 per uur), alleen lezen, nooit een concept:
+//   opdracht 'draad'  {draad}                       → aan, cc, afzendadres en onderwerp voor een antwoord (mail-ontvangers.js) + meldregel
+//   opdracht 'feiten' {concept, draad?, stukken?}   → feitenstrook: elke waarde langs de draad, de meegegeven stukken en Davids schrijfgids
+// Geeft geen mailtekst terug, alleen adressen, het onderwerp en de waarden die al in Socevs eigen concept staan.
+async function mailconceptSmal(d) {
+  const O = require(path.join(__dirname, 'mail-ontvangers.js'));
+  const draad = d.draad == null || d.draad === '' ? '' : String(d.draad);
+  if (draad && !/^[0-9a-f]{12,24}$/.test(draad)) return { status: 400, j: { ok: false, fout: 'draad = Gmail-threadId (hex)' } };
+  const lees = async function () {
+    try { return await mailGesprekLees(draad); } catch (e) { logError('mailconcept-gesprek', e); return null; }
+  };
+  if (d.opdracht === 'draad') {
+    if (!draad) return { status: 400, j: { ok: false, fout: 'draad ontbreekt' } };
+    const g = await lees();
+    if (!g) return { status: 502, j: { ok: false, fout: 'het lees-luik gaf deze draad niet (alleen privé-Gmail); loop de ontvangers zelf na' } };
+    const r = O.ontvangers(g.berichten);
+    if (!r) return { status: 404, j: { ok: false, fout: 'geen bericht in deze draad' } };
+    const concept = g.berichten.some(function (b) { return b && Array.isArray(b.labels) && b.labels.indexOf('DRAFT') >= 0; });
+    return { status: 200, j: { ok: true, draad, soort: r.soort, aan: r.aan, cc: r.cc, van: r.van, van_adres: r.van_adres, van_reden: r.van_reden,
+      onderwerp: O.antwoordOnderwerp(r.onderwerp), weggelaten: r.weggelaten, eigen_weg: r.eigen_weg, concept_in_draad: concept, regel: O.ontvangersRegel(r) } };
+  }
+  if (d.opdracht === 'feiten') {
+    const concept = typeof d.concept === 'string' ? d.concept : '';
+    if (concept.trim().length < 5) return { status: 400, j: { ok: false, fout: 'concept ontbreekt' } };
+    // review Codex wv4098 MOET 1: nooit stil afkappen (dan zou de strook waarden na de grens niet zien en toch "alles onderbouwd" zeggen)
+    if (concept.length > 20000) return { status: 413, j: { ok: false, fout: 'concept langer dan 20.000 tekens: de strook controleert dit niet; loop de getallen zelf na' } };
+    const stukken = (Array.isArray(d.stukken) ? d.stukken : []).slice(0, 10).filter(function (x) { return x && typeof x === 'object'; })
+      .map(function (x) { return { naam: String(x.naam || 'stuk').slice(0, 120), tekst: String(x.tekst || '').slice(0, 300000) }; });
+    let teksten = [], gelezen = false;
+    if (draad) {
+      const g = await lees();
+      if (g) { gelezen = true; teksten = g.berichten.filter(function (b) { return b && !(Array.isArray(b.labels) && b.labels.indexOf('DRAFT') >= 0); }).map(function (b) { return [b.onderwerp, b.tekst].map(function (x) { return typeof x === 'string' ? x : ''; }).join('\n'); }); }
+    }
+    let stem = '';
+    try { stem = mailStemGids(); } catch (e) { stem = ''; }
+    const f = O.feitenStrook(concept, { draad: teksten, stukken, stem });
+    if (draad && !gelezen) f.regel += ' (De draad was niet te lezen: alleen de stukken en je ondertekening telden.)';
+    return { status: 200, j: Object.assign({ ok: true, draad_gelezen: gelezen, stukken: stukken.length }, f) };
+  }
+  return { status: 400, j: { ok: false, fout: "opdracht 'draad' of 'feiten'" } };
+}
 const mailVoorwerk = (function () {
   const p = path.join(__dirname, 'mailvoorwerk.js');
   if (!fs.existsSync(p) || !mailman || typeof mailman.voorwerkBron !== 'function') return null;
@@ -23636,7 +23686,8 @@ const mailVoorwerk = (function () {
       lees: mailVoorwerkLees,
       poort: function (stuk) { return require(path.join(__dirname, 'intake', 'patientpoort.js')).beoordeel(stuk); },
       claude: harvesterClaude,
-      stem: function () { const s = String(VV().lees(path.join(VAULT, '.claude', 'skills', 'mijn-mailstem', 'SKILL.md'), 'utf8') || ''); const i = s.indexOf('# Mijn mailstem'); return i >= 0 ? s.slice(i) : ''; },
+      stem: mailStemGids,
+      gesprek: mailGesprekLees,   // wv4098 (nr 348): aan, cc en afzendadres uit de hele draad
       correcties: function () { return String(VV().lees(path.join(VAULT, '00_Systeem', 'Mailstem - correcties van David.md'), 'utf8', { max: 262144 }) || ''); },   // nr 318, wv4095: alleen de prompt, niet de poort
       concept: function (body) { return potVzConcept(body); },
       register: function (regel) { return potVzRegister(regel); },
@@ -31977,7 +32028,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, eindjes: 6, 'eindjes/oordeel': 20 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata', 'eindjes', 'eindjes/oordeel']);   // wv4007: eindjes alleen beurtpas of API_SECRET   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -32215,6 +32266,7 @@ async function smalActie(actie, d, wie) {
     return { status: 200, j: { ok: r.code === 0, code: r.code, stdout: r.stdout, stderr: r.stderr } };
   }
   if (actie === 'bank') return bankSmal(d);   // wv680: alleen-lezen bankluis (zie bankSmal)
+  if (actie === 'mailconcept') return mailconceptSmal(d);   // wv4098: ontvangers en feitenstrook voor een chatconcept (alleen lezen)
   if (actie === 'beleggen') return beleggenSmal(d);   // wv3756: Socev in het gewone gesprek (stand, dagboekregel); nooit handelen
   if (actie === 'homey') return HOMEY_POD ? HOMEY_POD.homeySmal(d, wie) : (!wie || !wie.mk ? { status: 403, j: { ok: false, fout: 'homey alleen vanuit de machinekamer (API_SECRET)' } } : { status: 404, j: { ok: false, fout: 'homey.js zit niet in deze release' } });   // wv3460: Homey (Athom MCP), alleen API_SECRET (zie homeySmal in homey.js; wv3886)
   if (actie === 'tibber') return tibberSmal(d, wie);   // wv2707: Tibber-uurronde los (opdracht uur), alleen API_SECRET (zie tibberSmal)

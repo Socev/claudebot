@@ -37,6 +37,8 @@ function kamer(o) {
     concept: async function (body) { st.concept.push(body); return o.conceptAntw || { status: 200, j: { ok: true, concept_id: 'r-123', thread_id: body.thread_id } }; },
     register: function (r) { st.register.push(r); },
   };
+  if (o.gesprek !== undefined) io.gesprek = async function (d) { st.gesprek = (st.gesprek || 0) + 1; if (o.gesprek instanceof Error) throw o.gesprek; return o.gesprek; };
+  if (o.verwerkers) io.verwerkers = function () { return o.verwerkers; };
   return { vw: V.maak(io), st, dir, zaken };
 }
 async function wacht(vw, draad) { for (let i = 0; i < 50; i++) { const t = vw.toon(draad); if (t.j.voorwerk && t.j.voorwerk.stand !== 'bezig') return t; await new Promise(function (r) { setTimeout(r, 5); }); } throw new Error('bleef bezig'); }
@@ -260,4 +262,44 @@ test('wv4095: correcties in de systeemprompt van stap 1 na de schrijfgids; geen 
   const k2 = kamer({ correctiesFout: true });
   await k2.vw.tik();
   assert.equal(k2.st.model, 1); assert.match(k2.st.systeem, /Mijn mailstem/); assert.doesNotMatch(k2.st.systeem, /CORRECTIES VAN DAVID/);
+});
+
+// ─────────── wv4098 (nr 348 = 3C48): aan, cc en afzendadres uit de hele draad ───────────
+function gesprekMet(cc, extra) {
+  return { berichten: [
+    { id: 'm1', datum: '2026-11-04T08:00:00Z', van: 'Iemand <iemand@voorbeeld.invalid>', aan: 'dokterschaap@gmail.com', cc: '', labels: ['INBOX'] },
+    { id: 'm2', datum: '2026-11-04T09:00:00Z', van: '"D. Schaap" <dokterschaap@gmail.com>', aan: 'iemand@voorbeeld.invalid', cc: 'ander@voorbeeld.invalid', labels: ['SENT'] },
+    { id: 'm3', datum: '2026-11-05T08:00:00Z', van: 'Iemand <iemand@voorbeeld.invalid>', aan: 'dokterschaap@gmail.com, collega@voorbeeld.invalid', cc: cc, labels: ['INBOX'] }
+  ].concat(extra || []) };
+}
+test('wv4098 gmail: aan, cc en afzendadres uit de draad; meldregel noemt ze; terugval = alleen afzender, eerlijk gezegd', async () => {
+  const tekst = 'Hoi,\n\nPrima, ik teken het en stuur het vrijdag terug.\n\nGroet,\nDavid';
+  const k = kamer({ gesprek: gesprekMet('Ander <ander@voorbeeld.invalid>, d.schaap@gmail.com') }); await k.vw.tik();
+  let r = await k.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst });
+  assert.equal(r.status, 200);
+  assert.deepEqual(k.st.concept[0], { aan: 'iemand@voorbeeld.invalid, collega@voorbeeld.invalid', cc: 'ander@voorbeeld.invalid', van: '"D. Schaap" <dokterschaap@gmail.com>',
+    onderwerp: 'Re: Kun je dit tekenen?', bericht: tekst, thread_id: 'aa11bb22cc33dd44' });
+  assert.equal(r.j.aan, 'iemand@voorbeeld.invalid, collega@voorbeeld.invalid (cc ander@voorbeeld.invalid; vanaf dokterschaap@gmail.com)', 'de app toont aan letterlijk');
+  assert.deepEqual(r.j.aan_lijst, ['iemand@voorbeeld.invalid', 'collega@voorbeeld.invalid']); assert.equal(r.j.cc, 'ander@voorbeeld.invalid'); assert.equal(r.j.van, 'dokterschaap@gmail.com');
+  assert.equal(r.j.ontvangers_onbekend, false); assert.equal(k.st.register[0].cc, 1);
+  // luik faalt → oud gedrag (alleen de afzender), ontvangers_onbekend
+  const f = kamer({ gesprek: new Error('luik weg') }); await f.vw.tik();
+  r = await f.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst });
+  assert.equal(r.status, 200); assert.deepEqual(f.st.concept[0], { aan: 'iemand@voorbeeld.invalid', onderwerp: 'Re: Kun je dit tekenen?', bericht: tekst, thread_id: 'aa11bb22cc33dd44' });
+  assert.equal(r.j.ontvangers_onbekend, true); assert.equal(r.j.cc, ''); assert.equal(r.j.aan, 'iemand@voorbeeld.invalid (cc kon Socev niet lezen)');
+  // laatste bericht in de draad is van een ander dan de afzender van de zaak (draad liep door) → oud gedrag
+  const a = kamer({ gesprek: gesprekMet('', [{ id: 'm4', datum: '2026-11-05T09:00:00Z', van: 'derde@voorbeeld.invalid', aan: 'dokterschaap@gmail.com', cc: '', labels: ['INBOX'] }]) }); await a.vw.tik();
+  r = await a.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst });
+  assert.equal(a.st.concept[0].aan, 'iemand@voorbeeld.invalid'); assert.equal(a.st.concept[0].cc, undefined); assert.equal(r.j.ontvangers_onbekend, true);
+});
+test('wv4098 gmail: de gevoeligheidspoort toetst ook de cc (medewerkergegeven alleen als álle ontvangers de verwerker zijn)', async () => {
+  const tekst = 'Hoi,\n\nHet IBAN is NL91ABNA0417164300, ik teken het vrijdag.\n\nGroet,\nDavid';
+  const vw = [{ naam: 'Salaris', domein: 'voorbeeld.invalid' }];
+  const ok = kamer({ verwerkers: vw, gesprek: gesprekMet('') }); await ok.vw.tik();
+  let r = await ok.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst });
+  assert.equal(r.status, 409); assert.ok(r.j.gevoelig.some(function (x) { return x.reden === 'niet_onderbouwd'; }), 'alle ontvangers verwerker: alleen nog onderbouwing');
+  const nee = kamer({ verwerkers: vw, gesprek: gesprekMet('buiten@elders.invalid') }); await nee.vw.tik();
+  r = await nee.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst });
+  assert.equal(r.status, 409); assert.ok(r.j.gevoelig.some(function (x) { return x.reden === 'geen_verwerker'; }), 'cc buiten de verwerker: dicht');
+  assert.equal(nee.st.concept.length, 0);
 });

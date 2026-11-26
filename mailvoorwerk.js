@@ -33,6 +33,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const P = require('./voorwerk-poort.js');
+const O = require('./mail-ontvangers.js');   // wv4098: aan, cc en afzendadres uit de draad (nr 348 = 3C48)
 
 const VERSIE = 'voorwerk-1', VERSIE2 = 'voorwerk-2';
 const ONDERZOEK_DAG_MAX = 6, USD_DAG_MAX = 5;   // automatisch per dag (op tik: alleen de uurgrens in server.js)
@@ -494,12 +495,23 @@ function maak(io) {
     catch (e) { fout('voorwerk-gmail-lees', e); return { status: 502, j: { ok: false, fout: 'de mail is even niet te lezen; probeer het zo opnieuw' } }; }
     let stem = '';
     try { stem = str(io.stem ? io.stem() : '', STEM_MAX); } catch (e) { stem = ''; }
+    // wv4098 (besluit nr 348 = 3C48, David Ja 25-11): aan, cc en afzendadres uit de hele draad (lees-luik mail_gesprek), zoals "allen beantwoorden".
+    // Alleen als het laatste echte bericht in de draad dat van de afzender van deze zaak is; anders, of als het luik faalt: het oude gedrag
+    // (alleen de afzender, standaardadres) en dat eerlijk zeggen (ontvangers_onbekend). De poort hieronder toetst ALLE ontvangers.
+    const aanAfz = aan0;
+    let ont = null, ontOnbekend = false;
+    if (typeof io.gesprek === 'function') {
+      try { const g = await io.gesprek(draad); ont = O.ontvangers(g && g.berichten); } catch (e) { fout('voorwerk-gesprek', e); ont = null; }
+      if (!ont || ont.soort !== 'antwoord' || ont.afzender !== aanAfz || ont.aan[0] !== aanAfz) { ont = null; ontOnbekend = true; }
+    }
+    const aanLijst = ont ? ont.aan : [aanAfz], ccLijst = ont ? ont.cc : [];
+    const poortAan = aanLijst.concat(ccLijst).find(function (x) { return !P.verwerkerVan(x, verwerkers()); }) || aanAfz;
     const pj = function (x, dflt) { try { const a = JSON.parse(x || 'null'); return a == null ? dflt : a; } catch (e) { return dflt; } };
     const f = pj(r.feiten, { bewezen: [], niet_bewezen: [] }), kz = pj(r.keuzes, []);
     const alleFeiten = (f.bewezen || []).concat(f.niet_bewezen || []);
     const blok = P.nietBewezenInTekst(tekst, f.niet_bewezen, [mailTekst].concat((f.bewezen || []).map(function (x) { return x.waarde; })));
     if (blok.length) return { status: 409, j: { ok: false, niet_bewezen: blok, fout: 'Haal eerst weg wat Socev niet kon onderbouwen: ' + blok.join(', ') } };
-    const gev = P.gevoelig(tekst, { mail: mailTekst, aan: aan0, verwerkers: verwerkers(), bewezen: f.bewezen || [], keuzes: kz, stem, feiten: alleFeiten });
+    const gev = P.gevoelig(tekst, { mail: mailTekst, aan: poortAan, verwerkers: verwerkers(), bewezen: f.bewezen || [], keuzes: kz, stem, feiten: alleFeiten });
     if (!poortConcept(tekst)) { gev.dicht = true; gev.redenen.unshift({ soort: 'patient', ruw: '', reden: 'nooit' }); }
     if (gev.dicht) return { status: 409, j: { ok: false, gevoelig: gev.redenen, fout: gevoeligTekst(gev.redenen) } };
     if (r.stap === 2 && d.toch !== true) {
@@ -515,7 +527,9 @@ function maak(io) {
     gmailBezig.add(draad);
     try {
       let a;
-      try { a = await io.concept({ aan, onderwerp, bericht: tekst, thread_id: draad }); } catch (e) { fout('voorwerk-gmail', e); return { status: 502, j: { ok: false, fout: 'Gmail is even niet bereikbaar; probeer het zo opnieuw' } }; }
+      const body = ont ? Object.assign({ aan: aanLijst.join(', '), onderwerp, bericht: tekst, thread_id: draad }, ccLijst.length ? { cc: ccLijst.join(', ') } : {}, ont.van ? { van: ont.van } : {})
+        : { aan, onderwerp, bericht: tekst, thread_id: draad };
+      try { a = await io.concept(body); } catch (e) { fout('voorwerk-gmail', e); return { status: 502, j: { ok: false, fout: 'Gmail is even niet bereikbaar; probeer het zo opnieuw' } }; }
       const j = a && a.j;
       // wv2729: het mailconcept-luik weigert sinds wv2728 een tweede concept in dezelfde draad (409); zeg dat in gewone taal
       if (a && a.status === 409 && isObj(j) && j.ok === false) return { status: 409, j: { ok: false, bestaat_al: true, fout: 'Er staat al een concept in deze Gmail-draad. Gooi dat eerst weg in Gmail en tik dan opnieuw.' } };
@@ -524,9 +538,17 @@ function maak(io) {
       open().prepare('UPDATE voorwerk SET gmail_tijd = ?, gmail_id = ?, gmail_draad = ? WHERE postvak = ? AND draad = ? AND besluit = ?').run(iso(), j.concept_id.slice(0, 80), td.slice(0, 40), PV, draad, r.besluit);
       try {
         io.register({ aangemaakt: iso(), concept_id: j.concept_id, thread_id: td || draad, aan, onderwerp, hash: crypto.createHash('sha256').update(tekst).digest('hex'),
-          tekens: tekst.length, bron: 'mail-voorwerk', aangepast: tekst !== str(r.concept, 6000) });
+          tekens: tekst.length, bron: 'mail-voorwerk', aangepast: tekst !== str(r.concept, 6000), cc: ccLijst.length, van: ont ? ont.van_adres : '' });
       } catch (e) { fout('voorwerk-register', e); }
-      return { status: 200, j: { ok: true, in_draad: td === draad, aan } };
+      // De app toont `aan` letterlijk ("Staat als concept …, aan <aan>. Kijk de ontvangers na"): daarom staan cc, afzendadres en wie wegviel erin
+      const extra = [];
+      if (ccLijst.length) extra.push('cc ' + ccLijst.join(', '));
+      if (ont) extra.push('vanaf ' + ont.van_adres);
+      if (ont && ont.weggelaten.length) extra.push('eerder in de draad, nu niet mee: ' + ont.weggelaten.join(', '));
+      if (ontOnbekend) extra.push('cc kon Socev niet lezen');
+      const weergave = aanLijst.join(', ') + (extra.length ? ' (' + extra.join('; ') + ')' : '');
+      return { status: 200, j: { ok: true, in_draad: td === draad, aan: weergave, aan_lijst: aanLijst, cc: ccLijst.join(', '), van: ont ? ont.van_adres : '',
+        weggelaten: ont ? ont.weggelaten : [], ontvangers_onbekend: ontOnbekend } };
     } finally { gmailBezig.delete(draad); }
   }
   // wv3092: voor MailMan (CONCEPT_KLAAR): de concepten die via gmail() in hun eigen Gmail-draad kwamen, met het besluit waarop ze antwoorden.

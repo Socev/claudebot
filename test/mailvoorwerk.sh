@@ -9,8 +9,8 @@ C=$(grep -vE '^\s*(\*|//)' mailvoorwerk.js)
 if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen|env)|import\(|console\.|\beval\("; then
   echo "ROOD  CI-poort: mailvoorwerk.js laadt een netwerk- of procesmodule, leest de omgeving, logt naar de console of gebruikt eval"; exit 1
 fi
-if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|crypto|node:sqlite|\./voorwerk-poort\.js)'\)$"; then
-  echo "ROOD  CI-poort: mailvoorwerk.js laadt een module buiten fs, path, crypto, node:sqlite en ./voorwerk-poort.js"; exit 1
+if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|crypto|node:sqlite|\./voorwerk-poort\.js|\./mail-ontvangers\.js)'\)$"; then
+  echo "ROOD  CI-poort: mailvoorwerk.js laadt een module buiten fs, path, crypto, node:sqlite, ./voorwerk-poort.js en ./mail-ontvangers.js"; exit 1
 fi
 echo "GROEN CI-poort: mailvoorwerk.js alleen lokaal"
 f=0
@@ -22,5 +22,7 @@ grep -q "if (rolPrimair()) mailVoorwerk.tik()" server.js || { echo "ROOD  server
 grep -q "mail_voorwerk: typeof mailVoorwerkInfo" server.js || { echo "ROOD  server.js: mail_voorwerk ontbreekt in /health"; f=1; }
 grep -qE '^RELEASE_OPTIONEEL=".* mailvoorwerk\.js ' uitrol.sh || { echo "ROOD  uitrol.sh: mailvoorwerk.js niet in RELEASE_OPTIONEEL"; f=1; }
 [ $f = 0 ] && echo "GROEN koppeling server.js en uitrol.sh"
-node --no-warnings --test --test-reporter=spec test/mailvoorwerk.test.js || f=1
+node --no-warnings --test --test-reporter=spec test/mailvoorwerk.test.js test/mail-ontvangers.test.js || f=1
+grep -qE "^RELEASE_OPTIONEEL=\".* mail-ontvangers\.js " uitrol.sh || { echo "ROOD  uitrol.sh: mail-ontvangers.js niet in RELEASE_OPTIONEEL"; f=1; }
+grep -q "gesprek: mailGesprekLees," server.js && grep -q "if (actie === 'mailconcept') return mailconceptSmal(d);" server.js || { echo "ROOD  server.js: gesprek of /smal/mailconcept niet gekoppeld"; f=1; }
 exit $f
