@@ -788,7 +788,8 @@ function maak(o) {
   function valtOp(db, codes, praktijk) {
     const naam = (code, oms) => (codes.get(code) || {}).naam || oms || code || '';
     const oud = db.prepare("SELECT substr(r.dag, 1, 7) AS maand, r.code, MIN(r.omschrijving) AS oms, COUNT(*) AS n FROM regel r JOIN export e ON e.id = r.export_id " +
-      "WHERE r.praktijk = ? AND r.voorlopig = 1 AND r.dag < date(e.exportdatum, '-2 months') GROUP BY maand, r.code ORDER BY maand, r.code").all(praktijk)
+      "WHERE r.praktijk = ? AND r.voorlopig = 1 AND r.dag < MIN(date(e.exportdatum, '-2 months'), date(e.exportdatum, 'start of month', '-1 month', '-1 day')) " +   // review ZOU 1: 30-4 → 28-2, niet 2-3
+      "GROUP BY maand, r.code ORDER BY maand, r.code").all(praktijk)
       .map((r) => ({ maand: r.maand, code: r.code, naam: naam(r.code, r.oms), n: r.n }));
     const nul = db.prepare("SELECT code, MIN(omschrijving) AS oms, COUNT(*) AS n, SUM(voorlopig) AS v FROM regel WHERE praktijk = ? AND type = 'V' AND tarief_cent = 0 GROUP BY code ORDER BY n DESC, code").all(praktijk)
       .map((r) => ({ code: r.code, naam: naam(r.code, r.oms), n: r.n, voorlopig: r.v }));

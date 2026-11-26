@@ -452,3 +452,15 @@ test('wv4148 Valt op: na twee maanden niet gefactureerd (tegen de eigen export),
   assert.strictEqual(p.laatste_export, '2026-08-20');
   assert.doesNotMatch(JSON.stringify(p.valt_op), /9\d{5}/);   // geen (verzonnen) patiëntnummer
 });
+test('wv4148 review ZOU 1+2: twee maanden terug vanaf een maandultimo (30-4 → 28-2) en geen patiëntnummer of pseudoniem in valt_op', () => {
+  const { m, map } = nieuw();
+  const V = (pnr, dag) => ({ pnr, code: '12010', oms: 'Consult kort', type: 'V', reg: 'A. Proefsen', tarief: '7.00', dag, factuur: null });
+  // export van 30-4: 27-2 is oud, 28-2 niet (precies twee maanden), 1-3 niet (SQLite alleen zou 30-4 − 2 maanden = 2-3 maken)
+  inlees(m, { agb: '009870', exportdatum: '2026-04-30', begin: '2026-02-01', eind: '2026-04-30', regels: [V('900301', '2026-02-27'), V('900302', '2026-02-28'), V('900303', '2026-03-01')] });
+  const p = m.app({ methode: 'GET', pad: '/app/pma' }).body.praktijken.find((x) => x.code === 'TG');
+  assert.deepStrictEqual(p.valt_op.voorlopig_oud.per.map((x) => [x.maand, x.n]), [['2026-02', 1]]);
+  const ps = db(map, 'SELECT DISTINCT patient FROM regel').map((r) => r.patient).filter(Boolean);
+  assert.strictEqual(ps.length, 3);   // mét nummer ingelezen: er zijn pseudoniemen
+  const j = JSON.stringify(p.valt_op) + JSON.stringify([p.data_van, p.data_tot, p.laatste_export]);
+  for (const x of ['900301', '900302', '900303'].concat(ps)) assert.ok(!j.includes(x), 'lek: ' + x);
+});
