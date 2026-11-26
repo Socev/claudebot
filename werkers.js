@@ -173,7 +173,7 @@ const OVERIG = [
   {"n8n": "Pxl1HeB7woGqcXzF", "naam": "Injectie-canary (Jev)", "soort": "luik"},
   {"n8n": "9a6vZy16RncxlQ8A", "naam": "Injectielabel (Jev)", "soort": "luik"},
   {"n8n": "QsoEDYT0T6yra1iK", "naam": "Injectielabel (pod)", "soort": "luik"},
-  {"n8n": "Z0OxkHC6vk3WCCHA", "naam": "Kluisluik (webhook)", "soort": "luik"},
+  {"n8n": "Z0OxkHC6vk3WCCHA", "naam": "Kluisluik (webhook)", "soort": "luik", "bewust_uit": true},   // wv4122: uit sinds 26-11-2026, geen aanroeper (David Ja op besluitenpagina nr 73); dubbel met Secret-invoerluik
   {"n8n": "ruUxLjRmYxgM8jzp", "naam": "Mailconcept naar Gmail", "soort": "luik"},
   {"n8n": "u2XdwcstzRuzb0nC", "naam": "OCR-gateway (DeepSeek) v2 (serieel)", "soort": "luik"},
   {"n8n": "43WqW5Y1NKy6YOw4", "naam": "Ping (bewaking)", "soort": "luik"},
