@@ -2623,6 +2623,28 @@ function maak(deps) {
     return { status: 200, flow: flowUit(lokaleFlows()[id] || f) };
   }
 
+  // wv4096: terug op proef (elke keer weer een vingerafdruk). Strenger dan nu, dus zonder vingerafdruk; alleen lokale flows die actief staan.
+  function opProef(id, ctx) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    const f = lokaleFlows()[id];
+    if (!f) return { status: 404, fout: 'alleen een flow van de machinekamer kan op proef staan' };
+    if (f.fout) return { status: 409, fout: 'deze flow is kapot: ' + f.fout };
+    if (f.status !== 'actief') return { status: 409, fout: 'deze flow staat niet vast aan' };
+    const p = path.join(FLOWS, id, 'flow.yaml');
+    try {
+      const y = JSON.parse(fs.readFileSync(p, 'utf8'));
+      y.status = 'proef';
+      delete y.geactiveerd;
+      y.terug_op_proef = new Date(klok()).toISOString();
+      const tmp = p + '.nieuw.' + process.pid;
+      fs.writeFileSync(tmp, JSON.stringify(y, null, 1) + '\n', { mode: 0o600 });
+      fs.renameSync(tmp, p);
+    } catch (e) { fout('studio-opproef', e); return { status: 500, fout: 'terugzetten lukte niet' }; }
+    st.lokaal.sleutel = null;
+    audit({ flow: id, op_proef: true, apparaat: (ctx && ctx.apparaat) || null });
+    return { status: 200, flow: flowUit(lokaleFlows()[id] || f) };
+  }
+
   st.timer = setInterval(function () { vrijRonde().catch(function () {}); }, 60 * 1000);
   if (st.timer.unref) st.timer.unref();
   // wv2984: na een herstart met een merk niet een minuut wachten
@@ -2644,6 +2666,7 @@ function maak(deps) {
     taak: function (id) { const t = st.taken.find(function (x) { return x.id === id; }); return t ? taakUit(t) : null; },
     stop: stopTaak,
     activeer: activeer,
+    opProef: opProef,   // wv4096
     teller: stand,
     health: function () { return { taken_vandaag: vandaagN(), bezig: !!st.bezig, in_rij: st.rij.length, splat: SP ? { hangt: !!st.splatHangt } : null }; },
     toetsFlow: toetsFlow,

@@ -160,7 +160,10 @@ function maak(deps) {
     if (kt.indexOf('vergelijk') < 0) db.exec('ALTER TABLE taak ADD COLUMN vergelijk TEXT');
     // wv4092: Opnieuw (instel = wat nodig is om de taak opnieuw te starten; weg zodra hij klaar is), poging (0 = eerste), opnieuw (id van de
     // herhaling), auto (ISO: tot wanneer de pod het zelf opnieuw mag proberen), stapel (groep van de filmstapel)
-    [['instel', 'TEXT'], ['poging', 'INTEGER NOT NULL DEFAULT 0'], ['opnieuw', 'TEXT'], ['auto', 'TEXT'], ['stapel', 'TEXT']].forEach(function (c) { if (kt.indexOf(c[0]) < 0) db.exec('ALTER TABLE taak ADD COLUMN ' + c[0] + ' ' + c[1]); });
+    // wv4096: reeks (groep van "Maak er 4": het eerste resultaat wordt de bron, de rest versies daarvan)
+    [['instel', 'TEXT'], ['poging', 'INTEGER NOT NULL DEFAULT 0'], ['opnieuw', 'TEXT'], ['auto', 'TEXT'], ['stapel', 'TEXT'], ['reeks', 'TEXT']].forEach(function (c) { if (kt.indexOf(c[0]) < 0) db.exec('ALTER TABLE taak ADD COLUMN ' + c[0] + ' ' + c[1]); });
+    // wv4096: bij een beeld uit tekst de instellingen (model + velden) voor "Nog een" vanuit Bewerken
+    if (kol('bron').indexOf('tekst_instel') < 0) db.exec('ALTER TABLE bron ADD COLUMN tekst_instel TEXT');
     db.exec('CREATE TABLE IF NOT EXISTS seintje (groep TEXT PRIMARY KEY, klaar INTEGER NOT NULL, mislukt INTEGER NOT NULL, op TEXT NOT NULL, gezien TEXT)');
     // na een herstart loopt er niets meer (de motor hield de taak in het geheugen). wv4092: een eerste poging die Opnieuw kan, probeert de pod
     // zelf nog één keer zodra de server vrij is (auto = 12 uur lang); een stapelrij (status 'stapel') blijft gewoon in de stapel.
@@ -194,6 +197,47 @@ function maak(deps) {
     return Buffer.from(s, 'base64');
   }
   function stand(id) { return STANDEN.find(function (x) { return x.id === id; }) || null; }
+  // wv4096 (2C61 e): stand vast aanzetten vanuit Imagine. Sleutel = stand-id of 'tekst-<model>'; de flows = die van de stand plus (bij de vrije
+  // opdracht) de stuk-/voorbeeldflows van hetzelfde model. Aan = alleen met een verse vingerafdruk (één voor allemaal); uit = zonder.
+  function vastSleutel(s) { return s.id === TEKST.id && s.model ? 'tekst-' + s.model : s.id; }
+  function vastFlows(sleutel) {
+    const s = STANDEN.concat(TEKSTEN).find(function (x) { return vastSleutel(x) === sleutel; });
+    if (!s) return null;
+    const l = [s.flow];
+    if (PLUS[s.id]) for (let n = 0; n <= REFS_MAX; n++) l.push(PLUS[s.id] + '-' + n);
+    return l;
+  }
+  async function vastZet(sleutel, d, ctx) {
+    const l = vastFlows(String(sleutel));
+    if (!l) return { status: 404, fout: 'onbekende stand' };
+    const aan = !!(d && d.aan === true);
+    let f0 = null;
+    try { f0 = await S.flowVan(l[0]); } catch (e) { f0 = null; }
+    if (!f0) return { status: 404, fout: 'deze stand staat niet in de Studio' };
+    if (f0.betaald) return { status: 409, fout: 'een betaalde stand vraagt altijd een vingerafdruk' };
+    if (aan) {
+      const vers = !!ctx.versOk();
+      if (!vers) return { status: 403, fout: 'bevestig het vast aanzetten met je vingerafdruk', vers_nodig: true };
+      ctx.versVerbruik();
+      const ctx2 = Object.assign({}, ctx, { versOk: function () { return true; }, versVerbruik: function () {} });
+      let n = 0;
+      for (let i = 0; i < l.length; i++) {
+        const r = S.activeer(l[i], ctx2);
+        if (r.status === 200) n++;
+        else if (i === 0 && r.status !== 409) return r;   // de hoofdflow moet lukken; een stuk-/voorbeeldflow die er niet is of al vast staat, telt niet
+      }
+      log('imagine vast aan ' + sleutel + ' flows=' + n);
+      return { status: 200, vast: 'actief', flows: n };
+    }
+    let n = 0;
+    for (let i = 0; i < l.length; i++) {
+      const r = S.opProef(l[i], ctx);
+      if (r.status === 200) n++;
+      else if (i === 0 && r.status !== 409) return r;
+    }
+    log('imagine vast uit ' + sleutel + ' flows=' + n);
+    return { status: 200, vast: 'proef', flows: n };
+  }
   async function standen(lijst) {
     const uit = [];
     for (const s of lijst || STANDEN) {
@@ -211,6 +255,8 @@ function maak(deps) {
       }
       uit.push({ id: s.id, naam: s.naam, karakter: s.karakter, opdracht: s.opdracht === true, ...(s.model ? { model: s.model, kort: s.kort } : {}), klaar: !!(f && f.klaar), reden: f ? f.reden : 'deze stand staat niet in de Studio',
         tijd: f ? f.tijd : '', vers_per_keer: !!(f && f.vers_per_keer), masker: masker, refs_max: masker ? refs : 0,
+        // wv4096 (2C61 e): David kan zelf kiezen of deze stand per beeld een vingerafdruk vraagt (proef) of vast aan staat (actief)
+        sleutel: vastSleutel(s), vast: f && !f.betaald && (f.status === 'proef' || f.status === 'actief') ? f.status : null,
         velden: f ? f.velden.filter(function (v) { return v.soort !== 'beeld' && v.soort !== 'seed' && !/^pod_/.test(v.naam); }) : [] });
     }
     return uit;
@@ -594,26 +640,92 @@ function maak(deps) {
     log('imagine bewegen klaar taak=' + taakId + ' versie=' + id + ' beelden=' + (c.beelden || 0) + ' bytes=' + mp4.length);
   }
   // ── wv2990: nieuw beeld uit tekst (gewone stand) ──
+  // wv4096: waar komt een variant? → { bron, origineel } of null (= nieuwe bron)
+  function variantDoel(bij, reeks, taakId) {
+    const d = open();
+    let bron = bij || null;
+    if (!bron && reeks) { const t = d.prepare("SELECT bron FROM taak WHERE reeks = ? AND id != ? AND bron != '' AND status = 'klaar' ORDER BY eind LIMIT 1").get(reeks, taakId); bron = t ? t.bron : null; }
+    if (!bron) return null;
+    const v1 = d.prepare('SELECT id FROM versie WHERE bron = ? AND nr = 1').get(bron);
+    return v1 ? { bron: bron, origineel: v1.id } : null;
+  }
+  function variantVersie(doel, bytes, x, u, opdracht) {
+    const d = open(), id = hex16();
+    const nr = (d.prepare('SELECT MAX(nr) AS n FROM versie WHERE bron = ?').get(doel.bron).n || 0) + 1;
+    const p = path.join(BEELDEN, doel.bron, id + '.' + x.soort);
+    try {
+      schrijf(p, bytes);
+      schrijf(toonPad(id), x.toon);
+      d.prepare('INSERT INTO versie (id, bron, voorganger, nr, stand, model, opdracht, gemaakt, breed, hoog, bytes, toon_bytes, ext, duur_s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, doel.bron, doel.origineel, nr, TEKST.id, u.model || null, opdracht, iso(), x.breed, x.hoog, bytes.length, x.toon.length, x.soort, u.duur_s || null);
+    } catch (e) {
+      if (!d.prepare('SELECT 1 FROM versie WHERE id = ?').get(id)) { try { fs.rmSync(p, { force: true }); fs.rmSync(toonPad(id), { force: true }); } catch (e2) {} }
+      throw e;
+    }
+    return id;
+  }
+  // wv4096 (L13): "Maak er 4" (aantal 2–4) en "Nog een" (bij) — één vingerafdruk voor allemaal (zoals vergelijk), telt als aantal voor de rij
+  // en de 30 per dag. Lukt een latere start niet, dan blijven de gestarte staan en zegt het antwoord hoeveel er liepen.
+  async function nieuwReeks(d, ctx, apparaat) {
+    const n = d && d.aantal !== undefined ? Number(d.aantal) : 1;
+    if (!Number.isInteger(n) || n < 1 || n > 4) return { status: 400, fout: 'aantal moet 1 tot 4 zijn' };
+    if (n === 1) return nieuw(d, ctx, apparaat);
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    const beurt = String(d && d.beurt_id || '');
+    if (!/^[A-Za-z0-9-]{8,60}$/.test(beurt)) return { status: 400, fout: 'beurt_id ontbreekt' };
+    const h = S.health();
+    if (h.in_rij + n > GRENS.rij) return { status: 429, fout: n + ' beelden passen nu niet in de rij (hooguit ' + GRENS.rij + '); wacht tot er een klaar is' };
+    if (h.taken_vandaag + n > GRENS.dag) return { status: 429, fout: n + ' beelden tellen als ' + n + ' en dan kom je over de ' + GRENS.dag + ' van vandaag' };
+    const vers = !!ctx.versOk();
+    if (vers) ctx.versVerbruik();   // vóór elke await (zoals vergelijk, review Codex wv3021 MOET 1)
+    const ctx2 = Object.assign({}, ctx, { versOk: function () { return vers; }, versVerbruik: function () {} });
+    const eigen = uitbKijk(apparaat, d && d.uitbreiding, false);
+    const reeks = d && d.bij ? null : hex16();
+    const taken = [];
+    for (let i = 1; i <= n; i++) {
+      const r = await nieuw(Object.assign({}, d, { beurt_id: beurt + '-' + i, uitbreiding: i === 1 ? d.uitbreiding : undefined }), ctx2, apparaat, { titel: eigen || null, reeks: reeks });
+      if (r.status !== 200) {
+        if (!taken.length) return r;
+        return { status: 200, taken: taken, fout: 'maar ' + taken.length + ' van de ' + n + ' gestart: ' + (r.fout || 'onbekend') };
+      }
+      if (r.taak) taken.push(r.taak);
+    }
+    log('imagine nieuw reeks n=' + n + (reeks ? '' : ' bij'));
+    return { status: 200, taken: taken, taak: taken[0] || null };
+  }
   function titelUit(opdracht) { return opdracht.length > 60 ? opdracht.slice(0, 59).trim() + '…' : opdracht; }
   async function nieuw(d, ctx, apparaat, ex) {
     ex = ex || {};
     if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
     if (schijf().vol) return { status: 507, fout: 'de bibliotheek van Imagine is vol (5 GB); gooi eerst iets weg' };
-    const velden = Object.assign({}, d && d.velden && typeof d.velden === 'object' ? d.velden : {});
+    // wv4096 (L13): "Nog een" = d.bij (een beeld uit tekst: het resultaat wordt een versie daarvan); "Maak er 4" = ex.reeks (groep).
+    // Zonder opdracht neemt "Nog een" de instellingen van dat beeld (bron.tekst_instel; anders de opdracht van het origineel).
+    const bij = d && d.bij !== undefined && d.bij !== null && d.bij !== '' ? String(d.bij) : '';
+    let bijInstel = null;
+    if (bij) {
+      const bb = HEX16.test(bij) ? open().prepare('SELECT herkomst, tekst_instel FROM bron WHERE id = ?').get(bij) : null;
+      if (!bb) return { status: 404, fout: 'dit beeld bestaat niet (meer)' };
+      if (bb.herkomst !== 'tekst') return { status: 409, fout: '"Nog een" kan alleen bij een beeld dat uit tekst gemaakt is' };
+      try { bijInstel = bb.tekst_instel ? JSON.parse(bb.tekst_instel) : null; } catch (e) { bijInstel = null; }
+      if (!bijInstel) { const v1 = open().prepare('SELECT opdracht, model FROM versie WHERE bron = ? AND nr = 1').get(bij); if (v1) bijInstel = { velden: { opdracht: v1.opdracht || '' }, model: (TEKSTEN.find(function (x) { return v1.model && String(v1.model).indexOf(x.kort) === 0; }) || TEKST).model }; }
+    }
+    const gegeven = d && d.velden && typeof d.velden === 'object' ? d.velden : null;
+    const velden = Object.assign({}, gegeven && schoon(gegeven.opdracht, GRENS.opdracht_max) ? gegeven : (bijInstel && bijInstel.velden) || gegeven || {});
     const opdracht = schoon(velden.opdracht, GRENS.opdracht_max);
     if (!opdracht) return { status: 400, fout: 'beschrijf eerst wat je wilt zien' };
     velden.opdracht = opdracht;
-    const tm = tekstModel(d && d.model);   // wv3038
+    const tm = tekstModel(d && d.model ? d.model : bijInstel && bijInstel.model);   // wv3038
     if (!tm) return { status: 400, fout: 'onbekend model; kies MOSS-Image of FLUX.2 klein' };
     const eigen = ex.titel !== undefined ? ex.titel : uitbKijk(apparaat, d && d.uitbreiding, false);   // wv3044: titel uit Davids eigen tekst; de uitgebreide tekst is de opdracht
+    const reeks = ex.reeks && HEX16.test(String(ex.reeks)) ? String(ex.reeks) : null;
     const id = hex16();
-    // zoals bewerk: de taak eerst vastleggen; bron en voorganger zijn er pas als het resultaat er is
-    const instel = JSON.stringify({ soort: 'nieuw', model: tm.model, velden: velden, titel: eigen || null });   // wv4092
-    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, instel, poging) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)').run(id, '', '', TEKST.id, 'wacht', iso(), instel, pogingVan(ex));
+    // zoals bewerk: de taak eerst vastleggen; bron en voorganger zijn er pas als het resultaat er is (bij "Nog een" staat de bron er al)
+    const instel = JSON.stringify({ soort: 'nieuw', model: tm.model, velden: velden, titel: eigen || null, bij: bij || null, reeks: reeks });   // wv4092; wv4096 bij/reeks
+    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, instel, poging, reeks) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, bij, '', TEKST.id, 'wacht', iso(), instel, pogingVan(ex), reeks);
     let r;
     try {
       r = await S.maakGeheugen({ flow: tm.flow, velden: velden, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
-        klaar: function (u) { return afrond(id, function () { return nieuwKlaar(id, opdracht, u, eigen); }); } }, ctx);
+        klaar: function (u) { return afrond(id, function () { return nieuwKlaar(id, opdracht, u, eigen, bij, reeks, { model: tm.model, velden: velden }); }); } }, ctx);
     } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
     if (r.status !== 200 || r.al) open().prepare('DELETE FROM taak WHERE id = ?').run(id);
     if (r.status !== 200) return r;
@@ -624,7 +736,7 @@ function maak(deps) {
     return { status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(id)) };
   }
   // Resultaat: het eerste beeld wordt een nieuwe bron (versie 1 = het gemaakte beeld)
-  async function nieuwKlaar(taakId, opdracht, u, eigen) {
+  async function nieuwKlaar(taakId, opdracht, u, eigen, bij, reeks, inst) {
     const d = open();
     const zet = function (status, reden, bron, versieId) { d.prepare('UPDATE taak SET bron = ?, voorganger = ? WHERE id = ?').run(bron || '', versieId || '', taakId); taakAf(taakId, status, reden, versieId); };
     const beelden = u.beelden || [];
@@ -634,10 +746,23 @@ function maak(deps) {
     const x = await toets(b.bytes);
     if (x.fout) return zet('mislukt', 'resultaat: ' + x.fout);
     if (schijf().bytes + b.bytes.length + x.toon.length > GRENS.schijf) return zet('mislukt', 'de bibliotheek is vol (5 GB); niets bewaard');
+    // wv4096 (L13): variant = versie van een bestaand beeld uit tekst ("Nog een": bij; "Maak er 4": de bron van het eerste klaar-resultaat
+    // uit dezelfde reeks). Synchroon vanaf hier tot de INSERT: twee resultaten uit één reeks kunnen niet allebei een nieuwe bron maken.
+    const doel = variantDoel(bij, reeks, taakId);
+    if (bij && !doel) return zet('mislukt', 'het beeld is intussen weggegooid');
+    if (doel) {
+      let vid;
+      try { vid = variantVersie(doel, b.bytes, x, u, opdracht); }
+      catch (e) { fout('imagine', new Error('resultaat bewaren mislukt')); return zet('mislukt', 'het resultaat kon niet bewaard worden'); }
+      zet('klaar', null, doel.bron, vid);
+      log('imagine nieuw klaar taak=' + taakId + ' variant bron=' + doel.bron);
+      return;
+    }
     let r;
     try { r = nieuweBron({ bytes: b.bytes, soort: x.soort, toon: x.toon, breed: x.breed, hoog: x.hoog, titel: titelUit(eigen || opdracht), herkomst: 'tekst', stand: TEKST.id,
       model: u.model || null, opdracht: opdracht, duur_s: u.duur_s || null }); }
     catch (e) { fout('imagine', new Error('resultaat bewaren mislukt')); return zet('mislukt', 'het resultaat kon niet bewaard worden'); }
+    try { if (inst) d.prepare('UPDATE bron SET tekst_instel = ? WHERE id = ?').run(JSON.stringify(inst), r.bron); } catch (e) { /* alleen gemak voor Nog een */ }
     zet('klaar', null, r.bron, r.versie);
     log('imagine nieuw klaar taak=' + taakId + ' bron=' + r.bron);
   }
@@ -892,7 +1017,7 @@ function maak(deps) {
     const ex = { poging: (Number(t.poging) || 0) + 1 };
     let r;
     if (x.soort === 'bewegen') r = await bewegen({ versie: x.versie, model: x.model || '', beweging: x.beweging || '', beurt_id: beurt }, ctx, apparaat, ex);
-    else if (x.soort === 'nieuw') r = await nieuw({ model: x.model, velden: x.velden || {}, beurt_id: beurt }, ctx, apparaat, Object.assign(ex, { titel: x.titel || null }));
+    else if (x.soort === 'nieuw') r = await nieuw({ model: x.model, velden: x.velden || {}, beurt_id: beurt, bij: x.bij || undefined }, ctx, apparaat, Object.assign(ex, { titel: x.titel || null, reeks: x.reeks || null }));
     else if (x.soort === 'bewerk') r = await bewerk({ versie: x.versie, stand: x.stand, velden: x.velden || {}, masker: x.masker || undefined, refs: x.refs || [], beurt_id: beurt }, ctx, apparaat, t.vergelijk || null, ex);
     else return { status: 409, fout: 'deze taak kan niet opnieuw' };
     if (r.status === 200 && r.taak && !r.al) {
@@ -1154,6 +1279,28 @@ function maak(deps) {
     if (s.gen !== gen || s.wissen) { S.stopGeheugen(r.taak.id, a); }   // intussen gewist: meteen weer stoppen
     return { status: 200, taak: id };
   }
+  // wv4096 (L13): "Maak er 4" in incognito — n losse beelden in de sessie, één vingerafdruk; telt voor de 12 in het geheugen, de rij en de dag
+  async function incNieuwReeks(a, d, ctx) {
+    const n = d && d.aantal !== undefined ? Number(d.aantal) : 1;
+    if (!Number.isInteger(n) || n < 1 || n > 4) return { status: 400, fout: 'aantal moet 1 tot 4 zijn' };
+    if (n === 1) return incNieuw(a, d, ctx);
+    const beurt = String(d && d.beurt_id || '');
+    if (!/^[A-Za-z0-9-]{8,60}$/.test(beurt)) return { status: 400, fout: 'beurt_id ontbreekt' };
+    if (incTotaal().n + n > GRENS.inc_n) return { status: 409, fout: 'incognito houdt hooguit ' + GRENS.inc_n + ' beelden tegelijk; voor ' + n + ' nieuwe is geen plek, wis eerst iets' };
+    const h = S.health();
+    if (h.in_rij + n > GRENS.rij) return { status: 429, fout: n + ' beelden passen nu niet in de rij (hooguit ' + GRENS.rij + '); wacht tot er een klaar is' };
+    if (h.taken_vandaag + n > GRENS.dag) return { status: 429, fout: n + ' beelden tellen als ' + n + ' en dan kom je over de ' + GRENS.dag + ' van vandaag' };
+    const vers = !!ctx.versOk();
+    if (vers) ctx.versVerbruik();
+    const ctx2 = Object.assign({}, ctx, { versOk: function () { return vers; }, versVerbruik: function () {} });
+    const taken = [];
+    for (let i = 1; i <= n; i++) {
+      const r = await incNieuw(a, Object.assign({}, d, { beurt_id: beurt + '-' + i, uitbreiding: i === 1 ? d.uitbreiding : undefined }), ctx2);
+      if (r.status !== 200) { if (!taken.length) return r; return { status: 200, taken: taken, fout: 'maar ' + taken.length + ' van de ' + n + ' gestart: ' + (r.fout || 'onbekend') }; }
+      if (r.taak) taken.push(r.taak);
+    }
+    return { status: 200, taken: taken, taak: taken[0] || null };
+  }
   // wv2990: nieuw beeld uit tekst in incognito — zelfde weg als incBewerk, zonder bronbeeld; het resultaat krijgt zijn eigen uur
   async function incNieuw(a, d, ctx) {
     const s = incOpen(a);
@@ -1302,7 +1449,8 @@ function maak(deps) {
     if (!post && (m = /^\/app\/imagine\/v\/([a-f0-9]{16})\/(toon|deel\/(\d{1,4}))$/.exec(p))) return uit(beeldGewoon(m[1], m[2] === 'toon' ? 'toon' : 'deel', Number(m[3])));
     if (post && p === '/app/imagine/laad') return uit(await laad(d), 'imagine laad');
     if (post && p === '/app/imagine/bewerk') return uit(await bewerk(d, ctx, a), 'imagine bewerk');
-    if (post && p === '/app/imagine/nieuw') return uit(await nieuw(d, ctx, a), 'imagine nieuw');   // wv2990
+    if (post && (m = /^\/app\/imagine\/vast\/([a-z0-9-]{2,40})$/.exec(p))) return uit(await vastZet(m[1], d, ctx), 'imagine vast');   // wv4096 (2C61 e)
+    if (post && p === '/app/imagine/nieuw') return uit(await nieuwReeks(d, ctx, a), 'imagine nieuw');   // wv2990; wv4096 aantal/bij
     if (post && p === '/app/imagine/bewegen') return uit(await bewegen(d, ctx, a), 'imagine bewegen');   // wv3266 (niet in incognito)
     if (post && p === '/app/imagine/uitbreiden') return uit(await uitbreid(a, d, ctx, false), 'imagine uitbreiden');   // wv3044
     if (!post && (m = /^\/app\/imagine\/uitbreiden\/([a-f0-9]{16})$/.exec(p))) return uit(uitbLees(a, m[1], false), 'imagine uitbreiden lees');
@@ -1328,7 +1476,7 @@ function maak(deps) {
     if (!post && (m = /^\/app\/imagine\/incognito\/b\/([a-f0-9]{16})\/(toon|deel\/(\d{1,4}))$/.exec(p))) return uit(incBeeld(a, m[1], m[2] === 'toon' ? 'toon' : 'deel', Number(m[3])), 'imagine incognito beeld');
     if (post && p === '/app/imagine/incognito/laad') return uit(await incLaad(a, d), 'imagine incognito laad');
     if (post && p === '/app/imagine/incognito/bewerk') return uit(await incBewerk(a, d, ctx), 'imagine incognito bewerk');
-    if (post && p === '/app/imagine/incognito/nieuw') return uit(await incNieuw(a, d, ctx), 'imagine incognito nieuw');   // wv2990
+    if (post && p === '/app/imagine/incognito/nieuw') return uit(await incNieuwReeks(a, d, ctx), 'imagine incognito nieuw');   // wv2990; wv4096 aantal
     if (post && p === '/app/imagine/incognito/uitbreiden') return uit(await uitbreid(a, d, ctx, true), 'imagine incognito uitbreiden');   // wv3044
     if (!post && (m = /^\/app\/imagine\/incognito\/uitbreiden\/([a-f0-9]{16})$/.exec(p))) return uit(uitbLees(a, m[1], true), 'imagine incognito uitbreiden lees');
     if (post && (m = /^\/app\/imagine\/incognito\/uitbreiden\/([a-f0-9]{16})\/weg$/.exec(p))) return uit(uitbStop(a, m[1], true), 'imagine incognito uitbreiden weg');
