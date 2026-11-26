@@ -54,6 +54,15 @@
 // pijp-maat), studio.js maakt de clip in het geheugen (beelden over de websocket, geheugenwacht, ffmpeg) en geeft mp4 + eerste beeld terug;
 // hier wordt dat een versie (ext mp4, weergaveversie = eerste beeld). Vak leeg = BEWEGEN_STANDAARD (levendige beweging). Eén filmpje tegelijk,
 // niet in incognito (geen route), telt mee voor 5 GB, 5 in de rij en 30 per dag. Een filmpje kan niet verder bewerkt worden.
+//
+// RECEPTEN EN NEDERLANDS METEEN MAKEN (wv4099, besluitenpagina nr 914 = L14 en nr 915 = L15, David Ja 25-11-2026 21:41):
+//   RECEPTEN: vaste, beproefde opdrachten (RECEPTEN, 26-11 op openbare proeffoto's geproefd) met het model dat erbij past; de app start een
+//   fotorecept met één tik via de gewone /bewerk (stand + opdracht), een filmrecept vult de beweging bij Laat bewegen. Eigen recepten (tabel
+//   recept, hooguit RECEPT.max) bewaart David bij een geslaagde eigen opdracht; alleen in de gewone stand (de app toont ze niet in incognito).
+//   METEEN MAKEN: /nieuw met uitschrijven: true = eerst de uitbreidflow (UITB.flow) op Davids eigen (Nederlandse) tekst, dan in dezelfde taak
+//   meteen de beeldflow met de Engelse tekst; geen tweede tik en de app hoeft niet open te blijven. De vingerafdruk (flow op proef) wordt bij de
+//   tik verbruikt en geldt voor de tweede stap. De Engelse tekst wordt de opdracht van de versie (zichtbaar bij het beeld, "Pas aan en maak
+//   opnieuw"), de titel blijft Davids eigen tekst. Opnieuw en vanzelf opnieuw schrijven opnieuw uit (instel.uitschrijven). Alleen gewone stand.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -111,6 +120,29 @@ const BEWEGEN_VOORKEUR = 'trouw';
 const BEWEGEN_STANDAARD = 'Lively, natural motion. Everyone in the picture moves naturally: they look at each other, smile and laugh, turn their heads '
   + 'and shift their posture a little. Slow, smooth camera zoom-in. Faces stay exactly the same, no new people, no cuts.';
 const BEWEGEN_STAND = 'bewegen';
+// wv4099 (L14): vaste recepten; opdracht in het Engels (werkt het best), naam in Davids taal. soort foto = bewerking met stand, bewegen = beweging.
+// Geproefd 26-11-2026 op een openbare proeffoto (mk-scripts/ovis-imagine/wv4099/recept-proef.js): alle vijf fotorecepten bruikbaar op FLUX.2 klein
+// (10–16 s); op Qwen lukte alleen de eerste, daarna weigerde de geheugenpoort (ComfyUI hield 28–36 GB vast, Qwen vraagt 39 GB; zie wv3275).
+// Daarom FLUX.2 klein (24 GB). Kerstkaart: zonder gespelde tekst schreef FLUX "Fijne feestdagn" (1×), met spelling 2× goed.
+const RECEPTEN = [
+  { id: 'kleurplaat', soort: 'foto', naam: 'Kleurplaat van deze foto', stand: 'opdracht-flux',
+    opdracht: "Turn this photo into a children's coloring page: clean, bold black outlines on a pure white background, no shading, no gray tones and no color fills. Keep every person recognizable with the same face, hair, clothing and pose, and keep the composition the same. Simplify the background into a few clear, large shapes that are easy to color in." },
+  { id: 'kerstkaart', soort: 'foto', naam: 'Kerstkaart', stand: 'opdracht-flux',
+    opdracht: 'Turn this photo into a festive Christmas card. Keep the people, their faces, hair, clothing and poses exactly the same. Add gently falling snow, warm fairy lights and a few pine branches with red baubles along the edges, with a cozy warm evening glow. At the bottom, write exactly two words in elegant white script lettering: "Fijne feestdagen" (spelled F-i-j-n-e  f-e-e-s-t-d-a-g-e-n). No other text.' },
+  { id: 'tekenfilm', soort: 'foto', naam: 'Tekenfilmstijl', stand: 'opdracht-flux',
+    opdracht: 'Redraw this photo in the style of a modern animated family film: soft 3D cartoon look, smooth shading, bright and friendly colors. Keep every person recognizable with the same hair, clothing, expression and pose, and keep the composition and background the same.' },
+  { id: 'rustig', soort: 'foto', naam: 'Rustige achtergrond', stand: 'opdracht-flux',
+    opdracht: 'Replace the background with a calm, softly blurred, neutral backdrop in light warm grey and beige tones, like a portrait studio. Keep the people, their faces, hair, clothing, poses and the framing exactly the same.' },
+  { id: 'zomerlicht', soort: 'foto', naam: 'Zomerlicht', stand: 'opdracht-flux',
+    opdracht: 'Make this look like a warm summer evening: golden sunlight from the side, a soft warm glow on skin and hair, slightly brighter and warmer colors. Keep the faces, the people, their poses and the composition exactly the same.' },
+  { id: 'lachen', soort: 'bewegen', naam: 'Iedereen lacht',
+    opdracht: 'Everyone in the picture smiles and then laughs warmly together, looking at each other and at the camera, with natural, gentle head movements. The camera stays still. Faces stay exactly the same, no new people, no cuts.' },
+  { id: 'zwaaien', soort: 'bewegen', naam: 'Zwaaien',
+    opdracht: 'Everyone in the picture waves at the camera with one hand and smiles, with natural, friendly movement. The camera stays still. Faces stay exactly the same, no new people, no cuts.' },
+  { id: 'wind', soort: 'bewegen', naam: 'Wind in het haar',
+    opdracht: "A gentle breeze blows through everyone's hair and clothes; they smile softly and blink naturally. Slow, smooth camera zoom-in. Faces stay exactly the same, no new people, no cuts." },
+];
+const RECEPT = { max: 30, naam_max: 40 };
 // wv4092 (besluitenpagina nr 20 = B121, nr 916 = L16, nr 917 = L17; David Ja 25-11-2026 21:41):
 //   OPRUIMEN: weesbestanden (geen versierij) en .nieuw.-resten in de eigen mappen beelden/ en toon/; tot OPRUIM.vanaf alleen tellen en loggen.
 //   OPNIEUW: een mislukte of onderbroken taak opnieuw met dezelfde instellingen; na een podherstart of "server te vol" (film) één keer vanzelf.
@@ -165,6 +197,7 @@ function maak(deps) {
     // wv4096: bij een beeld uit tekst de instellingen (model + velden) voor "Nog een" vanuit Bewerken
     if (kol('bron').indexOf('tekst_instel') < 0) db.exec('ALTER TABLE bron ADD COLUMN tekst_instel TEXT');
     db.exec('CREATE TABLE IF NOT EXISTS seintje (groep TEXT PRIMARY KEY, klaar INTEGER NOT NULL, mislukt INTEGER NOT NULL, op TEXT NOT NULL, gezien TEXT)');
+    db.exec('CREATE TABLE IF NOT EXISTS recept (id TEXT PRIMARY KEY, naam TEXT NOT NULL, soort TEXT NOT NULL, stand TEXT, opdracht TEXT NOT NULL, gemaakt TEXT NOT NULL)');   // wv4099
     // na een herstart loopt er niets meer (de motor hield de taak in het geheugen). wv4092: een eerste poging die Opnieuw kan, probeert de pod
     // zelf nog één keer zodra de server vrij is (auto = 12 uur lang); een stapelrij (status 'stapel') blijft gewoon in de stapel.
     const nu0 = iso(), tot0 = iso(klok() + AUTO.ms);
@@ -318,7 +351,9 @@ function maak(deps) {
   }
   function taakUit(t) {
     const lo = t.studio && (t.status === 'wacht' || t.status === 'bezig') ? S.geheugenTaak(t.studio) : null;
-    return { id: t.id, bron: t.bron, voorganger: t.voorganger, stand: t.stand, status: lo ? lo.status : t.status, fase: lo ? lo.fase : null,
+    const uitNu = uitFase.has(t.id) && (t.status === 'wacht' || t.status === 'bezig');   // wv4099: stap 1 van meteen maken
+    return { id: t.id, bron: t.bron, voorganger: t.voorganger, stand: t.stand, status: lo ? lo.status : t.status, fase: uitNu ? (lo && /^wacht|rij/.test(String(lo.fase || '')) ? lo.fase : 'wordt uitgeschreven') : lo ? lo.fase : null,
+      uitschrijven: uitNu || undefined,
       procent: lo ? lo.procent : null, plek_in_rij: lo ? lo.plek_in_rij : null, reden: t.reden || null, gemaakt: t.gemaakt, eind: t.eind || null, versie: t.versie || null,
       vergelijk: t.vergelijk || null,
       // wv4092: Opnieuw, vanzelf opnieuw, stapel
@@ -715,8 +750,11 @@ function maak(deps) {
     velden.opdracht = opdracht;
     const tm = tekstModel(d && d.model ? d.model : bijInstel && bijInstel.model);   // wv3038
     if (!tm) return { status: 400, fout: 'onbekend model; kies MOSS-Image of FLUX.2 klein' };
-    const eigen = ex.titel !== undefined ? ex.titel : uitbKijk(apparaat, d && d.uitbreiding, false);   // wv3044: titel uit Davids eigen tekst; de uitgebreide tekst is de opdracht
+    // wv4099 (L15): meteen maken = eerst uitschrijven, dan in dezelfde taak het beeld (niet bij "Nog een": die heeft de Engelse tekst al)
+    const metUit = d && d.uitschrijven === true && !bij;
+    const eigen = ex.titel !== undefined ? ex.titel : metUit ? opdracht : uitbKijk(apparaat, d && d.uitbreiding, false);   // wv3044: titel uit Davids eigen tekst; de uitgebreide tekst is de opdracht
     const reeks = ex.reeks && HEX16.test(String(ex.reeks)) ? String(ex.reeks) : null;
+    if (metUit) return nieuwMetUit(d, ctx, apparaat, ex, { velden: velden, opdracht: opdracht, tm: tm, eigen: eigen, reeks: reeks });
     const id = hex16();
     // zoals bewerk: de taak eerst vastleggen; bron en voorganger zijn er pas als het resultaat er is (bij "Nog een" staat de bron er al)
     const instel = JSON.stringify({ soort: 'nieuw', model: tm.model, velden: velden, titel: eigen || null, bij: bij || null, reeks: reeks });   // wv4092; wv4096 bij/reeks
@@ -733,6 +771,55 @@ function maak(deps) {
     uitbGebruikt(apparaat, d && d.uitbreiding, false);   // wv3044: gestart → de uitgebreide tekst uit het geheugen
     log('imagine nieuw taak=' + id + ' model=' + tm.model);
     return { status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(id)) };
+  }
+  // wv4099 (L15): meteen maken. Stap 1 = de uitbreidflow (telt niet voor de 30, wel voor de rij), stap 2 = de beeldflow; één taakrij.
+  // Vooraf alles toetsen wat stap 2 kan weigeren (flow klaar, vingerafdruk, rij en dag), zodat David niet na het uitschrijven pas "nee" hoort.
+  const uitFase = new Set();   // taak-id's die nog aan het uitschrijven zijn (voor taakUit)
+  async function nieuwMetUit(d, ctx, apparaat, ex, n) {
+    let fb = null, fu = null;
+    try { fb = await S.flowVan(n.tm.flow); fu = await S.flowVan(UITB.flow); } catch (e) { fb = fb || null; }
+    if (!fb || !fb.klaar) return { status: 409, fout: 'dit model kan nu niet' + (fb && fb.reden ? ': ' + fb.reden : '') };
+    if (!fu || !fu.klaar) return { status: 409, fout: 'uitschrijven kan nu niet' + (fu && fu.reden ? ': ' + fu.reden : '') };
+    if (fb.vers_per_keer && !ctx.versOk()) return { status: 403, fout: 'deze flow is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
+    const h = S.health();
+    if (h.in_rij + 1 > GRENS.rij) return { status: 429, fout: 'er staan al ' + GRENS.rij + ' taken in de rij; wacht tot er een klaar is' };
+    if (h.taken_vandaag + 1 > GRENS.dag) return { status: 429, fout: 'vandaag al ' + GRENS.dag + ' bewerkingen gemaakt; morgen weer' };
+    const vers = !!ctx.versOk();
+    if (vers) ctx.versVerbruik();   // vóór elke await (zoals nieuwReeks); geldt voor stap 2
+    const ctx2 = Object.assign({}, ctx, { versOk: function () { return vers; }, versVerbruik: function () {} });
+    const beurt = String(d.beurt_id || '');
+    const id = hex16();
+    const instel = JSON.stringify({ soort: 'nieuw', model: n.tm.model, velden: n.velden, titel: n.eigen || null, bij: null, reeks: n.reeks, uitschrijven: true });
+    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, instel, poging, reeks) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, '', '', TEKST.id, 'wacht', iso(), instel, pogingVan(ex), n.reeks);
+    uitFase.add(id);
+    let r;
+    try {
+      r = await S.maakGeheugen({ flow: UITB.flow, velden: { opdracht: n.opdracht }, beurt_id: beurt + '-u', geheim: false, apparaat: apparaat,
+        klaar: function (u) { return afrond(id, function () { return naUitschrijven(id, u, beurt, apparaat, ctx2, n); }); } }, ctx2);
+    } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
+    if (r.status !== 200 || r.al) { uitFase.delete(id); open().prepare('DELETE FROM taak WHERE id = ?').run(id); }
+    if (r.status !== 200) return r;
+    if (r.al) { const t = open().prepare('SELECT * FROM taak WHERE studio = ?').get(r.taak.id); return { status: 200, taak: t ? taakUit(t) : null, al: true }; }
+    open().prepare("UPDATE taak SET studio = ? WHERE id = ? AND status IN ('wacht','bezig')").run(r.taak.id, id);
+    log('imagine nieuw taak=' + id + ' model=' + n.tm.model + ' uitschrijven=1');
+    return { status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(id)) };
+  }
+  async function naUitschrijven(id, u, beurt, apparaat, ctx2, n) {
+    uitFase.delete(id);
+    const t0 = open().prepare('SELECT status FROM taak WHERE id = ?').get(id);
+    if (!t0 || (t0.status !== 'wacht' && t0.status !== 'bezig')) return;   // intussen afgehandeld (gestopt, weggegooid)
+    const tekst = u.status === 'klaar' ? uitbNetjes(u.tekst) : '';
+    if (!tekst && u.status === 'gestopt') return taakAf(id, 'gestopt', u.reden || 'gestopt');
+    if (!tekst) return taakAf(id, u.status === 'klaar' || u.status === 'mislukt' ? 'mislukt' : u.status, 'uitschrijven lukte niet: ' + (u.status === 'klaar' ? 'het model gaf geen tekst terug' : (u.reden || u.status)));
+    const velden = Object.assign({}, n.velden, { opdracht: tekst });
+    let r;
+    try {
+      r = await S.maakGeheugen({ flow: n.tm.flow, velden: velden, beurt_id: beurt + '-b', geheim: false, apparaat: apparaat,
+        klaar: function (u2) { return afrond(id, function () { return nieuwKlaar(id, tekst, u2, n.eigen, '', n.reeks, { model: n.tm.model, velden: velden }); }); } }, ctx2);
+    } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
+    if (r.status !== 200) return taakAf(id, 'mislukt', 'uitgeschreven, maar het beeld kon niet starten: ' + (r.fout || 'onbekend'));
+    open().prepare("UPDATE taak SET studio = ? WHERE id = ? AND status IN ('wacht','bezig')").run(r.taak.id, id);
+    log('imagine nieuw uitgeschreven taak=' + id + ' duur_s=' + (u.duur_s || 0));
   }
   // Resultaat: het eerste beeld wordt een nieuwe bron (versie 1 = het gemaakte beeld)
   async function nieuwKlaar(taakId, opdracht, u, eigen, bij, reeks, inst) {
@@ -863,6 +950,33 @@ function maak(deps) {
       log('imagine immich versie=' + v.id + ' albums=' + n);
       return { status: 200, immich: { link: link, noot: noten.join('; ') || null, albums: n } };
     } finally { immichBezig.delete(id); }
+  }
+
+  // ── wv4099 (L14): recepten ──
+  function recepten() {
+    const eigen = open().prepare('SELECT * FROM recept ORDER BY gemaakt').all().map(function (r) { return { id: r.id, soort: r.soort, naam: r.naam, stand: r.stand || null, opdracht: r.opdracht, eigen: true }; });
+    return RECEPTEN.map(function (r) { return { id: r.id, soort: r.soort, naam: r.naam, stand: r.stand || null, opdracht: r.opdracht, eigen: false }; }).concat(eigen);
+  }
+  function receptBewaar(d) {
+    const soort = d && d.soort === 'bewegen' ? 'bewegen' : d && d.soort === 'foto' ? 'foto' : null;
+    if (!soort) return { status: 400, fout: 'onbekend soort recept' };
+    const naam = schoon(d.naam, RECEPT.naam_max), opdracht = schoon(d.opdracht, GRENS.opdracht_max);
+    if (!naam) return { status: 400, fout: 'geef het recept een naam' };
+    if (!opdracht) return { status: 400, fout: 'een recept zonder opdracht kan niet' };
+    const st = soort === 'foto' ? stand(d.stand) : null;
+    if (soort === 'foto' && (!st || !st.opdracht)) return { status: 400, fout: 'een recept kan alleen bij een vrije opdracht' };
+    const db = open();
+    if (db.prepare('SELECT COUNT(*) AS n FROM recept').get().n >= RECEPT.max) return { status: 429, fout: 'je hebt al ' + RECEPT.max + ' eigen recepten; gooi er eerst een weg' };
+    const al = db.prepare('SELECT id FROM recept WHERE soort = ? AND COALESCE(stand, \'\') = ? AND opdracht = ?').get(soort, st ? st.id : '', opdracht);
+    if (al) { db.prepare('UPDATE recept SET naam = ? WHERE id = ?').run(naam, al.id); return { status: 200, recept: al.id, al: true }; }
+    const id = hex16();
+    db.prepare('INSERT INTO recept (id, naam, soort, stand, opdracht, gemaakt) VALUES (?, ?, ?, ?, ?, ?)').run(id, naam, soort, st ? st.id : null, opdracht, iso());
+    log('imagine recept bewaard soort=' + soort);
+    return { status: 200, recept: id };
+  }
+  function receptWeg(id) {
+    const r = open().prepare('DELETE FROM recept WHERE id = ?').run(String(id));
+    return r.changes ? { status: 200 } : { status: 404, fout: 'dit recept bestaat niet (meer)' };
   }
 
   // ── wv3044: opdracht uitbreiden (zie de kop) ──
@@ -1016,7 +1130,7 @@ function maak(deps) {
     const ex = { poging: (Number(t.poging) || 0) + 1 };
     let r;
     if (x.soort === 'bewegen') r = await bewegen({ versie: x.versie, model: x.model || '', beweging: x.beweging || '', beurt_id: beurt }, ctx, apparaat, ex);
-    else if (x.soort === 'nieuw') r = await nieuw({ model: x.model, velden: x.velden || {}, beurt_id: beurt, bij: x.bij || undefined }, ctx, apparaat, Object.assign(ex, { titel: x.titel || null, reeks: x.reeks || null }));
+    else if (x.soort === 'nieuw') r = await nieuw({ model: x.model, velden: x.velden || {}, beurt_id: beurt, bij: x.bij || undefined, uitschrijven: x.uitschrijven === true }, ctx, apparaat, Object.assign(ex, { titel: x.titel || null, reeks: x.reeks || null }));
     else if (x.soort === 'bewerk') r = await bewerk({ versie: x.versie, stand: x.stand, velden: x.velden || {}, masker: x.masker || undefined, refs: x.refs || [], beurt_id: beurt }, ctx, apparaat, t.vergelijk || null, ex);
     else return { status: 409, fout: 'deze taak kan niet opnieuw' };
     if (r.status === 200 && r.taak && !r.al) {
@@ -1332,7 +1446,7 @@ function maak(deps) {
   async function uitbStand() {
     let f = null;
     try { f = await S.flowVan(UITB.flow); } catch (e) { f = null; }
-    return { klaar: !!(f && f.klaar), reden: f ? f.reden : 'de uitbreidstap staat niet in de Studio', tijd: f ? f.tijd : '', standaard: false, model: f && f.ai_model ? f.ai_model : null };
+    return { klaar: !!(f && f.klaar), reden: f ? f.reden : 'de uitbreidstap staat niet in de Studio', tijd: f ? f.tijd : '', standaard: false, model: f && f.ai_model ? f.ai_model : null, meteen: true };   // wv4099: pod kan meteen maken (uitschrijven: true)
   }
   function refsGeldig(s, refs) { return (refs || []).every(function (r) { return !!incGeldig(s, r); }); }
   async function incKlaar(a, taakId, gen, bronId, st, opdracht, u, naad, refs) {
@@ -1441,7 +1555,7 @@ function maak(deps) {
     let m;
     if (!post && p === '/app/imagine') {
       const l = lijst();
-      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, seintjes: seintjes(), standen: await standen(), bewegen: await bewegenStand(), tekst: (await standen([TEKST]))[0], teksten: await standen(TEKSTEN), tekst_standaard: TEKST.model, uitbreiden: await uitbStand(), schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
+      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, seintjes: seintjes(), standen: await standen(), bewegen: await bewegenStand(), recepten: recepten(), tekst: (await standen([TEKST]))[0], teksten: await standen(TEKSTEN), tekst_standaard: TEKST.model, uitbreiden: await uitbStand(), schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
         incognito: { nog_te_wissen: S.incognito().nog_te_wissen } } };
     }
     if (!post && (m = /^\/app\/imagine\/bron\/([a-f0-9]{16})$/.exec(p))) { const b = bronMet(m[1]); return b ? { status: 200, body: Object.assign({ ok: true }, b) } : { status: 404, body: { ok: false, fout: 'dit beeld bestaat niet (meer)' } }; }
@@ -1450,6 +1564,8 @@ function maak(deps) {
     if (post && p === '/app/imagine/bewerk') return uit(await bewerk(d, ctx, a), 'imagine bewerk');
     if (post && (m = /^\/app\/imagine\/vast\/([a-z0-9-]{2,40})$/.exec(p))) return uit(await vastZet(m[1], d, ctx), 'imagine vast');   // wv4096 (2C61 e)
     if (post && p === '/app/imagine/nieuw') return uit(await nieuwReeks(d, ctx, a), 'imagine nieuw');   // wv2990; wv4096 aantal/bij
+    if (post && p === '/app/imagine/recept') return uit(receptBewaar(d), 'imagine recept');   // wv4099
+    if (post && (m = /^\/app\/imagine\/recept\/([a-f0-9]{16})\/weg$/.exec(p))) return uit(receptWeg(m[1]), 'imagine recept weg');
     if (post && p === '/app/imagine/bewegen') return uit(await bewegen(d, ctx, a), 'imagine bewegen');   // wv3266 (niet in incognito)
     if (post && p === '/app/imagine/uitbreiden') return uit(await uitbreid(a, d, ctx, false), 'imagine uitbreiden');   // wv3044
     if (!post && (m = /^\/app\/imagine\/uitbreiden\/([a-f0-9]{16})$/.exec(p))) return uit(uitbLees(a, m[1], false), 'imagine uitbreiden lees');
