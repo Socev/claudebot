@@ -103,7 +103,7 @@ const M = require(path.resolve('pot-maand.js'));
     const regels = (mk.p.stappen || []).filter((x) => /^Let op/.test(x));
     const gemeld = db.prepare("select sleutel, waarde from instelling where sleutel like 'bewaking_gemeld_%'").all();
     if (kanSignaal) {
-      toets('bewaking: één regel "Let op, Kostenmaatschap: …" op de maandkaart, alleen KM', regels.length === 1 && /^Let op, Kostenmaatschap: Eind \w+: de kosten lopen/.test(regels[0]) && /OVIS POT › Wat nu/.test(regels[0]), mk.p.stappen);
+      toets('bewaking: één regel "Let op, Kostenmaatschap: …" op de maandkaart, alleen KM', regels.length === 1 && /^Let op, Kostenmaatschap: Eind \w+: de kosten lopen/.test(regels[0]) && /OVIS POT › Begroting: https:\/\/pot\.socev\.dev\/#\/begroting\?jaar=\d{4}&ent=KM$/.test(regels[0]) && regels[0].length <= 400, mk.p.stappen);
       toets('bewaking: gemeld vastgelegd (instelling bewaking_gemeld_KM_<jaar>, met de kaart)', gemeld.length === 1 && gemeld[0].sleutel === `bewaking_gemeld_KM_${J}` && JSON.parse(gemeld[0].waarde).kaart === mk.sleutel, gemeld);
       toets('bewaking: uitkomst van de ronde noemt KM', Array.isArray(u.bewaking) && u.bewaking.join() === 'KM', u.bewaking);
       toets('bewaking: eenmalig per entiteit per jaar (daarna niets nieuws)', (await M.bewakingNieuw(io, B, J)).length === 0);

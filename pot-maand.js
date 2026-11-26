@@ -311,6 +311,15 @@ async function klaarzetten(io, B, nu, inst, uit, zet) {
 // ── 5. Voor jou ──────────────────────────────────────────────────────────────
 // wv4140 (A23): de kaart opent OVIS POT op pot.socev.dev (de Socev-app stuurt scherm 'pot' daarheen); het oude Nota's-scherm is weg
 const POT_DOEL = { module: 'pot', doel: { scherm: 'pot', focus: null } };
+// wv4146 (2C68 b): een link in een stap landt meteen op het goede scherm, jaar en entiteit (OVIS POT leest #/<scherm>?jaar=&ent=&praktijk=;
+// de Socev-app maakt een https-link in een stap tikbaar)
+const POT_ADRES = 'https://pot.socev.dev/';
+function potLink(scherm, q) {
+  const p = new URLSearchParams();
+  for (const k of ['jaar', 'ent', 'praktijk']) if (q && q[k] != null && q[k] !== '') p.set(k, String(q[k]));
+  const s = p.toString();
+  return `${POT_ADRES}#/${scherm}${s ? '?' + s : ''}`;
+}
 function kaartGrens(p) { return Object.assign(p, { titel: kap(p.titel, 90), waarom: kap(p.waarom, 400), meting: kap(p.meting, 300), stappen: (p.stappen || []).slice(0, 12) }); }
 function kaartKlaar(datum, rijen, open, nuKort, bewaking) {
   const n = rijen.length;
@@ -320,8 +329,8 @@ function kaartKlaar(datum, rijen, open, nuKort, bewaking) {
     herkomst: { handmatig: 'pot-maand', datum: datum, ...POT_DOEL },
     waarom: `Socev maakte de stukken van ${datumWoord(datum)} (bijdragen POT en Kostenmaatschap, doorbelaste huur SLOEL) en zette per praktijk één mail met de pdf's als concept in Gmail, aan het vastgezette mailadres van de praktijk uit de Second Brain. Iedereen betaalt op de 15e. Versturen doe je zelf.` +
       (open.length ? ` Nog open van eerder: ${open.join('; ')}.` : ''),
-    stappen: [...bewaking.map((b) => `Let op, ${ENT_KORT[b.entiteit] || b.entiteit}: ${b.tekst} Kijk in OVIS POT › Wat nu.`), 'Open Gmail en ga naar Concepten.', `Kijk per praktijk de mail na (onderwerp begint met "POH-GGZ"): ontvanger, tekst en de pdf's.`, 'Verstuur ze.',
-      ...(open.length ? ['Wil je een praktijk herinneren aan een open nota: OVIS POT › Betalingen, "herinnering als concept".'] : []),
+    stappen: [...bewaking.map((b) => `Let op, ${ENT_KORT[b.entiteit] || b.entiteit}: ${b.tekst} Bijsturen kan in OVIS POT › Begroting: ${potLink('begroting', { jaar: b.jaar, ent: b.entiteit })}`), 'Open Gmail en ga naar Concepten.', `Kijk per praktijk de mail na (onderwerp begint met "POH-GGZ"): ontvanger, tekst en de pdf's.`, 'Verstuur ze.',
+      ...(open.length ? [`Wil je een praktijk herinneren aan een open nota: OVIS POT › Betalingen, "herinnering als concept": ${potLink('betalingen', { jaar: Number(String(datum).slice(0, 4)) })}`] : []),
       'Binnen een uur na versturen ziet Socev ze als verzonden; deze kaart gaat dan vanzelf dicht.'],
     meting: `${nuKort}: ${n} concept${n > 1 ? 'en staan' : ' staat'} klaar in Gmail.` });
 }
@@ -332,7 +341,7 @@ function kaartProbleem(rijen, nuKort) {
     titel: `OVIS POT — ${rijen.length} mail${rijen.length > 1 ? 's' : ''} niet als concept klaargezet`,
     herkomst: { handmatig: 'pot-maand', soort: 'probleem', ids: rijen.map((r) => r.id), ...POT_DOEL },
     waarom: 'Socev kon deze mails met stukken niet als concept klaarzetten: ' + regels.join('; ') + '. Voor deze stukken staat dus nog niets in Gmail.',
-    stappen: ['Gaat het om een factuuradres: zeg tegen Socev "factuuradres <praktijk> is …"; Socev zet het in de Second Brain en daarna komt er een kaart om het vast te zetten. Of pas in OVIS POT › Praktijken het e-mailadres van de praktijk aan.',
+    stappen: ['Gaat het om een factuuradres: zeg tegen Socev "factuuradres <praktijk> is …"; Socev zet het in de Second Brain en daarna komt er een kaart om het vast te zetten. Of pas in OVIS POT › Praktijken het e-mailadres van de praktijk aan: ' + potLink('praktijken'),
       'Gaat het om iets anders: zeg het in de machinekamer.', 'Socev probeert het elke tien minuten opnieuw; deze kaart gaat vanzelf dicht als het gelukt is.'],
     meting: `${nuKort}: ${rijen.length} mail${rijen.length > 1 ? 's wachten' : ' wacht'}.` });
 }
