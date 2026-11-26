@@ -22,7 +22,7 @@ fs.copyFileSync(path.join(ROOT, 'imagine.js'), path.join(MOD, 'imagine.js'));
 function wijzig(oud, nieuw) { const p = path.join(MOD, 'imagine.js'); const s = fs.readFileSync(p, 'utf8'); if (s.indexOf(oud) < 0) throw new Error('kruisproef: tekst niet gevonden'); fs.writeFileSync(p, s.split(oud).join(nieuw)); }
 if (KRUIS === 'kvers') wijzig("const r = await nieuw(Object.assign({}, d, { beurt_id: beurt + '-' + i, uitbreiding: i === 1 ? d.uitbreiding : undefined }), ctx2,", "const r = await nieuw(Object.assign({}, d, { beurt_id: beurt + '-' + i, uitbreiding: i === 1 ? d.uitbreiding : undefined }), ctx,");
 if (KRUIS === 'kreeks') wijzig('    const doel = variantDoel(bij, reeks, taakId);', '    const doel = null;');
-if (KRUIS === 'kvast') wijzig("      if (!vers) return { status: 403, fout: 'bevestig het vast aanzetten met je vingerafdruk', vers_nodig: true };", '');
+if (KRUIS === 'kvast') wijzig("      if (!ctx.versOk()) return { status: 403, fout: 'bevestig het vast aanzetten met je vingerafdruk', vers_nodig: true };", '');
 const I = require(path.join(MOD, 'imagine.js'));
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40, 7)]);
@@ -186,6 +186,13 @@ async function afAlles(S) { for (const id of [...S.live.keys()]) { S.af(id, beel
     toets('6e uit (terug op proef) zonder vingerafdruk', r1.status === 200 && S.flows['beeld-opdracht-qwen'] === 'proef' && S.flows['beeld-plus-qwen-2'] === 'proef', [r1, S.flows]);
     const r2 = await app(im, '/app/imagine/vast/tekst-moss', 'POST', { aan: true }, ctxVers());
     toets('6f tekst-moss vast', r2.status === 200 && S.flows['beeld-tekst-moss'] === 'actief' && S.flows['beeld-tekst-flux'] === 'proef', S.flows);
+    // review Codex MOET 1: een onderdeel dat niet terug wil, geeft geen succes
+    S.flows['beeld-tekst-moss'] = 'actief';
+    const oud = S.opProef; S.opProef = function (id) { if (id === 'beeld-plus-qwen-1') return { status: 500 }; return oud(id); };
+    await app(im, '/app/imagine/vast/opdracht-qwen', 'POST', { aan: true }, ctxVers());
+    const r4 = await app(im, '/app/imagine/vast/opdracht-qwen', 'POST', { aan: false }, ctxNiet);
+    toets('6h terugzetten half gelukt: geen 200, zegt hoeveel nog vast staan', r4.status === 500 && /1 van 4/.test(r4.body.fout), r4);
+    S.opProef = oud;
     const r3 = await app(im, '/app/imagine/vast/bestaat-niet', 'POST', { aan: true }, ctxVers());
     toets('6g onbekende stand: 404', r3.status === 404, r3.status);
   }

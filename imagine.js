@@ -215,28 +215,25 @@ function maak(deps) {
     try { f0 = await S.flowVan(l[0]); } catch (e) { f0 = null; }
     if (!f0) return { status: 404, fout: 'deze stand staat niet in de Studio' };
     if (f0.betaald) return { status: 409, fout: 'een betaalde stand vraagt altijd een vingerafdruk' };
+    let ctx2 = ctx;
     if (aan) {
-      const vers = !!ctx.versOk();
-      if (!vers) return { status: 403, fout: 'bevestig het vast aanzetten met je vingerafdruk', vers_nodig: true };
+      if (!ctx.versOk()) return { status: 403, fout: 'bevestig het vast aanzetten met je vingerafdruk', vers_nodig: true };
       ctx.versVerbruik();
-      const ctx2 = Object.assign({}, ctx, { versOk: function () { return true; }, versVerbruik: function () {} });
-      let n = 0;
-      for (let i = 0; i < l.length; i++) {
-        const r = S.activeer(l[i], ctx2);
-        if (r.status === 200) n++;
-        else if (i === 0 && r.status !== 409) return r;   // de hoofdflow moet lukken; een stuk-/voorbeeldflow die er niet is of al vast staat, telt niet
-      }
-      log('imagine vast aan ' + sleutel + ' flows=' + n);
-      return { status: 200, vast: 'actief', flows: n };
+      ctx2 = Object.assign({}, ctx, { versOk: function () { return true; }, versVerbruik: function () {} });
     }
-    let n = 0;
-    for (let i = 0; i < l.length; i++) {
-      const r = S.opProef(l[i], ctx);
-      if (r.status === 200) n++;
-      else if (i === 0 && r.status !== 409) return r;
+    // review Codex MOET 1: elk onderdeel zetten en daarna ALLE bestaande onderdelen nalopen; pas succes als ze allemaal in de gevraagde stand staan
+    const doel = aan ? 'actief' : 'proef';
+    for (const id of l) { try { if (aan) S.activeer(id, ctx2); else S.opProef(id, ctx); } catch (e) { /* telt bij het nalopen */ } }
+    let n = 0, mis = 0;
+    for (const id of l) {
+      let f = null;
+      try { f = await S.flowVan(id); } catch (e) { f = null; }
+      if (!f) continue;   // een stuk-/voorbeeldflow die er niet is
+      if (f.status === doel) n++; else mis++;
     }
-    log('imagine vast uit ' + sleutel + ' flows=' + n);
-    return { status: 200, vast: 'proef', flows: n };
+    log('imagine vast ' + (aan ? 'aan ' : 'uit ') + sleutel + ' flows=' + n + (mis ? ' mis=' + mis : ''));
+    if (mis) return { status: 500, fout: (aan ? 'vast aanzetten' : 'terugzetten') + ' lukte niet helemaal: ' + mis + ' van ' + (n + mis) + ' onderdelen staan nog ' + (aan ? 'op proef' : 'vast aan') + '; probeer het opnieuw', vast: aan ? 'proef' : 'actief' };
+    return { status: 200, vast: doel, flows: n };
   }
   async function standen(lijst) {
     const uit = [];
