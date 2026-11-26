@@ -12852,10 +12852,47 @@ function appVjModuleKaart(p) {
   const h = (p && p.herkomst) || {}, bron = function (v) { return Array.isArray(v) ? v.length > 0 : !!v; };
   return !!h.module && !bron(h.wv) && !bron(h.register) && !bron(h.todoist);
 }
+// wv4192 (besluitenpagina nr 391 = 3C91, David Ja 25-11-2026 22:30): knopstap. vj-knoplink.js bewaart de volledige link van een kaart
+// buiten de kaarttekst (link in /tmp, markering zonder link in socev-app-data); de app krijgt hem alleen in het detail van die open kaart.
+// Ontbreekt de module, dan gewoon geen knopstap. De link komt nooit in een log of in het antwoord aan de kaartmaker.
+let VJ_KNOPLINK_MOD;
+function vjKnoplink() {
+  if (VJ_KNOPLINK_MOD === undefined) {
+    try {
+      VJ_KNOPLINK_MOD = require(path.join(__dirname, 'vj-knoplink.js')).maak({ merkPad: path.join(APP_DATA, 'vj-knoplink.json'), linkDir: process.env.VJ_KNOPLINK_DIR || '/tmp/socev-vj-knoplink' });
+      // elk uur verlopen links van schijf, ook zonder verkeer (pas bij het eerste gebruik: het poortblok draait in de toetsen los in een vm)
+      const tm = setInterval(function () { try { VJ_KNOPLINK_MOD.tik(); } catch (e) { logError('vj-knoplink', e); } }, 3600 * 1000);
+      if (tm && tm.unref) tm.unref();
+      VJ_KNOPLINK_MOD.tik();
+    } catch (e) { logError('vj-knoplink', e); VJ_KNOPLINK_MOD = null; }
+  }
+  return VJ_KNOPLINK_MOD;
+}
+function vjKnoplinkVoor(p) { try { const K = vjKnoplink(); return K ? K.voor(p) : undefined; } catch (e) { logError('vj-knoplink', e); return undefined; } }
+function vjKnoplinkOpruim(punten) {
+  try { const K = vjKnoplink(); if (K) K.opruim(punten.filter(function (p) { return p.status === 'open' || p.status === 'later'; }).map(function (p) { return p.id; })); } catch (e) { logError('vj-knoplink', e); }
+}
+// POST /bericht/voor-jou-knoplink {secret, sleutel, tekst, url} (werkvoorraad.py na een geslaagde kaart): bindt aan de OPEN kaart met die
+// sleutel (verse lezing). Antwoord { ok, id, tot } of een fout; nooit de link. Log: alleen de sleutel.
+async function berichtVjKnoplink(res, d) {
+  const sleutel = String(d.sleutel || '');
+  res._log = { voor_jou_knoplink: /^[a-z0-9][a-z0-9-]{1,60}$/.test(sleutel) ? sleutel : 'ongeldig' };
+  const K = vjKnoplink();
+  if (!K) return berichtStuur(res, 503, { ok: false, fout: 'knopstap niet geladen op de pod' });
+  if (!/^[a-z0-9][a-z0-9-]{1,60}$/.test(sleutel)) return berichtStuur(res, 400, { ok: false, fout: 'ongeldige sleutel' });
+  let punten;
+  try { punten = await appVjPuntenVers(); } catch (e) { logError('vj-knoplink', e); return berichtStuur(res, 503, { ok: false, fout: 'Voor jou nu niet te lezen' }); }
+  const p = punten.find(function (x) { return x.sleutel === sleutel && (x.status === 'open' || x.status === 'later'); });
+  if (!p) return berichtStuur(res, 404, { ok: false, fout: 'geen open kaart met deze sleutel' });
+  const r = K.zet(p, d.tekst, d.url);
+  res._log.ok = !!r.ok;
+  berichtStuur(res, r.ok ? 200 : 400, r);
+}
 async function appVoorJouRoute(req, res, a, kanaal) {
   res._app.stil = true;   // de app leest bij openen van Vandaag en op Ververs
   let punten;
   try { punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appStuur(res, 200, { ok: true, punten: [], later: [], meer: 0, fout: 'de lijst is nu niet te lezen' }); }
+  vjKnoplinkOpruim(punten);   // wv4192: knopstap van een kaart die dicht is weg
   const nu = Date.now(), vandaag = appYmd(nu);
   const eigen = punten;
   const zichtbaar = eigen.filter(function (p) { return appVjZichtbaar(p, vandaag); }).slice(0, APP_VJ_MAX);
@@ -13551,6 +13588,7 @@ async function appVoorJouDetail(req, res, a, idTekst) {
   appStuur(res, 200, Object.assign(appVjKort(p, vandaag), { ok: true, woorden: sw || undefined,
     auto: p.soort === 'besluit' && typeof telVoorstelKort === 'function' ? telVoorstelKort(p.id) : undefined,   // wv3771: klaargezet in de auto (weergave; de knop blijft de knop)
     waarom: p.waarom ? appKort(appVjGewoon(p.waarom), 600) : null, stappen: stappen, herkomst: herkomst, vraag: vraag,
+    knoplink: vjKnoplinkVoor(p),   // wv4192 (3C91): { tekst, url } zolang hij geldt, { tekst, verlopen } daarna; alleen hier
     meting: p.meting ? appKort(appVjGewoon(p.meting), 400) : null, laatst_gemeten: p.laatst_gemeten || null,
     bewijs: p.bewijs ? appKort(appVjGewoon(p.bewijs), 400) : null, gesloten_door: p.gesloten_door || null, gesloten_op: p.gesloten_op || null,
     terug_ms: appVjTerugMs(p.id, nu, a.id), knop: p.soort === 'besluit' && !sw ? await appVjKnopVormDb(p, appVjKnopStand(p, rv, (await appVjAfgeleid(punten, nu)).map)) : undefined }));   // wv1018, wv3692
@@ -17863,7 +17901,7 @@ const BERICHT_KIJKT_MARGE_MS = 8 * 1000;     // na de volgende poll heeft de app
 const BERICHT_INVOER_MS = 2 * 60 * 1000;     // wv804 (ontwerp § 2): echte invoer op een ander apparaat < 2 min = David is bezig
 const BERICHT_BEZIG_MAX = 3;                 // wv804 Fable M1: bezig aan het eind van een bundel = hooguit 3× opnieuw plannen
 const BERICHT_CONTROLE_MARGE_MS = 90 * 1000; // wv292 (Fable wv263 #7): n8n kijkt na een uitgesteld seintje opnieuw (controle_na)
-const BERICHT_RE = /^\/bericht(\/(bestand|stand|naar-telegram|sms-pas|sms-ingang))?$/;   // wv3664: sms-pas = n8n toetst de pas van Davids sms-tik terug; wv3668: sms-ingang = handtekening van een binnenkomende sms
+const BERICHT_RE = /^\/bericht(\/(bestand|stand|naar-telegram|sms-pas|sms-ingang|voor-jou-knoplink))?$/;   // wv4192: voor-jou-knoplink = kaartscript geeft de link van een knopstap af   // wv3664: sms-pas = n8n toetst de pas van Davids sms-tik terug; wv3668: sms-ingang = handtekening van een binnenkomende sms
 
 function berichtIsPad(req) { return BERICHT_RE.test(reqPath(req)); }
 function berichtStuur(res, status, obj) {
@@ -18484,6 +18522,7 @@ function berichtRoute(req, res) {
       if (p === '/bericht/sms-pas') return smsPasRoute(res, d);   // wv3664
       if (p === '/bericht/sms-ingang') return smsIngangRoute(res, d);   // wv3668
       if (p === '/bericht/bestand') return berichtBestand(res, d);
+      if (p === '/bericht/voor-jou-knoplink') return berichtVjKnoplink(res, d);   // wv4192 (3C91)
       if (p === '/bericht/stand') return berichtStand(res, d);
       return berichtNaarTelegram(res, d);
     }).catch(function (e) { logError('bericht', e); berichtStuur(res, 500, { ok: false, fout: 'fout op de pod', terugval: true }); });
