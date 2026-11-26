@@ -17310,18 +17310,56 @@ function appModellenZet(req, res, reg, a, s, d) {
   appStuur(res, 200, appModellenStand());
 }
 const APP_VERBRUIK_CACHE_MS = 60 * 1000;
+// wv4168 (besluitenpagina nr 116 = 2C16, nr 166 = 2C66; David Ja 25-11-2026 22:28): vooruit en terug (prognose eindstand, vorige week,
+// staafjes per week, agentklussen), sprongen in de meter, agents die nu draaien, Davids reserve en welk model de afgelopen 30 dagen
+// draaide. Rekenwerk in verbruik-vooruit.js; ontbreekt die module of faalt iets, dan valt alleen dat veld weg (null), de rest blijft.
+const VERBRUIK_VOORUIT = (function () { try { return require(path.join(__dirname, 'verbruik-vooruit.js')); } catch (e) { return null; } })();
+const appNlDatum = function (t) { try { return new Date(t).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); } catch (e) { return null; } };
+function appVerbruikVooruit(d, tank, weken, stand) {
+  const VV4168 = VERBRUIK_VOORUIT;
+  const uit = { vooruit: null, sprongen: null, sprongen2: null, agents: null, reserve: null, modellen30: null };
+  if (!VV4168) return uit;
+  const tt = typeof tokenteller !== 'undefined' && tokenteller && typeof tokenteller.verdeling === 'function' ? tokenteller : null;
+  try {
+    if (d.laatste) {
+      const p = VV4168.prognose({ laatste: d.laatste, reeks: d.reeks });
+      if (p) {
+        const w = VV4168.weken(weken && weken.weken, d.nu);
+        p.vorige = w.vorige; p.weken = w.weken;
+        // agentklussen alleen als de agents op abonnement 1 draaien (anders telt hun verbruik niet in deze meter)
+        const op1 = !d.account2 || d.account2.agents_op === 1;
+        const reset = Date.parse(d.laatste.zeven_dagen_reset);
+        const deel = op1 && tt && isFinite(reset) ? tt.agentDeel(appNlDatum(reset - 7 * 86400000 + 12 * 3600000)) : null;
+        p.klussen = op1 && !p.te_vroeg ? VV4168.klussen({ vervalt: p.vervalt, nu: p.nu, agent_deel: deel, starts: weken ? weken.starts_sinds_reset : null }) : null;
+        uit.vooruit = p;
+      }
+      uit.sprongen = VV4168.sprongen(d.reeks, d.laatste.zeven_dagen_reset, d.nu);
+    }
+    if (d.account2 && d.reeks2 && d.reeks2.length) uit.sprongen2 = VV4168.sprongen(d.reeks2, d.account2.zeven_dagen_reset, d.nu);
+  } catch (e) { logError('app-verbruik-vooruit', e); }
+  try { uit.agents = VV4168.agentsNu(appAgentsReg(), typeof maxAgents === 'function' ? maxAgents() : null, stand && Array.isArray(stand.items) ? stand.items.filter(function (w) { return w.status === 'open'; }).length : null); }
+  catch (e) { logError('app-verbruik-agents', e); }
+  const r = stand && stand.stand ? Number(stand.stand.reserve_david) : NaN;
+  uit.reserve = isFinite(r) && r > 0 && r < 0.5 ? Math.round(r * 10000) / 10000 : null;
+  try {
+    const v = tt ? tt.verdeling() : null;
+    if (v && v.modellen.length) uit.modellen30 = { van: v.van, tot: v.tot, gemeten_op: v.gegenereerd_op, modellen: v.modellen.map(function (m) { return { model: m.model, pct: m.pct }; }) };
+  } catch (e) { logError('app-verbruik-modellen', e); }
+  return uit;
+}
 async function appVerbruik(req, res) {
   res._app.stil = true;   // ververst elke 60 s zolang het scherm open is
   const c = appStaat.verbruikCache;
   if (c && Date.now() - c.op < APP_VERBRUIK_CACHE_MS) return appStuur(res, 200, c.d);
   const fouten = [];
-  const [tank, wv] = await Promise.all([
+  const [tank, wv, weken] = await Promise.all([
     appSbRpc('mk_app_verbruik', {}).catch(function (e) { logError('app-verbruik', e); fouten.push('tank'); return null; }),
     appSbRpc('mk_broedstoof', {}).catch(function (e) { logError('app-verbruik', e); fouten.push('tikker'); return null; }),
+    appSbRpc('mk_app_verbruik_weken', {}).catch(function (e) { logError('app-verbruik', e); return null; }),   // wv4168; mist = geen terugblik, geen fout
   ]);
-  let vrij = null, limieten = null;
+  let vrij = null, limieten = null, st = null;
   try {
-    const st = await appWerkvoorraad();
+    st = await appWerkvoorraad();
     const s = st && st.stand ? st.stand : null;
     if (s && s.max_eigen_vrij != null) {
       vrij = s.vrij_tot || null;
@@ -17348,6 +17386,7 @@ async function appVerbruik(req, res) {
       max_dag: Number(wv.tikker.max_dag) || 0, alleen_doorwerk: wv.tikker.alleen_doorwerk === true } : null,
     vrij_tot: vrij, limieten: limieten, nu: tank && tank.nu ? tank.nu : new Date().toISOString(), fouten: fouten,
   };
+  Object.assign(d, appVerbruikVooruit(d, tank, weken, st));   // wv4168
   if (!fouten.length) appStaat.verbruikCache = { op: Date.now(), d: d };
   appStuur(res, 200, d);
 }

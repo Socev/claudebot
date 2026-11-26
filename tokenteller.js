@@ -302,7 +302,40 @@ function maak(opt) {
       eur: eurOnbekend ? null : rond(eurSom, 2),
       soorten: soorten, klussen: alle.slice(0, DAG_MAX), afgekapt: alle.length > DAG_MAX ? alle.length - DAG_MAX : 0, bron: 'tokenboekhouding' };
   }
-  return { stand: stand, dag: dag };
+  // wv4168 (2C66 d, 2C16): welk model de afgelopen 30 dagen draaide (aandeel in de tankpunten, = deel van het weekverbruik; eigen
+  // telling van de tokenboekhouding, afgeleid) en per dag het deel van de agents (werkvoorraad-agent / alles) voor de vertaling naar
+  // agentklussen. Zelfde bron als TokenCounter (samenvatting.json); null als die niet te lezen is.
+  function verdeling() {
+    let s;
+    try { s = samenvatting(); } catch (e) { return null; }
+    if (!s) return null;
+    const pm = (Array.isArray(s.per_model) ? s.per_model : []).slice(0, 12).map(function (r) {
+      return { model: tekst(r && r.model, 20), tp: getal(r && r.tankpunten) };
+    }).filter(function (r) { return r.model && /^[A-Za-z0-9 .-]{1,20}$/.test(r.model) && r.tp != null && r.tp > 0; });
+    const som = pm.reduce(function (a, r) { return a + r.tp; }, 0);
+    const modellen = som > 0 ? pm.map(function (r) { return { model: r.model, pct: rond(r.tp / som, 3), tankpunten: rond(r.tp, 1) }; })
+      .sort(function (a, b) { return b.pct - a.pct; }) : [];
+    const dagen = (Array.isArray(s.per_dag_soort) ? s.per_dag_soort : []).slice(0, DAGEN_MAX).filter(function (r) { return r && DATUM.test(String(r.datum)); })
+      .map(function (r) {
+        const rs = r.soorten && typeof r.soorten === 'object' ? r.soorten : {};
+        let tot = 0, ag = 0;
+        Object.keys(rs).slice(0, SOORTEN_MAX).forEach(function (k) { const v = getal(rs[k]); if (v != null && v > 0) { tot += v; if (k === 'werkvoorraad-agent') ag += v; } });
+        return { datum: String(r.datum), agents: ag, totaal: tot };
+      });
+    const per = s.periode && typeof s.periode === 'object' ? s.periode : {};
+    return { gegenereerd_op: typeof s.gegenereerd_op === 'string' && !isNaN(Date.parse(s.gegenereerd_op)) ? new Date(s.gegenereerd_op).toISOString() : null,
+      van: DATUM.test(String(per.van)) ? String(per.van) : null, tot: DATUM.test(String(per.tot)) ? String(per.tot) : null,
+      modellen: modellen, dagen: dagen };
+  }
+  // Deel van de agents in het verbruik vanaf een datum (jjjj-mm-dd, Nederlandse dag); null zonder dagen.
+  function agentDeel(vanaf) {
+    const v = verdeling();
+    if (!v) return null;
+    let tot = 0, ag = 0;
+    v.dagen.forEach(function (d) { if (!vanaf || d.datum >= vanaf) { tot += d.totaal; ag += d.agents; } });
+    return tot > 0 ? ag / tot : null;
+  }
+  return { stand: stand, dag: dag, verdeling: verdeling, agentDeel: agentDeel };
 }
 
 // Tank van beide abonnementen uit mk_app_verbruik (zelfde bron als Verbruik & modellen); alleen getallen en tijden.
