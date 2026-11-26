@@ -7633,7 +7633,7 @@ async function appNoodSeintjes() {
   try {
     if (!(await appRolOk())) return;
     const p = appPushLees();
-    for (const id of Object.keys(p.apparaten)) if (!p.apparaten[id].verlopen) await appPushStuur(id, 'noodstand');
+    for (const id of Object.keys(p.apparaten)) if (!p.apparaten[id].verlopen) await appPushStuur(id, 'noodstand', null, { soort: 'storing' });   // wv4121
   } catch (e) { logError('app-nood', e); }
 }
 // POST /app/nood/wachtwoord {wachtwoord, herhaling}: alleen op de goedkeurder, verse vingerafdruk (verbruikt), 10–128 tekens.
@@ -16122,10 +16122,30 @@ function appVapidJwt(v, aud) {
   const i = Buffer.from(JSON.stringify({ aud: aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: appConfig().herkomst })).toString('base64url');
   return k + '.' + i + '.' + crypto.sign('sha256', Buffer.from(k + '.' + i), { key: v.key, dsaEncoding: 'ieee-p1363' }).toString('base64url');
 }
+// wv4121 (nr 316 = 3C16, David Ja 25-11): welk soort seintje (vraag, antwoord, machinekamer, storing) per apparaat; alleen in het
+// geheugen (een herstart = de zin van vroeger, restrisico). Ontbreekt seintje-soort.js, dan gewoon zonder soort.
+let SEINTJE_SOORT_MOD;
+function SS() {
+  if (SEINTJE_SOORT_MOD === undefined) { try { SEINTJE_SOORT_MOD = require(path.join(__dirname, 'seintje-soort.js')); } catch (e) { logError('seintje-soort', e); SEINTJE_SOORT_MOD = null; } }
+  return SEINTJE_SOORT_MOD;
+}
+function appSeintjeSoortNoteer(id, soort) {
+  const m = SS();
+  if (!m || !m.geldig(soort)) return;
+  const st = appStaat.seintjeSoort || (appStaat.seintjeSoort = {});
+  st[id] = m.noteer(st[id], soort, Date.now());
+}
+function appSeintjeSoortHaal(id) {
+  const m = SS();
+  const st = appStaat.seintjeSoort || {};
+  if (!m || !st[id]) return null;
+  return m.haal(st[id], Date.now());
+}
 // Eén seintje naar één apparaat. Alleen naar een actief apparaat uit het register, nooit tijdens een noodstop.
 // wv804 (ontwerp § 5): poets = {voor: iso}: een lege push (TTL 600, Urgency low, Topic socev) die een nog niet bezorgd echt seintje
 // bij de pushdienst vervangt; de SW vraagt de stand en vervangt de melding. Schrijft laatst/laatst_per niet, wel s.poets.
 // wv3680: extra = { doel } (alleen een vaste naam uit APP_SEINTJE_EXTRA_DOEL): waar een tik op dit seintje landt, naast het kanaal in reden.
+// wv4121: extra.soort (vraag|antwoord|machinekamer|storing): wat het vergrendelscherm noemt; de push zelf blijft leeg.
 async function appPushStuur(id, reden, poets, extra) {
   if (fs.existsSync(APP_UIT)) return { ok: false, reden: 'app staat uit' };
   let a = null;
@@ -16151,6 +16171,8 @@ async function appPushStuur(id, reden, poets, extra) {
   // verwerkt); overleeft geen herstart (restrisico, gedocumenteerd). Een poets telt niet als onderweg.
   const po = appStaat.pushOnderweg || (appStaat.pushOnderweg = {});
   if (!poets) po[id] = (po[id] || 0) + 1;
+  const soort = !poets && extra && SS() && SS().geldig(extra.soort) ? extra.soort : undefined;   // wv4121
+  if (soort) appSeintjeSoortNoteer(id, soort);   // vóór de fetch, zoals onderweg
   try {
     // meldingen: kort houdbaar en niet dringend, zodat een telefoon die offline was niet na 22:00 alsnog zoemt (K6)
     const meld = reden === 'meldingen';
@@ -16173,14 +16195,14 @@ async function appPushStuur(id, reden, poets, extra) {
       if (!s || s.endpoint !== sub.endpoint) return;
       const nu = new Date().toISOString();
       if (poets) s.poets = { op: nu, voor: poets.voor, status: status };   // wv804 (ontwerp § 5)
-      else s.laatst = { op: nu, status: status, reden: String(reden || '').slice(0, 30), doel: extra && Object.hasOwn(APP_SEINTJE_EXTRA_DOEL, String(extra.doel)) ? extra.doel : undefined };   // wv3680   // 30: 'antwoord machinekamer' is 21 (seintje -> tab, wv137)
+      else s.laatst = { op: nu, status: status, reden: String(reden || '').slice(0, 30), doel: extra && Object.hasOwn(APP_SEINTJE_EXTRA_DOEL, String(extra.doel)) ? extra.doel : undefined, soort: soort };   // wv3680; wv4121 soort   // 30: 'antwoord machinekamer' is 21 (seintje -> tab, wv137)
       // wv804 Fable B1/M2: per kanaal het laatste bezorgde (2xx) seintje; een mislukte push overschrijft niets
       if (!poets && ok && kanaalVan) (s.laatst_per = s.laatst_per || {})[kanaalVan[1]] = { op: nu };
       if (weg) { s.endpoint = null; s.verlopen = nu; appPushVerlopenMeld(p, id, a.naam, nu, status); }
     });
   } catch (e) { logError('app-push', e); }
   if (!poets) { if (--po[id] <= 0) delete po[id]; }
-  appAudit({ route: 'push', m: 'POST', status: status, apparaat: id, reden: (poets ? 'poets' : String(reden || '').slice(0, 40)) + (weg ? ' (abonnement verlopen, bewaard)' : '') });
+  appAudit({ route: 'push', m: 'POST', status: status, apparaat: id, reden: (poets ? 'poets' : String(reden || '').slice(0, 40)) + (weg ? ' (abonnement verlopen, bewaard)' : ''), soort: soort });   // wv4121: soort = verzendlog per soort
   return { ok: ok, status: status, reden: ok ? 'verstuurd' : weg ? 'abonnement verlopen' : status ? 'pushdienst gaf ' + status : 'pushdienst niet bereikbaar' };
 }
 async function appPushAlle(soort, reden, filter, extra) {
@@ -16211,7 +16233,8 @@ function appPushNaBeurt(jobId) {
     const gz = k.app.gezien || {}, iemand = Object.keys(gz).length > 0, vrager = k.app.apparaat;
     if (iemand && gz[vrager]) return;
     // wv804 (ontwerp § 3): alleen wie mag (de Pixel, of zoem aan); een pc-vrager zonder zoem krijgt niets (de Pixel zag het = David zag het)
-    appPushAlle('antwoord', 'antwoord ' + k.app.kanaal, function (id) { return (!iemand || id === vrager) && appPushMag(id); }).catch(function (e) { logError('app-push', e); });
+    const ss = SS(), soort = ss ? ss.soortVanBeurt(k.app.kanaal, !!k.app.vraag) : undefined;   // wv4121
+    appPushAlle('antwoord', 'antwoord ' + k.app.kanaal, function (id) { return (!iemand || id === vrager) && appPushMag(id); }, soort ? { soort: soort } : undefined).catch(function (e) { logError('app-push', e); });
   }, APP_PUSH_WACHT_MS);
   if (t && t.unref) t.unref();
 }
@@ -16308,7 +16331,10 @@ function appSeintjeStand(req, res, reg) {
       // Fable M3: dit apparaat draait de nieuwe SW; pas dan mag er een poets-push heen
       if (s && !s.sw_vraagt) appPushWijzig(function (p) { const x = p.apparaten[a.id]; if (x && !x.sw_vraagt) x.sw_vraagt = new Date().toISOString(); });
     } catch (e) { logError('app-push', e); return appStuur(res, 200, { ok: true, toon: true }); }
-    appStuur(res, 200, { ok: true, toon: appSeintjeToon(a.id, s) });
+    const uit = { ok: true, toon: appSeintjeToon(a.id, s) };
+    // wv4121: welke soorten sinds de vorige vraag van deze service worker (alleen vaste woorden; de tekst staat in sw.js)
+    try { const h = appSeintjeSoortHaal(a.id); if (h) { uit.soorten = h.soorten; if (h.herhaal) uit.herhaal = true; } } catch (e) { logError('seintje-soort', e); }
+    appStuur(res, 200, uit);
   }, function () { appWeiger(res, 409, 'passief', 'seintje-stand rol'); });
 }
 // Poets-push (ontwerp § 5 + Fable B1/M3): naar de Pixel als die de nieuwe SW draait (sw_vraagt), een bezorgd kanaalseintje kreeg ná
@@ -16375,7 +16401,7 @@ async function appPushMeldTik() {
       if (bekend.length !== s.meld_kaarten.length) appPushWijzig(function (q) { if (q.apparaten[id]) q.apparaten[id].meld_kaarten = bekend; });
       continue;
     }
-    const r = await appPushStuur(id, 'meldingen');
+    const r = await appPushStuur(id, 'meldingen', null, { soort: 'storing' });   // wv4121
     if (r.ok) appPushWijzig(function (q) { const x = q.apparaten[id]; if (x) { x.meld_kaarten = open.slice(0, 200); x.meld_laatst = Date.now(); } });
   }
 }
@@ -17914,7 +17940,10 @@ async function berichtPushNu(kanaal, ids) {
   let uit = [];
   let gooide = false;
   const doel = berichtPushDoel(kanaal, ids);   // wv3680
-  try { uit = await appPushAlle('antwoord', 'antwoord ' + kanaal, function (id) { return appPushMag(id); }, doel ? { doel: doel } : undefined); } catch (e) { logError('bericht-push', e); gooide = true; }   // wv804: alleen-Pixel
+  let soort;   // wv4121: vraag gaat voor; dringend zonder vraag = storing (zie seintje-soort.js)
+  try { const ss = SS(), idx = berichtIndex(); soort = ss ? ss.soortVanBerichten(kanaal, (ids || []).map(function (id) { return idx[id]; })) : undefined; } catch (e) { logError('seintje-soort', e); }
+  const extra = doel || soort ? { doel: doel || undefined, soort: soort } : undefined;
+  try { uit = await appPushAlle('antwoord', 'antwoord ' + kanaal, function (id) { return appPushMag(id); }, extra); } catch (e) { logError('bericht-push', e); gooide = true; }   // wv804: alleen-Pixel
   const verstuurd = uit.filter(function (r) { return r && r.ok; }).length;
   // wv292 (Fable wv263 #7): faalden alle pushdiensten, dan het volgende bericht niet bundelen (n8n ziet het dan na 1 min)
   berichtPushStaat(kanaal).mislukt = verstuurd === 0 && (uit.length > 0 || (gooide && berichtPushGewenst() > 0));   // Fable wv292 #6
@@ -21379,7 +21408,7 @@ const imagineApp = (function () {
       log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: function (w) { logError(w, new Error('imagine')); },
       // wv4092 (L17): één seintje als de filmstapel leeg is — de gewone push zonder inhoud ("Socev heeft iets voor je"), alleen naar de
       // apparaten die seintjes aan hebben; stille uren regelt imagine.js (dan alleen de regel bovenaan in Imagine). Nooit Telegram.
-      seintje: function () { return appPushAlle('antwoord', 'imagine', function (id) { return appPushMag(id); }); } });
+      seintje: function () { return appPushAlle('antwoord', 'imagine', function (id) { return appPushMag(id); }, { soort: 'antwoord' }); } });   // wv4121
   } catch (e) { logError('imagine', new Error('laden faalde')); return null; }
 })();
 async function appImagine(req, res, a, s, route, d) {

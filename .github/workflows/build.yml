@@ -634,6 +634,10 @@ jobs:
       - name: "strateeg-ideeen (wv4012, boek Ideeën)"
         if: ${{ !cancelled() }}
         run: node --test test/strateeg-ideeen.test.js
+      # wv4121: seintje zegt het soort (vraag, antwoord, machinekamer, storing), zonder inhoud — keuze, lijst per apparaat, elke verzendplek geeft een soort.
+      - name: "seintje-soort (wv4121, 3C16)"
+        if: ${{ !cancelled() }}
+        run: node --test test/seintje-soort.test.js
       # wv2991: OVIS Personeelsscherm fase 0 — proefscherm tekenen, koppelen met IP-eis, intrekken, tik en meldingen (nep-D1, nep-Cloudflare).
       - name: "personeelsscherm (wv2991, OVIS Personeelsscherm fase 0)"
         if: ${{ !cancelled() }}
