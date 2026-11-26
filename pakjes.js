@@ -1002,7 +1002,15 @@ function maak(o) {
 // "is X al besteld of bezorgd?" te beoordelen. Geen adres, volgcode, volglink of bestelnummer; Shopper-verwachtingen zonder id.
 function kaal(body) {
   const b = body && typeof body === 'object' ? body : {};
-  const rij = (w) => ({ winkel: w.winkel || null, omschrijving: w.omschrijving || null, onderwerp: w.onderwerp || null, vervoerder: w.vervoerder || null,
+  // Vrije tekst (winkel, omschrijving, onderwerp) kan een bestelnummer, postcode of adres bevatten (Codex MOET 3): nummers vanaf 5 cijfers,
+  // postcodes, mailadressen en huisnummers na een straatwoord eruit, hooguit 120 tekens.
+  const schoon = (t) => {
+    if (typeof t !== 'string' || !t.trim()) return null;
+    const u = t.replace(/\S+@\S+/g, '…').replace(/\b[1-9]\d{3}\s?[A-Za-z]{2}\b/g, '…').replace(/[A-Za-z]*\d[\dA-Za-z-]{4,}/g, (m) => ((m.match(/\d/g) || []).length >= 5 ? '…' : m))
+      .replace(/(straat|laan|weg|plein|singel|gracht|kade|dreef|hof|pad|steeg)(\s+)\d+\s?[a-zA-Z]?\b/gi, '$1$2…').replace(/\s+/g, ' ').trim();
+    return u ? u.slice(0, 120) : null;
+  };
+  const rij = (w) => ({ winkel: schoon(w.winkel), omschrijving: schoon(w.omschrijving), onderwerp: schoon(w.onderwerp), vervoerder: w.vervoerder || null,
     stand: w.stand || null, eerste: w.eerste || null, laatst: w.laatst || null, bezorgd_op: w.bezorgd_op || null, verwacht_dag: w.verwacht_dag || null, verborgen: !!w.verborgen });
   const lijst = (x) => (Array.isArray(x) ? x : []).filter((w) => w && typeof w === 'object').map(rij);
   return { ok: true, lopend: lijst(b.lopend), eerder: lijst(b.eerder), laatste_ronde: b.laatste_ronde || null, ronde_fout: !!b.ronde_fout };

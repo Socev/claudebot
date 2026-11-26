@@ -563,6 +563,11 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
     toets('5 kaal: geen volgcode, bestelnummer, adres, link of id; Shopper-verwachtingen niet mee', !/3SPROE|111-222|Proefstraat|postnl\.nl|aaaaaaaaaaaa|verwacht"/.test(s) && !('verwacht' in k), s);
     toets('5 kaal: winkel, omschrijving, stand en datums blijven; rommel valt weg', k.ok === true && k.lopend.length === 1 && k.lopend[0].winkel === 'Proefwinkel' && k.lopend[0].omschrijving === 'Proefding'
       && k.lopend[0].stand === 'onderweg' && k.lopend[0].eerste === '2026-11-20T10:00:00Z' && k.eerder.length === 1 && k.eerder[0].verborgen === true && k.eerder[0].bezorgd_op === '2026-11-01T10:00:00Z', k);
+    const k2 = P.kaal({ lopend: [{ winkel: 'Proefwinkel', omschrijving: 'Bestelling 7051636511589311 voor Proefstraat 12 1234 AB', onderwerp: 'Je bestelling P1748513186 is onderweg naar proef@voorbeeld.nl', stand: 'onderweg' },
+      { winkel: 'Proefwinkel', omschrijving: 'Toetsenbord K120 en USB-C kabel 2m', stand: 'onderweg' }] });
+    const s2 = JSON.stringify(k2);
+    toets('5 kaal: bestelnummers, postcode, huisnummer en mailadres uit de vrije tekst; productwoorden blijven', !/7051636|P174851|1234 ?AB|Proefstraat 12|proef@/.test(s2)
+      && /Toetsenbord K120 en USB-C kabel 2m/.test(s2) && /onderweg naar/.test(s2), s2);
     toets('5 kaal: lege of kapotte invoer = lege lijsten', JSON.stringify(P.kaal(null)) === JSON.stringify({ ok: true, lopend: [], eerder: [], laatste_ronde: null, ronde_fout: false }));
     const b = fs.readFileSync('server.js', 'utf8'), st = b.indexOf("if (actie === 'pakjes')"), blok = b.slice(st, b.indexOf("if (actie === 'facturen')", st));
     toets('5 server.js: /smal/pakjes alleen lijst + kaal (geen verberg, geleverd, ronde), eigen grens', st > 0 && /\.kaal\(u\.body\)/.test(blok) && !/verberg|geleverd|pakjesRonde|ververs/.test(blok)
