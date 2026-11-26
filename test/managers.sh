@@ -223,6 +223,29 @@ const wacht = () => new Promise((r) => setImmediate(r));
     toets('8 na afloop: laatste_ronde = afroep, weer_om over een uur', d3.laatste_afroep.uitkomst === 'goed' && d3.laatste_ronde === new Date(st.nu).toISOString() && d3.kan === false && d3.weer_om === new Date(st.nu + 3600000).toISOString(), d3);
     toets('8 rapport bij "1 bron" (data vereist ≥ 1) goed', /is klaar/.test((st.berichten[0] || {}).tekst || ''), st.berichten);
   }
+  // ── 8d. wv4123 (3C13/3C35/3C43): groepen, besloten, uitleg en onderhoud ──
+  { const { m } = omgeving();
+    const ri = M.rpcInvoer();
+    toets('8d wv4123: RPC-invoer Data met onderhoud DM9 en DM10, de rest zonder', JSON.stringify((ri.find((x) => x.id === 'data') || {}).onderhoud) === '["DM9","DM10"]' && ri.filter((x) => x.onderhoud).length === 1, ri);
+    const pt = (id, groep, x) => Object.assign({ id: id, check: id.split('-')[0], ernst: 'warning', status: groep === 'jou' || groep === 'besloten' ? 'gemeld' : 'open', groep: groep, samenvatting: 'codetaal ' + id, detail: '' }, x || {});
+    const sb = {
+      data: { aantal: 3, totaal: 3, groepen: { jou: 0, mk: 1, onderhoud: 2, besloten: 0 }, per_ernst: { warning: 3 }, hartslag: null, besloten: [],
+        top: [pt('DM3-a', 'mk', { uitleg: 'Oude mappen groeien; ligt bij de machinekamer.' }), pt('DM9-b', 'onderhoud'), pt('DM10-c', 'onderhoud')] },
+      mrlean: { aantal: 1, totaal: 3, groepen: { jou: 0, mk: 1, onderhoud: 0, besloten: 2 }, per_ernst: { warning: 1 }, hartslag: null, top: [pt('ML6-a', 'mk')],
+        besloten: [pt('ML1-a', 'besloten', { besluit: { rij: 2431, stand: 'klaar', op: '2026-11-05T06:27:00Z', klaar_op: '2026-11-05T08:00:00Z' }, uitleg: 'Je zei Ja op 5-11.' }),
+                   pt('ML7-a', 'besloten', { besluit: { rij: 2902, stand: 'wordt gebouwd', op: '2026-11-11T11:01:00Z' } })] },
+      design: { aantal: 1, totaal: 1, groepen: { jou: 1, mk: 0, onderhoud: 0, besloten: 0 }, per_ernst: {}, hartslag: null, besloten: [], top: [pt('DS1-a', 'jou', { besluit: { rij: 9, stand: 'wacht op jou', op: null } })] },
+      ui: { aantal: 2, totaal: 3, groepen: { jou: 0, mk: 2, onderhoud: 0, besloten: 1 }, per_ernst: {}, hartslag: null, top: [pt('UI1-a', 'mk'), pt('UI2-a', 'mk', { ernst: 'serious' })],
+        besloten: [pt('UI3-a', 'besloten', { besluit: { rij: 8, stand: 'klaar', op: '2026-11-20T10:00:00Z' } })] } };
+    const k = m.stand(sb, {});
+    const d = k.find((x) => x.id === 'data').bevindingen, ml = k.find((x) => x.id === 'mrlean').bevindingen, ds = k.find((x) => x.id === 'design').bevindingen;
+    toets('8d Data: groepen door, uitleg uit de state, vaste zin voor DM9/DM10 zonder bestandsnaam', d.groepen.onderhoud === 2 && d.top[0].uitleg === 'Oude mappen groeien; ligt bij de machinekamer.' && d.top[1].uitleg === M.ONDERHOUD_ZIN.DM9 && d.top[2].uitleg === M.ONDERHOUD_ZIN.DM10 && Object.values(M.ONDERHOUD_ZIN).every((z) => !/\.(js|ts|tsx|py|md|json)\b|\/opt\//.test(z)), d);
+    toets('8d MrLean: 1 open, 2 besloten met stand en datum, totaal 3', ml.aantal === 1 && ml.groepen.besloten === 2 && ml.totaal === 3 && ml.besloten.length === 2 && ml.besloten[0].besluit.stand === 'klaar' && ml.besloten[0].besluit.op === '2026-11-05T06:27:00Z' && ml.besloten[0].uitleg === 'Je zei Ja op 5-11.' && ml.besloten[1].uitleg === '', ml);
+    toets('8d Design + UI-deel: groepen opgeteld, jou bovenaan, dan ernstig voor licht, besloten van het deel mee', ds.groepen.jou === 1 && ds.groepen.mk === 2 && ds.groepen.besloten === 1 && ds.totaal === 4 && ds.aantal === 3 && ds.top.map((x) => x.id).join() === 'DS1-a,UI2-a,UI1-a' && ds.besloten.length === 1 && ds.besloten[0].id === 'UI3-a', ds);
+    toets('8d punt draagt groep en besluit (rij-id niet naar de app)', ds.top[0].groep === 'jou' && ds.top[0].besluit.stand === 'wacht op jou' && !('rij' in ds.top[0].besluit), ds.top[0]);
+    const oud = m.stand({ ciso: { aantal: 7, per_ernst: {}, hartslag: null, top: [1, 2, 3, 4, 5, 6, 7].map((i) => ({ id: 'C' + i + '-x', ernst: 'warning' })) } }, {}).find((x) => x.id === 'ciso').bevindingen;
+    toets('8d oude RPC (zonder groepen): geen groepen/besloten op de kaart, top hooguit 5, punt zonder groep', !('groepen' in oud) && !('besloten' in oud) && oud.top.length === 5 && oud.top[0].groep === null, oud);
+  }
   // ── 8b. UI Manager (wv896; sinds wv4116 deel gebruik van de Design Manager): RPC-regel, samenvoegen, prompt en slotregel ──
   { const u = M.DELEN.find((x) => x.id === 'ui');
     toets('8b UI: deel met hartslag ui_manager, patroon ^UI[0-9], in de RPC-invoer', u && u.hartslag === 'ui_manager' && u.patroon === '^UI[0-9]' && M.rpcInvoer().some((x) => x.id === 'ui' && x.patroon === '^UI[0-9]'));

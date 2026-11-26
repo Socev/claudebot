@@ -25,7 +25,7 @@ const DOOR = { david: 'door jou', socev: 'door Socev', machinekamer: 'door de ma
 
 // Het register (de naam-whitelist). Een nieuwe manager = één regel hier (+ test/managers.sh). rooster: dag 0 = zondag, tijd Europe/Amsterdam (de n8n-trigger).
 const MANAGERS = [
-  { id: 'data', naam: 'Data Manager', skill: 'data-manager', sessie: 'data-manager', model: 'claude-sonnet-5-5', hartslag: 'data_manager', patroon: '^DM[0-9]',
+  { id: 'data', naam: 'Data Manager', skill: 'data-manager', sessie: 'data-manager', model: 'claude-sonnet-5-5', hartslag: 'data_manager', patroon: '^DM[0-9]', onderhoud: ['DM9', 'DM10'],
     bewaakt: 'Waar al je gegevens staan (databanken, pod, Drive, vault) en of elke plek een backup en een eigenaar heeft.',
     rooster: { dag: 0, uur: 9, min: 30 }, slot: 'DATA-MANAGER', slotRe: /^DATA-MANAGER \d{4}-\d{2}-\d{2}: [1-9]\d* bronnen gemeten/,
     slotFormaat: 'DATA-MANAGER <JJJJ-MM-DD>: <n> bronnen gemeten, <m> niet vast te stellen, <N> open (<k> nieuw), kaart geen' },
@@ -55,15 +55,39 @@ const MANAGERS = [
 // bij zijn manager op. Geen afroep, geen eigen rooster.
 const DELEN = [{ id: 'ui', naam: 'UI Manager', hartslag: 'ui_manager', patroon: '^UI[0-9]', deelVan: 'design' }];
 const ERNST_RANG = { kritiek: 0, critical: 0, serious: 1, hoog: 1, warning: 2, middel: 2 };
+// wv4123 (besluitenpagina 3C13/3C35/3C43, David Ja 25-11-2026): de RPC geeft elk punt een groep: 'jou' (de kaart ligt bij David),
+// 'mk' (bij de machinekamer), 'onderhoud' (vaste lijst per manager hierboven: controles die per ontwerp doorlopen) en 'besloten'
+// (David besliste al; telt niet meer als open, staat onder "Besloten door jou"). Volgorde op de kaart: jou, mk, onderhoud.
+const GROEP_RANG = { jou: 0, mk: 1, onderhoud: 2 };
+// Eén gewone zin voor een onderhoudspunt zonder eigen uitleg (de afwerkklus schrijft de uitleg van de andere punten in de state).
+const ONDERHOUD_ZIN = {
+  DM9: 'Een stukje pod-code haalt zelf gegevens op én maakt de tekst die je ziet; dat wordt bij het eerstvolgende werk eraan gesplitst. Doorlopend onderhoud, jij hoeft niets.',
+  DM10: 'Een scherm in de app haalt zelf gegevens op of beslist zelf wat je ziet; dat wordt bij het eerstvolgende werk eraan rechtgezet. Doorlopend onderhoud, jij hoeft niets.',
+};
+function rangPunt(b) {
+  const g = GROEP_RANG[b.groep]; const r = ERNST_RANG[String(b.ernst || '').toLowerCase()];
+  return [g == null ? 1 : g, r == null ? 3 : r];
+}
+function sorteer(l) {
+  return l.sort(function (a, b) { const x = rangPunt(a), y = rangPunt(b); return x[0] - y[0] || x[1] - y[1] || String(b.laatst_gezien || '').localeCompare(String(a.laatst_gezien || '')); });
+}
+const GROEPEN_LEEG = { jou: 0, mk: 0, onderhoud: 0, besloten: 0 };
 function samenvoegen(d, x) {
   if (!x) return d;
   if (!d) return x;
   const pe = Object.assign({}, d.per_ernst || {});
   Object.keys(x.per_ernst || {}).forEach(function (k) { pe[k] = (Number(pe[k]) || 0) + (Number(x.per_ernst[k]) || 0); });
-  const rang = function (b) { const r = ERNST_RANG[String(b.ernst || '').toLowerCase()]; return r == null ? 3 : r; };
-  const top = (Array.isArray(d.top) ? d.top : []).concat(Array.isArray(x.top) ? x.top : [])
-    .sort(function (a, b) { return rang(a) - rang(b) || String(b.laatst_gezien || '').localeCompare(String(a.laatst_gezien || '')); }).slice(0, 5);
-  return Object.assign({}, d, { aantal: (Number(d.aantal) || 0) + (Number(x.aantal) || 0), per_ernst: pe, top: top });
+  const top = sorteer((Array.isArray(d.top) ? d.top : []).concat(Array.isArray(x.top) ? x.top : []));
+  const uit = Object.assign({}, d, { aantal: (Number(d.aantal) || 0) + (Number(x.aantal) || 0), per_ernst: pe, top: d.groepen || x.groepen ? top : top.slice(0, 5) });
+  if (d.groepen || x.groepen) {   // wv4123
+    const g = Object.assign({}, GROEPEN_LEEG);
+    [d.groepen || {}, x.groepen || {}].forEach(function (y) { Object.keys(g).forEach(function (k) { g[k] += Number(y[k]) || 0; }); });
+    uit.groepen = g;
+    uit.totaal = (Number(d.totaal) || 0) + (Number(x.totaal) || 0);
+    uit.besloten = (Array.isArray(d.besloten) ? d.besloten : []).concat(Array.isArray(x.besloten) ? x.besloten : [])
+      .sort(function (a, b) { return String((b.besluit || {}).op || '').localeCompare(String((a.besluit || {}).op || '')); }).slice(0, 10);
+  }
+  return uit;
 }
 const PER_ID = {};
 MANAGERS.forEach(function (m) { PER_ID[m.id] = m; });
@@ -285,11 +309,22 @@ function maak(o) {
       const k = lj ? { loopt: true } : kan(m, 'david');
       let bev = null;
       if (d) {
-        const top = (Array.isArray(d.top) ? d.top : []).map(function (b) {
+        const punt = function (b) {
+          const besluit = b.besluit && typeof b.besluit === 'object' ? { stand: String(b.besluit.stand || ''), op: b.besluit.op || null, klaar_op: b.besluit.klaar_op || null } : null;
           return { id: String(b.id || ''), ernst: String(b.ernst || ''), status: String(b.status || ''), samenvatting: String(b.samenvatting || ''),
-            detail: String(b.detail || ''), sinds: b.eerst_gezien || null };
-        });
-        bev = { aantal: Number(d.aantal) || 0, per_ernst: d.per_ernst || {}, top: top.slice(0, 5), verborgen: false };
+            detail: String(b.detail || ''), sinds: b.eerst_gezien || null,
+            // wv4123: groep en één gewone zin (uitleg uit de state, anders de vaste zin van een onderhoudscontrole, anders leeg = samenvatting)
+            groep: b.groep ? String(b.groep) : null, uitleg: String(b.uitleg || ONDERHOUD_ZIN[String(b.check || '')] || ''), besluit: besluit };
+        };
+        const top = (Array.isArray(d.top) ? d.top : []).map(punt);
+        bev = { aantal: Number(d.aantal) || 0, per_ernst: d.per_ernst || {}, top: d.groepen ? top.slice(0, 15) : top.slice(0, 5), verborgen: false };
+        if (d.groepen) {   // wv4123: alleen met de nieuwe RPC; een oude geeft geen groepen en de app valt terug op één getal
+          const g = {};
+          Object.keys(GROEPEN_LEEG).forEach(function (x) { g[x] = Number(d.groepen[x]) || 0; });
+          bev.groepen = g;
+          bev.totaal = Number(d.totaal) || 0;
+          bev.besloten = (Array.isArray(d.besloten) ? d.besloten : []).map(punt).slice(0, 10);
+        }
       }
       return { id: m.id, naam: m.naam, bewaakt: m.bewaakt, rooster: roosterTekst(m), soort: m.soort || 'sessie',
         volgende: (function () { const v = volgendeWeekronde(m, t); return v ? new Date(v).toISOString() : null; })(),
@@ -308,7 +343,13 @@ function maak(o) {
 }
 
 // Wat de RPC mk_managers_stand per manager nodig heeft (geen vrije invoer: alleen deze vaste lijst).
-function rpcInvoer() { return MANAGERS.concat(DELEN).filter(function (m) { return m.patroon; }).map(function (m) { return { id: m.id, hartslag: m.hartslag, patroon: m.patroon }; }); }
+function rpcInvoer() {
+  return MANAGERS.concat(DELEN).filter(function (m) { return m.patroon; }).map(function (m) {
+    const r = { id: m.id, hartslag: m.hartslag, patroon: m.patroon };
+    if (m.onderhoud) r.onderhoud = m.onderhoud.slice();   // wv4123: checks die per ontwerp doorlopen (groep onderhoud)
+    return r;
+  });
+}
 
-module.exports = { maak: maak, MANAGERS: MANAGERS, DELEN: DELEN, samenvoegen: samenvoegen, vraagZin: vraagZin, REDENEN: REDENEN, prompt: prompt, rapportRegels: rapportRegels, kort: kort, volgendeWeekronde: volgendeWeekronde,
+module.exports = { maak: maak, MANAGERS: MANAGERS, DELEN: DELEN, samenvoegen: samenvoegen, ONDERHOUD_ZIN: ONDERHOUD_ZIN, vraagZin: vraagZin, REDENEN: REDENEN, prompt: prompt, rapportRegels: rapportRegels, kort: kort, volgendeWeekronde: volgendeWeekronde,
   amsNaarMs: amsNaarMs, rpcInvoer: rpcInvoer, VOOR_WEEKRONDE_MS: VOOR_WEEKRONDE_MS };
