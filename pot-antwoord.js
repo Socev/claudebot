@@ -178,9 +178,13 @@ function kiesPerNaam(tekst, groep) {
 }
 
 // Gaat deze mail over het patiëntenaantal? Onderwerp met "1 januari <jaar>" of patiënt + aantal/ingeschreven in de eigen tekst.
-function overAantal(onderwerp, eigen, cfg) {
+function overAantal(onderwerp, eigen, cfg, bekend) {
   const o = vouw(onderwerp), t = vouw(eigen);
-  if (o.includes(vouw(cfg.onderwerp)) || /patientenaantal|patienten aantal|aantal patienten/.test(o)) return true;
+  if (/patientenaantal|patienten aantal|aantal patienten/.test(o)) return true;
+  // 26-11 (David): "Re: Arbeidsovereenkomst per 1 januari 2027" van een niet-praktijkadres telde mee op het onderwerp alleen. De jaarzin
+  // in het onderwerp telt nu alleen van een bekend praktijkadres (ook een antwoord met alleen een bijlage), of als onderwerp of eigen tekst
+  // over patiënten/inschrijving/aantal gaat of de eigen tekst een aannemelijk aantal noemt.
+  if (o.includes(vouw(cfg.onderwerp)) && (bekend || /(patient|ingeschrev|inschrijv|praktijkgrootte)/.test(o + ' ' + t) || getallen(eigen).some((g) => plausibel(g.n)))) return true;
   return /patient/.test(t) && /(aantal|ingeschrev|per 1[- ]1|1 januari|peildatum)/.test(t);
 }
 
@@ -383,8 +387,8 @@ async function ronde(io, o) {
     const eigen = antwoordDeel(vol.tekst);
     const registreer = (uitkomst, extra) => { st.mails[m.id] = Object.assign({ op: L.nu, ymd: mail.ymd, adres: mail.adres, uitkomst }, extra || {}); };
     if (!adres || EIGEN_ADRESSEN.includes(adres)) { registreer('eigen'); continue; }
-    if (!overAantal(vol.onderwerp || m.onderwerp, eigen, cfg)) { registreer('niet_relevant'); uit.niet_relevant++; continue; }
     const groep = praktijkenVan(adres, L.praktijken);
+    if (!overAantal(vol.onderwerp || m.onderwerp, eigen, cfg, groep.length > 0)) { registreer('niet_relevant'); uit.niet_relevant++; continue; }
     const status = mail.ymd < cfg.peildatum ? 'voorlopig' : 'definitief';
     if (!groep.length) { voorstellen.push({ vraag: { wie: adres, mail, probleem: 'onbekend', getallen: [...new Set(getallen(eigen).filter((g) => plausibel(g.n)).map((g) => g.n))].slice(0, 6) } }); registreer('onbekend'); continue; }
     if (groep.length === 1) {

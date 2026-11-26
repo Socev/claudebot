@@ -30,6 +30,13 @@ const A = require(path.resolve('pot-antwoord.js'));
   toets('kies: 3412 zonder punt; 3831AB is postcode', k5.aantal === 3412, k5);
   toets('antwoordDeel: geciteerde tekst valt weg', !/2\.400/.test(A.antwoordDeel('Wij hebben 3.000.\n\nOp 1 dec. 2026 om 09:00 schreef David <x@y.z>:\n> vorig jaar 2.400')));
   toets('adresVan: "Naam" <adres>', A.adresVan('"Proef Praktijk" <Een@Proef.Example>') === 'een@proef.example');
+  const cfgT = A.instellingen(2027);
+  toets('overAantal: contract "per 1 januari 2027" zonder aantal = niet relevant (26-11)', !A.overAantal('Re: Arbeidsovereenkomst per 1 januari 2027', 'Hoi, hierbij getekend retour. Groet, Proef', cfgT));
+  toets('overAantal: contract-onderwerp met "aantal uren" = niet relevant', !A.overAantal('Re: Arbeidsovereenkomst per 1 januari 2027', 'Het aantal uren klopt. Getekend retour.', cfgT));
+  toets('overAantal: onderwerp met jaarzin + aantal in de tekst = relevant', A.overAantal('Re: per 1 januari 2027', 'Wij hebben 3.412.', cfgT));
+  toets('overAantal: onderwerp met jaarzin + "ingeschreven" = relevant', A.overAantal('Re: ingeschreven per 1 januari 2027', 'Zie bijlage.', cfgT));
+  toets('overAantal: jaarzin + alleen bijlage van een bekend praktijkadres = relevant', A.overAantal('Re: per 1 januari 2027', 'Zie bijlage.', cfgT, true));
+  toets('overAantal: "Patiëntenaantal" in het onderwerp = relevant', A.overAantal('Re: Patiëntenaantal', 'zie bijlage', cfgT));
 
   // ── nep-D1 met het schema van de app en een vaste klok ──
   const db = new DatabaseSync(':memory:');
