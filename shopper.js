@@ -1058,9 +1058,11 @@ function maak(o) {
       if (!z) { reden = 'weg'; return null; }
       if (z.status !== 'open' || !z.wacht_op_jou) { reden = 'anders'; return null; }
       const wens = tekstVeld(fmWaarde(t, 'wens'), MAX_WENS) || z.wens;
-      lijst = huidigeEisen(t).concat([a]).slice(0, MAX_EISEN);
+      if (huidigeEisen(t).length >= MAX_EISEN) { reden = 'vol'; return null; }   // review wv4171 MOET 1: onder het slot, nooit afkappen
+      lijst = huidigeEisen(t).concat([a]);
       return '---\n' + zetEisenRegels(fm[1], wens, lijst, aangepast, true) + '\n---' + t.slice(fm[0].length);
     });
+    if (!ok && reden === 'vol') return { status: 409, body: { ok: false, fout: 'er staan al ' + MAX_EISEN + ' eisen; haal er eerst een weg bij Eisen aanpassen' } };
     if (!ok) return { status: 409, body: { ok: false, fout: reden === 'anders' ? 'deze zoektocht veranderde intussen; laad hem opnieuw' : 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
     const r = await opnieuw(id);
     if (r.status === 200) return { status: 200, body: { ok: true, eisen: lijst, aangepast, zoekt: r.body.zoekt } };
@@ -1087,7 +1089,8 @@ function maak(o) {
       const fm = /^---\n([\s\S]*?)\n---/.exec(t || '');
       const z = fm ? ontleed(t, v.p.rel, v.p.ent) : null;
       const g = z && z.status === 'gekocht' ? gekochtVan(t) : null;
-      if (!g || g.bedrag_eur != null || g.datum !== v.z.gekocht.datum || g.winkel !== v.z.gekocht.winkel) { reden = 'anders'; return null; }
+      // review wv4171 MOET 2: de hele gekocht-regel moet gelijk zijn aan die van de controle (andere optie, opmerking of via = weigeren)
+      if (!g || g.bedrag_eur != null || JSON.stringify(g) !== JSON.stringify(v.z.gekocht)) { reden = 'anders'; return null; }
       nieuw = Object.assign({}, g, { bedrag_eur: b });
       return '---\n' + zetStatusRegels(fm[1], 'gekocht', gekochtRegel(nieuw)) + '\n---' + t.slice(fm[0].length);
     });

@@ -255,6 +255,12 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       && det('Zonder bedrag').gekocht.bedrag_eur === kies.bedrag_eur && det('Zonder bedrag').gekocht.datum === '2026-11-02' && det('Zonder bedrag').gekocht.optie === 'o1'
       && naZ.replace(/^gekocht: .*$/m, '') === voorZ.replace(/^gekocht: .*$/m, ''), [rB, naZ.slice(0, 300)]);
     toets('7s bedrag: tweede keer = 409 (staat er al); facturendatabase byte-gelijk', mB.bedrag(idZ, { factuur: kies.id }).status === 409 && hashVan() === voorHash);
+    // review MOET 2: de gekocht-regel veranderde intussen (andere opmerking, zelfde winkel en datum) = 409, geen bedrag
+    fs.writeFileSync(pZ, voorZ);
+    const vvAnders = Object.assign({}, VV, { wijzig: (pad, fn) => { fs.writeFileSync(pad, fs.readFileSync(pad, 'utf8').replace(/^gekocht: \{(.*)\}$/m, (r, x) => 'gekocht: {' + x + ', opmerking: "intussen"}')); return VV.wijzig(pad, fn); } });
+    const rA = S.maak({ vault: V3, vv: vvAnders, facturenPad: () => FP }).bedrag(idZ, { factuur: kies.id });
+    toets('7u bedrag: gekocht-regel intussen anders (zelfde winkel en datum) = 409, geen bedrag geschreven', rA.status === 409 && /bedrag_eur: null/.test(fs.readFileSync(pZ, 'utf8')), [rA, fs.readFileSync(pZ, 'utf8').slice(0, 300)]);
+    fs.writeFileSync(pZ, voorZ);
     toets('7t bedrag op een open zoektocht = 409', mB.bedrag(z3('Open met gekocht-regel').id, { factuur: kies.id }).status === 409);
     fs.writeFileSync(pZ, voorZ);
   }
@@ -1259,6 +1265,13 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('16g tweede antwoord = 409 (geen vraag meer), geen tweede agent', (await m16.antwoord(z16.id, { antwoord: 'nog eens' })).status === 409 && starts.length === 1);
     const n16 = S.nieuwOpdracht({ grondwet: 'GRONDWET-KERN v1', start_id: 'abcdef012345', wens: 'x', eisen: [] });
     toets('16h nieuw-opdracht: link met de start_id en de wacht_op_jou-regel', n16.includes('[Open de zoektocht](/?app=shopper&zt=abcdef012345)') && n16.includes('wacht_op_jou:'));
+    // review MOET 1: vol tijdens het schrijven (andere schrijver zette intussen de twintigste eis) = 409, vraag blijft, niets afgekapt
+    const P16b = path.join(PR16, 'Shopper - 2026-11-04 - Bijna vol.md'), eisen19 = Array.from({ length: 19 }, (_, i) => '"eis ' + i + '"');
+    fs.writeFileSync(P16b, pagina(['type: shopper-zoektocht', 'wens: "Bijna vol"', 'status: open', 'wacht_op_jou: "maat?"', 'gezocht: 2026-11-04T09:00+01:00', 'eisen: [' + eisen19.join(', ') + ']']));
+    const id16b = S.idVan('20_Prive/Shopper/Shopper - 2026-11-04 - Bijna vol.md');
+    const vvVol = Object.assign({}, VV, { wijzig: (pad, fn) => { const t = fs.readFileSync(pad, 'utf8').replace('"eis 18"]', '"eis 18", "eis 19"]'); fs.writeFileSync(pad, t); return VV.wijzig(pad, fn); } });
+    const r16b = await S.maak({ vault: V16, vv: vvVol, nu: () => klok, opnieuwPad: path.join(W, 'opnieuw16b.json'), grondwet: () => 'GRONDWET-KERN v1', poort: POORT, agentStart: async () => startAntwoord, agentStand: () => 'loopt' }).antwoord(id16b, { antwoord: '80 x 120' });
+    toets('16k vol onder het slot: 409, wacht_op_jou blijft, antwoord niet afgekapt weggeschreven', r16b.status === 409 && /wacht_op_jou: "maat\?"/.test(fs.readFileSync(P16b, 'utf8')) && !/80 x 120/.test(fs.readFileSync(P16b, 'utf8')), r16b);
     toets('16i opnieuw-opdracht zonder geldige id: link naar Shopper zelf', S.opnieuwOpdracht({ grondwet: 'GRONDWET-KERN v1', pad: 'a.md', entiteit: 'prive', wens: 'x', eisen: [] }).includes('[Open Shopper](/?app=shopper)'));
     const src16 = fs.readFileSync('server.js', 'utf8'), bl16 = src16.slice(src16.indexOf('const shopper = (function () {'), src16.indexOf('// ── einde OVIS Shopper ──'));
     toets('16j server.js: routes antwoord (status- en opnieuw-teller) en bedrag (statusteller)', /\\\/antwoord\$\/[\s\S]{0,200}shopper_status[\s\S]{0,200}shopper_opnieuw[\s\S]{0,200}shopper\.antwoord\(m\[1\], d\)/.test(bl16)
