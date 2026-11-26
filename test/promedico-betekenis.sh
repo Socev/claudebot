@@ -34,10 +34,10 @@ const blok = (d, van) => d.blokken.concat(d.dagbreed).find((b) => b.van === van)
 
 geval.r1_patient_zonder_tekst = (M) => { const d = reken(M, dag([Object.assign(P('09:00', '09:15'), { omschrijving: MERK })])); const b = blok(d, '09:00');
   return b.betekenis === 'patient' && b.zekerheid === 'zeker' && b.regel === 'patient' && !JSON.stringify(d).includes(MERK) && !('omschrijving' in b); };
-geval.r2_dagbreed_onbekend = (M) => { const d = reken(M, dag([B('07:00', '19:00', 'vergadering_overig', { omschrijving: 'Nog iets' })], [S('08:00', '10:00', 'consult')]));
+geval.r2_dagbreed_onbekend = (M) => { const d = reken(M, dag([B('07:00', '18:30', 'vergadering_overig', { omschrijving: 'Nog iets' })], [S('08:00', '10:00', 'consult')]));
   return d.dagbreed.length === 1 && d.dagbreed[0].betekenis === 'dagbreed_onbekend' && d.open_bepaalbaar === false && /dagbreed/.test(d.open_reden) && d.open.length === 0; };
 geval.r2_dagmarkering_met_patroon = (M) => { const w = M.maakWoorden({ dagmarkering: { patronen: ['\\bdienstdag\\b'] }, groepen: [] });
-  const d = M.betekenDag(dag([B('07:00', '19:00', 'vergadering_overig', { omschrijving: 'Dienstdag' })], [S('08:00', '10:00', 'consult')]), [], { datum: DAG, nuMs: NU, woorden: w });
+  const d = M.betekenDag(dag([B('07:00', '18:30', 'vergadering_overig', { omschrijving: 'Dienstdag' })], [S('08:00', '10:00', 'consult')]), [], { datum: DAG, nuMs: NU, woorden: w });
   return d.dagbreed[0].betekenis === 'dagmarkering' && d.open_bepaalbaar === true && d.open.length === 1 && d.open[0].van === '08:00' && d.open[0].tot === '10:00'; };
 geval.r3_afgedekt_eigen_afspraak = (M) => { const d = reken(M, dag([B('15:30', '17:30', 'brief_info')]), [G(1, 'gezin', '16:00', '16:45', 'Proef gezin')]); const b = blok(d, '15:30');
   return b.betekenis === 'eigen_afspraak' && b.zekerheid === 'zeker' && b.regel === 'agenda' && b.titel === 'Proef gezin' && bots(d, 1).uitkomst === 'd' && bots(d, 1).zekerheid === 'zeker'; };
@@ -68,10 +68,26 @@ geval.moet2_patient_onder_eigen_blok_is_a = (M) => { const d = reken(M, dag([B('
   const b = bots(d, 9); return b.uitkomst === 'a' && b.label === 'botst: patiënt geboekt' && b.tijden[0].van === '16:30'; };
 geval.moet2_patient_onder_agenda_blok_is_a = (M) => { const d = reken(M, dag([B('15:30', '17:30', 'brief_info'), P('16:30', '16:45')]), [G(10, 'gezin', '16:00', '16:45')]);
   return blok(d, '15:30').regel === 'agenda' && bots(d, 10).uitkomst === 'a'; };
-geval.moet3_dagbreed_controleer = (M) => { const d = reken(M, dag([B('07:00', '19:00', 'vergadering_overig')], [S('08:00', '10:00', 'consult')]), [G(11, 'david', '08:30', '09:00')]);
+geval.moet3_dagbreed_controleer = (M) => { const d = reken(M, dag([B('07:00', '18:30', 'vergadering_overig')], [S('08:00', '10:00', 'consult')]), [G(11, 'david', '08:30', '09:00')]);
   return bots(d, 11).uitkomst === 'c' && bots(d, 11).regel === 'dagbreed'; };
-geval.c_d_onder_dagbreed_en_eigen_blok = (M) => { const d = reken(M, dag([B('07:00', '19:00', 'vergadering_overig'), B('14:30', '17:00', 'vergadering_overig', { omschrijving: 'Fysio' })]), [G(12, 'david', '15:00', '16:00'), G(13, 'david', '16:00', '18:00')]);
+geval.c_d_onder_dagbreed_en_eigen_blok = (M) => { const d = reken(M, dag([B('07:00', '18:30', 'vergadering_overig'), B('14:30', '17:00', 'vergadering_overig', { omschrijving: 'Fysio' })]), [G(12, 'david', '15:00', '16:00'), G(13, 'david', '16:00', '18:00')]);
   return bots(d, 12).uitkomst === 'd' && bots(d, 13).uitkomst === 'c'; };
+// wv4145 (David 25-11, C23): het oranje blok 07:00–19:00 op di–vr is alleen een markering. DAG = di 17-11; ma = 16-11, za = 21-11.
+const ORANJE = () => B('07:00', '19:00', 'vergadering_overig', { herhalend: true });
+geval.c23_oranje_di_prive_spreekuur_open = (M) => { const d = reken(M, dag([ORANJE()], [S('08:00', '10:00', 'consult')]), [G(30, 'gezin', '08:30', '09:00')]);
+  return d.dagbreed.length === 1 && d.dagbreed[0].betekenis === 'dagmarkering' && d.open_bepaalbaar === true && bots(d, 30).uitkomst === 'b' && bots(d, 30).zekerheid === 'zeker'; };
+geval.c23_oranje_vr_ook = (M) => { const d = reken(M, dag([ORANJE()], [S('08:00', '10:00', 'consult')]), [G(31, 'david', '09:00', '09:30')], '2026-11-20');
+  return d.dagbreed[0].betekenis === 'dagmarkering' && bots(d, 31).uitkomst === 'b'; };
+geval.c23_oranje_ma_blijft_onbekend = (M) => { const d = reken(M, dag([ORANJE()], [S('08:00', '10:00', 'consult')]), [G(32, 'david', '08:30', '09:00')], '2026-11-16');
+  return d.dagbreed[0].betekenis === 'dagbreed_onbekend' && bots(d, 32).uitkomst === 'c'; };
+geval.c23_andere_tijd_of_kleur_blijft_onbekend = (M) => { const a = reken(M, dag([B('07:00', '18:30', 'vergadering_overig')], [S('08:00', '10:00', 'consult')]));
+  const b = reken(M, dag([B('07:00', '19:00', 'grijs')], [S('08:00', '10:00', 'consult')]));
+  return a.dagbreed[0].betekenis === 'dagbreed_onbekend' && b.dagbreed[0].betekenis === 'dagbreed_onbekend'; };
+geval.c23_oranje_patient_eronder_blijft_a = (M) => { const d = reken(M, dag([ORANJE(), P('08:30', '08:45')], [S('08:00', '10:00', 'consult')]), [G(33, 'gezin', '08:30', '09:00')]);
+  return bots(d, 33).uitkomst === 'a'; };
+geval.c23_blokregel_kapot_telt_en_geldt_niet = (M) => { const w = M.maakWoorden({ dagmarkering: { patronen: [], blokken: [{ soort: 'vergadering_overig', van: '07:00', tot: '19:00', dagen: ['dinsdag'] }, { soort: '', van: '07:00', tot: '19:00', dagen: ['di'] }] }, groepen: [] });
+  const d = M.betekenDag(dag([ORANJE()], [S('08:00', '10:00', 'consult')]), [], { datum: DAG, nuMs: NU, woorden: w });
+  return w.kapot === 2 && w.dagblokken.length === 0 && d.dagbreed[0].betekenis === 'dagbreed_onbekend'; };
 geval.d_eigen_blokkade = (M) => { const d = reken(M, dag([B('14:00', '15:20', 'grijs', { omschrijving: 'Vrij' }), B('15:20', '15:40', 'vergadering_overig', { omschrijving: 'Overleg' }), B('15:40', '17:00', 'brief_info', { omschrijving: 'Fysio' })],
   [S('14:00', '16:00', 'consult')]), [G(14, 'david', '15:00', '16:00')]);   // elk blok < 50 %: geen regel 3, wel drie dekkende woordenlijstblokken
   return d.blokken.every((b) => b.regel === 'woordenlijst') && bots(d, 14).uitkomst === 'd' && bots(d, 14).zekerheid === 'waarschijnlijk'; };
@@ -156,7 +172,7 @@ const A = M.maakApp({ leesStaat: () => staatUit, rpc: async (fn, b) => { rpcAanr
   toets('4c uitrol-lijst: module en woordenlijst optioneel; json wordt geparst', /RELEASE_OPTIONEEL="[^"]*\bpromedico-betekenis\.js\b/.test(us) && /RELEASE_OPTIONEEL="[^"]*\bpromedico-woorden\.json\b/.test(us) && /\(\*\.json\) node -e 'JSON\.parse/.test(us));
   toets('4d woordenlijst: elk patroon compileert', M.standaardWoorden().kapot === 0 && M.standaardWoorden().groepen.length >= 4);
   const hb = src.indexOf('// ── Promedico-laag in Calendar (wv3143) ──'), he = src.indexOf('// ── einde Promedico-laag ──');
-  toets('4e eigen blokmarkers, direct na de Calendar', hb === src.indexOf('// ── einde OVIS Calendar ──') + '// ── einde OVIS Calendar ──\n'.length && he > hb);
+  toets('4e eigen blokmarkers, na het einde van de Calendar (niet erbinnen)', hb > src.indexOf('// ── einde OVIS Calendar ──') && src.indexOf('// ── einde OVIS Calendar ──') > 0 && he > hb);
   const gestuurd = [], fl = [];
   let rpcUit = rijen, staatLees = staatUit;
   const ctx = vm.createContext({ require: (n) => (n === 'fs' ? fs : require(n)), __dirname: process.cwd(), path, process: { env: { PROMEDICO_AGENDA_DIR: path.join(TMPK, 'pa') } },
@@ -183,6 +199,7 @@ const A = M.maakApp({ leesStaat: () => staatUit, rpc: async (fn, b) => { rpcAanr
   const bron = fs.readFileSync('promedico-betekenis.js', 'utf8');
   fs.copyFileSync('promedico-woorden.json', path.join(TMPK, 'promedico-woorden.json'));
   const kruis = [
+    ['wv4145 blokregel oranje di–vr', [["if ((w.dagblokken || []).some(", "if (false && (w.dagblokken || []).some("]], ['c23_oranje_di_prive_spreekuur_open', 'c23_oranje_vr_ook']],
     ['MOET 1 open-soort nooit afgedekt', [['if (!isOpenSoort(b, w)) {', 'if (true) {']], ['moet1_op_de_dag_nooit_afgedekt']],
     ['MOET 2 patiënt altijd eerst', [['const pat = snij(E, patient.map(iv));', 'const pat = [];']], ['moet2_patient_onder_eigen_blok_is_a', 'moet2_patient_onder_agenda_blok_is_a']],
     ['MOET 3 dagbreed onbekend = geen open uren', [["else if (dagbreedOnbekend.length) reden = 'dagbreed blok met onbekende betekenis';", ''], ["const bezet = blokken.filter((b) => !b.open && b.betekenis !== 'dagmarkering');", "const bezet = blokken.filter((b) => !b.open && b.betekenis !== 'dagmarkering' && b.betekenis !== 'dagbreed_onbekend');"]], ['r2_dagbreed_onbekend', 'moet3_dagbreed_controleer']],

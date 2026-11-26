@@ -2,8 +2,12 @@
   "versie": 1,
   "uitleg": "Woordenlijst van promedico-betekenis.js (wv3143, regel 2 en 5 van het Kalender-plan). Elk patroon is een JavaScript-regex zonder vlaggen; er wordt hoofdletterongevoelig gezocht in de (al geschoonde) omschrijving van een blok ZONDER patiënt. Volgorde telt: de eerste groep die past wint. dekt = de tijd is voor David bekend geblokkeerd (een eigen afspraak eronder is 'afgedekt'); open = telt als open spreekuur. Uitbreiden mag zonder nieuwe bouw; een patroon dat niet compileert wordt overgeslagen en geteld in /health.",
   "dagmarkering": {
-    "uitleg": "Alleen voor dagbrede blokken (>= 10 uur). Een dagbreed blok dat hier niet past blijft 'dagbreed, onbekend' (review MOET 3: die dag geen open uren, elke overlap = controleer). Bewust leeg tot David zegt wat zijn dagbrede blokken betekenen.",
-    "patronen": []
+    "uitleg": "Alleen voor dagbrede blokken (>= 10 uur). Een dagbreed blok dat hier niet past blijft 'dagbreed, onbekend' (review MOET 3: die dag geen open uren, elke overlap = controleer). patronen = op de omschrijving; blokken = precies deze soort, begin, eind en weekdag (voor een blok waarvan de omschrijving niet vast staat).",
+    "patronen": [],
+    "blokken": [
+      { "soort": "vergadering_overig", "van": "07:00", "tot": "19:00", "dagen": ["di", "wo", "do", "vr"],
+        "waarom": "David 25-11-2026 (besluitenpagina nr 33, C23): het oranje blok 07:00-19:00 op di t/m vr is alleen een markering, geen werk (wv4145)" }
+    ]
   },
   "groepen": [
     { "betekenis": "open_op_de_dag", "label": "open op de dag", "dekt": false, "open": true,

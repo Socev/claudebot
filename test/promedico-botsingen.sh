@@ -39,7 +39,7 @@ function staatStandaard(vers) {
   vers = vers || VERS;
   return { versie: 2, log: {}, datums: {
     '2026-11-17': Object.assign(dag(vers, [P('09:00', '09:15'), Bl('15:30', '17:00', 'brief_info', { omschrijving: MERK[0] })], [S('08:00', '12:00'), S('13:00', '17:00')]), {}),
-    '2026-11-18': dag(vers, [Bl('07:00', '19:00', 'vergadering_overig', { omschrijving: MERK[0] })], [S('08:00', '12:00')]),
+    '2026-11-18': dag(vers, [Bl('07:00', '18:30', 'vergadering_overig', { omschrijving: MERK[0] })], [S('08:00', '12:00')]),
     '2026-11-19': dag(vers, [], [S('08:00', '12:00')], { weergave: 'dag' }),
     '2026-11-20': dag(Z('2026-11-12T10:00:00Z'), [], [S('08:00', '12:00')]),
     '2026-11-24': dag(vers, [Bl('14:00', '15:00', 'roze', { omschrijving: 'op de dag' })], [])

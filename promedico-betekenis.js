@@ -10,7 +10,8 @@
  *
  * REGELS PER BLOK (eerste die past wint; 'regel' en 'reden' gaan mee naar het detail in de app):
  *   1 patient     blok met patiënt (elke kleur) → patiëntafspraak, bezet, nooit tekst, zeker.
- *   2 dagbreed    zonder patiënt en >= 10 uur → dagmarkering alleen met een expliciet patroon (woordenlijst.dagmarkering), anders
+ *   2 dagbreed    zonder patiënt en >= 10 uur → dagmarkering alleen met een expliciet patroon op de omschrijving of een vaste
+ *                 blokregel (soort + van + tot + weekdag) in woordenlijst.dagmarkering (wv4145: oranje 07–19 di–vr, David 25-11), anders
  *                 'dagbreed, onbekend': die dag geen open uren, elke overlap = controleer (MOET 3).
  *   3 agenda      zonder patiënt, geen open-soort (MOET 1: 'op de dag' of roze nooit), en een Google-afspraak (niet hele dag) ligt voor
  *                 >= 50 % van zijn eigen duur in het blok → eigen afspraak (Jij/Gezin, met titel) of vergadering (Werk/HAGRO); zeker.
@@ -35,6 +36,7 @@ const DAGBREED_MIN = 600;                  // >= 10 uur
 const KORT_MIN = 15;                       // korte blokken (samengevat in de app; rood <= 15 min = kort blok)
 const MAX_DAGEN = 62;
 const OPEN_SOORTEN = ['consult', 'visite', 'belletje'];
+const WEEKDAGEN = ['zo', 'ma', 'di', 'wo', 'do', 'vr', 'za'];
 const BOTS_AGENDA = ['david', 'gezin'];
 const AGENDA_NAAM = { david: 'je agenda', gezin: 'Gezin', werk: 'Werk', hagro: 'HAGRO' };
 const PATIENT_LABEL = { consult: 'consult', visite: 'visite', belletje: 'belletje', brief_info: 'brief' };
@@ -76,9 +78,15 @@ function gezienTekst(ms) { return dagNL(datumVan(ms)) + ' ' + klokVan(ms); }
 // ── woordenlijst ───────────────────────────────────────────────────────────────────────────────────────────────
 /** Compileert de woordenlijst één keer; een patroon dat niet compileert wordt overgeslagen en geteld (nooit de hele lijst weg). */
 function maakWoorden(j) {
-  const uit = { dagmarkering: [], groepen: [], kapot: 0, versie: j && j.versie || null };
+  const uit = { dagmarkering: [], dagblokken: [], groepen: [], kapot: 0, versie: j && j.versie || null };
   const re = (p) => { try { return new RegExp(String(p), 'i'); } catch (e) { uit.kapot++; return null; } };
   if (j && j.dagmarkering && Array.isArray(j.dagmarkering.patronen)) uit.dagmarkering = j.dagmarkering.patronen.map(re).filter(Boolean);
+  // wv4145: vaste blokregel; alles moet kloppen (soort, van, tot, weekdag), anders telt de regel als kapot en geldt hij niet.
+  for (const r of (j && j.dagmarkering && Array.isArray(j.dagmarkering.blokken) ? j.dagmarkering.blokken : [])) {
+    const dagen = r && Array.isArray(r.dagen) ? r.dagen.filter((d) => WEEKDAGEN.includes(d)) : [];
+    if (!r || typeof r.soort !== 'string' || !r.soort || !Number.isFinite(min(r.van)) || !Number.isFinite(min(r.tot)) || !dagen.length || dagen.length !== r.dagen.length) { uit.kapot++; continue; }
+    uit.dagblokken.push({ soort: r.soort, van: r.van, tot: r.tot, dagen });
+  }
   for (const g of (j && Array.isArray(j.groepen) ? j.groepen : [])) {
     if (!g || typeof g.betekenis !== 'string' || !Array.isArray(g.patronen)) { uit.kapot++; continue; }
     uit.groepen.push({ betekenis: g.betekenis, label: String(g.label || g.betekenis), dekt: g.dekt === true, open: g.open === true, re: g.patronen.map(re).filter(Boolean) });
@@ -99,7 +107,7 @@ function isOpenSoort(b, w) {   // MOET 1: een blok dat open kan zijn, wordt nooi
   const g = zoekGroep(b.omschrijving, w);
   return !!(g && g.open);
 }
-function beteken(b, google, w) {
+function beteken(b, google, w, weekdag) {
   const v = min(b.van), t = min(b.tot), duur = t - v;
   const basis = { van: b.van, tot: b.tot, soort: b.soort, kleur: b.kleur || null, patient: b.patient === true, herhalend: b.herhalend === true, kort: duur <= KORT_MIN };
   // 1 patiënt
@@ -110,6 +118,8 @@ function beteken(b, google, w) {
   if (duur >= DAGBREED_MIN) {
     if (b.omschrijving && w.dagmarkering.some((r) => r.test(b.omschrijving)))
       return Object.assign(basis, { betekenis: 'dagmarkering', label: 'dagmarkering', zekerheid: 'waarschijnlijk', regel: 'dagbreed', reden: 'dagbreed blok, omschrijving staat in de woordenlijst als dagmarkering', dekt: false, open: false, dagbreed: true });
+    if ((w.dagblokken || []).some((r) => r.soort === b.soort && r.van === b.van && r.tot === b.tot && r.dagen.includes(weekdag)))
+      return Object.assign(basis, { betekenis: 'dagmarkering', label: 'dagmarkering', zekerheid: 'waarschijnlijk', regel: 'dagbreed', reden: 'dagbreed blok met precies deze kleur, tijden en weekdag staat in de woordenlijst als dagmarkering', dekt: false, open: false, dagbreed: true });
     return Object.assign(basis, { betekenis: 'dagbreed_onbekend', label: 'dagbreed blok, betekenis onbekend', zekerheid: 'onbekend', regel: 'dagbreed',
       reden: 'blok van ' + Math.round(duur / 60) + ' uur zonder patiënt en zonder bekende omschrijving: die dag geen open uren, elke afspraak eronder = controleer', dekt: false, open: false, dagbreed: true });
   }
@@ -171,7 +181,7 @@ function betekenDag(x, google, o) {
   if (x.dag.dagnotitie) uit.dagnotitie = x.dag.dagnotitie; else if (x.dag.dagnotitie_weg) uit.dagnotitie_weg = true;
 
   const blokken = (Array.isArray(x.dag.blokken) ? x.dag.blokken : []).filter((b) => b && min(b.tot) > min(b.van))
-    .map((b) => beteken(b, g, w)).sort((a, b) => min(a.van) - min(b.van) || min(a.tot) - min(b.tot));
+    .map((b) => beteken(b, g, w, o.datum ? WEEKDAGEN[new Date(o.datum + 'T12:00:00Z').getUTCDay()] : null)).sort((a, b) => min(a.van) - min(b.van) || min(a.tot) - min(b.tot));
   const iv = (b) => [min(b.van), min(b.tot)];
   const patient = blokken.filter((b) => b.patient);
   const dagbreedOnbekend = blokken.filter((b) => b.betekenis === 'dagbreed_onbekend');
