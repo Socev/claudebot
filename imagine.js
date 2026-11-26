@@ -709,7 +709,7 @@ function maak(deps) {
     if (!/^[A-Za-z0-9-]{8,60}$/.test(beurt)) return { status: 400, fout: 'beurt_id ontbreekt' };
     const h = S.health();
     if (h.in_rij + n > GRENS.rij) return { status: 429, fout: n + ' beelden passen nu niet in de rij (hooguit ' + GRENS.rij + '); wacht tot er een klaar is' };
-    if (h.taken_vandaag + n > GRENS.dag) return { status: 429, fout: n + ' beelden tellen als ' + n + ' en dan kom je over de ' + GRENS.dag + ' van vandaag' };
+    if (h.taken_vandaag + uitFase.size + n > GRENS.dag) return { status: 429, fout: n + ' beelden tellen als ' + n + ' en dan kom je over de ' + GRENS.dag + ' van vandaag' };   // wv4099: + beeldstappen na een lopende uitschrijving
     const vers = !!ctx.versOk();
     if (vers) ctx.versVerbruik();   // vóór elke await (zoals vergelijk, review Codex wv3021 MOET 1)
     const ctx2 = Object.assign({}, ctx, { versOk: function () { return vers; }, versVerbruik: function () {} });
@@ -783,7 +783,8 @@ function maak(deps) {
     if (fb.vers_per_keer && !ctx.versOk()) return { status: 403, fout: 'deze flow is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
     const h = S.health();
     if (h.in_rij + 1 > GRENS.rij) return { status: 429, fout: 'er staan al ' + GRENS.rij + ' taken in de rij; wacht tot er een klaar is' };
-    if (h.taken_vandaag + 1 > GRENS.dag) return { status: 429, fout: 'vandaag al ' + GRENS.dag + ' bewerkingen gemaakt; morgen weer' };
+    // review Codex MOET 1: beeldstappen die nog na een lopende uitschrijving komen, tellen al mee voor de 30 per dag
+    if (h.taken_vandaag + uitFase.size + 1 > GRENS.dag) return { status: 429, fout: 'vandaag al ' + GRENS.dag + ' bewerkingen gemaakt (of in de maak); morgen weer' };
     const vers = !!ctx.versOk();
     if (vers) ctx.versVerbruik();   // vóór elke await (zoals nieuwReeks); geldt voor stap 2
     const ctx2 = Object.assign({}, ctx, { versOk: function () { return vers; }, versVerbruik: function () {} });
@@ -966,9 +967,9 @@ function maak(deps) {
     const st = soort === 'foto' ? stand(d.stand) : null;
     if (soort === 'foto' && (!st || !st.opdracht)) return { status: 400, fout: 'een recept kan alleen bij een vrije opdracht' };
     const db = open();
-    if (db.prepare('SELECT COUNT(*) AS n FROM recept').get().n >= RECEPT.max) return { status: 429, fout: 'je hebt al ' + RECEPT.max + ' eigen recepten; gooi er eerst een weg' };
     const al = db.prepare('SELECT id FROM recept WHERE soort = ? AND COALESCE(stand, \'\') = ? AND opdracht = ?').get(soort, st ? st.id : '', opdracht);
-    if (al) { db.prepare('UPDATE recept SET naam = ? WHERE id = ?').run(naam, al.id); return { status: 200, recept: al.id, al: true }; }
+    if (al) { db.prepare('UPDATE recept SET naam = ? WHERE id = ?').run(naam, al.id); return { status: 200, recept: al.id, al: true }; }   // review Codex ZOU 1: vóór de maximumtoets
+    if (db.prepare('SELECT COUNT(*) AS n FROM recept').get().n >= RECEPT.max) return { status: 429, fout: 'je hebt al ' + RECEPT.max + ' eigen recepten; gooi er eerst een weg' };
     const id = hex16();
     db.prepare('INSERT INTO recept (id, naam, soort, stand, opdracht, gemaakt) VALUES (?, ?, ?, ?, ?, ?)').run(id, naam, soort, st ? st.id : null, opdracht, iso());
     log('imagine recept bewaard soort=' + soort);

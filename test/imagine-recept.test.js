@@ -7,7 +7,7 @@
 //   3. Uitschrijven mislukt: taak mislukt met reden, geen beeldstart; Opnieuw schrijft opnieuw uit.
 //   4. Maak er 4 met meteen maken: vier uitschrijvingen, één vingerafdruk.
 //   5. Recepten: vaste lijst, eigen recept bewaren (dubbel = bijwerken), alleen bij een vrije opdracht, weggooien.
-// Kruisproeven (moeten ROOD): IMAGINE_KRUIS=kmeteen (uitschrijven genegeerd), =kvers (stap 2 zonder de vingerafdruk van de tik).
+// Kruisproeven (moeten ROOD): IMAGINE_KRUIS=kmeteen (uitschrijven genegeerd), =kvers (stap 2 zonder de vingerafdruk van de tik), =kdag (daggrens zonder de lopende uitschrijvingen).
 const fs = require('fs'), path = require('path'), os = require('os');
 const ROOT = path.join(__dirname, '..');
 const KRUIS = process.env.IMAGINE_KRUIS || '';
@@ -20,6 +20,7 @@ const MOD = path.join(W, 'mod'); fs.mkdirSync(MOD);
 fs.copyFileSync(path.join(ROOT, 'imagine.js'), path.join(MOD, 'imagine.js'));
 function wijzig(oud, nieuw) { const p = path.join(MOD, 'imagine.js'); const s = fs.readFileSync(p, 'utf8'); if (s.indexOf(oud) < 0) throw new Error('kruisproef: tekst niet gevonden'); fs.writeFileSync(p, s.split(oud).join(nieuw)); }
 if (KRUIS === 'kmeteen') wijzig('const metUit = d && d.uitschrijven === true && !bij;', 'const metUit = false;');
+if (KRUIS === 'kdag') wijzig('if (h.taken_vandaag + uitFase.size + 1 > GRENS.dag)', 'if (h.taken_vandaag + 1 > GRENS.dag)');
 if (KRUIS === 'kvers') wijzig("const ctx2 = Object.assign({}, ctx, { versOk: function () { return vers; }, versVerbruik: function () {} });\n    const beurt = String(d.beurt_id || '');", "const ctx2 = ctx;\n    const beurt = String(d.beurt_id || '');");
 const I = require(path.join(MOD, 'imagine.js'));
 
@@ -52,7 +53,7 @@ function stub() {
       const id = 's' + String(S.starts.length).padStart(15, '0');
       live.set(id, { id: id, o: o, beurt: o.beurt_id });
       S.starts.push({ id: id, flow: o.flow, velden: o.velden, beurt: o.beurt_id, geheim: o.geheim });
-      S.vandaag++;
+      if (o.flow !== 'opdracht-uitbreiden') S.vandaag++;   // zoals studio.js: een tekst-uitvoer telt niet voor de 30
       return { status: 200, taak: { id: id } };
     },
     geheugenTaak: function (id) { return live.has(id) ? { status: 'bezig', fase: 'nep', procent: null, plek_in_rij: null } : null; },
@@ -117,6 +118,15 @@ const tekstUit = (t) => ({ status: 'klaar', reden: null, duur_s: 2, tekst: t, be
     const r2 = await app(im, '/app/imagine/nieuw', 'POST', { velden: { opdracht: 'een boot' }, uitschrijven: true, beurt_id: beurt() }, ctxVers());
     toets('2b rij vol: 429, niets gestart', r2.status === 429 && S.starts.length === n0, [r2.status, S.starts.length - n0]);
     S.extraRij = 0;
+    // review Codex MOET 1: bij 29 gemaakt kan maar één meteen-maken-taak erbij (de beeldstap van de lopende telt al mee)
+    const v0 = S.vandaag; S.vandaag = 29;
+    const n1 = S.starts.length;
+    const r3 = await app(im, '/app/imagine/nieuw', 'POST', { velden: { opdracht: 'een boot' }, uitschrijven: true, beurt_id: beurt() }, ctxVers());
+    const r4 = await app(im, '/app/imagine/nieuw', 'POST', { velden: { opdracht: 'een tweede boot' }, uitschrijven: true, beurt_id: beurt() }, ctxVers());
+    toets('2c daggrens telt de lopende uitschrijving mee: eerste 200, tweede 429', r3.status === 200 && r4.status === 429 && S.starts.length === n1 + 1, [r3.status, r4.status, S.starts.length - n1]);
+    S.af(S.starts[n1].id, { status: 'mislukt', reden: 'nep', beelden: [] });
+    await slaap(50);
+    S.vandaag = v0;
   }
   // ── 3. uitschrijven mislukt + Opnieuw ──
   {

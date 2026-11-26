@@ -98,7 +98,7 @@ done
 node --no-warnings test/imagine-recept.test.js > /tmp/imagine-toets.$$ 2>&1; r=$?
 tail -n 1 /tmp/imagine-toets.$$; grep -E "^ROOD" /tmp/imagine-toets.$$
 [ $r = 0 ] || { echo "ROOD  test/imagine-recept.test.js"; f=1; }
-for k in kmeteen:"1a meteen maken" kvers:"1d daarna vanzelf de beeldflow"; do
+for k in kmeteen:"1a meteen maken" kvers:"1d daarna vanzelf de beeldflow" kdag:"2c daggrens telt"; do
   IMAGINE_KRUIS=${k%%:*} node --no-warnings test/imagine-recept.test.js > /tmp/imagine-toets.$$ 2>&1
   if [ $? = 0 ]; then echo "ROOD  kruisproef ${k%%:*} bleef groen"; f=1
   elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"
