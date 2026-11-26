@@ -115,7 +115,7 @@ const wacht = () => new Promise((r) => setImmediate(r));
     st.knop = { hash: 'ffff0000', antwoord: { ok: true, tekst: '  zal ik de CISO nu een ronde laten draaien?', t: st.nu - 60000, sleutel: 'j2:ffff0000' } };
     r = await m.start('ciso', 'socev', 'controle', 'ffff0000');
     toets('3 CISO: vaste zin (hoofdletters en spaties maken niet uit)', r.status === 202, r);
-    toets('3 vraagZin per manager', M.MANAGERS.map((x) => M.vraagZin(x)).join('|') === 'Zal ik de Data Manager nu een ronde laten draaien?|Zal ik de Design Manager nu een ronde laten draaien?|Zal ik de UI Manager nu een ronde laten draaien?|Zal ik de CISO nu een ronde laten draaien?|Zal ik de MrLean nu een ronde laten draaien?|Zal ik de Bibliothecaris nu een ronde laten draaien?');
+    toets('3 vraagZin per manager', M.MANAGERS.map((x) => M.vraagZin(x)).join('|') === 'Zal ik de Data Manager nu een ronde laten draaien?|Zal ik de Design Manager nu een ronde laten draaien?|Zal ik de CISO nu een ronde laten draaien?|Zal ik de MrLean nu een ronde laten draaien?|Zal ik de Bibliothecaris nu een ronde laten draaien?');
     toets('3 ongeldig vraag-id → 403 zonder register te lezen', (await m.start('data', 'socev', '', '../../x')).status === 403);
   }
   // ── 4. twee tegelijk ──
@@ -187,9 +187,12 @@ const wacht = () => new Promise((r) => setImmediate(r));
     toets('7 Design: za 24-10 10:00 CEST = 08:00Z', new Date(M.volgendeWeekronde(d, ms('2026-10-21T10:00:00Z'))).toISOString() === '2026-10-24T08:00:00.000Z');
     toets('7 Data: zo 25-10 09:30 (wintertijd vanaf 03:00) = 08:30Z', new Date(M.volgendeWeekronde(dm, ms('2026-10-24T12:00:00Z'))).toISOString() === '2026-10-25T08:30:00.000Z');
     toets('7 CISO: ma 26-10 06:00 CET = 05:00Z', new Date(M.volgendeWeekronde(c, ms('2026-10-25T12:00:00Z'))).toISOString() === '2026-10-26T05:00:00.000Z');
-    const u = M.MANAGERS.find((x) => x.id === 'ui');
-    toets('7 UI: vr 30-10 10:00 CET = 09:00Z (na de zomertijd)', new Date(M.volgendeWeekronde(u, ms('2026-10-23T12:00:00Z'))).toISOString() === '2026-10-30T09:00:00.000Z');
-    toets('7 UI: vr 23-10 10:00 CEST = 08:00Z', new Date(M.volgendeWeekronde(u, ms('2026-10-22T12:00:00Z'))).toISOString() === '2026-10-23T08:00:00.000Z');
+    // wv4116: Design (vorm + gebruik) om de week vanaf za 28-11-2026; ervoor wekelijks; UI Manager heeft geen eigen kaart meer
+    toets('7 wv4116: geen manager ui meer in het register, wel deel ui bij design', !M.MANAGERS.some((x) => x.id === 'ui') && M.DELEN.some((x) => x.id === 'ui' && x.deelVan === 'design') && (d.delen || []).indexOf('ui') >= 0);
+    toets('7 wv4116: do 26-11 → za 28-11 10:00 CET', new Date(M.volgendeWeekronde(d, ms('2026-11-26T12:00:00Z'))).toISOString() === '2026-11-28T09:00:00.000Z');
+    toets('7 wv4116: na 28-11 10:00 → za 12-12 (5-12 is geen rondeweek)', new Date(M.volgendeWeekronde(d, ms('2026-11-28T09:00:01Z'))).toISOString() === '2026-12-12T09:00:00.000Z');
+    toets('7 wv4116: over de jaargrens: 27-12 → za 9-1-2027', new Date(M.volgendeWeekronde(d, ms('2026-12-27T12:00:00Z'))).toISOString() === '2027-01-09T09:00:00.000Z');
+    toets('7 wv4116: zomertijd: 20-3-2027 → za 3-4-2027 10:00 CEST = 08:00Z', new Date(M.volgendeWeekronde(d, ms('2027-03-20T12:00:00Z'))).toISOString() === '2027-04-03T08:00:00.000Z');
     toets('7 op het slot zelf telt nog', new Date(M.volgendeWeekronde(d, ms('2026-10-24T08:00:00Z'))).toISOString() === '2026-10-24T08:00:00.000Z');
     toets('7 net erna = volgende week', new Date(M.volgendeWeekronde(d, ms('2026-10-24T08:00:01Z'))).toISOString() === '2026-10-31T09:00:00.000Z');
   }
@@ -198,11 +201,12 @@ const wacht = () => new Promise((r) => setImmediate(r));
     const sb = { ciso: { aantal: 2, per_ernst: { warning: 2 }, hartslag: { laatste_ronde: '2026-10-19T04:07:10Z', drempel_min: 12960 },
       top: [{ id: 'C1-x', ernst: 'warning', status: 'open', samenvatting: 'laag: iets', detail: 'pad /opt/data/x', eerst_gezien: '2026-10-05T10:00:00Z' }] },
       data: { aantal: 0, per_ernst: {}, hartslag: { laatste_ronde: '2026-10-01T03:00:00Z', drempel_min: 12960 }, top: [] },
-      design: { aantal: 0, per_ernst: {}, hartslag: null, top: [] }, ui: { aantal: 0, per_ernst: {}, hartslag: null, top: [] }, mrlean: { aantal: 0, per_ernst: {}, hartslag: null, top: [] },
+      design: { aantal: 0, per_ernst: {}, hartslag: null, top: [] }, ui: { aantal: 1, per_ernst: { middel: 1 }, hartslag: null, top: [{ id: 'UI2-x', ernst: 'middel', status: 'open', samenvatting: 's', detail: '' }] }, mrlean: { aantal: 0, per_ernst: {}, hartslag: null, top: [] },
       bibliothecaris: { aantal: 0, per_ernst: {}, hartslag: null, top: [] } };
     let k = m.stand(sb, { vast: false });
     const c = k.find((x) => x.id === 'ciso'), d = k.find((x) => x.id === 'data'), ds = k.find((x) => x.id === 'design');
-    toets('8 zes kaarten in vaste volgorde (wv2430: MrLean)', k.map((x) => x.id).join() === 'data,design,ui,ciso,mrlean,bibliothecaris', k.map((x) => x.id));
+    toets('8 vijf kaarten in vaste volgorde (wv2430: MrLean; wv4116: UI zit in Design)', k.map((x) => x.id).join() === 'data,design,ciso,mrlean,bibliothecaris', k.map((x) => x.id));
+    toets('8 wv4116: Design-kaart telt het UI-deel mee, rooster om de week', ds.bevindingen.aantal === 1 && ds.bevindingen.top[0].id === 'UI2-x' && ds.rooster === 'om de week op zaterdag 10:00', ds);
     toets('8 hartslag op tijd / te laat / nog nooit', c.hartslag === 'op tijd' && d.hartslag === 'te laat' && ds.hartslag === 'nog nooit', k.map((x) => x.hartslag));
     toets('8 CISO: top met detail op de telefoon, kan draaien, rooster', c.bevindingen.top.length === 1 && c.bevindingen.top[0].detail === 'pad /opt/data/x' && c.kan === true && c.rooster === 'elke maandag 06:00', c);
     k = m.stand(sb, { vast: true });
@@ -219,17 +223,21 @@ const wacht = () => new Promise((r) => setImmediate(r));
     toets('8 na afloop: laatste_ronde = afroep, weer_om over een uur', d3.laatste_afroep.uitkomst === 'goed' && d3.laatste_ronde === new Date(st.nu).toISOString() && d3.kan === false && d3.weer_om === new Date(st.nu + 3600000).toISOString(), d3);
     toets('8 rapport bij "1 bron" (data vereist ≥ 1) goed', /is klaar/.test((st.berichten[0] || {}).tekst || ''), st.berichten);
   }
-  // ── 8b. UI Manager (wv896): sessie, model, hartslag, prompt en slotregel ──
-  { const u = M.MANAGERS.find((x) => x.id === 'ui');
-    toets('8b UI: sessie ui-manager, Sonnet, hartslag ui_manager, patroon ^UI[0-9]', u && u.sessie === 'ui-manager' && u.skill === 'ui-manager' && u.model === 'claude-sonnet-5-5' && u.hartslag === 'ui_manager' && u.patroon === '^UI[0-9]');
-    const p = M.prompt(u, 'david', ms('2026-10-23T12:00:00Z'));
-    toets('8b UI: prompt noemt skill ui-manager, OP AFROEP en het slotformaat', /\[MACHINEKAMER - UI MANAGER - OP AFROEP\]/.test(p) && /skill `ui-manager`/.test(p) && /UI-MANAGER <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open \(<k> nieuw\), voorstellen <v>, kaart geen, wv geen$/.test(p), p);
-    const r = M.rapportRegels('Twee dingen gevonden.\nUI-MANAGER 2026-10-23: 8 checks, 1 niet vast te stellen, 2 open (2 nieuw), voorstellen 2, kaart geen, wv geen', u);
-    toets('8b UI: slotregel herkend, telling zonder voorvoegsel', r.goed && r.telling.indexOf('8 checks') === 0 && r.regels.length === 1, r);
-    toets('8b UI: slot van een andere manager telt niet', !M.rapportRegels('DESIGN-MANAGER 2026-10-23: 9 checks', u).goed);
+  // ── 8b. UI Manager (wv896; sinds wv4116 deel gebruik van de Design Manager): RPC-regel, samenvoegen, prompt en slotregel ──
+  { const u = M.DELEN.find((x) => x.id === 'ui');
+    toets('8b UI: deel met hartslag ui_manager, patroon ^UI[0-9], in de RPC-invoer', u && u.hartslag === 'ui_manager' && u.patroon === '^UI[0-9]' && M.rpcInvoer().some((x) => x.id === 'ui' && x.patroon === '^UI[0-9]'));
+    const sv = M.samenvoegen({ aantal: 2, per_ernst: { laag: 2 }, top: [{ id: 'DS1-a', ernst: 'laag' }] }, { aantal: 1, per_ernst: { middel: 1, laag: 0 }, top: [{ id: 'UI2-b', ernst: 'middel' }] });
+    toets('8b wv4116: samenvoegen telt op en zet middel bovenaan', sv.aantal === 3 && sv.per_ernst.laag === 2 && sv.per_ernst.middel === 1 && sv.top[0].id === 'UI2-b' && sv.top.length === 2, sv);
+    toets('8b wv4116: samenvoegen met één kant leeg', M.samenvoegen(null, { aantal: 1 }).aantal === 1 && M.samenvoegen({ aantal: 4 }, null).aantal === 4);
+    const ud = M.MANAGERS.find((x) => x.id === 'design');
+    const p = M.prompt(ud, 'david', ms('2026-10-23T12:00:00Z'));
+    toets('8b Design: prompt noemt skill design-manager, OP AFROEP, om de week en het slotformaat', /\[MACHINEKAMER - DESIGN MANAGER - OP AFROEP\]/.test(p) && /skill `design-manager`/.test(p) && /om de week op zaterdag 10:00/.test(p) && /DESIGN-MANAGER <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open \(<k> nieuw\), kaart geen, wv geen$/.test(p), p);
+    const r = M.rapportRegels('Twee dingen gevonden.\nDESIGN-MANAGER 2026-10-23: 8 checks, 1 niet vast te stellen, 2 open (2 nieuw), kaart geen, wv geen', ud);
+    toets('8b Design: slotregel herkend, telling zonder voorvoegsel', r.goed && r.telling.indexOf('8 checks') === 0 && r.regels.length === 1, r);
+    toets('8b Design: slot van een andere manager telt niet', !M.rapportRegels('UI-MANAGER 2026-10-23: 9 checks', ud).goed);
     // wv1722: lange regel kapt af op een woordgrens met …, niet midden in een woord of zin stil
     const lang = ('De vormgeving van het verzonnen proefscherm wijkt op meerdere plekken af van de bouwdoos, ').repeat(5).trim();
-    const rl = M.rapportRegels(lang + '\nUI-MANAGER 2026-10-23: 8 checks, 0 niet vast te stellen, 1 open (1 nieuw), voorstellen 1, kaart geen, wv geen', u).regels[0];
+    const rl = M.rapportRegels(lang + '\nDESIGN-MANAGER 2026-10-23: 8 checks, 0 niet vast te stellen, 1 open (1 nieuw), kaart geen, wv geen', ud).regels[0];
     const zonder = rl.slice(0, -1);
     toets('8b wv1722: regel van ' + lang.length + ' tekens → ≤ 301, eindigt op …, geen half woord', lang.length >= 400 && rl.length <= 301 && /…$/.test(rl)
       && /[\s,;:]/.test(lang.charAt(zonder.length)) && lang.indexOf(zonder) === 0 && !/[\s,;:]$/.test(zonder), rl);

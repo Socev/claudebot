@@ -29,15 +29,12 @@ const MANAGERS = [
     bewaakt: 'Waar al je gegevens staan (databanken, pod, Drive, vault) en of elke plek een backup en een eigenaar heeft.',
     rooster: { dag: 0, uur: 9, min: 30 }, slot: 'DATA-MANAGER', slotRe: /^DATA-MANAGER \d{4}-\d{2}-\d{2}: [1-9]\d* bronnen gemeten/,
     slotFormaat: 'DATA-MANAGER <JJJJ-MM-DD>: <n> bronnen gemeten, <m> niet vast te stellen, <N> open (<k> nieuw), kaart geen' },
-  { id: 'design', naam: 'Design Manager', skill: 'design-manager', sessie: 'design-manager', model: 'claude-sonnet-5-5', hartslag: 'design_manager', patroon: '^DS[0-9]',
-    bewaakt: 'Of alle apps één vormgeving houden (Socev-blauw en de bouwdoos) en of de indeling logisch is.',
-    rooster: { dag: 6, uur: 10, min: 0 }, slot: 'DESIGN-MANAGER', slotRe: /^DESIGN-MANAGER \d{4}-\d{2}-\d{2}: \d+ checks/,
+  // wv4116 (besluit nr 71 / C61, David 25-11-2026): Design en UI Manager zijn één ronde met twee delen (vorm DS, gebruik UI), om de week
+  // op zaterdag 10:00 vanaf 28-11-2026 (de n8n-IF in AI - Design Manager kiest dezelfde weken); AI - UI Manager staat uit. Afroep = beide delen.
+  { id: 'design', naam: 'Design Manager', skill: 'design-manager', sessie: 'design-manager', model: 'claude-sonnet-5-5', hartslag: 'design_manager', patroon: '^DS[0-9]', delen: ['ui'],
+    bewaakt: 'Om de week, in één ronde: of alle apps één vormgeving houden (Socev-blauw, de bouwdoos, een logische indeling) en hoe je de app echt gebruikt (waar je vastloopt, wat traag is of niets doet).',
+    rooster: { dag: 6, uur: 10, min: 0, omDeWeekVanaf: '2026-11-28' }, slot: 'DESIGN-MANAGER', slotRe: /^DESIGN-MANAGER \d{4}-\d{2}-\d{2}: \d+ checks/,
     slotFormaat: 'DESIGN-MANAGER <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open (<k> nieuw), kaart geen, wv geen' },
-  // wv896 UI Manager (vr 10:00, Sonnet): meet gebruik (wat David doet en waar hij vastloopt), niet de vorm (dat is Design).
-  { id: 'ui', naam: 'UI Manager', skill: 'ui-manager', sessie: 'ui-manager', model: 'claude-sonnet-5-5', hartslag: 'ui_manager', patroon: '^UI[0-9]',
-    bewaakt: 'Hoe je de app echt gebruikt: wat je opent, waar je vastloopt of iets zoekt, wat traag is of niets doet.',
-    rooster: { dag: 5, uur: 10, min: 0 }, slot: 'UI-MANAGER', slotRe: /^UI-MANAGER \d{4}-\d{2}-\d{2}: \d+ checks/,
-    slotFormaat: 'UI-MANAGER <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open (<k> nieuw), voorstellen <v>, kaart geen, wv geen' },
   { id: 'ciso', naam: 'CISO', skill: 'ciso', sessie: 'ciso', model: 'claude-opus-5-5', hartslag: 'ciso', patroon: '^C[0-9]',
     bewaakt: 'De beveiliging: sleutels, toegang, versies en wat er van buitenaf bereikbaar is.',
     rooster: { dag: 1, uur: 6, min: 0 }, slot: 'CISO', slotRe: /^CISO \d{4}-\d{2}-\d{2}: \d+ checks/,
@@ -54,6 +51,20 @@ const MANAGERS = [
     bewaakt: 'Of je Second Brain en de databank hetzelfde zeggen over elke entiteit (stamgegevens, herkenningskenmerken, contactgegevens).',
     rooster: { dagelijks: true, uur: 2, min: 30 }, voorMs: 30 * 60000 },
 ];
+// wv4116: een deel van een manager zonder eigen kaart (de RPC mk_managers_stand neemt per regel één patroon ^XX[0-9]); stand() telt het
+// bij zijn manager op. Geen afroep, geen eigen rooster.
+const DELEN = [{ id: 'ui', naam: 'UI Manager', hartslag: 'ui_manager', patroon: '^UI[0-9]', deelVan: 'design' }];
+const ERNST_RANG = { kritiek: 0, critical: 0, serious: 1, hoog: 1, warning: 2, middel: 2 };
+function samenvoegen(d, x) {
+  if (!x) return d;
+  if (!d) return x;
+  const pe = Object.assign({}, d.per_ernst || {});
+  Object.keys(x.per_ernst || {}).forEach(function (k) { pe[k] = (Number(pe[k]) || 0) + (Number(x.per_ernst[k]) || 0); });
+  const rang = function (b) { const r = ERNST_RANG[String(b.ernst || '').toLowerCase()]; return r == null ? 3 : r; };
+  const top = (Array.isArray(d.top) ? d.top : []).concat(Array.isArray(x.top) ? x.top : [])
+    .sort(function (a, b) { return rang(a) - rang(b) || String(b.laatst_gezien || '').localeCompare(String(a.laatst_gezien || '')); }).slice(0, 5);
+  return Object.assign({}, d, { aantal: (Number(d.aantal) || 0) + (Number(x.aantal) || 0), per_ernst: pe, top: top });
+}
 const PER_ID = {};
 MANAGERS.forEach(function (m) { PER_ID[m.id] = m; });
 
@@ -78,12 +89,20 @@ function amsNaarMs(j, m, d, u, mi) {
 }
 function amsDatum(t) { const x = amsDelen(t); return x.j + '-' + String(x.m).padStart(2, '0') + '-' + String(x.d).padStart(2, '0'); }
 function amsKlok(t) { const x = amsDelen(t); return String(x.u).padStart(2, '0') + ':' + String(x.mi).padStart(2, '0'); }
+// wv4116: om de week vanaf een ankerdatum (JJJJ-MM-DD, zelf een rondedag); vóór het anker gold het weekritme. Hele kalenderdagen, geen klok.
+function rondeWeek(m, dag) {
+  const v = m.rooster.omDeWeekVanaf;
+  if (!v) return true;
+  const a = v.split('-').map(Number), dagen = Math.round((dag.getTime() - Date.UTC(a[0], a[1] - 1, a[2])) / DAG);
+  return dagen < 0 || Math.floor(dagen / 7) % 2 === 0;
+}
 // eerstvolgende weekronde ná t (of precies op t)
 function volgendeWeekronde(m, t) {
   const x = amsDelen(t);
-  for (let i = 0; i <= 7; i++) {
+  for (let i = 0; i <= 14; i++) {
     const dag = new Date(Date.UTC(x.j, x.m - 1, x.d + i));
     if (!m.rooster.dagelijks && dag.getUTCDay() !== m.rooster.dag) continue;
+    if (!m.rooster.dagelijks && !rondeWeek(m, dag)) continue;
     const ms = amsNaarMs(dag.getUTCFullYear(), dag.getUTCMonth() + 1, dag.getUTCDate(), m.rooster.uur, m.rooster.min);
     if (ms >= t) return ms;
   }
@@ -92,7 +111,7 @@ function volgendeWeekronde(m, t) {
 const DAGNAMEN = ['zondag', 'maandag', 'dinsdag', 'woensdag', 'donderdag', 'vrijdag', 'zaterdag'];
 // De vaste vraagzin voor Socev (skills § Op afroep); alleen een Ja op precies deze zin geeft een ronde vrij (Fable diffreview #3).
 function vraagZin(m) { return 'Zal ik de ' + m.naam + ' nu een ronde laten draaien?'; }
-function roosterTekst(m) { return (m.rooster.dagelijks ? 'elke nacht' : 'elke ' + DAGNAMEN[m.rooster.dag]) + ' ' + String(m.rooster.uur).padStart(2, '0') + ':' + String(m.rooster.min).padStart(2, '0'); }
+function roosterTekst(m) { return (m.rooster.dagelijks ? 'elke nacht' : (m.rooster.omDeWeekVanaf ? 'om de week op ' : 'elke ') + DAGNAMEN[m.rooster.dag]) + ' ' + String(m.rooster.uur).padStart(2, '0') + ':' + String(m.rooster.min).padStart(2, '0'); }
 
 // ── de prompt (vast; alleen naam en wie) ──
 function prompt(m, door, nu) {
@@ -253,7 +272,8 @@ function maak(o) {
   function stand(sb) {
     const t = nu(), s = lees();
     return MANAGERS.map(function (m) {
-      const d = sb && sb[m.id] ? sb[m.id] : null;
+      let d = sb && sb[m.id] ? sb[m.id] : null;
+      (m.delen || []).forEach(function (id) { d = samenvoegen(d, sb && sb[id] ? sb[id] : null); });   // wv4116
       const h = d && d.hartslag ? d.hartslag : null;
       const mijn = s.afroepen.filter(function (a) { return a.id === m.id; });
       const la = mijn.length ? mijn[mijn.length - 1] : null;
@@ -288,7 +308,7 @@ function maak(o) {
 }
 
 // Wat de RPC mk_managers_stand per manager nodig heeft (geen vrije invoer: alleen deze vaste lijst).
-function rpcInvoer() { return MANAGERS.map(function (m) { return { id: m.id, hartslag: m.hartslag, patroon: m.patroon }; }); }
+function rpcInvoer() { return MANAGERS.concat(DELEN).filter(function (m) { return m.patroon; }).map(function (m) { return { id: m.id, hartslag: m.hartslag, patroon: m.patroon }; }); }
 
-module.exports = { maak: maak, MANAGERS: MANAGERS, vraagZin: vraagZin, REDENEN: REDENEN, prompt: prompt, rapportRegels: rapportRegels, kort: kort, volgendeWeekronde: volgendeWeekronde,
+module.exports = { maak: maak, MANAGERS: MANAGERS, DELEN: DELEN, samenvoegen: samenvoegen, vraagZin: vraagZin, REDENEN: REDENEN, prompt: prompt, rapportRegels: rapportRegels, kort: kort, volgendeWeekronde: volgendeWeekronde,
   amsNaarMs: amsNaarMs, rpcInvoer: rpcInvoer, VOOR_WEEKRONDE_MS: VOOR_WEEKRONDE_MS };
