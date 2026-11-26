@@ -180,6 +180,10 @@ nep.listen(0, '127.0.0.1', async () => {
     huidig = p4.pid;
     const hu = await wachtRol('primair');
     toets('U1 uit-bestand: /health uitwijk.warm = {uit:true, sinds}', hu && hu.uitwijk.warm && hu.uitwijk.warm.uit === true && /^\d{4}-\d\d-\d\dT/.test(hu.uitwijk.warm.sinds), hu && JSON.stringify(hu.uitwijk.warm));
+    fs.unlinkSync(D + '/warm-uit');
+    const hu2 = await health();
+    toets('U1b uit-bestand weg zonder herstart: /health blijft uit tonen (bij de start gelezen)', hu2 && hu2.uitwijk.warm && hu2.uitwijk.warm.uit === true, hu2 && JSON.stringify(hu2.uitwijk.warm));
+    fs.writeFileSync(D + '/warm-uit', '');   // U3 hieronder: warm-uit moet een bestand zijn
     let al = ''; try { al = fs.readFileSync(D + '/api.log', 'utf8'); } catch (e) {}
     toets('U2 uit-bestand: logregel "warm … uitgezet (wv4086)"', / warm melding=uitgezet_\(wv4086\)/.test(al), al.slice(-400));
     // U3 — schakelaar onleesbaar (ENOTDIR: ouder is een bestand) = dicht: niet laden

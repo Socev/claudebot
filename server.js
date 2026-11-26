@@ -31555,7 +31555,7 @@ function rolInfo() {
     // Kant zoals fetch-secrets.sh (image) hem toepaste; null = image van vóór stap 6d (dan geen n8n-override en het
     // Olares-tunneltoken nog in de omgeving). naar-vps eist hier 'vps' vóór de eerste beurt (review 6d #5).
     fetch_secrets_kant: process.env.FETCH_SECRETS_KANT || null,
-    warm: warmeStaat ? warmeStaat.stand() : warmUitStand(),   // wv3908: warme staat naar/van de R230 (leeftijd per soort); wv4086: {uit:true} als hij uitgezet is
+    warm: warmeStaat ? warmeStaat.stand() : (warmUitBijStart || null),   // wv3908: warme staat naar/van de R230 (leeftijd per soort); wv4086: {uit:true} als hij uitgezet is
     nood: noodSpiegel ? noodSpiegel.stand() : { ingericht: false },   // wv3909: spiegel naar socev-nood (hartslag, passkeys, push, bundelhash)
     spaarstand: spaarInfo(),   // wv3909: grenzen op kant vps
     n8n_3b: ROL_KANT === 'olares' ? { laatste_iso: u3b.laatste_iso, laatste_uitkomst: u3b.laatste_uitkomst, aanroepen: u3b.aanroepen,
@@ -31649,10 +31649,11 @@ function warmUitStand() {   // alleen ENOENT = schakelaar afwezig; elke andere f
   try { return { uit: true, sinds: fs.statSync(warmUitBestand()).mtime.toISOString() }; }
   catch (e) { return e && e.code === 'ENOENT' ? null : { uit: true, sinds: null, fout: String((e && e.code) || e).slice(0, 40) }; }
 }
+var warmUitBijStart = null;   // wv4086: uit-stand zoals gelezen bij de start (var: rolInfo() kan vroeg lezen)
 var warmeStaat = (function () {   // var (geen const): rolInfo() hierboven leest hem; const gaf een TDZ-fout bij een vroege aanroep
   const p = path.join(__dirname, 'warme-staat.js');
   if (!fs.existsSync(p) || ROL_ALTIJD_PASSIEF) return null;
-  const wu = warmUitStand();
+  const wu = warmUitBijStart = warmUitStand();   // bij de start gelezen; /health toont dat (herlezen zou na weghalen 'null' zeggen terwijl hij uit blijft)
   if (wu) { schrijfLog(nu() + ' warm ' + velden({ melding: 'uitgezet (wv4086): ' + warmUitBestand(), fout: wu.fout })); return null; }
   try {
     return require(p).maak({
