@@ -1044,3 +1044,16 @@ test('wv3264 Levenskalender: lijst geeft precisie, video, stem, kring en punt bi
     }
   } finally { o.sluit(); }
 });
+
+test('wv4117 (2C65): lijst geeft bij David de fotodagen uit het fotospoor; toonmodus en bezoekers niet', () => {
+  const o = albumOmgeving();
+  try {
+    const ha = o.album('gezin', ['2019-07-03', '2019-07-04', '2019-07-04', '2019-07-05']), hz = o.album('gezin', ['2019-08-01'], { zonderSpoor: true });
+    const l = o.ml.lijst().body.herinneringen, k = (h) => l.find((x) => x.hid === h);
+    assert.deepStrictEqual(k(ha).fotodagen, { van: '2019-07-03', tot: '2019-07-05' });
+    assert.strictEqual(k(hz).fotodagen, null, 'zonder fotospoor: null');
+    assert.strictEqual(k(o.hid('reis', o.rel)).fotodagen, null, 'reis zonder album: null');
+    for (const h of o.ml.lijst({ toon: true }).body.herinneringen) assert.ok(!('fotodagen' in h), 'toonlijst heeft geen fotodagen');
+    for (const kr of M.PKRINGEN) for (const x of o.ml.publiekLijst(kr)) assert.ok(!(x.item && 'fotodagen' in x.item), 'bezoekers krijgen geen fotodagen (' + kr + ')');
+  } finally { o.sluit(); }
+});

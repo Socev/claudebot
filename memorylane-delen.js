@@ -780,6 +780,13 @@ function maak(o) {
       return !!((a && a.stand === 'klaar' && !a.kan) || (b && b.stand === 'klaar' && !b.kan));
     } catch (e) { fout('ml-stem-lijst', e); return false; }
   }
+  // wv4117 (besluitenpagina nr 165 = 2C65, David Ja 25-11): de dagen van de foto's (fotospoor: het drukste venster van ≤ 31 dagen met ≥ 80 % van
+  // de foto's met een datum) voor "Vandaag in je leven" en de datumvoorstellen in de app. Alleen bij David: niet in de toonmodus, niet naar bezoekers
+  // (toonKort neemt het veld niet over). De app beslist of het bij de datum op de pagina past; de pod schrijft hier niets.
+  function fotodagenVan(h) {
+    const sp = F && typeof F.spoor === 'function' ? F.spoor(h.hid) : null;
+    return sp && sp.van && sp.tot ? { van: sp.van, tot: sp.tot } : null;
+  }
   // wv3264: het kaartpunt voor David (nooit in de toonmodus of naar buiten): fotospoor, anders de reispagina (Tripper)
   function puntVan(h) {
     const sp = F && typeof F.spoor === 'function' ? F.spoor(h.hid) : null;
@@ -802,7 +809,7 @@ function maak(o) {
     const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen' && h.status !== 'samengevoegd' && (!toon || toonbaar(h))).map((h) => {
       if (toon) return toonKort(kort(h));
       const p = paginaLees(h.hid), x = sam(h, p), k = kort(h, p, x), kr = kringVan(h, k.titel);
-      return Object.assign(k, { kring: { familie: !!kr.familie, shizzle: !!kr.shizzle }, punt: puntVan(h), nieuw_op: h.aangemaakt || null });
+      return Object.assign(k, { kring: { familie: !!kr.familie, shizzle: !!kr.shizzle }, punt: puntVan(h), nieuw_op: h.aangemaakt || null, fotodagen: fotodagenVan(h) });
     });
     alle.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : a.hid < b.hid ? -1 : 1));
     if (toon) {
