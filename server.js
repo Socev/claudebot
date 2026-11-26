@@ -32362,7 +32362,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20, 'wachter-kaart': 30 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, pakjes: 30, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20, 'wachter-kaart': 30 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata', 'eindjes', 'eindjes/oordeel', 'wachter-kaart']);   // wv4124: wachter-kaart idem   // wv4007: eindjes alleen beurtpas of API_SECRET   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -32668,6 +32668,14 @@ async function smalActie(actie, d, wie) {
   // 23-10-2026, wv945); de POT-rekening en Privé staan hier niet in de weg: die zijn alleen-eigenaar en Socev leest als eigenaar.
   // wv2694: OVIS OSINT voor Socev (skill osint): adres, bedrijf, telefoon; persoon alleen met herkomst david-vraag en een doel (osint.py)
   if (actie === 'osint') return smalOsint(d, !(wie && wie.mk));   // Socev-sleutel of beurtpas = socev; API_SECRET = machinekamer
+  // wv4125 (besluit nr 419 / 3C119): Pakjes lezen voor de Actie-Bewaker ("is X al besteld of bezorgd?" vóór hij "nog niet gedaan" meldt).
+  // Alleen de lijst, ingekort door pakjes.kaal (geen adres, volgcode, volglink of bestelnummer); verversen, verbergen en "Is geleverd" blijven de app.
+  if (actie === 'pakjes') {
+    if (!pakjes || typeof pakjes.lijst !== 'function') return { status: 404, j: { ok: false, fout: 'Pakjes zit niet in deze versie van de pod' } };
+    const u = pakjes.lijst(pakjesGekocht(), pakjesOnderwerpen);
+    if (!u || u.status !== 200 || !u.body) return { status: 503, j: { ok: false, fout: 'Pakjes kon de lijst niet lezen' } };
+    return { status: 200, j: require(path.join(__dirname, 'pakjes.js')).kaal(u.body) };
+  }
   if (actie === 'facturen') {
     if (String(d.opdracht || '') === 'aansluiting') return finAansluiting(d);   // wv1864: aansluiting bank ↔ inkoopfacturen (fin-reconcile.js)
     if (!facturenRoutes || typeof facturenRoutes.lees !== 'function') return { status: 404, j: { ok: false, fout: 'Facturen zit niet in deze versie van de pod' } };

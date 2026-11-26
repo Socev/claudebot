@@ -555,6 +555,19 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
     toets('4 onderwerpen: kapotte bank = lege Map', (() => { try { return po(['a']).size === 0; } catch (e) { return false; } })());
     fs.rmSync(MD, { recursive: true, force: true });
   }
+  {   // wv4125: POST /smal/pakjes geeft alleen de ingekorte lijst (pakjes.kaal), alleen lezen
+    const k = P.kaal({ lopend: [{ id: 'aaaaaaaaaaaa', winkel: 'Proefwinkel', omschrijving: 'Proefding', code: '3SPROE123456789', bestelnr: '111-2223334-4445556', adres: 'Proefstraat 1',
+      link: 'https://jouw.postnl.nl/x', stand: 'onderweg', eerste: '2026-11-20T10:00:00Z', laatst: '2026-11-21T10:00:00Z', vervoerder: 'PostNL' }, null, 'x'],
+      eerder: [{ winkel: 'Ander', stand: 'bezorgd', bezorgd_op: '2026-11-01T10:00:00Z', verborgen: true }], verwacht: [{ id: 'z', wens: 'iets' }], laatste_ronde: '2026-11-21T10:00:00Z' });
+    const s = JSON.stringify(k);
+    toets('5 kaal: geen volgcode, bestelnummer, adres, link of id; Shopper-verwachtingen niet mee', !/3SPROE|111-222|Proefstraat|postnl\.nl|aaaaaaaaaaaa|verwacht"/.test(s) && !('verwacht' in k), s);
+    toets('5 kaal: winkel, omschrijving, stand en datums blijven; rommel valt weg', k.ok === true && k.lopend.length === 1 && k.lopend[0].winkel === 'Proefwinkel' && k.lopend[0].omschrijving === 'Proefding'
+      && k.lopend[0].stand === 'onderweg' && k.lopend[0].eerste === '2026-11-20T10:00:00Z' && k.eerder.length === 1 && k.eerder[0].verborgen === true && k.eerder[0].bezorgd_op === '2026-11-01T10:00:00Z', k);
+    toets('5 kaal: lege of kapotte invoer = lege lijsten', JSON.stringify(P.kaal(null)) === JSON.stringify({ ok: true, lopend: [], eerder: [], laatste_ronde: null, ronde_fout: false }));
+    const b = fs.readFileSync('server.js', 'utf8'), st = b.indexOf("if (actie === 'pakjes')"), blok = b.slice(st, b.indexOf("if (actie === 'facturen')", st));
+    toets('5 server.js: /smal/pakjes alleen lijst + kaal (geen verberg, geleverd, ronde), eigen grens', st > 0 && /\.kaal\(u\.body\)/.test(blok) && !/verberg|geleverd|pakjesRonde|ververs/.test(blok)
+      && /const SMAL_GRENS = \{[^\n}]*\bpakjes: 30\b/.test(b) && !/SMAL_ALLEEN_PAS = new Set\(\[[^\]]*'pakjes'/.test(b));
+  }
   toets('4 uitrol.sh: pakjes.js in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bpakjes\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

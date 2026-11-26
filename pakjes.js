@@ -998,4 +998,14 @@ function maak(o) {
   return { herken, isKandidaat, ronde, lijst, verberg, geleverd, info, sluit, verwerkMail, teVolgen, volg, _laatst: () => laatst };
 }
 
-module.exports = { maak, herken, adresUit, detailUit, onderwerpSchoon, isKandidaat, leesDhl, leesPostnl, leesGls, leesGofo, leesDragonfly, volgAdressen, volgLink, dagUit, tijdvakUit, standUit, STANDEN };
+// wv4125 (besluit nr 419 / 3C119): de lijst voor POST /smal/pakjes (Actie-Bewaker, skill actie-bewaker aankoop.py): alleen wat nodig is om
+// "is X al besteld of bezorgd?" te beoordelen. Geen adres, volgcode, volglink of bestelnummer; Shopper-verwachtingen zonder id.
+function kaal(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const rij = (w) => ({ winkel: w.winkel || null, omschrijving: w.omschrijving || null, onderwerp: w.onderwerp || null, vervoerder: w.vervoerder || null,
+    stand: w.stand || null, eerste: w.eerste || null, laatst: w.laatst || null, bezorgd_op: w.bezorgd_op || null, verwacht_dag: w.verwacht_dag || null, verborgen: !!w.verborgen });
+  const lijst = (x) => (Array.isArray(x) ? x : []).filter((w) => w && typeof w === 'object').map(rij);
+  return { ok: true, lopend: lijst(b.lopend), eerder: lijst(b.eerder), laatste_ronde: b.laatste_ronde || null, ronde_fout: !!b.ronde_fout };
+}
+
+module.exports = { kaal, maak, herken, adresUit, detailUit, onderwerpSchoon, isKandidaat, leesDhl, leesPostnl, leesGls, leesGofo, leesDragonfly, volgAdressen, volgLink, dagUit, tijdvakUit, standUit, STANDEN };
