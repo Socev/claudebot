@@ -6,7 +6,7 @@
 # zonder zusterbestand, niet genoemd, symlink, hardlink, FIFO), niet van ons (gewone bronnotitie, symlink-beschrijving, punt-map,
 # koppelmap), NFD-naam, bestand (base64, type, 404 zonder geldige beschrijving, ook uit een warme lijst, 413), /health zonder inhoud,
 # zonder ovis-register.js, en server.js (dispatch, privé-module dicht op een vaste plek, tellers vooraf, stil bij 200, reden zonder pad,
-# /health, uitrol-lijst, Dockerfile). Raakt de echte vault niet. Gebruik: bash test/mediatheek.sh
+# /health, uitrol-lijst, Dockerfile); sinds wv4118 ook volgorde nieuw → oud, nieuw/toegevoegd en speelduur (mp3/wav/m4a). Raakt de echte vault niet. Gebruik: bash test/mediatheek.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node --no-warnings - <<'JS'
@@ -352,6 +352,46 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
      'javascript:alert(1)//https://github.com/', 'https://evil.nl/https://github.com/', 'https://github.com.', ' https://evil.nl', 'https://github.com/' + 'x'.repeat(300), '', null, ['https://github.com/x']]
       .every((x) => EA(x) === null), ['https://github.com.', 'https://github.com:444/x'].map((x) => EA(x)));
   toets('6h hostlijst is vast in de code (alleen github.com)', JSON.stringify(M.EXTERN_HOSTS) === '{"github.com":"GitHub"}');
+
+  // ── 7. wv4118: nieuwste eerst, nieuw, toegevoegd, speelduur ──
+  const V7 = path.join(W, 'vault7'), Z7 = (p, t) => { fs.mkdirSync(path.dirname(path.join(V7, p)), { recursive: true }); fs.writeFileSync(path.join(V7, p), t); };
+  // echte mp3-frames (MPEG-1 laag 3, 128 kbit/s, 44,1 kHz, stereo): 417 bytes per frame, 1152 monsters
+  const frame = (xing) => { const f = Buffer.alloc(417); f[0] = 0xff; f[1] = 0xfb; f[2] = 0x90; f[3] = 0x00; if (xing) { f.write('Xing', 36, 'latin1'); f.writeUInt32BE(1, 40); f.writeUInt32BE(xing, 44); } return f; };
+  const CBR = Buffer.concat(Array.from({ length: 106 }, () => frame()));            // 106 × 417 bytes × 8 / 128000 = 2,76 s
+  const VBR = Buffer.concat([frame(3828), frame(), frame()]);                        // 3828 × 1152 / 44100 = 100,0 s
+  const id3 = Buffer.concat([Buffer.from([0x49, 0x44, 0x33, 3, 0, 0, 0, 0, 0, 20]), Buffer.alloc(20), VBR]);   // ID3v2 van 30 bytes ervoor
+  const wav = Buffer.alloc(44 + 16000); wav.write('RIFF', 0, 'latin1'); wav.writeUInt32LE(36 + 16000, 4); wav.write('WAVEfmt ', 8, 'latin1'); wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(8000, 28); wav.writeUInt16LE(1, 32); wav.writeUInt16LE(8, 34); wav.write('data', 36, 'latin1'); wav.writeUInt32LE(16000, 40);
+  const doos = (naam, inhoud) => { const k = Buffer.alloc(8); k.writeUInt32BE(8 + inhoud.length, 0); k.write(naam, 4, 'latin1'); return Buffer.concat([k, inhoud]); };
+  const mvhd = Buffer.alloc(100); mvhd.writeUInt32BE(1000, 12); mvhd.writeUInt32BE(171500, 16);   // versie 0: tijdschaal 1000, duur 171,5 s
+  const m4a = Buffer.concat([doos('ftyp', Buffer.from('M4A isom', 'latin1')), doos('mdat', Buffer.alloc(5000)), doos('moov', doos('mvhd', mvhd))]);   // moov aan het eind
+  const NEP = Buffer.concat([Buffer.from('\u0001\n\u0001audio/mpeg\u0000?\u0000Encryption-Method:AES128CBC', 'latin1'), Buffer.alloc(3000, 0xff)]);   // versleutelde beltoon
+  const D7 = M.duurUitKop, rl = (b) => (p, n) => b.slice(p, p + n);
+  toets('7a duur mp3: CBR uit de bitrate, Xing-teller, ID3v2 ervoor', D7(rl(CBR), CBR.length, 'mp3') === 2.8 && D7(rl(VBR), VBR.length, 'mp3') === 100 && D7(rl(id3), id3.length, 'mp3') === 100, [D7(rl(CBR), CBR.length, 'mp3'), D7(rl(VBR), VBR.length, 'mp3'), D7(rl(id3), id3.length, 'mp3')]);
+  toets('7b duur wav (byteRate) en m4a (mvhd, moov aan het eind)', D7(rl(wav), wav.length, 'wav') === 2 && D7(rl(m4a), m4a.length, 'm4a') === 171.5, [D7(rl(wav), wav.length, 'wav'), D7(rl(m4a), m4a.length, 'm4a')]);
+  toets('7c geen duur: nep-mp3 (proef, versleuteld, één losse frame-kop), ogg, kapotte m4a', D7(rl(MP3), MP3.length, 'mp3') === null && D7(rl(NEP), NEP.length, 'mp3') === null && D7(rl(Buffer.alloc(100)), 100, 'ogg') === null && D7(rl(Buffer.from('xxxxmoov')), 8, 'm4a') === null);
+  const S7 = '20_Prive/Bronnen/Shizzle';
+  const st7 = (naam, velden, inhoud) => { Z7(S7 + '/' + naam + '.mp3', inhoud || CBR); Z7(S7 + '/' + naam + '.md', besch(['categorie: Shizzle', 'titel: ' + naam].concat(velden, bl(S7 + '/' + naam + '.mp3')))); };
+  st7('Oud', ['datum: 2026-10-19']);
+  st7('Midden', ['datum: 2026-10-24', 'favoriet: true'], VBR);
+  st7('Zonder datum', ['datum_tekst: oktober 2026']);
+  st7('Vers', ['datum: 2026-11-25']);                              // nieuw op datum
+  st7('Oud maar net erbij', ['datum: 2005-01-01', 'toegevoegd: 2026-11-20']);   // nieuw door toegevoegd
+  st7('Lang geleden erbij', ['datum: 2026-11-01', 'toegevoegd: 2026-10-01']);  // toegevoegd wint van datum: niet nieuw
+  st7('Toekomst', ['datum: 2027-05-01']);                           // tikfout: niet nieuw
+  Z7(S7 + '/Fout.mp3', CBR); Z7(S7 + '/Fout.md', besch(['categorie: Shizzle', 'toegevoegd: gisteren'].concat(bl(S7 + '/Fout.mp3'))));
+  const NU = Date.parse('2026-11-26T03:00:00Z');
+  const m7 = M.maak({ vault: V7, cacheMs: 0, nu: () => NU }), s7 = m7.stand().j, it7 = s7.onderwerpen[0].items;
+  toets('7d volgorde: nieuw bovenaan (jongste toevoeging eerst), dan datum nieuw → oud, zonder datum achteraan',
+    JSON.stringify(it7.map((i) => i.titel)) === '["Vers","Oud maar net erbij","Toekomst","Lang geleden erbij","Midden","Oud","Zonder datum"]', it7.map((i) => i.titel));
+  toets('7e nieuw: alleen Vers en Oud maar net erbij; toegevoegd in het stuk', it7.filter((i) => i.nieuw).map((i) => i.titel).join('|') === 'Vers|Oud maar net erbij' && it7[1].toegevoegd === '2026-11-20' && it7[0].toegevoegd === null, it7.map((i) => [i.titel, i.nieuw, i.toegevoegd]));
+  toets('7f duur per bestand in de lijst (CBR 2,8 s, Xing 100 s); te herstellen: onleesbare toegevoegd', it7[0].bestanden[0].duur === 2.8 && it7.find((i) => i.titel === 'Midden').bestanden[0].duur === 100 && /toegevoegd is onleesbaar/.test((s7.te_herstellen[0] || {}).reden || ''), [it7[0].bestanden[0], s7.te_herstellen]);
+  toets('7g 14 dagen later is niets meer nieuw', M.maak({ vault: V7, cacheMs: 0, nu: () => NU + 15 * 864e5 }).stand().j.onderwerpen[0].items.every((i) => !i.nieuw));
+  // duur volgt een gewijzigd bestand (cache op inode:grootte:mtime) en volgt geen koppeling
+  Z7(S7 + '/Vers.mp3', VBR);
+  const tijd = new Date(NU + 5000); fs.utimesSync(path.join(V7, S7, 'Vers.mp3'), tijd, tijd);
+  toets('7h gewijzigd bestand: nieuwe duur', m7.stand().j.onderwerpen[0].items[0].bestanden[0].duur === 100, m7.stand().j.onderwerpen[0].items[0].bestanden[0]);
+  toets('7i bestaande toets 2g: zelfde volgorde in deel 2 (C, Köln, D)', JSON.stringify(sz.map((i) => i.titel)) === '["Lied C: het vervolg","Köln","Lied D"]');
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

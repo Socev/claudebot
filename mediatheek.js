@@ -27,6 +27,11 @@
 // niet), alleen https, alleen een host uit EXTERN_HOSTS, ≤ 300 tekens, geen gebruikersdeel, poort of rare tekens, en dan zonder
 // `bestanden:`. Zo'n stuk telt als stuk (geen bestand, niet om af te spelen); de App toont "Open bij <host>". De padcontrole voor
 // echte bestanden (M1–M4) blijft ongewijzigd: een extern stuk heeft geen bestand-id.
+// wv4118 (26-11-2026; besluitenpagina nr 199 = 2C99, David Ja 25-11 22:00): binnen een categorie het nieuwste eerst (stukken met `nieuw`
+// bovenaan, dan op datum van nieuw naar oud, zonder datum achteraan); `toegevoegd: JJJJ-MM-DD` (optioneel) zegt wanneer een stuk erbij kwam.
+// Een stuk is `nieuw` als toegevoegd (anders datum) hooguit NIEUW_DAGEN geleden is. Per geluidsbestand `duur` (seconden, of null) uit de kop van
+// het bestand (mp3: Xing/VBRI of CBR-schatting; m4a: mvhd; wav: fmt/data), één keer per bestandsversie (inode:grootte:mtime), via dezelfde
+// fd-leesweg als een bestand (geen koppeling volgen). De app toont duur in plaats van megabytes.
 // Alles alleen lezen; de module schrijft niets. Privé-module: op een vaste plek open, een bestand ophalen onder het invoerslot (server.js, wv1901/wv3446).
 
 const fs = require('fs');
@@ -36,6 +41,7 @@ const crypto = require('crypto');
 const PAGINA = '20_Prive/Mediatheek.md';
 const MAX_PAGINA = 1024 * 1024;
 const MAX_BESTAND = 20 * 1024 * 1024;
+const NIEUW_DAGEN = 14;   // wv4118: zo lang heet een stuk 'nieuw' in de app
 const AUDIO = { mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg' };
 // alleen downloaden (beeld en video krijgen later een eigen weergave; geparkeerd als beeldbank, Ideeënbus § 22)
 const ANDERS = { pdf: 'application/pdf', flp: 'application/octet-stream', mid: 'audio/midi', midi: 'audio/midi',
@@ -58,6 +64,93 @@ function externAdres(s) {
   if (!Object.prototype.hasOwnProperty.call(EXTERN_HOSTS, host)) return null;
   if (u.href.length > MAX_EXTERN) return null;
   return { url: u.href, naam: EXTERN_HOSTS[host] };
+}
+
+// ── wv4118: speelduur uit de kop van een geluidsbestand. lees(pos, n) → Buffer (hooguit n bytes vanaf pos); grootte = bestandsgrootte.
+// Geeft seconden (afgerond op 0,1) of null. Alleen lezen van een paar kB; nooit het hele bestand. Kapotte of onbekende kop = null.
+const MP3_KBPS = {   // [versie 1 | 2/2.5][laag 1..3] → bitrate-tabel (index 1..14)
+  1: { 1: [32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448], 2: [32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+    3: [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320] },
+  2: { 1: [32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256], 2: [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+    3: [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160] },
+};
+const MP3_HZ = { 3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000] };
+const rond = (x) => (Number.isFinite(x) && x > 0 && x < 24 * 3600 ? Math.round(x * 10) / 10 : null);
+function duurMp3(lees, grootte) {
+  let begin = 0;
+  const id3 = lees(0, 10);
+  if (id3.length === 10 && id3.toString('latin1', 0, 3) === 'ID3') begin = 10 + ((id3[6] & 0x7f) << 21 | (id3[7] & 0x7f) << 14 | (id3[8] & 0x7f) << 7 | (id3[9] & 0x7f)) + (id3[5] & 0x10 ? 10 : 0);
+  const b = lees(begin, 64 * 1024);
+  for (let i = 0; i + 4 <= b.length; i++) {
+    if (b[i] !== 0xff || (b[i + 1] & 0xe0) !== 0xe0) continue;
+    const vb = (b[i + 1] >> 3) & 3, lb = (b[i + 1] >> 1) & 3, bi = (b[i + 2] >> 4) & 15, si = (b[i + 2] >> 2) & 3, kan = (b[i + 3] >> 6) & 3;
+    if (vb === 1 || lb === 0 || bi === 0 || bi === 15 || si === 3) continue;
+    const laag = 4 - lb, v1 = vb === 3, kbps = MP3_KBPS[v1 ? 1 : 2][laag][bi - 1], hz = MP3_HZ[vb][si];
+    const per = laag === 1 ? 384 : laag === 3 && !v1 ? 576 : 1152;
+    // twee frames achter elkaar, anders is het geen mp3 (een hernoemd beltoonbestand bijvoorbeeld)
+    const pad = (b[i + 2] >> 1) & 1, flen = laag === 1 ? (Math.floor(12000 * kbps / hz) + pad) * 4 : Math.floor(per / 8 * kbps * 1000 / hz) + pad;
+    const j = i + flen;
+    if (j + 4 > b.length ? begin + j + 4 <= grootte - 128 : b[j] !== 0xff || (b[j + 1] & 0xfe) !== (b[i + 1] & 0xfe) || ((b[j + 2] >> 2) & 3) !== si) continue;
+    // Xing/Info (VBR-teller) na de zij-informatie, of VBRI op 32 bytes na de kop
+    const zij = laag !== 3 ? 0 : v1 ? (kan === 3 ? 17 : 32) : (kan === 3 ? 9 : 17);
+    const x = i + 4 + zij;
+    if (x + 12 <= b.length) {
+      const tag = b.toString('latin1', x, x + 4);
+      if ((tag === 'Xing' || tag === 'Info') && (b.readUInt32BE(x + 4) & 1)) return rond(b.readUInt32BE(x + 8) * per / hz);
+    }
+    const y = i + 4 + 32;
+    if (y + 18 <= b.length && b.toString('latin1', y, y + 4) === 'VBRI') return rond(b.readUInt32BE(y + 14) * per / hz);
+    // CBR: wat er na de eerste frame-kop staat, zonder ID3v1-staart
+    const staart = grootte >= 128 && lees(grootte - 128, 3).toString('latin1') === 'TAG' ? 128 : 0;
+    return rond((grootte - begin - i - staart) * 8 / (kbps * 1000));
+  }
+  return null;
+}
+function duurWav(lees, grootte) {
+  const h = lees(0, 12);
+  if (h.length < 12 || h.toString('latin1', 0, 4) !== 'RIFF' || h.toString('latin1', 8, 12) !== 'WAVE') return null;
+  let pos = 12, perSec = 0;
+  for (let n = 0; n < 64 && pos + 8 <= grootte; n++) {
+    const c = lees(pos, 20);
+    if (c.length < 8) return null;
+    const id = c.toString('latin1', 0, 4), len = c.readUInt32LE(4);
+    if (id === 'fmt ' && c.length >= 20) perSec = c.readUInt32LE(16);   // byteRate: 8 bytes in de fmt-inhoud
+    if (id === 'data') return perSec ? rond(Math.min(len, grootte - pos - 8) / perSec) : null;
+    pos += 8 + len + (len & 1);
+  }
+  return null;
+}
+function duurMp4(lees, grootte) {
+  // dozen aflopen: bovenste laag tot moov, daarin mvhd (moov kan aan het eind staan)
+  const zoek = (van, tot, naam) => {
+    let pos = van;
+    for (let n = 0; n < 256 && pos + 8 <= tot; n++) {
+      const k = lees(pos, 16);
+      if (k.length < 8) return null;
+      let len = k.readUInt32BE(0), kop = 8;
+      if (len === 1) { if (k.length < 16) return null; len = Number(k.readBigUInt64BE(8)); kop = 16; }
+      else if (len === 0) len = tot - pos;
+      if (len < kop) return null;
+      if (k.toString('latin1', 4, 8) === naam) return { van: pos + kop, tot: Math.min(tot, pos + len) };
+      pos += len;
+    }
+    return null;
+  };
+  const moov = zoek(0, grootte, 'moov');
+  const mvhd = moov && zoek(moov.van, moov.tot, 'mvhd');
+  if (!mvhd) return null;
+  const m = lees(mvhd.van, 32);
+  if (m.length < 20) return null;
+  if (m[0] === 1) { if (m.length < 32) return null; return rond(Number(m.readBigUInt64BE(24)) / (m.readUInt32BE(20) || NaN)); }
+  return rond(m.readUInt32BE(16) / (m.readUInt32BE(12) || NaN));
+}
+function duurUitKop(lees, grootte, ext) {
+  try {
+    if (ext === 'mp3') return duurMp3(lees, grootte);
+    if (ext === 'wav') return duurWav(lees, grootte);
+    if (ext === 'm4a') return duurMp4(lees, grootte);
+  } catch (e) { /* kapotte kop */ }
+  return null;   // aac/ogg/opus: geen kop met duur die we hier lezen; de app toont dan niets
 }
 
 const extVan = (p) => { const m = /\.([a-z0-9]{1,5})$/i.exec(p); return m ? m[1].toLowerCase() : ''; };
@@ -259,13 +352,18 @@ function leesBeschrijving(tekst, map, opt) {
   const een = (k) => { const x = v[k]; if (x === undefined || x === '') return null; return typeof x === 'string' ? x.trim() : undefined; };
   if (een('bron_soort') !== 'mediatheek') return { niet: true };
   if (metExtern && (v.extern === undefined || v.extern === '')) return { reden: ZONDER_ZUS };   // wv3063: geen extern = de oude reden
-  for (const k of ['categorie', 'titel', 'wie', 'datum', 'datum_tekst', 'favoriet']) if (een(k) === undefined) return { reden: k + ' moet één waarde zijn, geen lijst' };
+  for (const k of ['categorie', 'titel', 'wie', 'datum', 'datum_tekst', 'favoriet', 'toegevoegd']) if (een(k) === undefined) return { reden: k + ' moet één waarde zijn, geen lijst' };
   const categorie = een('categorie');
   if (!categorie) return { reden: 'categorie ontbreekt' };
   let datum = null;
   if (een('datum')) {
     datum = datumIso(een('datum'));
     if (!datum || !geldigeDatum(datum)) return { reden: 'de datum is onleesbaar (schrijf 2026-10-19, of gebruik datum_tekst)' };
+  }
+  let toegevoegd = null;   // wv4118
+  if (een('toegevoegd')) {
+    toegevoegd = datumIso(een('toegevoegd'));
+    if (!toegevoegd || !geldigeDatum(toegevoegd)) return { reden: 'toegevoegd is onleesbaar (schrijf 2026-11-26)' };
   }
   let favoriet = false;
   const fav = een('favoriet');
@@ -303,7 +401,7 @@ function leesBeschrijving(tekst, map, opt) {
   while (i < romp.length && romp[i].trim() && !/^#{1,6}\s/.test(romp[i])) alinea.push(romp[i++].trim());
   const omschrijving = plat(alinea.join(' ')).slice(0, 1200) || null;
   return { stuk: { categorie: categorie, titel: een('titel') ? plat(een('titel')) : null, wie: een('wie') ? plat(een('wie')) : null, datum: datum,
-    datum_tekst: datum ? null : een('datum_tekst'), favoriet: favoriet, omschrijving: omschrijving, bestanden: bestanden, extern: extern } };
+    datum_tekst: datum ? null : een('datum_tekst'), toegevoegd: toegevoegd, favoriet: favoriet, omschrijving: omschrijving, bestanden: bestanden, extern: extern } };
 }
 
 const MAX_BESCHRIJVING = 64 * 1024;
@@ -320,6 +418,9 @@ function maak(opt) {
   const TOP = PAD.split('/')[0];
   const fout = opt.fout || function () {};
   const CACHE_MS = typeof opt.cacheMs === 'number' ? opt.cacheMs : 60000;
+  const nu = typeof opt.nu === 'function' ? opt.nu : () => Date.now();   // wv4118: klok (toets)
+  // nieuw = de datum ligt tussen NIEUW_DAGEN dagen geleden en morgen (een datum in de verre toekomst is een tikfout, geen nieuws)
+  const isNieuw = (iso) => { if (!iso) return false; const d = (nu() - Date.parse(iso + 'T00:00:00Z')) / 864e5; return d >= -1 && d < NIEUW_DAGEN + 1; };
   let echteVault = null, echteTop = null;
   let kopCache = new Map();   // rel → { k: ino:grootte:mtime, mt: bool }
   let cache = null;
@@ -367,6 +468,32 @@ function maak(opt) {
       if (path.dirname(r) !== dirReal || r.indexOf(echt().top + path.sep) !== 0) return { weg: 'buiten' };
       return { abs: r, grootte: st.size, dev: st.dev, ino: st.ino, m: st.mtimeMs };
     } catch (e) { return { weg: 'ontbreekt' }; }
+  }
+
+  // wv4118: speelduur per bestandsversie; zelfde leesweg als bestand() (O_NOFOLLOW, fd op de verwachte plek, zelfde inode, nlink 1)
+  let duurCache = new Map(), duurNieuw = new Map();
+  function duurVan(z, ext) {
+    if (!AUDIO[ext]) return null;
+    const k = z.abs + '|' + z.ino + ':' + z.grootte + ':' + z.m;
+    if (duurCache.has(k)) { duurNieuw.set(k, duurCache.get(k)); return duurCache.get(k); }
+    let fd = null, d = null;
+    try {
+      fd = fs.openSync(z.abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      const st = fdOpPlek(fd, z.abs) ? fs.fstatSync(fd) : null;
+      if (st && st.isFile() && st.nlink === 1 && st.dev === z.dev && st.ino === z.ino) {
+        const lees = (pos, n) => {
+          if (pos < 0 || pos >= st.size) return Buffer.alloc(0);
+          const buf = Buffer.alloc(Math.min(n, st.size - pos));
+          let g = 0;
+          while (g < buf.length) { const r = fs.readSync(fd, buf, g, buf.length - g, pos + g); if (r <= 0) break; g += r; }
+          return buf.slice(0, g);
+        };
+        d = duurUitKop(lees, st.size, ext);
+      }
+    } catch (e) { d = null; }
+    finally { if (fd !== null) try { fs.closeSync(fd); } catch (e) { /* al dicht */ } }
+    duurNieuw.set(k, d);
+    return d;
   }
 
   // Eén beschrijving beoordelen (ook bij elk bestand-verzoek opnieuw): mapRaw = vaultpad van de map zoals op schijf.
@@ -449,6 +576,7 @@ function maak(opt) {
     const kt = leesKlein(path.join(echt().vault, PAD), MAX_PAGINA, false);
     if (!kt.fout) { kaft = leesKaft(kt.tekst); kaftM = kt.mtimeMs; }
     const z = zoek();
+    duurNieuw = new Map();
     const perId = new Map(), perCat = new Map(), teHerstellen = [], geclaimd = new Set(), mtMappen = new Set();
     let nb = 0, nweg = 0, next = 0, laatst = kaftM;
     for (const g of z.gevonden) {
@@ -466,13 +594,14 @@ function maak(opt) {
         geclaimd.add(b.pad);
         if (!perId.has(id)) nb++;
         perId.set(id, { map: g.map, md: g.naam });
-        bs.push({ id: id, naam: b.naam, ext: b.ext, soort: AUDIO[b.ext] ? 'audio' : 'bestand', label: b.ext, grootte: f.grootte, ontbreekt: false, te_groot: f.grootte > MAX_BESTAND });
+        bs.push({ id: id, naam: b.naam, ext: b.ext, soort: AUDIO[b.ext] ? 'audio' : 'bestand', label: b.ext, grootte: f.grootte, ontbreekt: false, te_groot: f.grootte > MAX_BESTAND,
+          duur: duurVan(f, b.ext) });
       }
       if (s.extern) next++;
       const sl = catSleutel(s.categorie);
       if (!perCat.has(sl)) perCat.set(sl, { naam: plat(s.categorie), items: [] });
       const item = { titel: s.titel || (bs[0] ? bs[0].naam.replace(/\.[^.]+$/, '') : md.slice(0, -3)), wie: s.wie, datum: s.datum, datum_tekst: s.datum_tekst,
-        omschrijving: s.omschrijving, noot: null, favoriet: s.favoriet, bestanden: bs, paginas: [], geweigerd: 0 };
+        omschrijving: s.omschrijving, noot: null, favoriet: s.favoriet, toegevoegd: s.toegevoegd, nieuw: isNieuw(s.toegevoegd || s.datum), bestanden: bs, paginas: [], geweigerd: 0 };
       if (s.extern) item.extern = { url: s.extern.url, naam: s.extern.naam };   // wv3063: alleen bij een stuk dat elders staat
       perCat.get(sl).items.push(item);
     }
@@ -481,7 +610,11 @@ function maak(opt) {
     let zonder = 0;
     for (const m of mtMappen) for (const a of z.audio.get(m) || []) if (!geclaimd.has(a) && !metBesch.has(a.slice(0, -extVan(a).length - 1))) zonder++;
     const nl = (a, b) => a.localeCompare(b, 'nl');
-    const volg = (it) => it.sort((a, b) => nl(a.datum || '9999', b.datum || '9999') || nl(a.titel, b.titel));
+    duurCache = duurNieuw;   // alleen wat nu nog bestaat blijft bewaard
+    // wv4118: nieuw bovenaan (jongste toevoeging eerst), dan op datum van nieuw naar oud, zonder datum achteraan, dan titel
+    const volg = (it) => it.sort((a, b) => (b.nieuw ? 1 : 0) - (a.nieuw ? 1 : 0)
+      || (a.nieuw && b.nieuw ? nl(b.toegevoegd || b.datum || '', a.toegevoegd || a.datum || '') : 0)
+      || nl(b.datum || '0000', a.datum || '0000') || nl(a.titel, b.titel));
     const onderwerpen = [];
     for (const k of kaft || []) {
       const sl = catSleutel(k.naam), c = perCat.get(sl);
@@ -557,4 +690,4 @@ function maak(opt) {
   return { stand: stand, bestand: bestand, health: health, lijst: lijst };
 }
 
-module.exports = { externAdres: externAdres, EXTERN_HOSTS: EXTERN_HOSTS, maak: maak, leesKaft: leesKaft, leesBeschrijving: leesBeschrijving, catSleutel: catSleutel, leesPagina: leesPagina, leesItem: leesItem, schoonDoel: schoonDoel, plat: plat, idVan: idVan, AUDIO: AUDIO, ANDERS: ANDERS, MAX_BESTAND: MAX_BESTAND };
+module.exports = { duurUitKop: duurUitKop, NIEUW_DAGEN: NIEUW_DAGEN, externAdres: externAdres, EXTERN_HOSTS: EXTERN_HOSTS, maak: maak, leesKaft: leesKaft, leesBeschrijving: leesBeschrijving, catSleutel: catSleutel, leesPagina: leesPagina, leesItem: leesItem, schoonDoel: schoonDoel, plat: plat, idVan: idVan, AUDIO: AUDIO, ANDERS: ANDERS, MAX_BESTAND: MAX_BESTAND };
