@@ -98,7 +98,7 @@ nep.listen(0, '127.0.0.1', async () => {
     APP_UIT_BESTAND: D + '/au', TEL_UIT_BESTAND: D + '/tu', JOBOUT_DIR: D + '/jobout', API_LOG: D + '/api.log', SYNC_LOG: D + '/sync.log', RUNTIME_FILE: D + '/runtime.json', CODEX_HOME: D + '/codex',
     SLEUTELPORTAAL_SLEUTEL: D + '/geen.key', UITROL_MARKER: D + '/uw', ROL_BESTAND: D + '/rol', AGY_MCP_TMP: D + '/agy.json', TUNNEL_UIT_POD: '1', SUPABASE_URL: 'http://127.0.0.1:9',
     SUPABASE_SERVICE_ROLE: 'proef', SOCEV_KANT: 'olares', OFFSITE_INTERVAL_MIN: '0', AUTO_UIT_POD: '1', LESSEN_INJECTIE: '0', API_SECRET: 'proef', MAX_AGENTS: '1', PORT: String(poort),
-    SCHEIDS_URL: TEAM, SCHEIDS_LEES_SLEUTEL: 'x', APP_POORT_SECRET: 'poort-proef-' + 'p'.repeat(32) });
+    SCHEIDS_URL: TEAM, SCHEIDS_LEES_SLEUTEL: 'x', APP_POORT_SECRET: 'poort-proef-' + 'p'.repeat(32), WARM_UIT_BESTAND: D + '/warm-uit-bestaat-niet' });
   ['CLAUDE_CODE_OAUTH_TOKEN', 'SOCEV_AGENT_RUN', 'RELEASE_DIR', 'SUPABASE_MCP_TOKEN', 'SB_SQL_LOKAAL'].forEach((k) => delete env[k]);
   const uit = fs.openSync(D + '/stdout.log', 'a');
   const p = spawn(process.execPath, [SRV], { env, detached: true, stdio: ['ignore', uit, uit], cwd: path.dirname(SRV) });
@@ -137,6 +137,7 @@ nep.listen(0, '127.0.0.1', async () => {
     const h2 = await wachtRol('primair');
     toets('W0 stand olares: primair', !!h2, h2 && JSON.stringify(h2.uitwijk));
     if (h2) {
+      toets('U0 zonder uit-bestand: warme staat geladen (uitwijk.warm zonder uit)', h2.uitwijk.warm && typeof h2.uitwijk.warm === 'object' && !h2.uitwijk.warm.uit, JSON.stringify(h2.uitwijk.warm));
       toets('W0b /health uitwijk.lease_s tussen 1 en 180', h2.uitwijk.lease_s > 0 && h2.uitwijk.lease_s <= 180, h2.uitwijk.lease_s);
       const w1 = await vraag('GET', '/app/status');
       toets('W1 primair: /app/status gewoon (geen passief), X-Socev-Kant olares', w1.s === 200 && w1.j && w1.j.passief === undefined && 'koppelen_open' in w1.j && w1.kant === 'olares' && !w1.rol, w1.t);
@@ -170,6 +171,17 @@ nep.listen(0, '127.0.0.1', async () => {
     const v3 = await vraag('POST', '/app/studio/maak'), v4 = await vraag('POST', '/app/imagine/nieuw'), v5 = await vraag('GET', '/app/studio/flows');
     toets('V3 spaarstand: POST Studio/Imagine 503 "ligt stil" (X-Socev-Kant vps), GET Studio niet', v3.s === 503 && v3.j && v3.j.spaarstand === true && v3.kant === 'vps' && v4.s === 503 && v4.j.spaarstand === true && v5.s !== 503 && !(v5.j && v5.j.spaarstand), v3.s + ' ' + v4.s + ' ' + v5.s + ' ' + v5.t);
     toets('V4 nood-spiegel zonder sleutel: niet ingericht, geen aanroep', hv && hv.uitwijk.nood && hv.uitwijk.nood.ingericht === false && !hv.uitwijk.nood.aanroepen, hv && JSON.stringify(hv.uitwijk.nood));
+    // U — wv4086: uit-schakelaar warme staat (bestand bestaat → niet geladen, /health uitwijk.warm {uit:true, sinds}, logregel)
+    try { process.kill(-p3.pid, 'SIGTERM'); } catch (e) {}
+    await new Promise((x) => setTimeout(x, 800));
+    stand.kant = 'olares';
+    fs.writeFileSync(D + '/warm-uit', '');
+    const p4 = spawn(process.execPath, [SRV], { env: Object.assign({}, env, { WARM_UIT_BESTAND: D + '/warm-uit' }), detached: true, stdio: ['ignore', uit, uit], cwd: path.dirname(SRV) });
+    huidig = p4.pid;
+    const hu = await wachtRol('primair');
+    toets('U1 uit-bestand: /health uitwijk.warm = {uit:true, sinds}', hu && hu.uitwijk.warm && hu.uitwijk.warm.uit === true && /^\d{4}-\d\d-\d\dT/.test(hu.uitwijk.warm.sinds), hu && JSON.stringify(hu.uitwijk.warm));
+    let al = ''; try { al = fs.readFileSync(D + '/api.log', 'utf8'); } catch (e) {}
+    toets('U2 uit-bestand: logregel "warm … uitgezet (wv4086)"', / warm melding=uitgezet_\(wv4086\)/.test(al), al.slice(-400));
   } catch (e) { toets('uitzondering', false, e && e.stack); }
   toets('T1 geen "gebruik Telegram" / "tik daar" in de app-antwoorden van server.js', !/gebruik Telegram|staat ook in Telegram, tik daar/.test(BRON));
   console.log('── app-passief-poort: ' + goed + ' groen, ' + fout + ' rood');
