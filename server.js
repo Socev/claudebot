@@ -16545,7 +16545,15 @@ async function appPushStand(req, res, a) {
   appStuur(res, 200, { ok: true, sleutel: v ? v.publiek : null, uit_reden: v ? null : 'seintjes zijn op de pod nog niet ingericht',
     aan: !!sub && !oud && !verlopen, sleutel_oud: oud, verlopen: verlopen,
     endpoint_hash: sub && sub.endpoint ? appSha(sub.endpoint).slice(0, 16) : null,   // Fable wv414 #4: de app ziet zo of de browser intussen een ander adres heeft
-    soorten: sub ? sub.soorten || [] : [], laatst: sub ? sub.laatst || null : null });
+    soorten: sub ? sub.soorten || [] : [], laatst: sub ? sub.laatst || null : null,
+    antwoord_seintje: !oud && appAntwoordSeintjeKomt(a.id, sub) });   // wv4166 (3C28): de wachtregel zegt alleen hier "je krijgt een seintje"
+}
+// wv4166 (besluitenpagina nr 328 = 3C28): krijgt dit apparaat een antwoord-seintje als het een antwoord niet binnen 20 s ophaalt?
+// Zelfde regels als appPushNaBeurt/appPushAlle: abonnement met adres, niet verlopen, soort antwoord, en appPushMag (de Pixel =
+// goedkeurder, het noodapparaat, of zoem aan). Een telefoonbeurt die luistert krijgt geen seintje; dat ziet de app zelf niet.
+function appAntwoordSeintjeKomt(id, sub) {
+  if (!sub || !sub.endpoint || sub.verlopen || (sub.soorten || []).indexOf('antwoord') < 0) return false;
+  return appPushMag(id, undefined, sub);
 }
 async function appPushAbonneer(req, res, a, d) {
   if (!appTeller('push', APP_PUSH_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens push');
