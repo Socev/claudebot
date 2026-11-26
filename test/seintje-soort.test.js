@@ -46,20 +46,31 @@ test('noteer + haal: samengevoegde pushes = alle soorten sinds de vorige vraag, 
   assert.deepStrictEqual(M.haal(st, 2200), { soorten: ['machinekamer'], herhaal: false });
 });
 
-test('noteer: onbekend soort telt niet; lijst hooguit 20; ouder dan 6 uur vervalt', () => {
+test('noteer: onbekend soort telt niet; ouder dan 6 uur vervalt', () => {
   let st = M.noteer(undefined, 'inhoud', 1000);
   assert.deepStrictEqual(M.haal(st, 1001), { soorten: [], herhaal: false });
-  st = {};
-  for (let i = 0; i < 30; i++) st = M.noteer(st, 'antwoord', 1000 + i);
-  assert.strictEqual(st.lijst.length, 20);
   st = M.noteer(undefined, 'vraag', 0);
   assert.deepStrictEqual(M.haal(st, M.BEWAAR_MS + 1), { soorten: [], herhaal: false });
 });
 
+test('Codex MOET 1: een vraag gevolgd door dertig antwoorden blijft een vraag', () => {
+  let st = M.noteer(undefined, 'vraag', 1000);
+  for (let i = 0; i < 30; i++) st = M.noteer(st, 'antwoord', 1001 + i);
+  assert.deepStrictEqual(M.haal(st, 2000), { soorten: ['vraag', 'antwoord'], herhaal: false });
+});
+
+test('Codex MOET 2: push in dezelfde milliseconde als de vorige stand telt als nieuw', () => {
+  let st = M.noteer(undefined, 'antwoord', 1000);
+  assert.deepStrictEqual(M.haal(st, 1000), { soorten: ['antwoord'], herhaal: false });
+  st = M.noteer(st, 'vraag', 1000);
+  assert.deepStrictEqual(M.haal(st, 1000), { soorten: ['vraag'], herhaal: false });
+  assert.deepStrictEqual(M.haal(st, 1000), { soorten: ['vraag'], herhaal: true });
+});
+
 test('haal: niets bekend (herstart) = lege lijst; kapotte staat = lege lijst', () => {
   assert.deepStrictEqual(M.haal(undefined, 1), { soorten: [], herhaal: false });
-  assert.deepStrictEqual(M.haal({ lijst: 'x' }, 1), { soorten: [], herhaal: false });
-  assert.deepStrictEqual(M.haal({ lijst: [{ s: 'geheim', op: 1 }] }, 2), { soorten: [], herhaal: false });
+  assert.deepStrictEqual(M.haal({ per: 'x' }, 1), { soorten: [], herhaal: false });
+  assert.deepStrictEqual(M.haal({ per: { geheim: { op: 1, n: 1 } }, n: 1, jongste: 'geheim' }, 2), { soorten: [], herhaal: false });
 });
 
 test('server.js: elke verzendplek geeft een soort mee (poets en proef niet), de stand geeft soorten', () => {

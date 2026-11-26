@@ -4,13 +4,12 @@
 // en de service worker haalt dat op bij de stand die hij toch al vraagt (GET /app/seintje-stand, 4 s). Alleen een vast woord uit
 // SOORTEN gaat over de lijn; de tekst bij elk woord staat in de service worker. Lukt het ophalen niet, dan de zin van vroeger.
 //
-// Waarom een lijst en niet alleen het laatste soort: alle pushes hebben Topic socev, dus de pushdienst vervangt een nog niet
+// Waarom alle soorten en niet alleen het laatste: alle pushes hebben Topic socev, dus de pushdienst vervangt een nog niet
 // bezorgde push door de volgende. Een vraag en daarna een rapport kunnen zo als één push binnenkomen; dan moet de service worker
 // beide soorten horen, anders overschrijft het rapport de vraag alsnog.
 
 const SOORTEN = ['vraag', 'storing', 'machinekamer', 'antwoord'];   // volgorde = voorrang bij tonen
 const BEWAAR_MS = 6 * 3600 * 1000;   // = APP_PUSH_TTL_S: langer houdt de pushdienst een seintje ook niet vast
-const MAX = 20;
 
 function geldig(s) { return SOORTEN.indexOf(s) >= 0; }
 
@@ -35,13 +34,14 @@ function soortVanBerichten(kanaal, rijen) {
 }
 
 // Vlak vóór de push: het soort onthouden (vóór de fetch, want de service worker kan de stand al vragen voordat de pushdienst
-// antwoordt). st = { lijst: [{s, op}], gehaald: ms }; geeft st terug.
+// antwoordt). Eén registratie per soort (Codex MOET 1: twintig antwoorden verdringen een vraag niet) met een oplopend volgnummer
+// als cursor (Codex MOET 2: geen gelijke milliseconden). st = { n, gehaald, jongste, per: { soort: { op, n } } }; geeft st terug.
 function noteer(st, soort, nu) {
   st = st && typeof st === 'object' ? st : {};
-  const lijst = Array.isArray(st.lijst) ? st.lijst : [];
-  if (geldig(soort)) lijst.push({ s: soort, op: nu });
-  st.lijst = lijst.filter(function (x) { return x && nu - x.op < BEWAAR_MS; }).slice(-MAX);
+  if (!st.per || typeof st.per !== 'object') st.per = {};
+  if (typeof st.n !== 'number') st.n = 0;
   if (typeof st.gehaald !== 'number') st.gehaald = 0;
+  if (geldig(soort)) { st.n += 1; st.per[soort] = { op: nu, n: st.n }; st.jongste = soort; }
   return st;
 }
 
@@ -49,17 +49,12 @@ function noteer(st, soort, nu) {
 // nieuws (dezelfde push nog eens, of een poets-push terwijl er nog iets ongezien is) = het jongste soort met herhaal (zonder zoem).
 // Niets bekend (pod herstart, alleen een proef) = lege lijst: de service worker toont dan de zin van vroeger.
 function haal(st, nu) {
-  if (!st || !Array.isArray(st.lijst)) return { soorten: [], herhaal: false };
-  const vers = st.lijst.filter(function (x) { return x && geldig(x.s) && nu - x.op < BEWAAR_MS; });
-  const nieuw = vers.filter(function (x) { return x.op > (st.gehaald || 0); });
-  st.gehaald = nu;
-  st.lijst = vers;
-  if (nieuw.length) {
-    const set = {};
-    nieuw.forEach(function (x) { set[x.s] = true; });
-    return { soorten: SOORTEN.filter(function (s) { return set[s]; }), herhaal: false };
-  }
-  if (vers.length) return { soorten: [vers[vers.length - 1].s], herhaal: true };
+  if (!st || !st.per || typeof st.per !== 'object') return { soorten: [], herhaal: false };
+  const vers = SOORTEN.filter(function (s) { const x = st.per[s]; return x && typeof x.op === 'number' && nu - x.op < BEWAAR_MS; });
+  const nieuw = vers.filter(function (s) { return st.per[s].n > (st.gehaald || 0); });
+  st.gehaald = typeof st.n === 'number' ? st.n : 0;
+  if (nieuw.length) return { soorten: nieuw, herhaal: false };
+  if (vers.indexOf(st.jongste) >= 0) return { soorten: [st.jongste], herhaal: true };
   return { soorten: [], herhaal: false };
 }
 
