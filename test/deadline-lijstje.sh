@@ -140,6 +140,28 @@ toets('5f getoond: tijd uit verzonden_op (zaterdag 08:30), onleesbaar = 07:05', 
   && DL.teDoen([rij({ status: 'open', keuze: '', verzonden_op: 'x' })], nu, new Set(), '2030-03-05')[0].tijd === '07:05');
 toets('5e andere bron telt niet', DL.teDoen([rij({ bron: 'todoist', status: 'afgehandeld', keuze: 'gedaan', getikt_op: new Date(nu - 200000).toISOString() })], nu, new Set(), '2030-03-05').length === 0);
 
+// 7. wv4102 (2C88 b): verlopen() voor Calendar en sluiten met plek Calendar
+{
+  const it0 = droog(REG);
+  let v = DL.verlopen(it0, REG, '2030-03-11');
+  toets('7a verlopen op 11-3: 1-2, 9-3 (Socev) en 10-3; niet 12-3, 20-3, 30-4; oudste eerst', v.map((x) => x.datum).join(',') === '2030-02-01,2030-03-09,2030-03-10', v.map((x) => x.datum));
+  toets('7b etiket en actie zonder etiketwoord', v[1].etiket === 'socev' && v[2].etiket === 'jij' && v[2].actie === 'David: opgave invullen in het portaal', v);
+  toets('7c geen grens van 14 dagen (anders dan rijp)', DL.verlopen(it0, REG, '2030-06-01').length === 6);
+  const vz = REG.replace('| **Heel oude proefdeadline** |', '| **GESEIND 1-2 (in je actielijstje; verzet naar 15-3-2030).** **Heel oude proefdeadline** |');
+  const itv = droog(vz);
+  toets('7d verzet naar een datum die nog komt = niet verlopen; daarna wel', !DL.verlopen(itv, vz, '2030-03-11').some((x) => x.datum === '2030-02-01')
+    && DL.verlopen(itv, vz, '2030-03-16').some((x) => x.datum === '2030-02-01'));
+  const t = v[2];
+  let u7 = DL.pasToe(REG, it0, { sleutel: t.sleutel, datum: t.datum, titel: t.titel, keuze: 'gedaan', vandaag: '2030-03-11', plek: 'Calendar' });
+  const n7 = u7.tekst || '';
+  toets('7e gedaan in Calendar: eigen kop, AFGEHANDELD (Gedaan in Calendar), telling gelijk', n7.indexOf(DL.AF_KOP_CAL + '\n\n| Datum | Entiteit | Wat | Actie | Signaleer | Bron |\n|---|---|---|---|---|---|\n| 2030-03-10 | Proefpraktijk | **AFGEHANDELD 11-3-2030 (Gedaan in Calendar).** **Proefdeadline') >= 0
+    && telRijen(n7) === telRijen(REG), n7.slice(n7.indexOf('## Afgehandeld')));
+  u7 = DL.pasToe(REG, it0, { sleutel: v[0].sleutel, datum: v[0].datum, titel: v[0].titel, keuze: 'laten_vallen', vandaag: '2030-03-11', plek: 'Calendar' });
+  toets('7f hoeft niet in Calendar: VERVALLEN (Hoeft niet, in Calendar)', /\*\*VERVALLEN 11-3-2030 \(Hoeft niet, in Calendar\)\.\*\* \*\*Heel oude/.test(u7.tekst || ''), u7);
+  u7 = DL.pasToe(REG, it0, { sleutel: t.sleutel, datum: t.datum, titel: t.titel, keuze: 'later', later_tot: '2030-04-01', vandaag: '2030-03-11', plek: 'Calendar' });
+  toets('7g Calendar kent geen later/getoond (opschuiven loopt via Socev)', u7.niets === 'onbekende keuze', u7);
+}
+
 // 6. runner: gedaan via maak() op het nep-register (wijzig = in het geheugen)
 (async () => {
   let pagina = REG; const logs = [];

@@ -149,9 +149,45 @@ const rij = (o) => Object.assign({ event_id: 1, begin_datum: '2026-11-04', eind_
   u = await vol.app({ methode: 'GET', pad: '/app/kalender/gevonden', nu: NU });
   toets('7n review ZOU 1: 500 rijen = meer: true (niet stil afkappen)', u.status === 200 && u.body.meer === true && u.body.regels.length === 500);
 
+  // ── 8. wv4102: verlopen deadlines + pad van een entiteit (verzonnen proefdata) ──
+  {
+    const SL = (c) => 'dl:' + c.repeat(40);
+    let lijst = [{ sleutel: SL('a'), datum: '2026-10-01', titel: 'Proefdeadline een', entiteit: 'Proef BV', etiket: 'jij', actie: 'iets doen' },
+      { sleutel: SL('b'), datum: '2026-10-20', titel: 'Proefdeadline twee', entiteit: 'Systeem', etiket: 'socev', actie: '' },
+      { sleutel: 'dl:kapot', datum: '2026-10-02', titel: 'x' }, { sleutel: SL('c'), datum: '2026-02-31', titel: 'y' }];
+    const sluitVraag = [];
+    let sluitUit = { u: { tekst: 'nieuw', regel: 12 }, ok: true };
+    const kv = K.maak({ rpc: async () => [], verlopen: async () => lijst, sluit: async (t) => { sluitVraag.push(t); return sluitUit; } });
+    let u = await kv.app({ methode: 'GET', pad: '/app/kalender/verlopen', nu: NU });
+    toets('8a GET verlopen: alleen geldige sleutel + datum, telling per etiket', u.status === 200 && u.body.regels.length === 2 && u.body.tel.jij === 1 && u.body.tel.socev === 1 && u.body.vandaag === '2026-11-03', u.body);
+    toets('8b reden zonder titel', !/Proef/.test(u.reden));
+    u = await kv.app({ methode: 'POST', pad: '/app/kalender/verlopen', nu: NU, body: { sleutel: SL('a'), keuze: 'gedaan', titel: 'VERVALST', datum: '2026-12-01' } });
+    toets('8c POST gedaan: schrijfroute met titel en datum uit het register (niet uit de browser), plek Calendar', u.status === 200 && u.body.ok === true && sluitVraag.length === 1
+      && sluitVraag[0].titel === 'Proefdeadline een' && sluitVraag[0].datum === '2026-10-01' && sluitVraag[0].plek === 'Calendar' && sluitVraag[0].keuze === 'gedaan' && sluitVraag[0].vandaag === '2026-11-03', [u, sluitVraag]);
+    u = await kv.app({ methode: 'POST', pad: '/app/kalender/verlopen', nu: NU, body: { sleutel: SL('a'), keuze: 'later' } });
+    const u2 = await kv.app({ methode: 'POST', pad: '/app/kalender/verlopen', nu: NU, body: { sleutel: 'dl:1', keuze: 'gedaan' } });
+    toets('8d alleen gedaan of laten_vallen en een echte sleutel (400)', u.status === 400 && u2.status === 400 && sluitVraag.length === 1);
+    u = await kv.app({ methode: 'POST', pad: '/app/kalender/verlopen', nu: NU, body: { sleutel: SL('d'), keuze: 'gedaan' } });
+    toets('8e niet (meer) verlopen in het register: 409, niets geschreven', u.status === 409 && sluitVraag.length === 1);
+    sluitUit = { u: { niets: 'al afgehandeld' }, ok: false };
+    u = await kv.app({ methode: 'POST', pad: '/app/kalender/verlopen', nu: NU, body: { sleutel: SL('b'), keuze: 'laten_vallen' } });
+    toets('8f al afgehandeld = ok (al)', u.status === 200 && u.body.al === true);
+    sluitUit = { u: { niets: 'pagina veranderde' }, ok: false };
+    u = await kv.app({ methode: 'POST', pad: '/app/kalender/verlopen', nu: NU, body: { sleutel: SL('b'), keuze: 'gedaan' } });
+    const u3 = await (async () => { sluitUit = { u: { niets: 'passief' }, ok: false }; return kv.app({ methode: 'POST', pad: '/app/kalender/verlopen', nu: NU, body: { sleutel: SL('b'), keuze: 'gedaan' } }); })();
+    toets('8g register veranderd / passief: 409 met opnieuw-zin', u.status === 409 && /opnieuw/.test(u.body.fout) && u3.status === 409, [u, u3]);
+    const k0 = K.maak({ rpc: async () => [] });
+    u = await k0.app({ methode: 'GET', pad: '/app/kalender/verlopen', nu: NU });
+    toets('8h zonder verlopen/sluit: 404', u.status === 404);
+    toets('8i info noemt alleen het aantal', JSON.stringify(kv.info().verlopen || {}).indexOf('Proef') < 0 && kv.info().verlopen.regels === 2);
+    const e2 = K.regel(rij({ entiteiten: [{ object_id: 'a1', naam: 'P', rol: 'betreft', pad: '10_Zakelijk/Proef/Persoon P.md' }, { naam: 'Q', pad: '../geheim.md' },
+      { naam: 'R', pad: '/etc/x.md' }, { naam: 'S', pad: '10_Proef/.verborgen/x.md' }, { naam: 'T', pad: '10_Proef/x.txt' }, { naam: 'U' }] }));
+    toets('8j pad alleen als vaultpad (.md, geen .., absoluut of verborgen map)', e2.entiteiten.map((x) => x.pad).join('|') === '10_Zakelijk/Proef/Persoon P.md|||||', e2.entiteiten);
+  }
+
   // ── 6. server.js ──
   const src = fs.readFileSync('server.js', 'utf8');
-  toets('6a dispatch GET /app/kalender achter de app-sessie (na Tripper)', src.indexOf("if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0 || route === 'POST /app/kalender/gevonden') return typeof appKalender === 'function' ? appKalender(req, res, a, route, d)") > src.indexOf("if (route.indexOf('GET /app/tripper/') === 0)"));
+  toets('6a dispatch GET /app/kalender achter de app-sessie (na Tripper)', src.indexOf("if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0 || route === 'POST /app/kalender/gevonden' || route === 'POST /app/kalender/verlopen') return typeof appKalender === 'function' ? appKalender(req, res, a, route, d)") > src.indexOf("if (route.indexOf('GET /app/tripper/') === 0)"));
   toets('6b /health.kalender', /kalender: typeof kalenderInfo === 'function' \? kalenderInfo\(\) : \{ aan: false \}/.test(src));
   toets('6c uitrol-lijst: kalender-app.js optioneel', /RELEASE_OPTIONEEL="[^"]*\bkalender-app\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));
   const hb = src.indexOf('// ── OVIS Calendar in de app (wv2333'), he = src.indexOf('// ── einde OVIS Calendar ──');

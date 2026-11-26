@@ -16896,7 +16896,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
         if (route === 'GET /app/beleggen/strateeg' || route === 'GET /app/beleggen/strateeg/backtest' || route === 'POST /app/beleggen/strateeg/stand' || route === 'POST /app/beleggen/strateeg/idee') return typeof appStrateeg === 'function' ? appStrateeg(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'strateeg');   // wv3993: Strateeg (fictief)
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || route === 'GET /app/beleggen/teller' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze|past)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
-        if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0 || route === 'POST /app/kalender/gevonden') return typeof appKalender === 'function' ? appKalender(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv3679: POST = Klopt niet / terug   // wv2333: OVIS Calendar (alleen lezen)
+        if (route === 'GET /app/kalender' || route.indexOf('GET /app/kalender/') === 0 || route === 'POST /app/kalender/gevonden' || route === 'POST /app/kalender/verlopen') return typeof appKalender === 'function' ? appKalender(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'kalender');   // wv3679: POST = Klopt niet / terug   // wv2333: OVIS Calendar (alleen lezen)
         if (route.indexOf('GET /app/promedico/') === 0) return typeof appPromedico === 'function' ? appPromedico(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'promedico');   // wv3143: Promedico-laag in Calendar (alleen lezen)
         if (route === 'GET /app/shopper' || route.indexOf('GET /app/shopper/') === 0 || route.indexOf('POST /app/shopper/') === 0) return typeof appShopper === 'function' ? appShopper(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'shopper');   // wv2264: OVIS Shopper (lezen, Niet meer nodig; wv2275 Gekocht / Toch niet gekocht)
         if (route === 'GET /app/besluiten' || route === 'POST /app/besluiten/antwoord') return typeof appBesluiten === 'function' ? appBesluiten(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'besluiten');   // wv3588: Besluitenpagina (reviews 19–21-11)
@@ -27876,13 +27876,25 @@ if (gambiaMensen && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) {
 //   GET /app/kalender                  vandaag t/m + 30 dagen
 //   GET /app/kalender/<van>/<tot>      YYYY-MM-DD, hooguit 62 dagen
 //   GET /app/kalender/gevonden         wv3679: vondsten van de datumdetector (+ 400 dagen) met vindzin; POST { id, oordeel } = Klopt niet / terug
+//   GET /app/kalender/verlopen         wv4102: verlopen deadlines uit het register; POST { sleutel, keuze: gedaan|laten_vallen } = naar ## Afgehandeld
 // Alleen lezen (behalve het oordeel op een vondst), achter de app-sessie. Titels kunnen namen bevatten: ze gaan alleen in het antwoord, nooit in een log; de audit noemt
 // alleen venster, aantal en status. /health.kalender: aan + laatste {op, regels, ms} of {op, fout}. Ontbreekt de module: 404, aan=false.
 const kalenderApp = (function () {
   const p = path.join(__dirname, 'kalender-app.js');
   if (!fs.existsSync(p)) return null;
   try { return require(p).maak({ rpc: function (fn, body) { return appSbRpc(fn, body, 20000); }, stuk: kalenderStuk,
-    extra: function (van, tot) { return typeof ghawaApp !== 'undefined' && ghawaApp && typeof ghawaApp.kalenderItems === 'function' ? ghawaApp.kalenderItems(van, tot) : []; } }); }   // wv3965: GHAWA-mijlpalen
+    extra: function (van, tot) { return typeof ghawaApp !== 'undefined' && ghawaApp && typeof ghawaApp.kalenderItems === 'function' ? ghawaApp.kalenderItems(van, tot) : []; },   // wv3965: GHAWA-mijlpalen
+    // wv4102 (2C88 b): verlopen deadlines live uit het register; sluiten via dezelfde schrijfroute als het actielijstje (deadline-lijstje.js schrijf)
+    verlopen: async function () {
+      if (typeof DL_LIJSTJE === 'undefined' || !DL_LIJSTJE || typeof DL_LIJSTJE.verlopen !== 'function') throw new Error('deadline-lijstje.js ontbreekt');
+      const voor = VV().lees(dlRegister(), 'utf8'), items = (await dlDroog()).items, na = VV().lees(dlRegister(), 'utf8');
+      return DL_LIJSTJE.verlopen(items, voor === na ? voor : '', appYmd(Date.now()));   // pagina veranderde tijdens het lezen: titels uit --droog
+    },
+    sluit: async function (t) {
+      if (typeof DL_LIJSTJE === 'undefined' || !DL_LIJSTJE || !rolPrimair()) return { u: { niets: 'passief' }, ok: false };
+      return DL_LIJSTJE.schrijf({ mag: function () { return rolPrimair(); }, droog: dlDroog, lees: function () { return VV().lees(dlRegister(), 'utf8'); },
+        wijzig: function (f) { return VV().wijzig(dlRegister(), f); } }, t);
+    } }); }
   catch (e) { logError('kalender', e); return null; }
 })();
 // wv3679: het kennisbestand van een vondst van de datumdetector (voor de vindzin). Eerst het bronpad uit de vindplaats; staat daar niet

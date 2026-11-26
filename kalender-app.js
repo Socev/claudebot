@@ -23,11 +23,22 @@
  *                                         "Naar Deadlines" lopen in de app via het gesprek met Socev (voorstel → Davids Ja → Poortwachter).
  * De vindzin gaat alleen in het antwoord aan Davids app-sessie, nooit in een log of de audit.
  *
+ * wv4102 (26-11-2026, besluitenpagina nr 188 / 2C88, Davids Ja 25-11 21:42): verlopen deadlines bovenaan Calendar.
+ *   GET  /app/kalender/verlopen           de regels van ## Actueel in het deadline-register met een datum vóór vandaag (o.verlopen: live
+ *                                         uit het register via deadline-lijstje.js verlopen(), niet uit de databank die 's nachts bijloopt)
+ *   POST /app/kalender/verlopen           { sleutel, keuze: 'gedaan' | 'laten_vallen' } → dezelfde schrijfroute als het actielijstje en
+ *                                         Voor jou (deadline-lijstje.js schrijf/pasToe, plek 'Calendar'): de regel naar ## Afgehandeld.
+ *                                         Titel en datum komen uit een verse lezing van het register, nooit uit de browser.
+ *   Gekoppelde entiteiten krijgen 'pad' (primary_page_path, migratie 0032) zodat de app de naam aanklikbaar maakt.
+ *
  * Puur: laadt niets, raakt geen bestanden; server.js geeft rpc(fn, body) mee (appSbRpc, service_role) en voor wv3679
  * stuk(bronpad, stuk) → { pad, tekst } | null (vault-veilig lezen, zoekt een verhuisd stuk op ovis_stuk).
  */
 const PAD_RE = /^\/app\/kalender(?:\/(\d{4}-\d{2}-\d{2})\/(\d{4}-\d{2}-\d{2}))?$/;
 const GEVONDEN_PAD = '/app/kalender/gevonden';
+const VERLOPEN_PAD = '/app/kalender/verlopen';   // wv4102
+const ENT_PAD_RE = /^[0-9]{2}_[^/]+(?:\/[^/]+)*\.md$/;
+const entPad = (p) => (typeof p === 'string' && p.length <= 300 && ENT_PAD_RE.test(p) && !p.split('/').some((x) => x === '..' || x.startsWith('.')) ? p : null);
 const GEVONDEN_DAGEN = 400;      // zelfde horizon als de detector (datumcontrole.py HORIZON)
 const GEVONDEN_MAX = 500;        // = limit in public.sb_kalender_gevonden (migratie 0031)
 const MAX_DAGEN = 62;
@@ -82,7 +93,8 @@ function syncTekst(r) {
 function regel(r) {
   r = r && typeof r === 'object' ? r : {};
   const ents = (Array.isArray(r.entiteiten) ? r.entiteiten : []).filter((e) => e && e.naam).map((e) => ({
-    object_id: e.object_id ? String(e.object_id) : null, naam: String(e.naam).slice(0, 200), rol: e.rol ? String(e.rol).slice(0, 40) : null }));
+    object_id: e.object_id ? String(e.object_id) : null, naam: String(e.naam).slice(0, 200), rol: e.rol ? String(e.rol).slice(0, 40) : null,
+    pad: entPad(e.pad) }));   // wv4102: pagina van de entiteit (migratie 0032), of null
   const heleDag = r.hele_dag !== false;
   const begin = heleDag ? null : tijd(r.begin_tijd), eind = heleDag ? null : tijd(r.eind_tijd);
   const eindDag = heleDag ? null : dagVan(r.eind_tijd);
@@ -260,9 +272,42 @@ function maak(o) {
     if (x.fout === 'status') return { status: 409, body: { ok: false, fout: 'deze vondst is al ' + (x.status === 'actief' ? 'overgenomen' : String(x.status || 'veranderd')) }, reden: reden + 409 };
     throw new Error('kalender: onverwacht antwoord op oordeel');
   }
+  // wv4102: verlopen deadlines (live uit het register) en ze sluiten via de schrijfroute van het actielijstje
+  const SLEUTEL_RE = /^dl:[0-9a-f]{40}$/;
+  async function verlopen(nu) {
+    const l = await o.verlopen();
+    const regels = (Array.isArray(l) ? l : []).filter((x) => x && SLEUTEL_RE.test(String(x.sleutel)) && geldigeDag(x.datum)).map((x) => ({
+      sleutel: String(x.sleutel), datum: x.datum, titel: String(x.titel || '(zonder titel)').slice(0, 200), entiteit: String(x.entiteit || '').slice(0, 120),
+      etiket: x.etiket === 'socev' || x.etiket === 'info' ? x.etiket : 'jij', actie: String(x.actie || '').slice(0, 300) }));
+    const t = { jij: 0, socev: 0, info: 0 };
+    for (const r of regels) t[r.etiket]++;
+    staat.verlopen = { op: new Date(nu).toISOString(), regels: regels.length };
+    return { status: 200, reden: 'kalender verlopen ' + regels.length, body: { ok: true, vandaag: dagAmsterdam(nu), regels, tel: t } };
+  }
+  async function sluit(d, nu) {
+    d = d && typeof d === 'object' ? d : {};
+    if (!SLEUTEL_RE.test(String(d.sleutel)) || (d.keuze !== 'gedaan' && d.keuze !== 'laten_vallen'))
+      return { status: 400, body: { ok: false, fout: 'ongeldig verzoek' }, reden: 'kalender verlopen ongeldig' };
+    const reden = 'kalender verlopen ' + d.keuze + ' ' + String(d.sleutel).slice(0, 11) + ' ';
+    const it = ((await o.verlopen()) || []).find((x) => x && x.sleutel === d.sleutel);
+    if (!it) return { status: 409, body: { ok: false, fout: 'deze deadline staat niet meer open in het register' }, reden: reden + 'weg' };
+    const r = await o.sluit({ sleutel: it.sleutel, datum: it.datum, titel: String(it.titel || ''), keuze: d.keuze, vandaag: dagAmsterdam(nu), plek: 'Calendar' });
+    const u = r && r.u ? r.u : {};
+    if (r && r.ok && u.tekst) return { status: 200, body: { ok: true, sleutel: it.sleutel }, reden: reden + 'regel ' + (u.regel || '?') };
+    if (u.niets === 'al afgehandeld') return { status: 200, body: { ok: true, sleutel: it.sleutel, al: true }, reden: reden + 'al' };
+    if (u.niets === 'passief') return { status: 409, body: { ok: false, fout: 'deze pod schrijft het register nu niet; probeer het zo opnieuw' }, reden: reden + 'passief' };
+    if (!u.niets || u.niets === 'pagina veranderde') return { status: 409, body: { ok: false, fout: 'het register veranderde net; probeer het opnieuw' }, reden: reden + 'veranderd' };
+    return { status: 409, body: { ok: false, fout: 'deze regel is niet zeker te vinden in het register (' + String(u.niets).slice(0, 60) + ')' }, reden: reden + 'niet' };
+  }
   async function app(v) {
     v = v || {};
     const nu = Number.isFinite(v.nu) ? v.nu : Date.now();
+    if (String(v.pad || '') === VERLOPEN_PAD) {
+      if (typeof o.verlopen !== 'function' || typeof o.sluit !== 'function') return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'kalender verlopen ontbreekt' };
+      if (v.methode === 'GET') return verlopen(nu);
+      if (v.methode === 'POST') return sluit(v.body, nu);
+      return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'kalender onbekend' };
+    }
     if (String(v.pad || '') === GEVONDEN_PAD) {
       if (v.methode === 'GET') return gevonden(nu);
       if (v.methode === 'POST') return oordeel(v.body);
@@ -299,8 +344,8 @@ function maak(o) {
       tel: { soort: tel(regels, 'soort', SOORTEN), voor_wie: tel(regels, 'voor_wie', VOOR_WIE) },
     } };
   }
-  function info() { return Object.assign({ aan: true }, staat.laatste ? { laatste: staat.laatste } : {}, staat.gevonden ? { gevonden: staat.gevonden } : {}, staat.extra_fout ? { extra_fout: staat.extra_fout } : {}); }
+  function info() { return Object.assign({ aan: true }, staat.laatste ? { laatste: staat.laatste } : {}, staat.gevonden ? { gevonden: staat.gevonden } : {}, staat.extra_fout ? { extra_fout: staat.extra_fout } : {}, staat.verlopen ? { verlopen: staat.verlopen } : {}); }
   return { app, info };
 }
 
-module.exports = { maak, regel, bronTekst, syncTekst, vindzin, gevondenRegel, nuIn, cpIndex, GEVONDEN_PAD, venster: (pad, nu) => { const m = PAD_RE.exec(pad); return m ? venster(m, nu) : null; }, PAD_RE, MAX_DAGEN, SOORTEN, VOOR_WIE };
+module.exports = { maak, regel, entPad, VERLOPEN_PAD, bronTekst, syncTekst, vindzin, gevondenRegel, nuIn, cpIndex, GEVONDEN_PAD, venster: (pad, nu) => { const m = PAD_RE.exec(pad); return m ? venster(m, nu) : null; }, PAD_RE, MAX_DAGEN, SOORTEN, VOOR_WIE };

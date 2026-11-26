@@ -24,6 +24,7 @@ const TERUG_DAGEN = 14;                       // verlopen [jij]-deadlines hoogui
 const MERK_RE = /^\*\*GESEIND \d{1,2}-\d{1,2}(?: \d{2}:\d{2})? \((?:in je actielijstje|in Voor jou)[^)]*\)\.\*\*\s*/;
 const AF_KOP = '### Afgehandeld via je actielijstje (sinds 24-11-2026, wv3707)';
 const AF_KOP_VJ = '### Afgehandeld via Voor jou (sinds 24-11-2026, wv3905)';
+const AF_KOP_CAL = '### Afgehandeld via Calendar (sinds 26-11-2026, wv4102)';   // wv4102 (2C88 b): Afgehandeld / Hoeft niet vanuit Calendar
 const VJ_MERK_RE = /^\*\*GESEIND \d{1,2}-\d{1,2}(?: \d{2}:\d{2})? \(in Voor jou[^)]*\)\.\*\*/;
 const TABEL_KOP = '| Datum | Entiteit | Wat | Actie | Signaleer | Bron |';
 
@@ -93,6 +94,29 @@ function rijp(items, tekst, vandaag, vol) {
   return uit;
 }
 
+// wv4102 (2C88 b): de deadlines in ## Actueel met een datum vóór vandaag (alle etiketten), oudste eerst, voor Calendar. items = --droog-uitvoer
+// (alleen niet-afgehandelde regels van ## Actueel), tekst = de pagina. Dezelfde weergavetitel als het actielijstje. Een regel die het lijstje of
+// Voor jou met "verzet naar <datum>" opschoof en waarvan die datum nog niet voorbij is, telt niet als verlopen.
+function verlopen(items, tekst, vandaag) {
+  const v = dagNr(vandaag), regels = String(tekst || '').split('\n'), uit = [];
+  if (v === null) return uit;
+  for (const i of items || []) {
+    if (!i || !i.bron || !/^dl:[0-9a-f]{40}$/.test(String(i.sleutel))) continue;
+    const d = dagNr(i.datum);
+    if (d === null || d >= v) continue;
+    const r = regels[(Number(i.bron.regel) || 0) - 1] || '';
+    const c = r.startsWith('| ' + i.datum + ' |') ? cellen(r) : [];
+    const vz = /^\*\*GESEIND [^*]*verzet naar (\d{1,2})-(\d{1,2})-(\d{4})\)\.\*\*/.exec(String(c[2] || ''));
+    if (vz && Date.UTC(+vz[3], +vz[2] - 1, +vz[1]) / 86400000 >= v) continue;
+    const actie = /^Actie: (.*)$/m.exec(String(i.omschrijving || ''));
+    uit.push({ sleutel: i.sleutel, datum: i.datum, titel: weergave(i, c[2] || ''), entiteit: String(i.bron.entiteit || '').slice(0, 120),
+      etiket: i.bron.etiket === 'socev' || i.bron.etiket === 'ter info' ? (i.bron.etiket === 'socev' ? 'socev' : 'info') : 'jij',
+      actie: actie ? actie[1].replace(/^\s*\[(?:jij|socev|ter info)\]\s*/i, '').slice(0, 300) : '' });
+  }
+  uit.sort(function (a, b) { return a.datum.localeCompare(b.datum) || a.sleutel.localeCompare(b.sleutel); });
+  return uit;
+}
+
 // Zoek de ene regel (index) in ## Actueel. t = { sleutel, datum, titel }. items = verse --droog-uitvoer van dezelfde tekst.
 function zoekRegel(regels, items, t) {
   const sec = secties(regels), nt = norm(t.titel).slice(0, 60);
@@ -126,7 +150,10 @@ function pasToe(tekst, items, t) {
   if (g.length !== 7) return { niets: 'regel heeft geen zes kolommen' };
   const wat = r.slice(g[2] + 1, g[3]).trim(), rest = wat.replace(MERK_RE, '');
   let merk;
-  const vj = t.plek === 'Voor jou', plek = vj ? 'in Voor jou' : 'in je actielijstje', afKop = vj ? AF_KOP_VJ : AF_KOP;
+  const vj = t.plek === 'Voor jou', cal = t.plek === 'Calendar';
+  const plek = vj ? 'in Voor jou' : cal ? 'in Calendar' : 'in je actielijstje', afKop = vj ? AF_KOP_VJ : cal ? AF_KOP_CAL : AF_KOP;
+  // wv4102: Calendar sluit alleen (Gedaan / Hoeft niet); opschuiven loopt daar via Socev (de datum zelf verandert dan)
+  if (cal && t.keuze !== 'gedaan' && t.keuze !== 'laten_vallen') return { niets: 'onbekende keuze' };
   if (t.keuze === 'getoond') merk = '**GESEIND ' + dm(t.vandaag) + (t.tijd ? ' ' + t.tijd : '') + ' (' + plek + ').** ';
   else if (t.keuze === 'later') {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(t.later_tot))) return { niets: 'later zonder datum' };
@@ -247,4 +274,4 @@ function maak(o) {
   return { deadlines: deadlines, verwerk: verwerk };
 }
 
-module.exports = { rijp, pasToe, teDoen, zoekRegel, weergave, cellen, maak, schrijf, kaal, norm, TIK_RUST_MS, AF_KOP, AF_KOP_VJ, MERK_RE };
+module.exports = { rijp, verlopen, AF_KOP_CAL, pasToe, teDoen, zoekRegel, weergave, cellen, maak, schrijf, kaal, norm, TIK_RUST_MS, AF_KOP, AF_KOP_VJ, MERK_RE };
