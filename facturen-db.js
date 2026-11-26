@@ -1877,6 +1877,7 @@ function directBesluit(fdb, op, o) {
   o = o || {};
   const nee = (reden) => ({ direct: false, reden });
   if (metaLees(fdb, 'versturen_vrijgegeven') !== '1') return nee('direct verzenden is (nog) niet vrijgegeven');
+  if (op && op.soort === 'boekhouder_afschrift') return afschriftDirect(fdb, op, o);
   if (!op || op.soort !== 'boekhouder_factuur' || !op.factuur) return nee('geen inkoopfactuur');
   // wv3914: Davids eigen knop "Bevestig en verstuur" op deze factuur vervangt de keuze van de leverancier, zolang de schakelaar aan staat
   const knop = op.direct_knop === 1;
@@ -1897,6 +1898,26 @@ function directBesluit(fdb, op, o) {
   const tw = factuurTwijfel(fdb, f, op.id);
   if (tw) return nee(tw);
   return { direct: true, reden: 'alle eisen kloppen' };
+}
+/*
+ * wv4144 (besluit 2C76 f): een POT-afschrift gaat alleen DIRECT als David zelf op "Verstuur aan André" drukte (direct_knop = 1 op déze
+ * opdracht, vast na het aanmaken, M29) én de schakelaar afschrift_versturen_knop aan staat (registerrij pot-afschrift-knop, Davids Ja).
+ * Verder: het afschrift staat onderweg, entiteit = de entiteit van de rekening (niet privé), doeladres = het afschriftadres, en er was nooit
+ * eerder een verzendpoging voor dit afschrift (onzeker = nooit opnieuw direct). Anders concept, zoals nu.
+ */
+function afschriftDirect(fdb, op, o) {
+  const nee = (reden) => ({ direct: false, reden });
+  if (op.direct_knop !== 1) return nee('geen knop Verstuur aan André');
+  if (metaLees(fdb, 'afschrift_versturen_knop') !== '1') return nee('Verstuur aan André staat (nu) uit');
+  const a = fdb.db.prepare('SELECT a.id, a.status, r.entiteit FROM pot_afschrift a JOIN rekening r ON r.id = a.rekening WHERE a.id = ?').get(op.afschrift);
+  if (!a) return nee('afschrift ontbreekt');
+  if (a.status !== 'in_wachtrij') return nee('afschrift staat niet onderweg (' + a.status + ')');
+  if (!a.entiteit || a.entiteit === 'prive' || a.entiteit !== op.entiteit) return nee('entiteit klopt niet');
+  const e = fdb.db.prepare('SELECT afschrift_doel FROM entiteit WHERE sleutel = ?').get(a.entiteit);
+  if (!e || !e.afschrift_doel || e.afschrift_doel !== op.doeladres) return nee('doeladres wijkt af van het afschriftadres');
+  if (fdb.db.prepare('SELECT 1 FROM opdracht WHERE afschrift = ? AND id <> ? AND verzend_reservering IS NOT NULL LIMIT 1').get(a.id, op.id)) return nee('er was al een verzendpoging voor dit afschrift');
+  if (!(o && o.voorbeeld) && op.verzend_reservering && op.modus !== 'versturen') return nee('deze opdracht is al als concept gereserveerd');
+  return { direct: true, reden: 'Davids knop, alle eisen kloppen' };
 }
 /*
  * wv2661: de eisen van directBesluit die over de factuur zelf gaan (niet over de opdracht of de keuze van de leverancier), los zodat Bevestig N
@@ -1951,7 +1972,7 @@ function reserveerKies(fdb, opId, o) {
   const tijd = nuIso(o.nu);
   return transactie(fdb, function () {
     const op = opdrachtOf(fdb, opId);
-    let k = op.soort === 'boekhouder_factuur' ? directBesluit(fdb, op, {}) : { direct: false, reden: 'geen inkoopfactuur' };
+    let k = op.soort === 'boekhouder_factuur' || op.soort === 'boekhouder_afschrift' ? directBesluit(fdb, op, {}) : { direct: false, reden: 'onbekende soort' };   // wv4144: ook het afschrift (alleen met Davids knop)
     if (k.direct && o.verzender !== true) k = { direct: false, reden: 'de verzender kent direct verzenden nog niet' };
     if (k.direct && !(o.bewijs && o.bewijs.ok === true)) k = { direct: false, reden: (o.bewijs && o.bewijs.reden) || 'bijlagen niet vers gelezen' };
     if (k.direct && directVandaag(fdb, o.nu) >= DIRECT_PER_DAG) k = { direct: false, reden: 'dagplafond van ' + DIRECT_PER_DAG + ' directe verzendingen bereikt' };

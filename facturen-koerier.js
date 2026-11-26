@@ -168,8 +168,13 @@ function mailVoor(fdb, op, modus) {
       tekst: 'Kenmerk ' + tok + ', opdracht ' + op.id + '.\n\nInkoopfactuur voor ' + kort(e.naam || ent, 120) + '.\n' + (modus === 'versturen' ? 'Verstuurd' : 'Klaargezet') + ' door Socev (assistent van David Schaap) na zijn akkoord.\n' };
   }
   const a = fdb.db.prepare('SELECT periode FROM pot_afschrift WHERE id = ?').get(op.afschrift) || {};
+  // wv4144 (2C76 e): de posten met een vraagteken (toelichting van de afschriftmaker, meta per afschrift) staan in de mail
+  const tl = String(D.metaLees(fdb, 'afschrift_toelichting:' + op.afschrift) || '').slice(0, 1500);
+  const n = tl ? tl.split('\n').filter((x) => /^- /.test(x) && !/^- en \d+ meer/.test(x)).length : 0;
+  const vraag = tl ? '\n' + (n === 1 ? 'Bij deze betaling staat een vraagteken (daar hoort een bon of factuur bij):' : 'Bij deze betalingen staat een vraagteken (daar hoort een bon of factuur bij):') + '\n' + tl + '\nLaat maar weten welke je nog mist.\n' : '';
   return { onderwerp: 'Bankafschrift ' + ent + ' ' + kort(a.periode, 10) + ' [ref ' + tok + ']',
-    tekst: 'Kenmerk ' + tok + ', opdracht ' + op.id + '.\n\nBankafschrift ' + kort(e.naam || ent, 120) + ' over ' + kort(a.periode, 10) + ' (MT940 en PDF).\nKlaargezet door Socev (assistent van David Schaap) na zijn akkoord.\n' };
+    tekst: 'Kenmerk ' + tok + ', opdracht ' + op.id + '.\n\nBankafschrift ' + kort(e.naam || ent, 120) + ' over ' + kort(a.periode, 10) + ' (MT940 en PDF).\n' + vraag +
+      (modus === 'versturen' ? 'Verstuurd' : 'Klaargezet') + ' door Socev (assistent van David Schaap) na zijn akkoord.\n' };
 }
 
 // ───────────────────────────── consistentiecontrole ─────────────────────────────
@@ -443,9 +448,14 @@ async function exactPaginas(bijlagen, pdf) {
  * UBL zonder ingebedde PDF, en de patiëntregel over alle tekst samen zonder kenmerk. De tekst blijft in deze functie (vluchtig).
  * → { ok } | { ok:false, reden }
  */
-async function leesBewijs(bijlagen, pdf) {
+async function leesBewijs(bijlagen, pdf, soort) {
   const teksten = [];
   for (const b of bijlagen || []) {
+    // wv4144 (2C76 f): bij een POT-afschrift is de MT940 een vaste bijlage; vers gelezen = de kop klopt (de inhoud is door de sha al gelijk aan het akkoord)
+    if (soort === 'boekhouder_afschrift' && /\.940$/i.test(b.naam)) {
+      if (!Buffer.isBuffer(b.bytes) || !MT940_KOP.test(b.bytes.subarray(0, 80).toString('latin1'))) return { ok: false, reden: 'MT940 niet te lezen' };
+      continue;
+    }
     if (/\.pdf$/i.test(b.naam)) {
       let t;
       try { t = await pdf(b.bytes); } catch (e) { t = { ok: false }; }
@@ -495,7 +505,7 @@ async function verstuurEen(fdb, io, op, o, uit) {
   // wv2480: concept of direct. Eerst (alleen als de opdracht direct kan) de bijlagen vers lezen; dan in één transactie kiezen, het dagplafond
   // tellen en reserveren (D.reserveerKies = ook de hercontrole op de verse rijen). Tussen die transactie en de aanroep zit geen await.
   let bewijs = null;
-  if (!eerder && o.directKlaar && D.directBesluit(fdb, op, {}).direct) bewijs = await leesBewijs(c.bijlagen, o.pdf || pdfNaarTekst);
+  if (!eerder && o.directKlaar && D.directBesluit(fdb, op, {}).direct) bewijs = await leesBewijs(c.bijlagen, o.pdf || pdfNaarTekst, op.soort);
   const keuze = D.reserveerKies(fdb, op.id, { sleutel: tok, nu: klok(), wie, bewijs, verzender: !!o.directKlaar });
   let modus = keuze.modus;
   let mail = mailVoor(fdb, op, modus);

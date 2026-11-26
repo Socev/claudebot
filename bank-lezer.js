@@ -1330,6 +1330,7 @@ const opdrachten = {
   // De maker (pot-afschrift.js) is puur; hier alleen invoer (bank-archief potAfschriftInvoer), bestanden en het geheugen per maand.
   // Bestanden in BANK_DIR/pot-afschriften/<maand>/ (700/600), meta.json per maand; 24 maanden bewaard. Uitvoer: geen posten of namen.
   async 'pot-afschrift-maanden'() {
+    const P = require(path.join(__dirname, 'pot-afschrift.js'));
     const x = archiefKlaar();
     let m;
     try { m = x.A.potAfschriftMaanden(x.a); } catch (e) { throw new Weigering('POT-rekening: ' + e.message); }
@@ -1337,8 +1338,7 @@ const opdrachten = {
     m.laatst_gelezen = potOpgehaald(x.s, m.rek);   // echte ophaaltijd, niet laatst_gezien (Fable wv787 diff #1)
     const maanden = m.maanden.map(function (r) {
       const meta = potMeta(r.maand), eind = potLaatsteDag(r.maand);
-      const compleet = vandaag > eind && !!m.laatst_gelezen && String(m.laatst_gelezen).slice(0, 10) >= potPlusDagen(eind, 2) &&
-        (String(m.nieuwste_post || '') > eind || vandaag >= potPlusDagen(eind, 10));   // zelfde poort als pot-afschrift.js
+      const compleet = P.isCompleet({ vandaag: vandaag, eind: eind, laatstGezien: m.laatst_gelezen, nieuwstePost: m.nieuwste_post });   // zelfde poort als de maker (wv4144: ook na de 3e 12:00)
       return { maand: r.maand, aantal: r.aantal, loopt_nog: vandaag <= eind, compleet: compleet, eerste: r.maand === m.eerste_maand,
         gemaakt: meta ? { op: meta.gemaakt, aantal: meta.aantal, begin: meta.begin, eind: meta.eind, bij: meta.bij, af: meta.af, stuk_open: meta.stuk_open,
           sha_mt940: meta.sha_mt940, vervangen_op: meta.vervangen_op || null } : null };
@@ -1384,8 +1384,23 @@ const opdrachten = {
     return { ok: true, maand: maand, nieuw: !oud, veranderd: veranderd, pdf_veranderd: pdfVeranderd, gemaakt: meta.gemaakt, aantal: meta.aantal, begin: meta.begin, eind: meta.eind,
       bij: meta.bij, af: meta.af, stuk_open: meta.stuk_open, ingekort86: meta.ingekort86, sha256: r.sha256,
       bestanden: [{ soort: 'mt940', naam: r.bestandsnamen.mt940, grootte: Buffer.byteLength(r.mt940, 'latin1') }, { soort: 'pdf', naam: r.bestandsnamen.pdf, grootte: r.pdf.length }],
-      mail: P.mailConcept(maand, t), mail_correctie: P.mailConcept(maand, t, { correctie: true }), ontvanger: x.A.metaLees(x.a, 'pot_afschrift_ontvanger') || null,
+      mail: P.mailConcept(maand, t, { regels: r.regels }), mail_correctie: P.mailConcept(maand, t, { correctie: true, regels: r.regels }), ontvanger: x.A.metaLees(x.a, 'pot_afschrift_ontvanger') || null,
+      regels: r.regels, vergelijk: potVergelijk(P, x, maand, r), toelichting: P.vraagLijst(r.regels).join('\n'),   // wv4144 (2C76 a, b, e): alleen naar de pod
       rek: inv.rek };   // wv959: de bankluis-sleutel van de rekening, zodat de pod de POT-rekening in Facturen vindt (rekening.bankluis_rek); niet naar de App
+  },
+  // wv4144 (2C76 a, b): de posten van een maand voor Davids scherm, met de vergelijking met de vorige maand. Alleen rekenen (de maker in
+  // geheugen): schrijft geen bestand en geen meta, zodat kijken nooit een afschrift verandert. actueel = de MT940 van nu is gelijk aan het
+  // gemaakte afschrift (anders is er sindsdien een boeking bij gekomen: Maak opnieuw). Alleen de pod (BANK_LOKAAL), niet via /smal/bank.
+  async 'pot-afschrift-regels'(a) {
+    const maand = String(a.opt.maand || '');
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(maand)) throw new Weigering('maand als JJJJ-MM');
+    const P = require(path.join(__dirname, 'pot-afschrift.js'));
+    const x = archiefKlaar();
+    const r = potRekenAlleen(P, x, maand);
+    if (!r.ok) return { ok: false, maand: maand, reden: r.reden, geweigerd: true };
+    const oud = potMeta(maand);
+    return { ok: true, maand: maand, aantal: r.telling.aantal, stuk_open: r.telling.stuk_open, regels: r.regels, vergelijk: potVergelijk(P, x, maand, r),
+      gemaakt: !!oud, actueel: !!(oud && oud.sha_mt940 === r.sha256.mt940) };
   },
   // wv815: POT-posten voor Davids datahub (server.js potDatahubRonde na de bank-ronde); alleen de pod (BANK_LOKAAL), niet via /smal/bank.
   // Uitvoer naar de pod (geheugen), nooit naar een sessie of log: de pod schrijft ze met parameters in D1 `fin`.
@@ -1582,6 +1597,26 @@ function potMap(maand) {
 function potMeta(maand) {
   if (!/^\d{4}-\d{2}$/.test(String(maand || ''))) return null;
   try { const m = JSON.parse(fs.readFileSync(path.join(POT_AFSCHRIFT_DIR, maand, 'meta.json'), 'utf8')); return m && m.maand === maand ? m : null; } catch (e) { return null; }
+}
+// wv4144: een maand alleen uitrekenen (niets schrijven). gemaakt = het tijdstip van het gemaakte afschrift (dan dezelfde sha), anders vast.
+function potRekenAlleen(P, x, maand) {
+  let inv;
+  try { inv = x.A.potAfschriftInvoer(x.a, maand); } catch (e) { return { ok: false, reden: 'POT-rekening: ' + e.message }; }
+  inv.laatstGezien = potOpgehaald(x.s, inv.rek);
+  const vorig = potMeta(potMaandPlus(maand, -1)), oud = potMeta(maand);
+  inv.vorigEind = vorig ? vorig.eind_centen : null;
+  inv.gemaakt = oud && oud.gemaakt ? oud.gemaakt : '2000-01-01T00:00:00.000Z';
+  return P.maakAfschrift(inv);
+}
+// wv4144 (2C76 b): vergelijking met de vorige maand (die maand in geheugen, zonder de aansluitingseis met de maand dáárvoor); null als die
+// maand niet te maken is (vóór de bankhistorie, keten sluit niet).
+function potVergelijk(P, x, maand, r) {
+  const vm = potMaandPlus(maand, -1);
+  let inv;
+  try { inv = x.A.potAfschriftInvoer(x.a, vm); } catch (e) { return null; }
+  inv.laatstGezien = potOpgehaald(x.s, inv.rek); inv.vorigEind = null; inv.gemaakt = '2000-01-01T00:00:00.000Z';
+  const t = P.maakAfschrift(inv);
+  try { return t.ok ? P.vergelijk({ maand: maand, telling: r.telling, regels: r.regels }, { maand: vm, telling: t.telling, regels: t.regels }) : null; } catch (e) { return null; }
 }
 function potOpgehaald(s, rek) { const o = s && s.opgehaald && rek ? s.opgehaald[rek] : null; return o && typeof o.transacties === 'string' ? o.transacties : null; }
 function potOpruimen() {

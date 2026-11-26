@@ -5106,11 +5106,18 @@ function afschriftKlaarzetten(fdb, r, invoer, o) {
     if (a && ['in_wachtrij', 'verstuurd'].includes(a.status)) weiger(409, 'dit afschrift staat al in de wachtrij of is verstuurd');
     if (!a) { a = { id: D.nieuwId() }; D.voegToe(fdb, 'pot_afschrift', { id: a.id, rekening: rek.id, periode: invoer.periode, mt940_document: ids[0].id, pdf_document: ids[1].id, status: 'in_wachtrij', aangemaakt_op: wanneer, bijgewerkt_op: wanneer }); }
     else fdb.db.prepare("UPDATE pot_afschrift SET mt940_document = ?, pdf_document = ?, status = 'in_wachtrij', bijgewerkt_op = ? WHERE id = ?").run(ids[0].id, ids[1].id, wanneer, a.id);
-    return afschriftOpdracht(fdb, r, a.id, e, ids.map((x) => x.id), invoer.periode, nu, 'afschrift_klaarzetten');
+    // wv4144 (2C76 e): de posten met een vraagteken als toelichting in de mail (meta per afschrift; geen deel van de vingerafdruk, die dekt
+    // adres en bijlagen). Alleen printbare tekst, hooguit 1500 tekens; zonder toelichting weg (een oude mag niet bij een nieuw afschrift blijven).
+    const tl = typeof invoer.toelichting === 'string' ? invoer.toelichting.replace(/[^\S\n]+/g, ' ').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, '').trim().slice(0, 1500) : '';
+    if (tl) D.metaZet(fdb, 'afschrift_toelichting:' + a.id, tl); else fdb.db.prepare('DELETE FROM meta WHERE sleutel = ?').run('afschrift_toelichting:' + a.id);
+    // wv4144 (2C76 f): Davids knop "Verstuur aan André" = direct_knop op deze ene opdracht, alleen met de schakelaar afschrift_versturen_knop
+    // aan (registerrij pot-afschrift-knop, Davids Ja). Uit = weigeren vóór er iets in de wachtrij staat (de pod valt dan niet stil terug).
+    if (invoer.verstuur === true && D.metaLees(fdb, 'afschrift_versturen_knop') !== '1') weiger(409, 'Verstuur aan André staat (nog) uit');
+    return afschriftOpdracht(fdb, r, a.id, e, ids.map((x) => x.id), invoer.periode, nu, 'afschrift_klaarzetten', { direct_knop: invoer.verstuur === true });
   });
 }
 // De opdracht boekhouder_afschrift bij een afschrift dat net op in_wachtrij ging (gedeeld door klaarzetten en Opnieuw proberen, wv2992).
-function afschriftOpdracht(fdb, r, afschriftId, e, docIds, periode, nu, wat) {
+function afschriftOpdracht(fdb, r, afschriftId, e, docIds, periode, nu, wat, extra) {
   const wanneer = nuIso(nu);
   const opId = D.nieuwId();
   // naam en mime uit de documentrij (bij een hergebruikt stuk de oude naam), zoals de consistentiecontrole ze opnieuw opbouwt (diffreview wv855 #5)
@@ -5120,9 +5127,10 @@ function afschriftOpdracht(fdb, r, afschriftId, e, docIds, periode, nu, wat) {
   const vingerafdruk = K.vingerafdruk(op);
   const verstuurNa = K.verstuurNa(nu, verstuurInstelling(fdb));
   D.voegToe(fdb, 'opdracht', { id: opId, soort: op.soort, afschrift: afschriftId, entiteit: e.sleutel, doeladres: e.afschrift_doel, bijlagen, vingerafdruk,
-    verstuur_na: verstuurNa, idempotentiesleutel: 'afschrift:' + afschriftId + ':' + opId, status: 'wacht', poging: 0, aangemaakt_door: r.wie, aangemaakt_op: wanneer, bijgewerkt_op: wanneer });
-  D.audit(fdb, { wie: r.wie, wat, object_soort: 'pot_afschrift', object_id: afschriftId, entiteit: e.sleutel, na: { periode, opdracht: opId }, wanneer });
-  return { afschrift: afschriftId, opdracht: { id: opId, verstuur_na: verstuurNa } };
+    verstuur_na: verstuurNa, idempotentiesleutel: 'afschrift:' + afschriftId + ':' + opId, status: 'wacht', poging: 0, aangemaakt_door: r.wie, aangemaakt_op: wanneer, bijgewerkt_op: wanneer,
+    direct_knop: extra && extra.direct_knop ? 1 : null });
+  D.audit(fdb, { wie: r.wie, wat, object_soort: 'pot_afschrift', object_id: afschriftId, entiteit: e.sleutel, na: { periode, opdracht: opId, direct_knop: extra && extra.direct_knop ? true : undefined }, wanneer });
+  return { afschrift: afschriftId, opdracht: { id: opId, verstuur_na: verstuurNa, direct_knop: extra && extra.direct_knop ? true : undefined } };
 }
 /*
  * wv2992: waarom een afschrift nu geen nieuwe opdracht mag krijgen (null = mag wel): het staat al in de wachtrij of is verstuurd, of er is een

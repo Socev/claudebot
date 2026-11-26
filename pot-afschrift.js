@@ -27,6 +27,16 @@ function maandNaam(m) { return MAANDEN[Number(m.slice(5, 7)) - 1] + ' ' + m.slic
 function laatsteDag(m) { const d = new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0)); return d.toISOString().slice(0, 10); }
 function plusDagen(d, n) { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
 function maandPlus(m, n) { const d = new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)) - 1 + n, 1)); return d.toISOString().slice(0, 7); }
+// Compleet (wv787; wv4144 besluit 2C76 c, David 25-11-2026): de maand is voorbij, de rekening is na de 2e van de maand erna gelezen én
+// (er staat al een geboekte post van ná de maand, of de bank is na de 3e om 12:00 gelezen, of het is minstens de 10e). De 3e-12:00-grens
+// is 11:00 UTC (12:00 in de winter, 13:00 in de zomer: nooit te vroeg). Een late boeking daarna gaat via de bestaande correctieroute
+// (veranderd → opnieuw maken; de volgende maand weigert tot dan op vorigEind). Puur: de klok komt in `vandaag` en `laatstGezien`.
+function isCompleet(o) {
+  const eind = o.eind, vandaag = String(o.vandaag || ''), lg = o.laatstGezien ? String(o.laatstGezien) : '';
+  if (!(vandaag > eind) || !lg || lg.slice(0, 10) < plusDagen(eind, 2)) return false;
+  const t = Date.parse(lg), grens = Date.parse(plusDagen(eind, 3) + 'T11:00:00Z');
+  return String(o.nieuwstePost || '') > eind || (Number.isFinite(t) && t >= grens) || vandaag >= plusDagen(eind, 10);
+}
 function dagNL(d) { return Number(d.slice(8, 10)) + '-' + Number(d.slice(5, 7)) + '-' + d.slice(0, 4); }
 function eur(cent) {
   const a = Math.abs(cent), e = String(Math.floor(a / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
@@ -299,9 +309,8 @@ function maak(inv) {
   if (!/^\d{4}-\d{2}-\d{2}T/.test(String(inv.gemaakt || ''))) throw new Weigering('gemaakt ontbreekt');
   const eind = laatsteDag(maand), vandaag = String(inv.vandaag || '');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(vandaag) || vandaag <= eind) throw new Weigering('de maand ' + maandNaam(maand) + ' loopt nog; het afschrift kan vanaf de 3e van de maand erna');
-  // compleet: de rekening is na de 2e van de maand erna gelezen én er staat al een geboekte post van ná de maand (bewijs van de bank zelf,
-  // niet van de podklok), of het is minstens de 10e (een maandbegin zonder posten)
-  if (!inv.laatstGezien || String(inv.laatstGezien).slice(0, 10) < plusDagen(eind, 2) || !(String(inv.nieuwstePost || '') > eind || vandaag >= plusDagen(eind, 10)))
+  // compleet: zie isCompleet (wv4144: ook als de bank na de 3e 12:00 gelezen is)
+  if (!isCompleet({ vandaag: vandaag, eind: eind, laatstGezien: inv.laatstGezien, nieuwstePost: inv.nieuwstePost }))
     throw new Weigering('de bank is na ' + dagNL(eind) + ' nog niet (genoeg) gelezen; late boekingen kunnen nog ontbreken');
   if (!inv.eersteMaand || maand <= inv.eersteMaand) throw new Weigering('de maand ' + maandNaam(maand) + ' valt (deels) vóór het begin van de bankhistorie; het beginsaldo is niet te bewijzen');
 
@@ -392,8 +401,14 @@ function maak(inv) {
     pdfDatum: g.slice(0, 4) + g.slice(5, 7) + g.slice(8, 10) + g.slice(11, 13) + g.slice(14, 16) + g.slice(17, 19) + 'Z',
   });
   const shaPdf = crypto.createHash('sha256').update(pdf).digest('hex');
+  // wv4144 (2C76 a): de posten zelf voor Davids eigen scherm (zelfde regels als de PDF, in boekingsvolgorde). Nooit naar een log.
+  const regelsApp = rijen.map(function (r) {
+    return { datum: r.p.datum, tegenpartij: r.p.naam || (r.vr.soort === 'bankkosten' ? 'ABN AMRO Bank N.V.' : ''),
+      omschrijving: String(r.v.Omschrijving || (r.vr.soort === 'bankkosten' ? r.v.vrij.replace(/^ABN AMRO Bank N\.V\.\s*/, '') : '')).slice(0, 140),
+      wat: r.vr.wat, soort: r.vr.soort, stuk: r.vr.stuk, vraag: r.vr.stuk === '?' || r.vr.stuk === 'ontbreekt', bedrag: r.p.b / 100, saldo: r.p.s / 100 };
+  });
   return {
-    ok: true, maand: maand, mt940: mt940, pdf: pdf, sha256: { mt940: shaMt, pdf: shaPdf }, telling: telling,
+    ok: true, maand: maand, mt940: mt940, pdf: pdf, sha256: { mt940: shaMt, pdf: shaPdf }, telling: telling, regels: regelsApp,
     bestandsnamen: { mt940: 'POT-' + maand + '.sta', pdf: 'POT-afschrift ' + maand + '.pdf' },
   };
 }
@@ -431,9 +446,57 @@ function mailConcept(maand, telling, o) {
   const regels = ['Hoi André,', '', o && o.correctie
     ? 'Hierbij opnieuw het afschrift van de POT-rekening over ' + m + ': er is na mijn vorige mail nog een boeking bij gekomen. Dit vervangt het afschrift dat ik je eerder stuurde (MT940 om in te lezen en de PDF met per regel wat het is).'
     : 'Hierbij het afschrift van de POT-rekening over ' + m + ': het MT940-bestand om in te lezen en een PDF met per regel wat het is.'];
-  if (telling && telling.stuk_open > 0) regels.push('', 'Bij ' + (telling.stuk_open === 1 ? 'één betaling staat' : telling.stuk_open + ' betalingen staat') + ' een vraagteken: daar hoort een bon of factuur bij. Laat maar weten welke je nog mist.');
+  // wv4144 (2C76 e): de posten met een vraagteken zelf (datum, tegenpartij, bedrag), zodat André niet hoeft terug te vragen welke
+  const lijst = vraagLijst(o && o.regels);
+  if (lijst.length) regels.push('', lijst.length === 1 ? 'Bij deze betaling staat een vraagteken (daar hoort een bon of factuur bij):' : 'Bij deze ' + lijst.length + ' betalingen staat een vraagteken (daar hoort een bon of factuur bij):', ...lijst, '', 'Laat maar weten welke je nog mist.');
+  else if (telling && telling.stuk_open > 0) regels.push('', 'Bij ' + (telling.stuk_open === 1 ? 'één betaling staat' : telling.stuk_open + ' betalingen staat') + ' een vraagteken: daar hoort een bon of factuur bij. Laat maar weten welke je nog mist.');
   regels.push('', 'Groet,', 'David');
   return { onderwerp: 'POT POH-GGZ: afschrift ' + m + (o && o.correctie ? ' (correctie)' : ''), bericht: regels.join('\n') };
 }
 
-module.exports = { maakAfschrift, mailConcept, maandNaam, laatsteDag, velden, swiftX, breek, dagEind, dagVolgorde, maakPdf, Weigering, MAANDEN };
+// wv4144 (2C76 e): één regel per post met een vraagteken ("- 5-10 Leverancier A B.V. € 123,45"), hooguit 12 (daarna "en N meer").
+function vraagLijst(regels) {
+  const v = (Array.isArray(regels) ? regels : []).filter(function (r) { return r && r.vraag; });
+  const l = v.slice(0, 12).map(function (r) {
+    return '- ' + dagNL(String(r.datum)).replace(/-\d{4}$/, '') + ' ' + (String(r.tegenpartij || r.omschrijving || 'onbekende tegenpartij').replace(/[\r\n]+/g, ' ').slice(0, 70)) +
+      ' € ' + eur(Math.round(Math.abs(Number(r.bedrag)) * 100)) + (r.stuk === 'ontbreekt' ? ' (stuk ontbreekt)' : '');
+  });
+  if (v.length > 12) l.push('- en ' + (v.length - 12) + ' meer (zie de PDF)');
+  return l;
+}
+// wv4144 (2C76 b): "zelfde patroon als vorige maand, behalve …". Puur; nu/toen = { maand, telling, regels } (maakAfschrift), toen mag null.
+// Vergelijkt het aantal posten per soort en de tegenpartijen (naam in kleine letters, spaties samengevoegd; geen fuzzy matching: tonen,
+// niet beslissen). Eigen rekening en bankkosten tellen niet mee als tegenpartij.
+const SOORT_MEERV = { salarissen: ['salaris', 'salarissen'], loonheffing: ['loonheffing', 'loonheffingen'], pensioen: ['pensioenpremie', 'pensioenpremies'],
+  overig: ['overige betaling', 'overige betalingen'], bankkosten: ['bankkostenpost', 'bankkostenposten'], eigen: ['overboeking eigen rekening', 'overboekingen eigen rekening'],
+  ontvangsten: ['ontvangst', 'ontvangsten'] };
+const SOORT_VOLG = ['salarissen', 'loonheffing', 'pensioen', 'ontvangsten', 'overig', 'bankkosten', 'eigen'];
+function vergelijk(nu, toen) {
+  if (!toen || !toen.telling || !nu || !nu.telling) return null;
+  const mt = String(MAANDEN[Number(String(toen.maand).slice(5, 7)) - 1] || '');
+  const ps = function (t, k) { return (t.per_soort[k] || { aantal: 0 }).aantal; };
+  const soorten = SOORT_VOLG.filter(function (k) { return ps(nu.telling, k) !== ps(toen.telling, k); })
+    .map(function (k) { return { soort: k, nu: ps(nu.telling, k), toen: ps(toen.telling, k) }; });
+  const naam = function (r) { return String(r.tegenpartij || '').toLowerCase().replace(/\s+/g, ' ').trim(); };
+  const partijen = function (rs) {
+    const m = new Map();
+    (rs || []).forEach(function (r) { if (r.soort === 'eigen' || r.soort === 'bankkosten') return; const n = naam(r); if (n && !m.has(n)) m.set(n, r.tegenpartij); });
+    return m;
+  };
+  const a = partijen(nu.regels), b = partijen(toen.regels);
+  const nieuw = Array.from(a.keys()).filter(function (k) { return !b.has(k); }).map(function (k) { return a.get(k); });
+  const weg = Array.from(b.keys()).filter(function (k) { return !a.has(k); }).map(function (k) { return b.get(k); });
+  const zelfde = !soorten.length && !nieuw.length && !weg.length;
+  const vast = ['salarissen', 'loonheffing', 'pensioen'].filter(function (k) { return ps(nu.telling, k) > 0 && ps(nu.telling, k) === ps(toen.telling, k); })
+    .map(function (k) { return SOORT_MEERV[k][1]; });
+  const opsom = function (l) { return l.length > 1 ? l.slice(0, -1).join(', ') + ' en ' + l[l.length - 1] : l[0] || ''; };
+  const delen = [];
+  if (soorten.length) delen.push(soorten.map(function (x) { return x.nu + ' ' + SOORT_MEERV[x.soort][x.nu === 1 ? 0 : 1] + ' (was ' + x.toen + ')'; }).join(', '));
+  if (nieuw.length) delen.push('nieuw: ' + nieuw.length + (nieuw.length === 1 ? ' tegenpartij (' : ' tegenpartijen (') + nieuw.slice(0, 5).join(', ') + (nieuw.length > 5 ? ', …' : '') + ')');
+  if (weg.length) delen.push('ontbreekt: ' + weg.length + (weg.length === 1 ? ' tegenpartij van ' + mt + ' (' : ' tegenpartijen van ' + mt + ' (') + weg.slice(0, 5).join(', ') + (weg.length > 5 ? ', …' : '') + ')');
+  const tekst = zelfde ? 'Zelfde patroon als ' + mt + (vast.length ? ': evenveel ' + opsom(vast) : '') + '; dezelfde tegenpartijen.'
+    : (vast.length && !soorten.some(function (x) { return ['salarissen', 'loonheffing', 'pensioen'].indexOf(x.soort) >= 0; }) ? 'Zelfde patroon als ' + mt + ' (evenveel ' + opsom(vast) + '), behalve: ' : 'Anders dan ' + mt + ': ') + delen.join('; ') + '.';
+  return { vorige_maand: toen.maand, zelfde: zelfde, soorten: soorten, nieuw: nieuw.slice(0, 20), ontbreekt: weg.slice(0, 20), tekst: tekst };
+}
+
+module.exports = { maakAfschrift, mailConcept, vraagLijst, vergelijk, isCompleet, maandNaam, laatsteDag, velden, swiftX, breek, dagEind, dagVolgorde, maakPdf, Weigering, MAANDEN };

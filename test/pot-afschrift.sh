@@ -104,7 +104,36 @@ weiger('ontbrekende post → saldi sluiten niet (met datum, zonder bedrag/naam)'
 weiger('lopende maand geweigerd', basis({ maand: vandaag.slice(0, 7), posten: [] }), /loopt nog/);
 weiger('eerste archiefmaand geweigerd', basis({ eersteMaand: M }), /begin van de bankhistorie/);
 weiger('rekening na de maand nog niet gelezen → geweigerd', basis({ laatstGezien: plusD(laatste(M), 1) + 'T10:00:00Z' }), /nog niet \(genoeg\) gelezen/);
-weiger('geen post na de maand en vóór de 10e → geweigerd', basis({ nieuwstePost: laatste(M), vandaag: plusD(laatste(M), 5) }), /nog niet \(genoeg\) gelezen/);
+weiger('geen post na de maand, vóór de 10e en niet na de 3e 12:00 gelezen → geweigerd', basis({ nieuwstePost: laatste(M), vandaag: plusD(laatste(M), 5), laatstGezien: plusD(laatste(M), 3) + 'T10:59:00Z' }), /nog niet \(genoeg\) gelezen/);
+// wv4144 (2C76 c): na de 3e 12:00 (11:00 UTC) gelezen = compleet, ook zonder post van ná de maand
+{ const r = P.maakAfschrift(basis({ nieuwstePost: laatste(M), vandaag: plusD(laatste(M), 3), laatstGezien: plusD(laatste(M), 3) + 'T11:00:00.000Z' }));
+  toets('wv4144: bank gelezen op de 3e 12:00 zonder post na de maand → compleet', r.ok === true, r.reden); }
+toets('wv4144: isCompleet — grens 3e 11:00Z, de 2e telt niet, lopende maand niet', P.isCompleet({ vandaag: plusD(laatste(M), 3), eind: laatste(M), laatstGezien: plusD(laatste(M), 3) + 'T11:00:00Z' }) === true &&
+  P.isCompleet({ vandaag: plusD(laatste(M), 3), eind: laatste(M), laatstGezien: plusD(laatste(M), 3) + 'T10:59:59Z' }) === false &&
+  P.isCompleet({ vandaag: plusD(laatste(M), 2), eind: laatste(M), laatstGezien: plusD(laatste(M), 2) + 'T18:00:00Z', nieuwstePost: plusD(laatste(M), 1) }) === true &&
+  P.isCompleet({ vandaag: laatste(M), eind: laatste(M), laatstGezien: plusD(laatste(M), 5) + 'T18:00:00Z' }) === false &&
+  P.isCompleet({ vandaag: plusD(laatste(M), 10), eind: laatste(M), laatstGezien: plusD(laatste(M), 2) + 'T08:00:00Z' }) === true &&
+  P.isCompleet({ vandaag: plusD(laatste(M), 4), eind: laatste(M), laatstGezien: 'onzin' }) === false);
+// wv4144 (2C76 a, b, e): regels = PDF-regels, vraagtekens, vergelijking, mail met de vraagtekenposten
+{ const r = P.maakAfschrift(basis());
+  toets('wv4144: regels = aantal posten, met soort/stuk/vraag, bedrag in euro', r.ok && r.regels.length === r.telling.aantal && r.regels.filter((x) => x.vraag).length === r.telling.stuk_open &&
+    r.regels.find((x) => x.tegenpartij === 'Leverancier A B.V.').bedrag === -123.45 && r.regels.find((x) => x.soort === 'bankkosten').tegenpartij === 'ABN AMRO Bank N.V.', r.regels);
+  const pdfTekst = (() => { const f = path.join(W, 'v.pdf'); fs.writeFileSync(f, r.pdf); const u = spawnSync('pdftotext', ['-layout', f, '-'], { encoding: 'utf8' }); return u.status === 0 ? u.stdout : null; })();
+  if (pdfTekst !== null) toets('wv4144: elke tegenpartij uit de regels staat ook in de PDF', r.regels.every((x) => !x.tegenpartij || pdfTekst.indexOf(x.tegenpartij.slice(0, 12)) >= 0));
+  const m = P.mailConcept(M, r.telling, { regels: r.regels });
+  toets('wv4144: mail noemt de post met ? (datum, tegenpartij, bedrag)', /Bij deze betaling staat een vraagteken/.test(m.bericht) && /- 5-\d+ Leverancier A B\.V\. € 123,45/.test(m.bericht) && !/Laat maar weten welke je nog mist\.$/m.test(m.bericht.split('\n')[0]), m.bericht);
+  toets('wv4144: mail zonder regels = oude zin (terugval)', /Bij één betaling staat een vraagteken/.test(P.mailConcept(M, r.telling).bericht));
+  const veel = Array.from({ length: 15 }, (_, i) => ({ datum: M + '-0' + (1 + (i % 9)), tegenpartij: 'Partij ' + i, bedrag: -1, vraag: true, stuk: '?' }));
+  toets('wv4144: vraagLijst hooguit 12 + "en 3 meer"', P.vraagLijst(veel).length === 13 && /en 3 meer/.test(P.vraagLijst(veel)[12]));
+  const zelf = P.vergelijk({ maand: M, telling: r.telling, regels: r.regels }, { maand: MV, telling: r.telling, regels: r.regels });
+  toets('wv4144: vergelijk gelijk → "Zelfde patroon als <maand>: evenveel salarissen, loonheffingen en pensioenpremies"', zelf.zelfde === true && /^Zelfde patroon als \w+: evenveel salarissen, loonheffingen en pensioenpremies; dezelfde tegenpartijen\.$/.test(zelf.tekst), zelf);
+  const minder = r.regels.filter((x) => x.tegenpartij !== 'PFZW').concat([{ tegenpartij: 'Nieuwe Partij B.V.', soort: 'overig' }]);
+  const ts = JSON.parse(JSON.stringify(r.telling)); ts.per_soort.pensioen.aantal = 0; ts.per_soort.overig.aantal += 1;
+  const anders = P.vergelijk({ maand: M, telling: ts, regels: minder }, { maand: MV, telling: r.telling, regels: r.regels });
+  toets('wv4144: vergelijk anders → soorten, nieuw en ontbreekt in de tekst', anders.zelfde === false && anders.nieuw[0] === 'Nieuwe Partij B.V.' && anders.ontbreekt[0] === 'PFZW' &&
+    /0 pensioenpremies \(was 1\)/.test(anders.tekst) && /nieuw: 1 tegenpartij \(Nieuwe Partij B\.V\.\)/.test(anders.tekst) && /ontbreekt: 1 tegenpartij van \w+ \(PFZW\)/.test(anders.tekst), anders);
+  toets('wv4144: vergelijk zonder vorige maand = null', P.vergelijk({ maand: M, telling: r.telling, regels: r.regels }, null) === null);
+}
 toets('geen post na de maand maar na de 10e → wel', P.maakAfschrift(basis({ nieuwstePost: laatste(M), vandaag: plusD(laatste(M), 10) })).ok === true);
 weiger('vorige maand veranderd (eindsaldo ≠ begin) → geweigerd met correctie-uitleg', basis({ vorigEind: 123 }), /veranderd sinds dat afschrift gemaakt is/);
 toets('vorige maand gelijk → wel', P.maakAfschrift(basis({ vorigEind: beginC })).ok === true);
@@ -242,7 +271,11 @@ weiger('IBAN ongeldig → geweigerd', basis({ rekening: { iban: 'x' } }), /geldi
   toets('pot-afschrift-maanden: dezelfde poort (niet compleet)', mnd0.ok && mnd0.maanden.find((x) => x.maand === M).compleet === false, mnd0.maanden && mnd0.maanden.find((x) => x.maand === M));
   stand(new Date().toISOString());
   const k1 = lez(['pot-afschrift', '--maand', M]);
-  toets('bank-lezer pot-afschrift: nieuw, bestanden, telling, mailconcept, geen posten in de uitvoer', k1.ok === true && k1.nieuw === true && k1.veranderd === false && k1.aantal === 8 && k1.bestanden.length === 2 && k1.mail && !JSON.stringify(k1).includes(MW[0]), k1);
+  // wv4144: de posten gaan sinds 2C76 wél naar de pod (regels, voor Davids scherm); de mail en de toelichting noemen alleen de ?-posten
+  toets('bank-lezer pot-afschrift: nieuw, bestanden, telling, mailconcept; regels + toelichting (wv4144), geen salarisnaam in mail of toelichting', k1.ok === true && k1.nieuw === true && k1.veranderd === false && k1.aantal === 8 && k1.bestanden.length === 2 && k1.mail &&
+    Array.isArray(k1.regels) && k1.regels.length === 8 && !k1.mail.bericht.includes(MW[0]) && typeof k1.toelichting === 'string' && !k1.toelichting.includes(MW[0]) && /Leverancier A/.test(k1.toelichting), k1);
+  const kr = lez(['pot-afschrift-regels', '--maand', M]);
+  toets('wv4144: pot-afschrift-regels = zelfde regels, actueel, schrijft niets', kr.ok === true && kr.regels.length === 8 && kr.actueel === true && kr.gemaakt === true, kr);
   const dir = path.join(BD, 'pot-afschriften', M);
   const mode = (p) => (fs.statSync(p).mode & 0o777).toString(8);
   toets('bestanden 600, mappen 700, sha in meta.json klopt', mode(path.join(BD, 'pot-afschriften')) === '700' && mode(dir) === '700' && mode(path.join(dir, 'POT-' + M + '.sta')) === '600' && mode(path.join(dir, 'meta.json')) === '600' &&
