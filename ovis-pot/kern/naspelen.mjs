@@ -72,9 +72,12 @@ export function bewakingJaar(a) {
   const bankEind = a.bankEind || (bankE.length ? bankE.map((b) => b.datum).sort().at(-1) : null);
   const tot = volleMaanden({ jaar: J, bankTot: a.bankTot || null, bankEind });
   const dekking = a.bankTot || bankEind;
-  const basis = { entiteit: E, jaar: J, bron: a.bron, begroting: B, bank_tot: dekking && dekking.startsWith(String(J)) ? dekking : null, bank_tot_bron: a.bankTot ? "ophaaldag" : "laatste post" };
-  if (!(B > 0)) return { ...basis, ok: false, reden: `geen begroting voor ${J}`, signaal: null, tot_maand: 0, maanden: [] };
   const kJ = kostenPerMaand(bankE, E, J);
+  // wv4146 (2C68 c): de kosten volgens de bank over de volle maanden (dezelfde som als echt_tot_nu), ook zonder begroting; de
+  // januari-ronde zet dit naast de kosten die David uit de boekhouding intypt (alleen ter controle, niets past zich aan)
+  const bankJaar = { kosten: rond2(kJ.slice(0, tot).reduce((x, y) => x + rond2(y), 0)), maanden: tot };
+  const basis = { entiteit: E, jaar: J, bron: a.bron, begroting: B, bank_tot: dekking && dekking.startsWith(String(J)) ? dekking : null, bank_tot_bron: a.bankTot ? "ophaaldag" : "laatste post", bank_jaar: bankJaar };
+  if (!(B > 0)) return { ...basis, ok: false, reden: `geen begroting voor ${J}`, signaal: null, tot_maand: 0, maanden: [] };
   const vorig = bankE.some((b) => String(b.datum).startsWith(String(J - 1))) ? kostenPerMaand(bankE, E, J - 1) : null;
   const s = kostenSignaal({ entiteit: E, begroting: B, vakantiegeld: Number(a.vakantiegeld) || 0, eindejaar: Number(a.eindejaar) || 0,
     werkelijk: kJ.map((x, i) => (i < tot ? rond2(x) : null)), profiel: vorig, buffer: Number(a.buffer) || 0 });
