@@ -570,6 +570,8 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
       && k2.lopend[0].omschrijving === null && /onderweg naar/.test(s2) && /Toetsenbord K120 en USB-C kabel 2m/.test(s2), s2);
     const k3 = P.kaal({ lopend: [{ winkel: 'Proefwinkel', omschrijving: 'Bezorgd op Laan van Proefvoort 12', stand: 'bezorgd' }, { winkel: 'Proefwinkel', onderwerp: 'Proefkade 3a ontvangen', stand: 'bezorgd' },
       { winkel: 'Proefwinkel', omschrijving: 'Proeftelefoon 16 Pro 256 GB', stand: 'onderweg' }] });
+    const k4 = P.kaal({ lopend: [{ winkel: 'Proefwinkel', onderwerp: 'Bezorgd op Proefdam 12, Proefstad', stand: 'bezorgd' }, { winkel: 'Proefwinkel', onderwerp: 'Je bestelling Proefding is verzonden', stand: 'onderweg' }] });
+    toets('5 kaal: onderwerp met een los getal (huisnummer) = weg; onderwerp zonder getal blijft', k4.lopend[0].onderwerp === null && k4.lopend[1].onderwerp === 'Je bestelling Proefding is verzonden', k4);
     toets('5 kaal: "Laan van … 12" en "…kade 3a" = veld weg; modelnummer blijft', k3.lopend[0].omschrijving === null && k3.lopend[1].onderwerp === null && k3.lopend[2].omschrijving === 'Proeftelefoon 16 Pro 256 GB', k3);
     toets('5 kaal: lege of kapotte invoer = lege lijsten', JSON.stringify(P.kaal(null)) === JSON.stringify({ ok: true, lopend: [], eerder: [], laatste_ronde: null, ronde_fout: false }));
     const b = fs.readFileSync('server.js', 'utf8'), st = b.indexOf("if (actie === 'pakjes')"), blok = b.slice(st, b.indexOf("if (actie === 'facturen')", st));

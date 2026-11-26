@@ -1011,7 +1011,10 @@ function kaal(body) {
     const u = t.replace(/\S+@\S+/g, '…').replace(/[A-Za-z]*\d[\dA-Za-z-]{4,}/g, (m) => ((m.match(/\d/g) || []).length >= 5 ? '…' : m)).replace(/\s+/g, ' ').trim();
     return u ? u.slice(0, 120) : null;
   };
-  const rij = (w) => ({ winkel: schoon(w.winkel), omschrijving: schoon(w.omschrijving), onderwerp: schoon(w.onderwerp), vervoerder: w.vervoerder || null,
+  // Het onderwerp is vrije mailtekst (Codex ronde 3 MOET 2: "Bezorgd op Dam 12, Amsterdam"): met een los getal van 1-4 cijfers valt het
+  // helemaal weg. De omschrijving is de producttitel die herken() uit een vaste vorm haalt (Amazon "Besteld: ‘…’") en houdt zijn getallen.
+  const onderwerp = (t) => (typeof t === 'string' && /(^|[^\p{L}\d])\d{1,4}[a-zA-Z]?([^\p{L}\d]|$)/u.test(t) ? null : schoon(t));
+  const rij = (w) => ({ winkel: schoon(w.winkel), omschrijving: schoon(w.omschrijving), onderwerp: onderwerp(w.onderwerp), vervoerder: w.vervoerder || null,
     stand: w.stand || null, eerste: w.eerste || null, laatst: w.laatst || null, bezorgd_op: w.bezorgd_op || null, verwacht_dag: w.verwacht_dag || null, verborgen: !!w.verborgen });
   const lijst = (x) => (Array.isArray(x) ? x : []).filter((w) => w && typeof w === 'object').map(rij);
   return { ok: true, lopend: lijst(b.lopend), eerder: lijst(b.eerder), laatste_ronde: b.laatste_ronde || null, ronde_fout: !!b.ronde_fout };
