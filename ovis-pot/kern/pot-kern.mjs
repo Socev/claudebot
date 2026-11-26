@@ -415,6 +415,18 @@ export function notaDatumVoor(jaar, maand, dag) {
   if (maand === 1 || dag === 1) return `${jaar}-${p2(maand)}-01`;
   return `${maand === 1 ? jaar - 1 : jaar}-${p2(maand - 1)}-${p2(dag)}`;
 }
+/** Standaard notadatum (C60/L1): de notadag, maar nooit eerder dan vandaag — opnieuw maken op 20 maart geeft 20 maart, niet 25 februari. */
+export function notaDatumStandaard(jaar, maand, dag, vandaag) {
+  const d = notaDatumVoor(jaar, maand, dag);
+  return vandaag && /^\d{4}-\d{2}-\d{2}$/.test(vandaag) && vandaag > d ? vandaag : d;
+}
+/** Toelichting bij de inhaalregel: over welke maanden het verschil gaat en over hoeveel maanden het verdeeld is. */
+export function inhaalUitleg(gemaakt, inhaal) {
+  const lijst = (ms) => { const w = ms.map((m) => MAANDEN[m - 1]); return w.length > 1 ? `${w.slice(0, -1).join(", ")} en ${w.at(-1)}` : w.join(""); };
+  const over = (inhaal || []).filter((x) => x !== 0).length;
+  return `Het jaarplan is gewijzigd nadat de nota${gemaakt.length === 1 ? "" : "'s"} van ${lijst(gemaakt)} al gemaakt ${gemaakt.length === 1 ? "was" : "waren"}; ` +
+    `het verschil over ${gemaakt.length === 1 ? "die maand" : "die maanden"} is verdeeld over ${over} ${over === 1 ? "maand" : "maanden"}.`;
+}
 /** Vervaldag van een maandnota: de 15e van de maand zelf, en altijd minstens 14 dagen na de notadatum (januari: 14 dagen). */
 export function vervaldagVoor(jaar, maand, datum) {
   const min = plusDagen(datum, 14);
@@ -855,24 +867,38 @@ export function kasstroom({ jaar, startsaldo, stromen, ondergrens = 0, bufferSta
  * @param {{ oud: {praktijk_id:string, maanden:number[]}[], nieuw: {praktijk_id:string, aandeel:number, maanden:number[]}[], gemaakt: number[], keuze: "verdelen"|"laten" }} a
  */
 export function herzien({ oud, nieuw, gemaakt, keuze }) {
-  const vast = new Set(gemaakt);
-  const open = Array.from({ length: 12 }, (_, i) => i + 1).filter((m) => !vast.has(m));
+  // gemaakt: lijst maanden (geldt voor alle praktijken) of per praktijk { praktijk_id: [maanden] } (C60 wv4142: een gecrediteerde of vervallen
+  // nota van één praktijk maakt die maand alleen voor die praktijk weer open)
+  const perPraktijk = gemaakt && !Array.isArray(gemaakt);
+  const vastVan = (id) => new Set(perPraktijk ? gemaakt[id] || [] : gemaakt || []);
+  const alle = Array.from({ length: 12 }, (_, i) => i + 1);
   const ids = [...new Set([...oud.map((x) => x.praktijk_id), ...nieuw.map((x) => x.praktijk_id)])].sort();
+  const openOoit = new Set();
   const praktijken = ids.map((id) => {
     const o = oud.find((x) => x.praktijk_id === id)?.maanden || Array(12).fill(0);
     const n = nieuw.find((x) => x.praktijk_id === id)?.maanden || Array(12).fill(0);
-    let maanden;
-    if (keuze === "laten" || !open.length) maanden = o.slice();
+    const vast = vastVan(id);
+    const open = alle.filter((m) => !vast.has(m));
+    for (const m of open) openOoit.add(m);
+    let maanden, inhaal = Array(12).fill(0);
+    if (keuze === "laten") maanden = o.slice();
     else {
+      // verdelen: gemaakte maanden blijven, open maanden volgen het nieuwe plan; het verschil over de gemaakte maanden alleen in open maanden
+      // waarin de praktijk in het nieuwe plan meedoet (bedrag ≠ 0; oude bevinding 3) — is die er niet, dan gaat het naar de afrekening
       const achter = [...vast].reduce((s, m) => s + (n[m - 1] - o[m - 1]), 0);
-      const deel = Math.trunc(achter / open.length);
-      maanden = o.map((x, i) => (vast.has(i + 1) ? x : n[i] + deel));
-      maanden[open.at(-1) - 1] += achter - deel * open.length;
+      const mee = open.filter((m) => n[m - 1] !== 0);
+      maanden = o.map((x, i) => (vast.has(i + 1) ? x : n[i]));
+      if (mee.length && achter) {
+        const deel = Math.trunc(achter / mee.length);
+        for (const m of mee) inhaal[m - 1] = deel;
+        inhaal[mee.at(-1) - 1] += achter - deel * mee.length;
+        for (const m of mee) maanden[m - 1] += inhaal[m - 1];
+      }
     }
     const nieuwJaar = n.reduce((s, x) => s + x, 0), plan = maanden.reduce((s, x) => s + x, 0);
-    return { praktijk_id: id, maanden, oud_jaar: o.reduce((s, x) => s + x, 0), nieuw_jaar: nieuwJaar, jaar: plan, naar_afrekening: plan - nieuwJaar };
+    return { praktijk_id: id, maanden, inhaal, gemaakt: [...vast].sort((a, c) => a - c), open_maanden: open, oud_jaar: o.reduce((s, x) => s + x, 0), nieuw_jaar: nieuwJaar, jaar: plan, naar_afrekening: plan - nieuwJaar };
   });
-  return { keuze, open_maanden: open, praktijken };
+  return { keuze, open_maanden: alle.filter((m) => openOoit.has(m)), praktijken };
 }
 
 // ---------- nota's ----------
@@ -895,9 +921,13 @@ export function controleerStukTekst(tekst) {
  * (apart, telt niet mee in de afrekening), een correctie (SLOEL-afrekening op de eerstvolgende huurnota) en een verrekening van een
  * tegoed. Bedrag = som van de regels; een negatief totaal staat in woorden ("u krijgt € x terug").
  */
-export function maakMaandNota({ entiteit, jaar, maand, praktijk_id, nummer, datum, vervaldag, debiteur, bijdrage, buffer = 0, correcties = [], verrekeningen = [], hoe = "" }) {
+export function maakMaandNota({ entiteit, jaar, maand, praktijk_id, nummer, datum, vervaldag, debiteur, bijdrage, inhaal = null, buffer = 0, correcties = [], verrekeningen = [], hoe = "" }) {
   const naam = MAANDEN[maand - 1];
-  const regels = [{ soort: "bijdrage", omschrijving: entiteit === "SLOEL" ? `Doorbelaste huur ${naam} ${jaar}` : `Bijdrage ${naam} ${jaar}`, bedrag: rond2(bijdrage), toelichting: hoe }];
+  // inhaal (C60, oude bevinding 2): na een herziening het verschil over de al gemaakte maanden als eigen regel; ook soort 'bijdrage', zodat
+  // 'gevraagd' en de afrekening gelijk blijven. De eerste regel is dan de gewone maand volgens het nieuwe plan (past bij de uitleg).
+  const inh = inhaal && Math.abs(Number(inhaal.bedrag) || 0) >= 0.005 ? inhaal : null;
+  const regels = [{ soort: "bijdrage", omschrijving: entiteit === "SLOEL" ? `Doorbelaste huur ${naam} ${jaar}` : `Bijdrage ${naam} ${jaar}`, bedrag: rond2(bijdrage - (inh ? Number(inh.bedrag) : 0)), toelichting: hoe }];
+  if (inh) regels.push({ soort: "bijdrage", omschrijving: `Verrekening wijziging jaarplan ${jaar} (eerdere maanden)`, bedrag: rond2(inh.bedrag), toelichting: inh.toelichting || "" });
   if (buffer) regels.push({ soort: "buffer", omschrijving: buffer > 0 ? `Opbouw buffer ${jaar} (vast tegoed, krijgt u terug bij uittreden)` : `Herverdeling buffer ${jaar}: u krijgt terug`, bedrag: rond2(buffer) });
   for (const c of correcties) regels.push({ soort: "correctie", omschrijving: c.omschrijving, bedrag: rond2(c.bedrag), toelichting: c.toelichting || "", correctie_id: c.id ?? null });
   for (const v of verrekeningen) regels.push({ soort: "verrekening", omschrijving: v.omschrijving, bedrag: rond2(v.bedrag), nota_id: v.nota_id ?? null });

@@ -1,4 +1,4 @@
-// GEGENEREERD uit Socev/ovis-pot eee9baf1006419f12993704ac72bc7b1d4c643bf (scripts/pod-bundel.mjs); niet met de hand wijzigen.
+// GEGENEREERD uit Socev/ovis-pot ba6f3009dbd72ee7d6ad743c92c99d4bbda687b6 (scripts/pod-bundel.mjs); niet met de hand wijzigen.
 // OVIS POT — de API (lezen en de instellingen schrijven). Los van Cloudflare, zodat de toets hem met een lokale SQLite kan draaien.
 // Rekenen doet de rekenkern (kern/pot-kern.mjs) in de browser; de API levert alleen gegevens en bewaart wijzigingen.
 // Elke schrijfactie is één batch (atomair) met een regel in `logboek` (wie, wat, oud → nieuw).
@@ -350,6 +350,20 @@ export async function behandel(db          , methode        , pad        , zoek 
 const json = (x         ) => JSON.stringify(x);
 /** Telt als gemaakte maandnota (niet opnieuw maken, R9 'gemaakt'): niet vervallen en niet gecrediteerd (wv3071/wv3079). */
 const TELT_ALS_GEMAAKT = (n                         ) => n.status !== "vervallen" && n.status !== "gecrediteerd";
+/** Per praktijk de maanden met een meetellende maandnota uit deze app (R9 herziening, C60 wv4142). */
+function gemaaktPerPraktijk(notas                           )                           {
+  const uit                           = {};
+  for (const n of notas) if (n.soort === "maand" && n.bron === "ovis-pot" && TELT_ALS_GEMAAKT(n)) {
+    const m = Number(String(n.periode).slice(5, 7)), l = (uit[String(n.praktijk_id)] ||= []);
+    if (!l.includes(m)) l.push(m);
+  }
+  for (const l of Object.values(uit)) l.sort((a, c) => a - c);
+  return uit;
+}
+/** Vaste sleutel "praktijk:MM,…" (gesorteerd); GEMAAKT_SLEUTEL rekent dezelfde in SQL (bind: entiteit, jaar) voor de controle in de batch. */
+const gemaaktSleutel = (per                          ) => Object.entries(per).flatMap(([pid, ms]) => ms.map((m) => `${pid}:${String(m).padStart(2, "0")}`)).sort().join(",");
+const GEMAAKT_SLEUTEL = "(select coalesce(group_concat(k, ','), '') from (select distinct praktijk_id || ':' || substr(periode, 6, 2) as k from nota " +
+  "where entiteit=? and jaar=? and soort='maand' and bron='ovis-pot' and status not in ('vervallen', 'gecrediteerd') order by k))";
 const plusDag = (d        , n        ) => K.plusDagen(d, n);
 
 /** Alles wat fase 2 voor jaar J nodig heeft (personeel, buffer, jaarplannen, nota's, correcties, ronde). */
@@ -949,12 +963,19 @@ export async function schrijfJaarronde(db          , route        , b        , w
       if (vast) {
         const keuzeR9 = keuze(b.keuze, "keuze (verdelen of laten)", ["verdelen", "laten"]         );
         const oudR = (d.regels                             ).filter((x) => x.jaarplan_id === vast.id).map((x) => ({ praktijk_id: String(x.praktijk_id), maanden: JSON.parse(String(x.maanden))            , buffer: JSON.parse(String(x.buffer))            , aandeel: Number(x.aandeel), stand: Number(x.stand) }));
-        const gemaakt = [...new Set((d.notas                             ).filter((n) => n.entiteit === e && n.jaar === J && n.soort === "maand" && n.bron === "ovis-pot" && TELT_ALS_GEMAAKT(n)).map((n) => Number(String(n.periode).slice(5, 7))))];
-        const h = K.herzien({ oud: oudR, nieuw: praktijken, gemaakt, keuze: keuzeR9 });
-        herz = { keuze: keuzeR9, gemaakt, open_maanden: h.open_maanden, naar_afrekening: h.praktijken.map((p) => ({ praktijk_id: p.praktijk_id, bedrag: p.naar_afrekening })) };
+        // gemaakt per praktijk (C60 wv4142): een gecrediteerde of vervallen nota maakt die maand alleen voor die praktijk weer open
+        const gemaaktPer = gemaaktPerPraktijk((d.notas                             ).filter((n) => n.entiteit === e && n.jaar === J));
+        const gemaakt = [...new Set(Object.values(gemaaktPer).flat())].sort((a, c) => a - c);
+        const h = K.herzien({ oud: oudR, nieuw: praktijken, gemaakt: gemaaktPer, keuze: keuzeR9 });
+        const inhaal                           = {};
+        for (const p of h.praktijken) if (p.inhaal.some((x) => x !== 0)) inhaal[p.praktijk_id] = p.inhaal;
+        herz = { keuze: keuzeR9, gemaakt, gemaakt_per: gemaaktPer, open_maanden: h.open_maanden, inhaal,
+          naar_afrekening: h.praktijken.map((p) => ({ praktijk_id: p.praktijk_id, bedrag: p.naar_afrekening })) };
+        // verdelen: de open maanden volgen het nieuwe plan, dus ook het nieuwe aandeel en de nieuwe stand (oude bevinding 2); laten: alles blijft oud
         praktijken = h.praktijken.map((p) => {
           const o = oudR.find((x) => x.praktijk_id === p.praktijk_id), n = praktijken.find((x) => x.praktijk_id === p.praktijk_id);
-          return { praktijk_id: p.praktijk_id, aandeel: o?.aandeel ?? n?.aandeel ?? 0, stand: o?.stand ?? n?.stand ?? null, maanden: p.maanden, buffer: o?.buffer || n?.buffer || Array(12).fill(0) };
+          const [eerst, dan] = keuzeR9 === "verdelen" ? [n, o] : [o, n];
+          return { praktijk_id: p.praktijk_id, aandeel: eerst?.aandeel ?? dan?.aandeel ?? 0, stand: eerst?.stand ?? dan?.stand ?? null, maanden: p.maanden, buffer: o?.buffer || n?.buffer || Array(12).fill(0) };
         });
       }
       const versie = 1 + Math.max(0, ...(d.jaarplannen                             ).filter((p) => p.entiteit === e).map((p) => Number(p.versie)));
@@ -984,16 +1005,17 @@ export async function schrijfJaarronde(db          , route        , b        , w
       const nieuwer = await rijen(db, "select 1 x from jaarplan where entiteit=? and jaar=? and versie>?", p.entiteit, p.jaar, p.versie);
       if (nieuwer.length) throw new Fout(409, "er is een nieuwere versie; stel die vast");
       // een herziening (R9) gaat uit van de nota's die er bij het bewaren waren; zijn er sindsdien nota's bijgekomen, dan opnieuw bewaren (Codex M4)
-      const herz = JSON.parse(String(p.grondslag)).herziening                                ;
-      const nu = (await rijen                     (db, "select distinct periode from nota where entiteit=? and jaar=? and soort='maand' and bron='ovis-pot'", p.entiteit, p.jaar)).map((x) => Number(String(x.periode).slice(5, 7))).sort((a, c) => a - c);
-      const toen = (herz?.gemaakt || []).slice().sort((a, c) => a - c);
-      if ((herz || nu.length) && json(nu) !== json(toen)) throw new Fout(409, "er zijn sinds het bewaren nota's gemaakt; bewaar het jaarplan opnieuw");
+      // per praktijk en alleen meetellende nota's (C60 wv4142; vervallen en gecrediteerd tellen niet, zoals bij het bewaren: M2)
+      const herz = JSON.parse(String(p.grondslag)).herziening                                                                         ;
+      const nu = (await rijen               (db, `select ${GEMAAKT_SLEUTEL} as k`, p.entiteit, p.jaar))[0]?.k ?? "";
+      const toen = herz ? (herz.gemaakt_per ? gemaaktSleutel(herz.gemaakt_per) : null) : "";
+      if (toen === null || nu !== toen) throw new Fout(409, "er zijn sinds het bewaren nota's gemaakt of vervallen; bewaar het jaarplan opnieuw");
       // atomair: alleen als dit plan nog concept is, vervalt het oude en wordt dit vastgesteld (Codex M5)
       await db.batch([
         db.prepare("update jaarplan set status='vervallen' where entiteit=? and jaar=? and status='vastgesteld' and exists (select 1 from jaarplan where id=? and status='concept') " +
-          "and (select count(distinct periode) from nota where entiteit=? and jaar=? and soort='maand' and bron='ovis-pot') = ?").bind(p.entiteit, p.jaar, id, p.entiteit, p.jaar, toen.length),
+          `and ${GEMAAKT_SLEUTEL} = ?`).bind(p.entiteit, p.jaar, id, p.entiteit, p.jaar, toen),
         db.prepare("update jaarplan set status='vastgesteld', vastgesteld_op=strftime('%Y-%m-%dT%H:%M:%SZ','now') where id=? and status='concept' " +
-          "and (select count(distinct periode) from nota where entiteit=? and jaar=? and soort='maand' and bron='ovis-pot') = ?").bind(id, p.entiteit, p.jaar, toen.length),
+          `and ${GEMAAKT_SLEUTEL} = ?`).bind(id, p.entiteit, p.jaar, toen),
         log(db, wie, "jaarplan", `${p.entiteit}/${p.jaar}/v${p.versie}`, "vastgesteld", null, { totaal: p.totaal }),
       ]);
       const na = (await rijen                    (db, "select status from jaarplan where id=?", id))[0];
@@ -1011,9 +1033,10 @@ export async function schrijfJaarronde(db          , route        , b        , w
       // anders de 15e en minstens 14 dagen na de notadatum (wv2795)
       const instRij = await rijen                                     (db, "select sleutel, waarde from instelling where sleutel = 'notadag' or sleutel in ('notadag_POT', 'notadag_KM', 'notadag_SLOEL')");
       const vanaf = await overnameVanaf(db);
+      const vandaag = (await rijen               (db, "select date('now') as d"))[0].d;   // zonder datum: niet terugdateren (C60/L1); de pod geeft zelf de NL-datum mee
       const datumVan                         = {}, vervalVan                         = {};
       for (const e of alleen) {
-        const dat = datum(b.datum ?? K.notaDatumVoor(J, m, K.notaDag(instRij, e)), "notadatum") ;
+        const dat = datum(b.datum ?? K.notaDatumStandaard(J, m, K.notaDag(instRij, e), vandaag), "notadatum") ;
         if (dat < vanaf) throw new Fout(409, `nota's maakt de app pas vanaf ${vanaf}; ${J < 2027 ? "2026 vroeg David zelf" : "eerder niet"}`);
         const verval = datum(b.vervaldag ?? K.vervaldagVoor(J, m, dat), "vervaldag") ;
         if (verval < dat) throw new Fout(400, "vervaldag ligt vóór de notadatum");
@@ -1036,6 +1059,8 @@ export async function schrijfJaarronde(db          , route        , b        , w
           const pid = String(r.praktijk_id), periode = `${J}-${String(m).padStart(2, "0")}`;
           if ((d.notas                             ).some((n) => n.entiteit === e && n.praktijk_id === pid && n.soort === "maand" && n.periode === periode && TELT_ALS_GEMAAKT(n))) continue;
           const bijdrage = Number(JSON.parse(String(r.maanden))[m - 1]), buf = Number(JSON.parse(String(r.buffer))[m - 1]);
+          const inh = Number(grond.herziening?.inhaal?.[pid]?.[m - 1] || 0);   // herziening: verschil over de al gemaakte maanden (oude bevinding 2)
+          const inhaal = inh ? { bedrag: inh, toelichting: K.inhaalUitleg(grond.herziening?.gemaakt_per?.[pid] || [], grond.herziening.inhaal[pid]) } : null;
           const corr = (d.correcties                             ).filter((c) => c.entiteit === e && c.praktijk_id === pid && c.nota_id == null);
           const teg = tegoeden.filter((n) => n.entiteit === e && n.praktijk_id === pid)
             .map((n) => ({ id: Number(n.id), nummer: String(n.nummer), soort: String(n.soort), bedrag: Number(n.bedrag), tegoed: Number(n.tegoed || 0), verrekend: Number(n.verrekend || 0), datum: String(n.datum) }));
@@ -1048,7 +1073,7 @@ export async function schrijfJaarronde(db          , route        , b        , w
           if (!deb) throw new Fout(409, `geen praktijkgegevens (debiteur) voor ${pid} op ${peil}: vul eerst een praktijkversie in`);
           const nummer = K.volgendNummer(nummers, J);
           nummers.push(nummer);
-          const n = K.maakMaandNota({ entiteit: e, jaar: J, maand: m, praktijk_id: pid, nummer, datum: dat, vervaldag: verval, debiteur: deb, bijdrage, buffer: buf,
+          const n = K.maakMaandNota({ entiteit: e, jaar: J, maand: m, praktijk_id: pid, nummer, datum: dat, vervaldag: verval, debiteur: deb, bijdrage, inhaal, buffer: buf,
             correcties: corr.map((c) => ({ id: Number(c.id), bedrag: Number(c.bedrag), omschrijving: String(c.omschrijving), toelichting: String(c.toelichting || "") })), verrekeningen: verr,
             hoe: `${grond.patroon?.hoe || ""}; uw aandeel ${(Number(r.aandeel) * 100).toFixed(3).replace(".", ",")} % (${grond.aandelen?.uitleg || ""})` });
           // alleen uit een plan dat bij het opslaan nog vastgesteld is; de neveneffecten alleen als de nota er echt staat (Codex r2 M2)
