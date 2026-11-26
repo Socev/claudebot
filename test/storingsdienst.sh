@@ -53,7 +53,7 @@ function rij(id, t, tekst, bron) { return { id: id, createdAt: new Date(t).toISO
   toets('1c na 16 min één onderzoek', w.claude.length === 1);
   toets('1d MOET 1: vrije fouttekst niet naar het model', !/Jansen|jan@/.test(w.claude[0]) && /vrije fouttekst weggelaten/.test(w.claude[0]));
   toets('2a ZELFHERSTEL + latere geslaagde run + niets gemist → opgelost en kaart af', w.af.length === 1 && w.af[0] === 'k-BIDXbs6nAN3vWLcJ|Label: +Processed|anders');
-  toets('2b één bericht met drie regels', w.bericht.length === 1 && /Oorzaak: /.test(w.bericht[0].t) && /Gevolg voor jou: /.test(w.bericht[0].t) && /Afloop: Liep om .* weer goed en die run nam/.test(w.bericht[0].t) && /Opgelost/.test(w.bericht[0].t));
+  toets('2b één bericht met drie regels', w.bericht.length === 1 && /Oorzaak: /.test(w.bericht[0].t) && /Gevolg voor jou: Nieuwe mail komt later in je Second Brain/.test(w.bericht[0].t) && /Ingehaald: Ja, 10:20 — Liep om .* weer goed en die run nam/.test(w.bericht[0].t) && /Opgelost/.test(w.bericht[0].t));
   let o = d.voorKaart('k-BIDXbs6nAN3vWLcJ|Label: +Processed|anders', 6);
   toets('2c kaart krijgt het onderzoek', o && o.oorzaak && o.afloop && o.uitkomst === 'opgelost');
   // 3 ruisregel: dezelfde storing 3 u later
@@ -87,12 +87,16 @@ function rij(id, t, tekst, bron) { return { id: id, createdAt: new Date(t).toISO
   toets('6a bundel: twee alarmen, één modelbeurt, één bericht', w.claude.length === 1 && w.bericht.length === 1 && (w.bericht[0].t.match(/Uitgezocht:/g) || []).length === 2);
   toets('6b kapot + handeling → Voor jou-kaart binnen de grenzen', w.vj.length === 1 && w.vj[0].titel.length <= 90 && w.vj[0].waarom.length <= 400 && w.vj[0].soort === 'doen' && /opnieuw in/.test(w.vj[0].stappen[0]));
   if (process.env.DBG) console.log(JSON.stringify(w.box), JSON.stringify(w.vj.map(k => k.titel)));
-  toets('6c kapot zonder handeling → één box-rij', w.box.length === 1 && /#storingsdienst/.test(w.box[0]) && /AI - B/.test(w.box[0]));
+  const kb = w.box.filter(function (b) { return /nog kapot/.test(b); });
+  toets('6c kapot zonder handeling → één box-rij', kb.length === 1 && /#storingsdienst/.test(kb[0]) && /AI - B/.test(kb[0]));
+  toets('6c2 wv4120: niet in de gevolgtabel → één box-rij voor beide', w.box.filter(function (b) { return /niet in de gevolgtabel/.test(b) && /WFZ1/.test(b) && /WFZ2/.test(b); }).length === 1);
   // 6d golf: drie alarmen die David iets laten missen → één Voor jou-kaart
-  w = wereld({ runs: { G1: [{ id: 9, status: 'success', startedAt: '2026-11-21T09:10:00Z' }], G2: [{ id: 9, status: 'success', startedAt: '2026-11-21T09:10:00Z' }], G3: [{ id: 9, status: 'success', startedAt: '2026-11-21T09:10:00Z' }] },
+  // wv4120: alleen automatiseringen die Davids dag raken (vaste tabel): de drie nachtwachters
+  const GW = ['2sGqWO46keLSzNQw', 's671dCP1OdjwzBGU', 'ExKOlDQ012gyJRuB'];
+  w = wereld({ runs: { '2sGqWO46keLSzNQw': [{ id: 9, status: 'success', startedAt: '2026-11-21T09:10:00Z' }], s671dCP1OdjwzBGU: [{ id: 9, status: 'success', startedAt: '2026-11-21T09:10:00Z' }], ExKOlDQ012gyJRuB: [{ id: 9, status: 'success', startedAt: '2026-11-21T09:10:00Z' }] },
     antwoord: function (n) { const a = []; for (let i = 1; i <= n; i++) a.push({ nr: i, oorzaak: 'Pod even weg.', gevolg: 'Geen nachtcontrole ' + i + '.', mist_david: true, handeling_david: '' }); return { ok: true, data: { alarmen: a } }; } });
   w.staat = { watermerk: 0 };
-  w.rijen = [1, 2, 3].map(function (i) { return rij(i, w.t, fmTekst('AI - W' + i, 'G' + i, 'Start run', 'Timeout', 10 + i)); });
+  w.rijen = [1, 2, 3].map(function (i) { return rij(i, w.t, fmTekst('AI - W' + i, GW[i - 1], 'Start run', 'Timeout', 10 + i)); });
   d = w.dienst(); await d.tik(); w.t += 16 * MIN; await d.tik();
   toets('6d golf: één Voor jou-kaart voor drie gemiste dingen', w.vj.length === 1 && w.vj[0].stappen.length === 4 && /Storingen \(3\)/.test(w.vj[0].titel) && w.vj[0].waarom.length <= 400);
   // 6e n8n-id's lopen niet gelijk met de tijd: een oudere run met een hoger id telt niet als 'erna'
@@ -184,6 +188,91 @@ function rij(id, t, tekst, bron) { return { id: id, createdAt: new Date(t).toISO
   w.t += 11 * MIN; const r2 = await d.tik();
   toets('14 tik terwijl een onderzoek loopt: geen tweede', r2 && r2.stil === 'loopt' && w.claude.length === 1);
   los({ ok: true, data: { alarmen: [{ nr: 1, oorzaak: 'x', gevolg: 'y', mist_david: false, handeling_david: '' }] } }); await p1;
+
+  // ── wv4120 (3C107/3C108) ──
+  const GV = require(path.join(path.dirname(MOD), 'storing-gevolg.js'));
+  // 15 let op alleen bij een automatisering die Davids dag raakt
+  const mistAlles = function (n) { const a = []; for (let i = 1; i <= n; i++) a.push({ nr: i, oorzaak: 'Dienst weg.', gevolg: 'Je mist iets.', mist_david: true, handeling_david: '' }); return { ok: true, data: { alarmen: a, voorval_oorzaak: '' } }; };
+  w = wereld({ antwoord: mistAlles }); w.staat = { watermerk: 0 };
+  w.rijen = [rij(1, w.t, fmTekst('AI - Onbekend', 'ONBEKEND1', 'k', 'Timeout', 600))];
+  d = w.dienst(); await d.tik(); w.t += 16 * MIN; await d.tik();
+  toets('15a onbekende automatisering, model zegt "mist": geen let op', w.vj.length === 0 && /Gevolg voor jou: Je mist iets/.test(w.bericht[0].t));
+  w = wereld({ antwoord: mistAlles }); w.staat = { watermerk: 0 };
+  w.rijen = [rij(1, w.t, fmTekst('AI - Agenda-Wachter', '2sGqWO46keLSzNQw', 'Start run', 'Timeout', 601))];
+  d = w.dienst(); await d.tik(); w.t += 16 * MIN; await d.tik();
+  toets('15b nachtwachter (raakt dag) niet ingehaald → let op in Voor jou', w.vj.length === 1 && /^Let op: Agenda-Wachter — De nachtcontrole/.test(w.vj[0].titel) && w.vj[0].titel.length <= 90 && /Ingehaald: Nee/.test(w.vj[0].waarom));
+  toets('15c gevolg uit de tabel, niet van het model', /Gevolg voor jou: De nachtcontrole van je agenda/.test(w.bericht[0].t) && !/Je mist iets/.test(w.bericht[0].t));
+  const noModel = function (n) { const a = []; for (let i = 1; i <= n; i++) a.push({ nr: i, oorzaak: 'x', gevolg: 'Niets dat je merkt.', mist_david: false, handeling_david: '' }); return { ok: true, data: { alarmen: a, voorval_oorzaak: '' } }; };
+  w = wereld({ antwoord: noModel }); w.staat = { watermerk: 0 };
+  w.rijen = [rij(1, w.t, fmTekst('AI - Agenda-Wachter', '2sGqWO46keLSzNQw', 'Start run', 'Timeout', 602))];
+  d = w.dienst(); await d.tik(); w.t += 16 * MIN; await d.tik();
+  toets('15d raakt dag: let op ook als het model "niets" zegt (deterministisch)', w.vj.length === 1);
+  w = wereld({ antwoord: mistAlles }); w.staat = { watermerk: 0 };
+  w.rijen = [rij(1, w.t, fmTekst('AI - Second Brain - Mail Processor', 'BIDXbs6nAN3vWLcJ', 'Gmail', 'Timeout', 603))];
+  d = w.dienst(); await d.tik(); w.t += 16 * MIN; await d.tik();
+  toets('15e raakt dag maar volgende run neemt het mee, nog niet kapot: geen let op', w.vj.length === 0 && /Ingehaald: Nee — nog niet; de volgende gewone run/.test(w.bericht[0].t));
+  w = wereld({ antwoord: mistAlles, runs: { BIDXbs6nAN3vWLcJ: [{ id: 700, status: 'error', startedAt: '2026-11-21T09:12:00Z' }] } }); w.staat = { watermerk: 0 };
+  w.rijen = [rij(1, w.t, fmTekst('AI - Second Brain - Mail Processor', 'BIDXbs6nAN3vWLcJ', 'Gmail', 'Timeout', 604))];
+  d = w.dienst(); await d.tik(); w.t += 16 * MIN; await d.tik();
+  toets('15f vanzelf maar volgende run ook mis (kapot): let op', w.vj.length === 1 && /^Let op:/.test(w.vj[0].titel));
+  w = wereld({ antwoord: mistAlles }); w.staat = { watermerk: 0 };
+  w.rijen = [rij(1, w.t, fmTekst('AI - WhatsApp Chats Zoeken (webhook)', '02Jga3TIAEigwgw0', 'k', 'Timeout', 605))];
+  d = w.dienst(); await d.tik(); w.t += 16 * MIN; await d.tik();
+  toets('15g losse vraag: Ingehaald hoeft niet, geen let op', w.vj.length === 0 && /Ingehaald: Hoeft niet/.test(w.bericht[0].t));
+  // 16 Ingehaald (puur) en Codex MOET 1: stroom weer gezond bewijst niet dat de gemiste aanvoer binnen is
+  const kl = function (iso) { return iso.slice(11, 16); };
+  let ih = GV.ingehaald({ soort: 'stil', r: GV.regel('am4hmDfEmCGOwCHD'), onderzoek: { stand: 'bewezen', afloop: 'Levert weer aan.', afloop_op: '2026-11-21T10:00:00Z' }, herstel: null });
+  toets('16a stil + nodig + weer gezond → niet vast te stellen', ih.stand === 'onbekend' && /niet te zien/.test(ih.toelichting));
+  ih = GV.ingehaald({ soort: 'stil', r: GV.regel('8swfS8Km2fhuJSdT'), onderzoek: null, herstel: { stand: 'weer-goed', op: '2026-11-21T10:00:00Z', tekst: 'Loopt weer.' } });
+  toets('16b stil + vanzelf + weer gezond → ja met tijd', ih.stand === 'ja' && GV.ingehaaldTekst(ih, kl) === 'Ja, 10:00 — Loopt weer.');
+  ih = GV.ingehaald({ soort: 'storing', r: GV.regel('2sGqWO46keLSzNQw'), onderzoek: null, herstel: { stand: 'weer-goed', op: 'x', tekst: 'Sindsdien weer goed gelopen.' } });
+  toets('16c storing + nodig + latere run goed → niet vast te stellen (geen gok)', ih.stand === 'onbekend');
+  ih = GV.ingehaald({ soort: 'storing', r: GV.regel('2sGqWO46keLSzNQw'), onderzoek: { stand: 'bewezen', afloop: 'Ingehaald.', afloop_op: '2026-11-21T09:30:00Z' }, herstel: null });
+  toets('16d inhaalslag bewezen → ja', ih.stand === 'ja' && ih.op === '2026-11-21T09:30:00Z');
+  ih = GV.ingehaald({ soort: 'storing', r: null, onderzoek: null, herstel: { stand: 'nog-fout', op: null, tekst: 'De laatste run liep ook mis.' } });
+  toets('16e nog fout → nee', ih.stand === 'nee');
+  toets('16f let op: stroom stil maar weer gezond → nee', GV.letOp(true, GV.regel('am4hmDfEmCGOwCHD'), { stand: 'onbekend' }, 'bewezen', 'stil') === false && GV.letOp(true, GV.regel('am4hmDfEmCGOwCHD'), { stand: 'nee' }, 'kapot', 'stil') === true);
+  // 17 voorvallen (puur)
+  const A = function (ref, min, sl, fs) { return { ref: String(ref), t: Date.parse('2026-11-16T02:00:00Z') + min * MIN, sleutel: sl, foutsoort: fs || 'pod' }; };
+  let vs = S.voorvallen([A(1, 0, 'a'), A(2, 10, 'b'), A(3, 20, 'c')]);
+  toets('17a drie verschillende binnen een uur → één voorval', vs.length === 1 && vs[0].aantal === 3 && vs[0].id === 'v1');
+  toets('17b twee storingen → geen voorval', S.voorvallen([A(1, 0, 'a'), A(2, 10, 'b')]).length === 0);
+  toets('17c drie keer dezelfde storing → geen voorval', S.voorvallen([A(1, 0, 'a'), A(2, 10, 'a'), A(3, 20, 'a')]).length === 0);
+  toets('17d drie verspreid over > 60 min → geen voorval', S.voorvallen([A(1, 0, 'a'), A(2, 40, 'b'), A(3, 61, 'c')]).length === 0);
+  vs = S.voorvallen([A(1, 0, 'a'), A(2, 50, 'b'), A(3, 70, 'c'), A(4, 80, 'd')]);
+  toets('17e venster schuift op: 50-70-80 vormt een voorval', vs.length === 1 && vs[0].id === 'v2' && vs[0].aantal === 3);
+  toets('17f geweigerde verzoeken tellen niet', S.voorvallen([A(1, 0, 'a'), A(2, 10, 'b'), A(3, 20, 'c', 'sleutel')]).length === 0);
+  vs = S.voorvallen([A(1, 0, 'a'), A(2, 5, 'b'), A(3, 10, 'c'), A(4, 70, 'd'), A(5, 75, 'e'), A(6, 80, 'f')]);
+  toets('17g lange golf → twee voorvallen, elk alarm in één', vs.length === 2 && vs[0].refs.join() === '1,2,3' && vs[1].refs.join() === '4,5,6');
+  // 18 voorval in de dienst: drie storingen tegelijk → één onderzoek met de voorvalvraag, oorzaak op de kop, één bericht met kop
+  const metVoorval = function (n, prompt) { const a = []; for (let i = 1; i <= n; i++) a.push({ nr: i, oorzaak: 'Pod herstartte.', gevolg: 'g', mist_david: false, handeling_david: '' });
+    return { ok: true, data: { alarmen: a, voorval_oorzaak: /## Voorval/.test(prompt) ? 'De pod herstartte om 03:10 voor een uitrol. Daardoor liepen drie nachtwachters vast.' : '' } }; };
+  w = wereld({ antwoord: metVoorval }); w.staat = { watermerk: 0 };
+  w.rijen = [rij(1, w.t, fmTekst('AI - A', 'VA1', 'k', 'Service unavailable - try again later', 801)), rij(2, w.t + 2 * MIN, fmTekst('AI - B', 'VB1', 'k', 'Service unavailable - try again later', 802)),
+    rij(3, w.t + 4 * MIN, fmTekst('AI - C', 'VC1', 'k', 'Service unavailable - try again later', 803))];
+  d = w.dienst(); await d.tik(); w.t += 20 * MIN; await d.tik();
+  toets('18a één onderzoek met het voorvalblok', w.claude.length === 1 && /## Voorval: 3 storingen/.test(w.claude[0]));
+  const kop = d.voorKop(['1', '2', '3']);
+  toets('18b oorzaak op de kop', kop && kop.stand === 'klaar' && /pod herstartte/i.test(kop.oorzaak));
+  toets('18c bericht begint met de voorvalkop', w.bericht.length === 1 && /^Voorval .* \(3 storingen\): De pod herstartte/.test(w.bericht[0].t));
+  w.t += 30 * MIN; await d.tik(); w.t += 30 * MIN; await d.tik();
+  toets('18d geen tweede voorvalvraag', w.claude.length === 1);
+  // 19 voorval ontstaat pas bij het derde alarm, dat ruis is (zelfde sleutel als eerder?) → nee: twee al uitgezocht, het derde is nieuw maar
+  //    vervalt (te laat) → één los voorval-onderzoek met de al uitgezochte oorzaken als context
+  w = wereld({ antwoord: metVoorval }); w.staat = { watermerk: 0 };
+  w.rijen = [rij(1, w.t, fmTekst('AI - A', 'VA1', 'k', 'Timeout', 901)), rij(2, w.t + MIN, fmTekst('AI - B', 'VB1', 'k', 'Timeout', 902))];
+  d = w.dienst(); await d.tik(); w.t += 16 * MIN; await d.tik();
+  toets('19a twee storingen: onderzoek zonder voorvalblok', w.claude.length === 1 && !/## Voorval/.test(w.claude[0]));
+  w.rijen.push(rij(3, w.t + 10 * MIN, fmTekst('AI - A', 'VA1', 'k', 'Timeout', 903)));   // zelfde sleutel als 1 → ruis, telt niet als derde storing
+  w.t += 30 * MIN; await d.tik();
+  toets('19b derde alarm met dezelfde sleutel: geen voorval', w.claude.length === 1 && Object.keys(w.staat.voorvallen || {}).length === 0);
+  w.rijen.push(rij(4, w.t - 10 * MIN, fmTekst('AI - D', 'VD1', 'k', 'Timeout', 904)));
+  w.staat.per_sleutel['VD1|k|anders'] = { ref: 'oud', op: w.t };   // de vierde is ruis (zelfde storing < 24 u): geen eigen onderzoek
+  d = w.dienst(); await d.tik();
+  toets('19c voorval ontstaat; alles al uitgezocht of ruis → nog niet meteen (15 min na het jongste)', Object.keys(w.staat.voorvallen).length === 1 && w.claude.length === 1);
+  w.t += 10 * MIN; await d.tik();
+  toets('19d los voorval-onderzoek: alleen het voorvalblok, met de al uitgezochte oorzaken', w.claude.length === 2 && /## Voorval/.test(w.claude[1]) && !/^## Alarm /m.test(w.claude[1]) && /al uitgezocht: Pod herstartte/.test(w.claude[1]));
+  toets('19e kop krijgt de oorzaak; bericht alleen de kop', /pod herstartte/i.test((d.voorKop(['1', '2', '4']) || {}).oorzaak) && /^Voorval /.test(w.bericht.slice(-1)[0].t) && !/Uitgezocht:/.test(w.bericht.slice(-1)[0].t));
   console.log(ok + ' goed, ' + fout + ' fout');
   process.exit(fout ? 1 : 0);
 })();

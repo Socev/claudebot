@@ -11438,7 +11438,7 @@ async function appMeldingenVerzamel() {
       wanneer: g.laatste, eerste: g.eerste, aantal: g.aantal, herstel: { stand: 'onbekend', op: null, tekst: '' }, techniek: techniek };
     // niet na te gaan of hij weer goed loopt, maar al 3 dagen niet teruggekomen: geen storing-chip meer (de app toont "kwam niet terug")
     const rustig = !!g.nagekeken && herstel[i].stand === 'onbekend' && Date.now() - Date.parse(g.laatste) >= APP_MELD_RUSTIG_MS;
-    return { id: g.id, rij: g.rij, kaart: 'k' + appSha(g.sleutel).slice(0, 12), soort: 'storing', titel: appWfNaam(f.workflow) + ' liep vast', uitleg: g.uitleg.tekst,
+    return { id: g.id, rij: g.rij, kaart: 'k' + appSha(g.sleutel).slice(0, 12), soort: 'storing', titel: appWfNaam(f.workflow) + ' liep vast', uitleg: g.uitleg.tekst, _wf: f.workflow_id || null,
       wanneer: g.laatste, eerste: g.eerste, aantal: g.aantal, herstel: herstel[i], rustig: rustig, techniek: techniek };
   });
   // Stilgevallen aanvoer: elke gemelde stroom één kaart (de laatste melding), met de stand van nu erbij.
@@ -11455,6 +11455,7 @@ async function appMeldingenVerzamel() {
         h = { stand: 'weer-goed', op: st.laatste_executie, tekst: 'Loopt weer (laatste aanvoer ' + appDagKlok(st.laatste_executie) + ').' };
       else if (st && st.status === 'stil') h = { stand: 'nog-fout', op: st.laatste_executie || null, tekst: 'Nog steeds stil' + (st.laatste_executie ? ' (laatste aanvoer ' + appDagKlok(st.laatste_executie) + ').' : '.') };
       items.push({ id: 's' + x.id + '-' + appSha(s.naam).slice(0, 6), rij: Number(x.id) || 0, kaart: 's' + appSha(s.naam).slice(0, 12) + '-' + x.id, soort: 'stil', titel: appWfNaam(s.naam) + ' leverde niets meer aan',
+        _pijplijn: st ? st.pijplijn_id || null : null,
         uitleg: 'Sinds ' + s.sinds + ' kwam er niets binnen (' + s.uren + ' uur; normaal hooguit ' + s.drempel + '). Meestal ligt dat aan de bron (een pc of app die uit stond), soms aan de automatisering zelf.',
         wanneer: x.createdAt, eerste: x.createdAt, aantal: 1, herstel: h, techniek: 'Stiltewachter · drempel ' + s.drempel + ' effectieve uren' });
     });
@@ -11463,14 +11464,18 @@ async function appMeldingenVerzamel() {
   Object.keys(nu).forEach(function (n) {
     const st = nu[n];
     if (st.status !== 'stil' || st.bewaken === 'nee' || stilGezien[n]) return;
-    items.push({ id: 'n' + appSha(n).slice(0, 10), rij: 0, kaart: null, soort: 'stil', titel: appWfNaam(n) + ' leverde niets meer aan',
+    items.push({ id: 'n' + appSha(n).slice(0, 10), rij: 0, kaart: null, soort: 'stil', titel: appWfNaam(n) + ' leverde niets meer aan', _pijplijn: st.pijplijn_id || null,
       uitleg: 'Volgens de Stiltewachter komt er nu niets binnen.', wanneer: st.gemeld_op || st.laatste_executie || st.createdAt || '1970-01-01T00:00:00.000Z', eerste: st.gemeld_op || null, aantal: 1,
       herstel: { stand: 'nog-fout', op: st.laatste_executie || null, tekst: st.laatste_executie ? 'Laatste aanvoer ' + appDagKlok(st.laatste_executie) + '.' : '' },
       techniek: 'Stiltewachter · drempel ' + st.drempel_uren + ' effectieve uren' });
   });
   // wv3712: het onderzoek van de storingsdienst (oorzaak, gevolg, afloop) op de kaart
   if (typeof storingsdienstVoorKaart === 'function') items.forEach(function (x) { if (!x.kaart) return; const o = storingsdienstVoorKaart(x.kaart, x.rij); if (o) x.onderzoek = o; });
+  // wv4120 (nr 407 = 3C107): twee vaste regels per kaart: Gevolg voor jou (vaste tabel storing-gevolg.js) en Ingehaald (deterministisch)
+  appMeldGevolg(items);
   items.sort(function (a, b) { return Date.parse(b.wanneer) - Date.parse(a.wanneer); });
+  // wv4120 (nr 408 = 3C108): >= 3 verschillende storingen binnen een uur → één kop "Voorval" met de oorzaak van de storingsdienst
+  const voorvallen = appMeldVoorvallen(rijen, items);
   // Stand van nu, bovenaan in gewone taal.
   let aanvoer = null;
   if (stilte) {
@@ -11490,8 +11495,51 @@ async function appMeldingenVerzamel() {
   // kaarten die (nog) misgaan en een melding in de buffer hebben: daarop geeft het meldingen-seintje een tik
   const getoond = items.slice(0, 100);   // kaarten uit dezelfde lijst als de items (Fable wv446 #4)
   const kaarten = getoond.filter(function (x) { return x.kaart && x.herstel.stand !== 'weer-goed'; }).map(function (x) { return x.kaart; });
-  return { items: getoond, stand: { aanvoer: aanvoer, extern: extern }, max_rij: maxRij, kaarten: kaarten, gelezen: !!rijen.length || !fouten.length, fouten: fouten, op: Date.now() };
+  getoond.forEach(function (x) { delete x._wf; delete x._pijplijn; });
+  return { items: getoond, voorvallen: voorvallen, stand: { aanvoer: aanvoer, extern: extern }, max_rij: maxRij, kaarten: kaarten, gelezen: !!rijen.length || !fouten.length, fouten: fouten, op: Date.now() };
 }
+/* meld-gevolg:begin */
+// wv4120: Gevolg voor jou + Ingehaald op elke kaart (niet op geweigerde verzoeken). Puur op de tabel en wat er al op de kaart staat.
+let appStoringGevolg = null;
+function appMeldGevolg(items) {
+  try { if (!appStoringGevolg) appStoringGevolg = require(path.join(__dirname, 'storing-gevolg.js')); } catch (e) { logError('app-meldingen', e); return; }
+  const G = appStoringGevolg;
+  let zh = {};
+  try { zh = require(path.join(__dirname, 'storingsdienst.js')).ZELFHERSTEL || {}; } catch (e) {}
+  items.forEach(function (x) {
+    if (x.soort === 'geweigerd') return;
+    const id = x.soort === 'stil' ? x._pijplijn : x._wf;
+    const r = G.regel(id), o = x.onderzoek && x.onderzoek.oorzaak ? x.onderzoek : null;
+    x.gevolg = G.gevolgTekst(r, o ? o.gevolg : null);
+    const ih = G.ingehaald({ soort: x.soort, zelfherstel: !!(x._wf && zh[x._wf]), r: r, herstel: x.herstel || null,
+      onderzoek: o && o.stand ? { stand: o.stand, afloop: o.afloop, afloop_op: o.afloop_op || null } : null });
+    x.ingehaald = { stand: ih.stand, tekst: G.ingehaaldTekst(ih, appDagKlok) };
+  });
+}
+function appMeldVoorvallen(rijen, items) {
+  try {
+    if (!storingsdienst || typeof storingsdienst.alarmenVan !== 'function') return [];
+    const S = require(path.join(__dirname, 'storingsdienst.js'));
+    const alarmen = storingsdienst.alarmenVan(rijen);
+    const vs = S.voorvallen(alarmen).sort(function (a, b) { return b.tot - a.tot; });
+    const perKaart = {};
+    alarmen.forEach(function (a) { (perKaart[a.kaart] = perKaart[a.kaart] || []).push(String(a.ref)); });
+    const uit = vs.map(function (v) {
+      const k = storingsdienst.voorKop(v.refs);
+      return { id: v.id, van: new Date(v.van).toISOString(), tot: new Date(v.tot).toISOString(), aantal: v.aantal, verschillend: v.sleutels.length,
+        oorzaak: k && k.oorzaak ? k.oorzaak : null, stand: k ? (k.oorzaak ? 'klaar' : k.stand === 'klaar' || k.stand === 'mislukt' ? 'niet' : 'bezig') : 'niet' };
+    });
+    // elke kaart onder het jongste voorval waarin hij voorkomt
+    items.forEach(function (x) {
+      if (!x.kaart || x.soort === 'geweigerd') return;
+      const refs = perKaart[x.kaart] || [];
+      const v = vs.find(function (v) { return refs.some(function (r) { return v.refs.indexOf(r) >= 0; }); });
+      if (v) x.voorval = v.id;
+    });
+    return uit.filter(function (v) { return items.some(function (x) { return x.voorval === v.id; }); }).slice(0, 20);
+  } catch (e) { logError('app-meldingen', e); return []; }
+}
+/* meld-gevolg:einde */
 // Eén verversing tegelijk, 60 s bewaard (meerdere apparaten en de seintjes-tik delen hem).
 function appMeldingen() {
   const c = appStaat.meld;
@@ -11577,7 +11625,7 @@ async function appMeldingenRoute(req, res, a) {
     const e = appMeldAfIs(x, af) ? af[appMeldRef(x)] : null;
     y.afgehandeld = e ? e.op : null;
     return y;
-  }), stand: m.stand,
+  }), stand: m.stand, voorvallen: m.voorvallen || [],
     fouten: m.fouten, bijgewerkt: new Date(m.op).toISOString(), gezien: gezien, nieuw_na: new Date(grens).toISOString(),
     nieuw: appMeldNieuw(items.filter(function (x) { return appMeldTelt(x, af); }), grens).length,
     seintjes_meldingen: !!(sub && (sub.soorten || []).indexOf('meldingen') >= 0) });
@@ -25826,7 +25874,7 @@ const storingsdienst = (function () {
       afloop: async function (a) {
         if (a.soort === 'stil') {
           const st = (await appN8nRijen(APP_STILTE_TABEL, null, 100)).find(function (s) { return s && String(s.naam) === a.naam; });
-          return { stilte: st ? { status: String(st.status || ''), laatste_executie: st.laatste_executie || null } : null };
+          return { stilte: st ? { status: String(st.status || ''), laatste_executie: st.laatste_executie || null, pijplijn_id: st.pijplijn_id || null, raakt_david: String(st.raakt_david || '') } : null };   // wv4120: gevolgtabel + raakt dag
         }
         const h = {};
         if (a.workflow_id) {
