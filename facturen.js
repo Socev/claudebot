@@ -28,6 +28,7 @@ const V = require('./facturen-validatie.js');
 const D = require('./facturen-db.js');
 const S = require('./facturen-sepa.js');
 const SP = require('./facturen-specificatie.js');
+const FA = require('./facturen-aanhef.js');   // wv4103: aanhef en slot aan André uit de mailstem-bron (lezer zet server.js)
 // wv2043: creditcard (ICS) als bron; ontbreekt het bestand in een release, dan alleen geen opdracht creditcard (de rest van Facturen blijft)
 let CC = null;
 try { CC = require('./facturen-creditcard.js'); } catch (e) { if (!(e && e.code === 'MODULE_NOT_FOUND' && /facturen-creditcard/.test(e.message))) throw e; CC = null; }
@@ -1109,8 +1110,9 @@ function bonjachtConcept(fdb, r, lijstId, o) {
     }
     // review r2 MOET 2: ook zonder bijlage (alleen bonnen zonder of met een te groot bestand) een concept met de regels
     const ent = l.naam_kort || l.e_naam;
-    const bericht = ['Ha pa,', '', 'Van je lijst van ' + (bjDagLang(l.ontvangen) || 'laatst') + (ent ? ' (' + ent + ')' : '') + ' heb ik ' + (mee_ids.length === 1 ? 'deze bon' : 'deze bonnen') +
-      ' gevonden' + (!bijlagen.length ? ' (de bon zelf kan niet mee in deze mail):' : '; ' + (bijlagen.length === 1 ? 'hij zit' : 'ze zitten') + ' in de bijlage:'), ''].concat(regels, ['', 'Groet,', 'David']).join('\n');
+    const gr = FA.groet('André', { aanhef: 'Ha pa,', slot: ['Groet,', 'David'] });
+    const bericht = [gr.aanhef, '', 'Van je lijst van ' + (bjDagLang(l.ontvangen) || 'laatst') + (ent ? ' (' + ent + ')' : '') + ' heb ik ' + (mee_ids.length === 1 ? 'deze bon' : 'deze bonnen') +
+      ' gevonden' + (!bijlagen.length ? ' (de bon zelf kan niet mee in deze mail):' : '; ' + (bijlagen.length === 1 ? 'hij zit' : 'ze zitten') + ' in de bijlage:'), ''].concat(regels, ['', ...gr.slot]).join('\n');
     const thread_id = l.account === 'prive' && l.draad_id ? l.draad_id : null;
     D.audit(fdb, { wie: r.wie, wat: 'bonjacht_concept_aangevraagd', object_soort: 'bonjacht_concept', object_id: l.id, entiteit: l.entiteit,
       na: { aanleiding: o.aanleiding || 'knop', aan, draad: !!thread_id, facturen: mee_ids, bijlagen: bijlagen.length, bytes, later: stukken.length - mee_ids.length, nogmaals: !!o.nogmaals }, wanneer });

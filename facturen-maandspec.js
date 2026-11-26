@@ -15,6 +15,7 @@
  */
 const crypto = require('crypto');
 const SP = require('./facturen-specificatie.js');
+const FA = require('./facturen-aanhef.js');   // wv4103: aanhef en slot aan André uit de mailstem-bron
 const { breedte, pas, hex, getal, kleur, schoon, isoDag, pdfBestand } = SP.pdf;
 const { eur, datumNl } = SP;
 
@@ -109,7 +110,8 @@ function mail(g, o) {
   o = o || {};
   const ent = g.entiteiten.length === 1 ? ' ' + ((g.paypal && g.paypal.rekeningen[0] && g.paypal.rekeningen[0].entiteit_naam) || (g.kaarten[0] && g.kaarten[0].entiteit_naam) || '') : '';
   const onderwerp = (o.nagekomen ? 'Aanvulling: specificatie' : 'Specificatie') + ' PayPal en creditcard ' + g.maand_naam;
-  const r = ['Ha pa,', ''];
+  const gr = FA.groet('André', { aanhef: 'Ha pa,', slot: ['Groet,', 'David'] });
+  const r = [gr.aanhef, ''];
   if (o.nagekomen) r.push('Hierbij de specificatie van ' + g.maand_naam + ' opnieuw, nu met de creditcard erbij (PDF in de bijlage).', '');
   else r.push('Hierbij de specificatie van ' + g.maand_naam + (ent.trim() ? ' voor' + ent : '') + ' (PDF in de bijlage). Per post zie je wat erachter zit.', '');
   if (!g.paypal) r.push('- PayPal: nog niet beschikbaar.');
@@ -122,7 +124,7 @@ function mail(g, o) {
     if (k.status === 'niet_aangeleverd') r.push('- Creditcard ICS …' + k.laatste4 + ', overzicht ' + g.maand_naam + ': heb ik nog niet aangeleverd; die stuur ik na.');
     else r.push('- Creditcard ICS …' + k.laatste4 + ', overzicht ' + g.maand_naam + ': ' + icsZin(k, true) + '.');
   }
-  r.push('', 'Groet,', 'David');
+  r.push('', ...gr.slot);
   return { onderwerp: onderwerp.slice(0, 150), bericht: r.join('\n') };
 }
 function bestandsnaam(g, o) {

@@ -10,6 +10,7 @@
  * rekening alleen de laatste vier cijfers.
  */
 const crypto = require('crypto');
+const FA = require('./facturen-aanhef.js');   // wv4103: aanhef en slot aan André uit de mailstem-bron
 
 class SpecFout extends Error {}
 const MAANDEN = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
@@ -64,7 +65,8 @@ function opbouw(batch, regels) {
 function mail(g) {
   const een = g.blokken.length === 1;
   const onderwerp = 'Specificatie SEPA-batch ' + g.entiteit_kort + ' (' + (een ? 'uitvoer ' + datumNl(g.blokken[0].datum) : g.blokken.length + ' uitvoerdatums') + ', ' + eur(g.totaal_centen) + ')';
-  const r = ['Ha pa,', '',
+  const gr = FA.groet('André', { aanhef: 'Ha pa,', slot: ['Groet,', 'David'] });
+  const r = [gr.aanhef, '',
     'Ik heb een SEPA-batch gemaakt voor ' + g.entiteit_naam + ' (rekening …' + g.rekening_eind + '). ' +
     // wv2842: de POT voert een batch per betaling in (extensie POT-invoer, ABN-takenlijst): op het afschrift staat elke betaling apart
     (g.entiteit === 'pot' ? 'Op het afschrift staat elke betaling apart' : 'In Exact zie je ' + (een ? 'die als één afschrijving' : 'per uitvoerdatum één afschrijving')) +
@@ -76,7 +78,7 @@ function mail(g) {
     if (lijst) r.push('');
   }
   if (!lijst) r.push('', g.entiteit === 'pot' ? 'De facturen per uitvoerdatum staan in de PDF.' : 'De facturen per afschrijving staan in de PDF.', '');
-  r.push('Totaal ' + eur(g.totaal_centen) + ', batchkenmerk ' + g.msg_id + '.', '', 'Groet,', 'David');
+  r.push('Totaal ' + eur(g.totaal_centen) + ', batchkenmerk ' + g.msg_id + '.', '', ...gr.slot);
   return { onderwerp: onderwerp.slice(0, 150), bericht: r.join('\n') };
 }
 function bestandsnaam(g) {

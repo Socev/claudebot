@@ -227,6 +227,7 @@ COPY fin-toewijzing.js /app/release-bootstrap/fin-toewijzing.js
 COPY facturen-creditcard.js /app/release-bootstrap/facturen-creditcard.js
 COPY facturen-paypal.js /app/release-bootstrap/facturen-paypal.js
 COPY facturen-maandspec.js /app/release-bootstrap/facturen-maandspec.js
+COPY facturen-aanhef.js /app/release-bootstrap/facturen-aanhef.js
 COPY facturen-boekstuk.js /app/release-bootstrap/facturen-boekstuk.js
 COPY paypal-zakelijk-lezer.js /app/release-bootstrap/paypal-zakelijk-lezer.js
 COPY fin-reconcile.js /app/release-bootstrap/fin-reconcile.js

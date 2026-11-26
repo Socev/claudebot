@@ -1349,6 +1349,10 @@ const opdrachten = {
     const maand = String(a.opt.maand || '');
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(maand)) throw new Weigering('maand als JJJJ-MM');
     const P = require(path.join(__dirname, 'pot-afschrift.js'));
+    // wv4103: aanhef en slot aan André uit de mailstem-bron (vault, alleen lezen; geen bestand of ongeldige regel = vaste tekst)
+    require(path.join(__dirname, 'facturen-aanhef.js')).zetLezer(function () {
+      return String(require(path.join(__dirname, 'vault-veilig.js')).lees(path.join(process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', '00_Systeem', 'Mailstem - correcties van David.md'), 'utf8', { max: 262144 }) || '');
+    });
     const x = archiefKlaar();
     let inv;
     try { inv = x.A.potAfschriftInvoer(x.a, maand); } catch (e) { throw new Weigering('POT-rekening: ' + e.message); }

@@ -18,6 +18,7 @@
  */
 const crypto = require('crypto');
 const SP = require('./facturen-specificatie.js');
+const FA = require('./facturen-aanhef.js');   // wv4103: aanhef en slot aan André uit de mailstem-bron
 const { breedte, pas, hex, getal, kleur, schoon, isoDag, pdfBestand } = SP.pdf;
 const { eur, datumNl } = SP;
 
@@ -175,9 +176,10 @@ function bestandsnaam(g) { return 'Boekstuk-Google-Home-' + g.termijn + '.pdf'; 
 function mail(g, o) {
   const auto = !o || o.wijze !== 'concept';
   const onderwerp = 'Boekstuk ' + ABO.naam + ' ' + g.maand_naam + ' — Tolgaarde';
-  const r = ['Beste pa,', '', 'Hierbij het boekstuk voor ' + ABO.naam + ' van ' + g.maand_naam + ' (' + eur(g.play.totaal_centen) + ', Tolgaarde). Google levert hiervoor geen factuur.', ''];
+  const gr = FA.groet('André', { aanhef: 'Beste pa,', slot: ['Groet,', 'David'] });   // auto: de vaste zin blijft het slot
+  const r = [gr.aanhef, '', 'Hierbij het boekstuk voor ' + ABO.naam + ' van ' + g.maand_naam + ' (' + eur(g.play.totaal_centen) + ', Tolgaarde). Google levert hiervoor geen factuur.', ''];
   if (auto) r.push('Dit bericht is automatisch verstuurd namens David.');
-  else r.push('Groet,', 'David');
+  else r.push(...gr.slot);
   return { onderwerp, bericht: r.join('\n') };
 }
 /*

@@ -16,6 +16,7 @@
  */
 const crypto = require('crypto');
 const { leesMt940, parseAbnDesc } = require('./mt940-lezer.js');
+const FA = require('./facturen-aanhef.js');   // wv4103: aanhef en slot aan André uit de mailstem-bron (lezer zet bank-lezer.js)
 
 const MAANDEN = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
 const MAX86 = 6, BREED86 = 65;
@@ -443,14 +444,15 @@ function zelfcontrole(mt940, verwacht) {
 // o.correctie: er ging al een afschrift van deze maand naar André en er kwam daarna een boeking bij (Fable wv787 diff #3).
 function mailConcept(maand, telling, o) {
   const m = maandNaam(maand);
-  const regels = ['Hoi André,', '', o && o.correctie
+  const gr = FA.groet('André', { aanhef: 'Hoi André,', slot: ['Groet,', 'David'] });
+  const regels = [gr.aanhef, '', o && o.correctie
     ? 'Hierbij opnieuw het afschrift van de POT-rekening over ' + m + ': er is na mijn vorige mail nog een boeking bij gekomen. Dit vervangt het afschrift dat ik je eerder stuurde (MT940 om in te lezen en de PDF met per regel wat het is).'
     : 'Hierbij het afschrift van de POT-rekening over ' + m + ': het MT940-bestand om in te lezen en een PDF met per regel wat het is.'];
   // wv4144 (2C76 e): de posten met een vraagteken zelf (datum, tegenpartij, bedrag), zodat André niet hoeft terug te vragen welke
   const lijst = vraagLijst(o && o.regels);
   if (lijst.length) regels.push('', lijst.length === 1 ? 'Bij deze betaling staat een vraagteken (daar hoort een bon of factuur bij):' : 'Bij deze ' + lijst.length + ' betalingen staat een vraagteken (daar hoort een bon of factuur bij):', ...lijst, '', 'Laat maar weten welke je nog mist.');
   else if (telling && telling.stuk_open > 0) regels.push('', 'Bij ' + (telling.stuk_open === 1 ? 'één betaling staat' : telling.stuk_open + ' betalingen staat') + ' een vraagteken: daar hoort een bon of factuur bij. Laat maar weten welke je nog mist.');
-  regels.push('', 'Groet,', 'David');
+  regels.push('', ...gr.slot);
   return { onderwerp: 'POT POH-GGZ: afschrift ' + m + (o && o.correctie ? ' (correctie)' : ''), bericht: regels.join('\n') };
 }
 

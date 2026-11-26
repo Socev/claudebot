@@ -224,6 +224,9 @@ const VAULT = process.env.VAULT_DIR || '/opt/data/AI_SecondBrain';
 // bestand naar keuze). Lui geladen: het app-blok draait in de poort- en UI-toets in een vm zonder __dirname.
 let VV_MOD = null;
 function VV() { if (!VV_MOD) VV_MOD = require(path.join(__dirname, 'vault-veilig.js')); return VV_MOD; }
+// wv4103 (besluit nr 411 / 3C111): de vaste mails van Facturen en POT halen aanhef en slot per ontvanger uit de mailstem-bron
+// (sectie "Aanhef en slot per vaste ontvanger" in het correctiebestand); facturen-aanhef.js is puur en krijgt hier de lezer. Geen bestand = vaste tekst.
+try { require(path.join(__dirname, 'facturen-aanhef.js')).zetLezer(function () { return String(VV().lees(path.join(VAULT, '00_Systeem', 'Mailstem - correcties van David.md'), 'utf8', { max: 262144 }) || ''); }); } catch (e) { /* oudere release zonder facturen-aanhef.js: vaste tekst */ }
 const REPO = process.env.REPO_DIR || '/opt/data/repo';
 const PORT = process.env.PORT || 8080;
 const SECRET = process.env.API_SECRET || '';

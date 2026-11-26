@@ -11,7 +11,7 @@ fi
 if echo "$C" | sed 's/new Date(\s*[^)[:space:]]/NIEUWEDATUM(/g' | grep -nE "Date\.now\s*\(|new Date\b|(^|[^.A-Za-z0-9_])Date\(|\.format(ToParts)?\(\s*\)|Math\.random"; then
   echo "ROOD  CI-poort: facturen-maandspec.js leest zelf de klok"; exit 1
 fi
-if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|\./facturen-specificatie\.js)'\)$"; then
+if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|\./facturen-specificatie\.js|\./facturen-aanhef\.js)'\)$"; then
   echo "ROOD  CI-poort: facturen-maandspec.js laadt een module buiten crypto en facturen-specificatie.js"; exit 1
 fi
 echo "GROEN CI-poort: facturen-maandspec.js puur"
