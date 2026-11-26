@@ -243,11 +243,12 @@ function maak(deps) {
       // wv3021: kan deze stand een masker en hoeveel voorbeelden? (alleen als die flow er is en klaar staat)
       let masker = false, refs = 0, plusVast = false;
       if (PLUS[s.id]) {
+        let door = true;
         for (let n = 0; n <= REFS_MAX; n++) {
           let p = null;
           try { p = await S.flowVan(PLUS[s.id] + '-' + n); } catch (e) { p = null; }
-          if (p && p.status === 'actief') plusVast = true;   // wv4096 review ronde 2 MOET 2: vast = vast als één onderdeel nog vast staat
-          if (!p || !p.klaar) break;
+          if (p && p.status === 'actief') plusVast = true;   // wv4096 review ronde 2/3: vast = vast als één onderdeel nog vast staat (alle onderdelen bekeken)
+          if (!door || !p || !p.klaar) { door = false; continue; }
           if (n === 0) masker = true; else refs = n;
         }
       }

@@ -201,6 +201,12 @@ async function afAlles(S) { for (const id of [...S.live.keys()]) { S.af(id, beel
     const r7 = await app(im, '/app/imagine/vast/opdracht-qwen', 'POST', { aan: false }, ctxNiet);
     toets('6k leesfout tijdens nalopen = geen 200', r7.status === 500, r7);
     S.flowVan = ofv;
+    // ronde 3: een vaste voorbeeldflow achter een ontbrekende telt ook
+    S.flows['beeld-plus-qwen-2'] = 'actief';
+    S.flowVan = async function (id) { if (id === 'beeld-plus-qwen-1') return null; return ofv(id); };
+    const lg = (await app(im, '/app/imagine', 'GET', null, ctxNiet)).body.standen.find((x) => x.id === 'opdracht-qwen');
+    toets('6l vaste voorbeeldflow na een ontbrekende: stand toont vast, voorbeelden tot de ontbrekende', lg.vast === 'actief' && lg.refs_max === 0, [lg.vast, lg.refs_max]);
+    S.flowVan = ofv;
     const r3 = await app(im, '/app/imagine/vast/bestaat-niet', 'POST', { aan: true }, ctxVers());
     toets('6g onbekende stand: 404', r3.status === 404, r3.status);
   }
