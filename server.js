@@ -31645,13 +31645,15 @@ function dbTerugRonde() {
 // de R230, geen stand-in bijhouden, geen hartslag; /health.uitwijk.warm = {uit: true, sinds}. Weer aan: bestand weg, server.js herstarten (uitrol)
 // en machinekamer.hartslag warme_staat weer actief. Gelezen bij de start; een function (geen const) i.v.m. rolInfo() bij een vroege aanroep.
 function warmUitBestand() { return process.env.WARM_UIT_BESTAND || '/opt/data/.socev-geheim/warme-staat-uit'; }
-function warmUitStand() {
-  try { return { uit: true, sinds: fs.statSync(warmUitBestand()).mtime.toISOString() }; } catch (e) { return null; }
+function warmUitStand() {   // alleen ENOENT = schakelaar afwezig; elke andere fout (EACCES, ENOTDIR, I/O) = uit (dicht bij twijfel, Codex wv4086 MOET 1)
+  try { return { uit: true, sinds: fs.statSync(warmUitBestand()).mtime.toISOString() }; }
+  catch (e) { return e && e.code === 'ENOENT' ? null : { uit: true, sinds: null, fout: String((e && e.code) || e).slice(0, 40) }; }
 }
 var warmeStaat = (function () {   // var (geen const): rolInfo() hierboven leest hem; const gaf een TDZ-fout bij een vroege aanroep
   const p = path.join(__dirname, 'warme-staat.js');
   if (!fs.existsSync(p) || ROL_ALTIJD_PASSIEF) return null;
-  if (warmUitStand()) { schrijfLog(nu() + ' warm ' + velden({ melding: 'uitgezet (wv4086): ' + warmUitBestand() })); return null; }
+  const wu = warmUitStand();
+  if (wu) { schrijfLog(nu() + ' warm ' + velden({ melding: 'uitgezet (wv4086): ' + warmUitBestand(), fout: wu.fout })); return null; }
   try {
     return require(p).maak({
       kant: function () { return ROL_KANT; }, primair: function () { return rolPrimair(); },

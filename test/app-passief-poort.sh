@@ -182,6 +182,13 @@ nep.listen(0, '127.0.0.1', async () => {
     toets('U1 uit-bestand: /health uitwijk.warm = {uit:true, sinds}', hu && hu.uitwijk.warm && hu.uitwijk.warm.uit === true && /^\d{4}-\d\d-\d\dT/.test(hu.uitwijk.warm.sinds), hu && JSON.stringify(hu.uitwijk.warm));
     let al = ''; try { al = fs.readFileSync(D + '/api.log', 'utf8'); } catch (e) {}
     toets('U2 uit-bestand: logregel "warm … uitgezet (wv4086)"', / warm melding=uitgezet_\(wv4086\)/.test(al), al.slice(-400));
+    // U3 — schakelaar onleesbaar (ENOTDIR: ouder is een bestand) = dicht: niet laden
+    try { process.kill(-p4.pid, 'SIGTERM'); } catch (e) {}
+    await new Promise((x) => setTimeout(x, 800));
+    const p5 = spawn(process.execPath, [SRV], { env: Object.assign({}, env, { WARM_UIT_BESTAND: D + '/warm-uit/onder-een-bestand' }), detached: true, stdio: ['ignore', uit, uit], cwd: path.dirname(SRV) });
+    huidig = p5.pid;
+    const hf = await wachtRol('primair');
+    toets('U3 schakelaar niet te lezen (ENOTDIR): toch uit, fout in /health', hf && hf.uitwijk.warm && hf.uitwijk.warm.uit === true && hf.uitwijk.warm.fout === 'ENOTDIR', hf && JSON.stringify(hf.uitwijk.warm));
   } catch (e) { toets('uitzondering', false, e && e.stack); }
   toets('T1 geen "gebruik Telegram" / "tik daar" in de app-antwoorden van server.js', !/gebruik Telegram|staat ook in Telegram, tik daar/.test(BRON));
   console.log('── app-passief-poort: ' + goed + ' groen, ' + fout + ' rood');
