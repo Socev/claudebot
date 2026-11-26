@@ -629,7 +629,11 @@ test('opdracht: pas na verstuur_na, 30 min, max 3 pogingen, tweede gelukt verand
   assert.equal(K.opdrachtOvergang({ status: 'opgehaald', opgehaald_op: c1.opgehaald_op, poging: 3 }, 'claim', Date.parse('2026-10-22T15:00:00Z')).definitief, true);
   const m2 = K.opdrachtOvergang({ status: 'opgehaald', poging: 2 }, 'mislukt');
   assert.deepEqual([m2.naar, m2.definitief], ['mislukt', false]);
-  assert.equal(K.claimbaar({ status: 'mislukt', poging: 2 }, t0).claim, true);
+  // wv4162 (C17): mislukt pas na 30 min weer te claimen (op bijgewerkt_op); zonder leesbare tijd niet
+  assert.equal(K.claimbaar({ status: 'mislukt', poging: 2, bijgewerkt_op: new Date(t0 - 31 * 60000).toISOString() }, t0).claim, true);
+  assert.equal(K.claimbaar({ status: 'mislukt', poging: 2, bijgewerkt_op: new Date(t0 - 29 * 60000).toISOString() }, t0).claim, false);
+  assert.equal(K.claimbaar({ status: 'mislukt', poging: 2 }, t0).claim, false);
+  assert.equal(K.claimbaar({ status: 'mislukt', poging: 3, bijgewerkt_op: new Date(t0).toISOString() }, t0).definitief, true);
   const m3 = K.opdrachtOvergang({ status: 'opgehaald', poging: 3 }, 'mislukt');
   assert.deepEqual([m3.definitief, m3.factuur], [true, 'mislukt_definitief']);
   assert.equal(K.claimbaar({ status: 'mislukt', poging: 3 }, t0).claim, false);

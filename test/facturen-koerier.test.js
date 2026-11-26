@@ -373,20 +373,34 @@ test('mislukt max 3× dan signaal; daarna geen poging meer; Opnieuw proberen vin
   const oud = KO.GRENS.verzendingen; KO.GRENS.verzendingen = 30; tc.after(() => { KO.GRENS.verzendingen = oud; });   // het zaad heeft zelf veel claimbare opdrachten
   const { f, op, tok } = t.bevestig();
   g.status = 500;
-  await t.ronde(g, VERSTUUR + 5 * MIN);
-  assert.equal(t.op(op.id).status, 'mislukt');
-  await t.ronde(g, VERSTUUR + 65 * MIN);
-  await t.ronde(g, VERSTUUR + 125 * MIN);
+  // wv4162 (C17): bij een 5xx stopt de ronde na één aanroep en een mislukte opdracht wacht 30 min; dus per ronde hooguit één aanroep en
+  // hooguit één poging erbij. Het zaad heeft oudere claimbare opdrachten: rondes van 31 min tot onze opdracht drie keer mislukte.
+  let tijd = VERSTUUR + 5 * MIN, rondes = 0, vorig = 0;
+  while (t.op(op.id).poging < 3 && rondes < 300) {
+    const voor = g.verzonden.length, pVoor = t.op(op.id).poging;
+    await t.ronde(g, tijd);
+    assert.ok(g.verzonden.length - voor <= 1, 'hooguit één aanroep per ronde bij een 5xx (ronde ' + rondes + ')');
+    assert.ok(t.op(op.id).poging - pVoor <= 1, 'hooguit één poging per ronde');
+    if (t.op(op.id).poging === 1 && vorig === 0) {
+      vorig = 1;
+      // vijf minuten later: nog niet opnieuw (30 min wachttijd na mislukt)
+      const n1 = g.verzonden.filter((v) => v.token === tok).length;
+      await t.ronde(g, tijd + 5 * MIN);
+      assert.equal(t.op(op.id).poging, 1, 'mislukt is pas na 30 min weer te claimen');
+      assert.equal(g.verzonden.filter((v) => v.token === tok).length, n1);
+    }
+    tijd += 31 * MIN; rondes++;
+  }
   assert.equal(t.op(op.id).status, 'mislukt');
   assert.equal(t.op(op.id).poging, 3);
   assert.equal(t.fac(f.id).status, 'verzending_mislukt');
   assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE soort = 'verzending_mislukt' AND EXISTS (SELECT 1 FROM json_each(facturen) j WHERE j.value = ?)", [f.id]), 1);
-  await t.ronde(g, VERSTUUR + 185 * MIN);
+  await t.ronde(g, tijd + 60 * MIN);
   assert.equal(g.verzonden.filter((v) => v.token === tok).length, 3);
   // stel dat poging 3 tóch een concept maakte: Opnieuw proberen → nieuwe opdracht, zelfde token → overgenomen, geen tweede
   g.status = null;
   g.mails.push({ id: 'mx00000000000001', aan: op.doeladres, onderwerp: 'x [ref ' + tok + ']', snippet: 'Kenmerk ' + tok + ', opdracht ' + op.id + '. Inkoopfactuur', labels: ['DRAFT'], dag_lokaal: '2026-10-22' });
-  const r = t.call('POST', 'opnieuw', { id: f.id }, { nu: VERSTUUR + 190 * MIN });
+  const r = t.call('POST', 'opnieuw', { id: f.id }, { nu: tijd + 65 * MIN });
   assert.equal(r.status, 200, JSON.stringify(r.j));
   await t.ronde(g, Date.parse(r.j.opdracht.verstuur_na) + MIN);
   assert.equal(t.op(r.j.opdracht.id).status, 'gelukt');

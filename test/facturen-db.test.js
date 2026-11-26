@@ -871,18 +871,19 @@ test('review #4: één kapotte rij houdt de andere opdrachten niet tegen; verstu
   D.sluit(f);
 });
 
-test('claimen: een door de koerier gemelde mislukking (poging < 3) komt bij de volgende ronde mee; factuur blijft wordt_verstuurd', () => {
+test('claimen: een door de koerier gemelde mislukking (poging < 3) komt na 30 min weer mee (wv4162); factuur blijft wordt_verstuurd', () => {
   const f = basis();
   const t = inWachtrij(f);
   D.claimOpdrachten(f, NU);
   f.db.prepare("UPDATE opdracht SET status = 'mislukt', fout = 'HTTP 502' WHERE id = ?").run(t.opdracht);   // zoals F4 het resultaat vastlegt
-  const c = D.claimOpdrachten(f, NU + 60000);
+  assert.equal(D.claimOpdrachten(f, NU + 60000).opdrachten.length, 0, 'wv4162: binnen 30 min niet opnieuw');
+  const c = D.claimOpdrachten(f, NU + 31 * 60000);
   assert.deepEqual(c.opdrachten.map((o) => [o.id, o.poging]), [[t.opdracht, 2]]);
   assert.equal(f.db.prepare('SELECT status FROM factuur WHERE id = ?').get(t.id).status, 'wordt_verstuurd');
   f.db.prepare("UPDATE opdracht SET status = 'mislukt' WHERE id = ?").run(t.opdracht);
-  assert.equal(D.claimOpdrachten(f, NU + 120000).opdrachten[0].poging, 3);
+  assert.equal(D.claimOpdrachten(f, NU + 62 * 60000).opdrachten[0].poging, 3);
   f.db.prepare("UPDATE opdracht SET status = 'mislukt' WHERE id = ?").run(t.opdracht);
-  assert.equal(D.claimOpdrachten(f, NU + 180000).opdrachten.length, 0, 'na drie pogingen niet meer');
+  assert.equal(D.claimOpdrachten(f, NU + 93 * 60000).opdrachten.length, 0, 'na drie pogingen niet meer');
   D.sluit(f);
 });
 
@@ -953,7 +954,8 @@ test('natoets: de koerier kan een mislukking altijd vastleggen, ook na een adres
   D.claimOpdrachten(f, NU);
   f.db.prepare("UPDATE entiteit SET boekhoud_doel = 'nieuw-adres@acta.invalid' WHERE sleutel = 'tolgaarde'").run();
   f.db.prepare("UPDATE opdracht SET status = 'mislukt', fout = 'HTTP 502' WHERE id = ?").run(t.opdracht);
-  const c = D.claimOpdrachten(f, NU + 60000);
+  assert.equal(D.claimOpdrachten(f, NU + 60000).geweigerd.length, 0, 'wv4162: mislukt pas na 30 min weer aan de beurt');
+  const c = D.claimOpdrachten(f, NU + 31 * 60000);
   assert.equal(c.opdrachten.length, 0);
   assert.deepEqual(c.geweigerd.map((x) => x.id), [t.opdracht]);
   assert.equal(f.db.prepare('SELECT status FROM factuur WHERE id = ?').get(t.id).status, 'verzending_mislukt');

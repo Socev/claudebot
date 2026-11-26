@@ -1457,6 +1457,9 @@ function betaalspoorNaOntkoppel(f, wissel) {
 
 const OPDRACHT_STATUSSEN = ['wacht', 'opgehaald', 'gelukt', 'mislukt', 'geweigerd', 'teruggedraaid'];
 const OPGEHAALD_TIMEOUT_MS = 30 * 60 * 1000, MAX_POGINGEN = 3;
+// wv4162 (C17, facturen-kern M1): een mislukte poging is pas na 30 min weer te claimen, zodat een korte storing van de verzender niet alle
+// drie de pogingen in één ronde opbrandt. Zonder leesbare bijgewerkt_op: niet claimen (veilige kant).
+const MISLUKT_WACHT_MS = 30 * 60 * 1000;
 function ms(iso) { const t = Date.parse(iso); if (!Number.isFinite(t)) throw new KernFout('tijd', 'ongeldige tijd'); return t; }
 // Mag de koerier deze opdracht nu claimen? { claim, poging } — puur, `nu` in ms van de beller.
 function claimbaar(op, nu) {
@@ -1467,7 +1470,12 @@ function claimbaar(op, nu) {
     if (nu - ms(op.opgehaald_op) <= OPGEHAALD_TIMEOUT_MS) return { claim: false, reden: 'nog onderweg' };
     return p < MAX_POGINGEN ? { claim: true, poging: p + 1 } : { claim: false, definitief: true, vastgelopen: true, reden: 'drie pogingen zonder resultaat' };
   }
-  if (op.status === 'mislukt') return p < MAX_POGINGEN ? { claim: true, poging: p + 1 } : { claim: false, definitief: true, reden: 'drie pogingen mislukt' };
+  if (op.status === 'mislukt') {
+    if (p >= MAX_POGINGEN) return { claim: false, definitief: true, reden: 'drie pogingen mislukt' };
+    const t = Date.parse(op.bijgewerkt_op);
+    if (!Number.isFinite(t) || nu - t < MISLUKT_WACHT_MS) return { claim: false, reden: 'wacht na een mislukte poging' };
+    return { claim: true, poging: p + 1 };
+  }
   return { claim: false, reden: 'status ' + op.status };
 }
 // Opdrachtovergang; een tweede 'gelukt' verandert niets (idempotent).
@@ -1707,7 +1715,7 @@ module.exports = {
   leerUitBevestiging,
   // overgangen (§ 4.4)
   STATUSSEN, GEBEURTENISSEN, STATUS_OVERGANGEN, statusOvergang, BETAALSPOREN, BETAALSPOOR_OVERGANGEN, betaalspoorBegin, betaalspoorOvergang, betaalspoorNaOntkoppel, isCreditnota,
-  OPDRACHT_STATUSSEN, claimbaar, opdrachtOvergang, verstuurNa, BEDENKTIJD_MS, MAX_POGINGEN, OPGEHAALD_TIMEOUT_MS,
+  OPDRACHT_STATUSSEN, claimbaar, opdrachtOvergang, verstuurNa, BEDENKTIJD_MS, MAX_POGINGEN, OPGEHAALD_TIMEOUT_MS, MISLUKT_WACHT_MS,
   // opdracht + vingerafdruk
   vingerafdrukCanoniek, vingerafdruk, maakOpdracht,
   // rollen

@@ -503,7 +503,7 @@ async function verstuurEen(fdb, io, op, o, uit) {
   try { antw = await io.verzender({ modus, aan: op.doeladres, onderwerp: mail.onderwerp, tekst: mail.tekst, token: tok, bijlagen: c.bijlagen }); }
   catch (e) {
     if (e && e.zekerNietVerstuurd && modus === 'versturen') antw = { status: 0, j: { code: 'vooraf' }, vooraf: true };   // direct kon niet: zo meteen concept
-    else if (e && e.zekerNietVerstuurd) { D.opdrachtResultaat(fdb, op.id, { status: 'mislukt', fout: 'verzender: ' + foutSoort(e) }, { nu: klok(), wie }); uit.verzending.mislukt++; return; }
+    else if (e && e.zekerNietVerstuurd) { D.opdrachtResultaat(fdb, op.id, { status: 'mislukt', fout: 'verzender: ' + foutSoort(e) }, { nu: klok(), wie }); uit.verzending.mislukt++; throw stopNa(e); }
     else {
       uit.verzending.geen_resultaat++;   // time-out of verbinding weg: misschien wél gemaakt → opgehaald laten, na 30 min eerst zoeken
       if (modus === 'versturen') { uit.verzending.direct_onzeker++; D.verzendNotitie(fdb, op, 'direct onzeker (geen antwoord van de verzender): nooit opnieuw direct; eerst zoeken, anders concept', { nu: klok(), wie }); }
@@ -519,7 +519,7 @@ async function verstuurEen(fdb, io, op, o, uit) {
     modus = 'concept'; mail = mailVoor(fdb, op, modus);
     try { antw = await io.verzender({ modus, aan: op.doeladres, onderwerp: mail.onderwerp, tekst: mail.tekst, token: tok, bijlagen: c.bijlagen }); }
     catch (e) {
-      if (e && e.zekerNietVerstuurd) { D.opdrachtResultaat(fdb, op.id, { status: 'mislukt', fout: 'verzender: ' + foutSoort(e) }, { nu: klok(), wie }); uit.verzending.mislukt++; return; }
+      if (e && e.zekerNietVerstuurd) { D.opdrachtResultaat(fdb, op.id, { status: 'mislukt', fout: 'verzender: ' + foutSoort(e) }, { nu: klok(), wie }); uit.verzending.mislukt++; throw stopNa(e); }
       uit.verzending.geen_resultaat++; return;
     }
   }
@@ -548,7 +548,11 @@ async function verstuurEen(fdb, io, op, o, uit) {
   const r = D.opdrachtResultaat(fdb, op.id, { status: 'mislukt', fout: 'verzender http ' + (Number(st) || 0) + (j.code ? ' ' + kort(j.code, 30) : '') }, { nu: klok(), wie });
   uit.verzending.mislukt++;
   if (r.definitief) uit.verzending.definitief++;
+  // wv4162 (C17): een 5xx of geen status = de verzender is stuk; elke volgende opdracht zou hetzelfde krijgen → de ronde stopt met verzenden
+  if (!(Number(st) >= 400 && Number(st) < 500)) { const e = new Error('verzender ' + (Number(st) || 0)); e.code = 'verzender_storing'; e.stopVerzenden = true; throw e; }
 }
+// wv4162 (C17): een fout die zeker vóór de verzending lag (webhook niet gevonden, verbinding geweigerd) is ook een storing: ronde stoppen
+function stopNa(e) { const f = new Error('verzender ' + foutSoort(e)); f.code = 'verzender_storing'; f.stopVerzenden = true; return f; }
 
 // ───────────────────────────── schaduw PDF-lezer (wv1431) ─────────────────────────────
 
