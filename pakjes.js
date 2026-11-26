@@ -1002,12 +1002,13 @@ function maak(o) {
 // "is X al besteld of bezorgd?" te beoordelen. Geen adres, volgcode, volglink of bestelnummer; Shopper-verwachtingen zonder id.
 function kaal(body) {
   const b = body && typeof body === 'object' ? body : {};
-  // Vrije tekst (winkel, omschrijving, onderwerp) kan een bestelnummer, postcode of adres bevatten (Codex MOET 3): nummers vanaf 5 cijfers,
-  // postcodes, mailadressen en huisnummers na een straatwoord eruit, hooguit 120 tekens.
+  // Vrije tekst (winkel, omschrijving, onderwerp) kan een bestelnummer, postcode of adres bevatten (Codex MOET 3, ronde 2): nummers vanaf
+  // 5 cijfers en mailadressen eruit; ruikt de tekst naar een adres (postcode, of een straatwoord met binnen vier woorden een getal), dan
+  // valt het hele veld weg (null = inhoud onbekend; de Actie-Bewaker sluit dan niet). Hooguit 120 tekens.
+  const ADRES = [/\b[1-9]\d{3}\s?[A-Za-z]{2}\b/, /(straat|laan|weg|plein|singel|gracht|kade|dreef|hof|pad|steeg|park|dijk|markt|baan|ring|erf|veld)\b(\s+[^\s\d]+){0,4}\s+\d+/i];
   const schoon = (t) => {
-    if (typeof t !== 'string' || !t.trim()) return null;
-    const u = t.replace(/\S+@\S+/g, '…').replace(/\b[1-9]\d{3}\s?[A-Za-z]{2}\b/g, '…').replace(/[A-Za-z]*\d[\dA-Za-z-]{4,}/g, (m) => ((m.match(/\d/g) || []).length >= 5 ? '…' : m))
-      .replace(/(straat|laan|weg|plein|singel|gracht|kade|dreef|hof|pad|steeg)(\s+)\d+\s?[a-zA-Z]?\b/gi, '$1$2…').replace(/\s+/g, ' ').trim();
+    if (typeof t !== 'string' || !t.trim() || ADRES.some((r) => r.test(t))) return null;
+    const u = t.replace(/\S+@\S+/g, '…').replace(/[A-Za-z]*\d[\dA-Za-z-]{4,}/g, (m) => ((m.match(/\d/g) || []).length >= 5 ? '…' : m)).replace(/\s+/g, ' ').trim();
     return u ? u.slice(0, 120) : null;
   };
   const rij = (w) => ({ winkel: schoon(w.winkel), omschrijving: schoon(w.omschrijving), onderwerp: schoon(w.onderwerp), vervoerder: w.vervoerder || null,
