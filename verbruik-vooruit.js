@@ -61,6 +61,8 @@ function prognose(o) {
   if (!l) return null;
   const t1 = tijd(l.gemeten_op), v1 = getal(l.zeven_dagen), resetT = tijd(l.zeven_dagen_reset);
   if (t1 == null || v1 == null || resetT == null || !(resetT > t1)) return null;
+  const nuT = tijd(o.nu);
+  if (nuT != null && resetT <= nuT) return null;   // Codex MOET 1: oude meting van een week die al voorbij is
   const startT = resetT - WEEK;
   const eindeT = tijd(o.einde);
   const eind = eindeT != null && eindeT > t1 && eindeT < resetT ? eindeT : resetT;
@@ -90,8 +92,11 @@ function weken(rijen, nuIso) {
   }).filter(Boolean).sort(function (a, b) { return a._t - b._t; });
   const vol = l.filter(function (w) { return !w.lopend && w.metingen >= 12; }).slice(-WEKEN_MAX);
   const lopend = l.filter(function (w) { return w.lopend; }).slice(-1);
+  // Codex MOET 2: vorige = de week die direct vóór nu eindigde (reset in de laatste 7 dagen); ontbreekt die of telde hij te
+  // weinig metingen, dan null (nooit een oudere week als "vorige week")
+  const vorigeW = l.filter(function (w) { return !w.lopend && w._t <= nu && w._t > nu - WEEK; }).slice(-1)[0] || null;
+  const vorige = vorigeW && vorigeW.metingen >= 12 ? vorigeW : null;
   const uit = vol.concat(lopend).map(function (w) { delete w._t; return w; });
-  const vorige = vol.length ? vol[vol.length - 1] : null;
   return { weken: uit, vorige: vorige ? { reset: vorige.reset, eind_pct: vorige.eind_pct, vervallen: rond(1 - vorige.eind_pct), onvolledig: vorige.onvolledig, laatste_op: vorige.laatste_op } : null };
 }
 

@@ -93,3 +93,15 @@ test('agents nu: alleen running telt als lopend, zoals het Agents-scherm', funct
   const a = V.agentsNu({ a: { status: 'running' }, b: { status: 'pending' }, c: { status: 'done' }, d: { status: 'running' } }, 5, 71);
   assert.deepStrictEqual(a, { loopt: 2, max: 5, wachten: 71 });
 });
+test('Codex MOET 1: meting van een week die al voorbij is geeft geen prognose', function () {
+  const r = week(4, 0.1);
+  assert.strictEqual(V.prognose({ laatste: laatsteVan(r), reeks: r, nu: new Date(RESET + UUR).toISOString() }), null);
+  assert.ok(V.prognose({ laatste: laatsteVan(r), reeks: r, nu: new Date(RESET - UUR).toISOString() }));
+});
+test('Codex MOET 2: vorige week ontbreekt of te weinig metingen = null, nooit een oudere week', function () {
+  const rij = (dag, eind, n) => ({ reset: new Date(RESET - dag * 7 * DAG).toISOString(), eind: eind, hoogste: eind, laatste_op: new Date(RESET - dag * 7 * DAG - UUR).toISOString(), metingen: n });
+  const nu = new Date(START + 4 * DAG).toISOString();
+  assert.strictEqual(V.weken([rij(2, 0.8, 300), rij(1, 0.4, 3), rij(0, 0.3, 50)], nu).vorige, null);
+  assert.strictEqual(V.weken([rij(2, 0.8, 300), rij(0, 0.3, 50)], nu).vorige, null);
+  assert.strictEqual(V.weken([rij(2, 0.8, 300), rij(1, 0.4, 300), rij(0, 0.3, 50)], nu).vorige.eind_pct, 0.4);
+});

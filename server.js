@@ -17322,7 +17322,7 @@ function appVerbruikVooruit(d, tank, weken, stand) {
   const tt = typeof tokenteller !== 'undefined' && tokenteller && typeof tokenteller.verdeling === 'function' ? tokenteller : null;
   try {
     if (d.laatste) {
-      const p = VV4168.prognose({ laatste: d.laatste, reeks: d.reeks });
+      const p = VV4168.prognose({ laatste: d.laatste, reeks: d.reeks, nu: d.nu });
       if (p) {
         const w = VV4168.weken(weken && weken.weken, d.nu);
         p.vorige = w.vorige; p.weken = w.weken;
