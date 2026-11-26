@@ -241,7 +241,8 @@ function maak(o) {
     const i = inst();
     if (boven(i)) return { ok: false, output: ZIN.plafond, reden: 'plafond' };
     if (kind === 'brain') {
-      const r = await o.brain({ input: job.input, title: typeof job.title === 'string' ? job.title : '', sheet: typeof job.sheet === 'string' ? job.sheet : '' });
+      const r = await o.brain({ input: job.input, title: typeof job.title === 'string' ? job.title : '', sheet: typeof job.sheet === 'string' ? job.sheet : '',
+        plek: typeof job.plek === 'string' ? job.plek : '' });   // wv4169: de plek die David in Tabula koos ('' = oude Tabula)
       return r && typeof r.output === 'string' ? { ok: r.ok === true, output: r.output, reden: r.ok === true ? null : 'brain' } : { ok: false, output: ZIN.fout, reden: 'brain' };
     }
     return model(kind, job, i);
@@ -383,7 +384,7 @@ function maak(o) {
 }
 
 /*
- * brain: de envelop voor OVIS Intake (tabula@1, bron app:tabula, interne route). Zuiver: x = { input, title, sheet }, geheimen(t) → { tekst, n }
+ * brain: de envelop voor OVIS Intake (tabula@1, bron app:tabula, interne route). Zuiver: x = { input, title, sheet, plek (sleutel of null) }, geheimen(t) → { tekst, n }
  * (de geheimenpoort van brain-web.js), nu (ms). → { env, titel } of { fout }.
  */
 const HOOFD_MAX = 1000 * 1000;
@@ -418,8 +419,10 @@ function brainEnvelop(x, geheimen, nu) {
   const buf = Buffer.from(hoofd, 'utf8');
   const bronId = crypto.createHash('sha256').update('tabula|' + blad + '|' + crypto.createHash('sha256').update(gm.tekst).digest('hex')).digest('hex').slice(0, 24);
   const naam = nlStempel(nu) + '_tabula_' + (slug(titel, 80) || 'blad') + '.md';
+  const meta = { onderwerp: titel, blad, geschreven_op: op, sleutels_weggelaten: gt.n + gm.n, ingekort };
+  if (PLEKKEN.indexOf(x.plek) >= 0) meta.plek = x.plek;   // wv4169: alleen een plek met een raw_input-map (zelfde lijst als het profiel)
   const env = { protocol: 'ovis-intake/1', profiel: 'tabula@1', bron: 'app:tabula', bron_id: bronId, ontvangen: op,
-    meta: { onderwerp: titel, blad, geschreven_op: op, sleutels_weggelaten: gt.n + gm.n, ingekort },
+    meta,
     onderdelen: [{ deel: 'p1', rol: 'hoofdtekst', naam, mime: 'text/markdown', grootte: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), tekst: hoofd }],
     overgang: { stand: 'om', bestandsnaam: naam },
     aanlevering: { workflow: 'pod:tabula-loket', knoop: 'tabula-loket.js' } };
@@ -427,7 +430,34 @@ function brainEnvelop(x, geheimen, nu) {
 }
 // Gewone zin over waar het stuk staat (plekVan van de router); nooit een verzonnen pad
 const ENT_NAAM = { TG: 'Tolgaarde', GH: 'Groenhouten', HAGRO: 'HAGRO', POT: 'POT', HOLD: 'Holding', PHBV: 'Praktijkhouders BV', SEL: 'SEL', DBH: 'DBH', GHAWA: 'GHAWA', PRIVE: 'Privé' };
-function plekZin(p, dubbel) {
+/*
+ * wv4169 (besluitenpagina nr 117 / 2C17): de plek die David in Tabula koos. Het loket geeft hem door als tekst:
+ *   ''        oude Tabula (geen keuzelijst): gedrag als vroeger, geen plekknoppen terug
+ *   'socev'   nieuwe Tabula, "Socev kiest": de router kiest; twijfelt hij, dan plekknoppen terug
+ *   'TG'      gekozen in de keuzelijst (vooraf ingevuld): de router neemt hem over (marker, Jev en Davids regels gaan voor)
+ *   'TG!'     een plekknop in het antwoordvenster na twijfel: Davids uitdrukkelijke keuze. Alleen die mag een al ingeleverd blad
+ *             (zelfde tekst = dubbel) alsnog een plek geven, via dezelfde keuze als Socev › Intake (Codex ontwerpreview MOET 1).
+ * → { plek: sleutel | null, knop: bool, nieuw: bool }
+ */
+const PLEKKEN = Object.keys(ENT_NAAM);
+const PLEK_KIEZEN = '\u27e6plek-kiezen\u27e7';   // laatste regel van een antwoord: Tabula 0.8+ toont dan de plekknoppen (en haalt de regel weg)
+function plekLees(v) {
+  const t = typeof v === 'string' ? v.trim() : '';
+  if (!t) return { plek: null, knop: false, nieuw: false };
+  const knop = /!$/.test(t), k = t.replace(/!$/, '');
+  return { plek: PLEKKEN.indexOf(k) >= 0 ? k : null, knop: knop && PLEKKEN.indexOf(k) >= 0, nieuw: true };
+}
+// Mag een plekknop een al ingeleverd blad nu een plek geven? Alleen als het nog nergens in een raw_input staat: twijfel, of eerder "geen".
+function dubbelKies(p) {
+  return !!(p && !(p.paden && p.paden.length) && (p.staat === 'twijfel' || (p.staat === 'klaar' && p.lens === 'geen')));
+}
+// o = { knoppen: nieuwe Tabula, gekozen: de plek is zojuist via de knop gekozen }
+function plekZin(p, dubbel, o) {
+  o = o || {};
+  if (o.knoppen && !(p && p.paden && p.paden.length) && p && (p.staat === 'twijfel' || (p.staat === 'klaar' && p.lens === 'geen')))
+    return (p.staat === 'twijfel' ? 'OVIS Intake twijfelt over de plek. Kies hieronder waar het heen moet.'
+      : 'Dit blad staat al in OVIS Intake, maar nog niet in de Second Brain. Kies hieronder alsnog een plek.') + '\n' + PLEK_KIEZEN;
+  if (o.gekozen) dubbel = false;
   const voor = dubbel ? 'Dit blad stond al in de Second Brain (zelfde tekst). ' : '';
   if (p && p.paden && p.paden.length) return voor + 'Vastgelegd in de Second Brain: ' + p.paden[0] + (p.entiteit && ENT_NAAM[p.entiteit] ? ' (' + ENT_NAAM[p.entiteit] + ')' : '') +
     '. De nachtronde verwerkt het verder tot kennispagina\'s.';
@@ -437,4 +467,4 @@ function plekZin(p, dubbel) {
   return voor + 'Ontvangen door OVIS Intake; de plek volgt binnen enkele minuten (Socev › Intake › Geschiedenis).';
 }
 
-module.exports = { maak, brainEnvelop, plekZin, K: { SOORTEN, STANDAARD, steekLijst, cijfers, cijfersGelijk, omhul, maxTokens, ZIN } };
+module.exports = { maak, brainEnvelop, plekZin, plekLees, dubbelKies, K: { PLEKKEN, PLEK_KIEZEN, SOORTEN, STANDAARD, steekLijst, cijfers, cijfersGelijk, omhul, maxTokens, ZIN } };

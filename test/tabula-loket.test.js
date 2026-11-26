@@ -337,3 +337,71 @@ test('router: tabula-blad → soort notitie/tabula, alleen kennis, eigen kop; pl
     assert.equal(r.plekVan('stk_20261118_ffffffff'), null);
   } finally { r.sluit(); db.close(); fs.rmSync(basis, { recursive: true, force: true }); }
 });
+
+// wv4169 (besluitenpagina nr 117 / 2C17): David kiest in Tabula de plek. Ingang + router op dezelfde databank; alle toetsdata verzonnen.
+test('plek uit Tabula: met plek landt het blad daar zonder twijfel en zonder sorteermodel; zonder plek twijfel zoals vroeger; plekknop plaatst het alsnog', async () => {
+  const basis = fs.mkdtempSync(path.join(os.tmpdir(), 'tabula-p-'));
+  const dir = path.join(basis, 'intake'), vault = path.join(basis, 'vault');
+  fs.mkdirSync(dir, { recursive: true }); fs.mkdirSync(path.join(vault, '_INBOX'), { recursive: true });
+  for (const m of Object.values(R.K.KENNIS_MAP)) fs.mkdirSync(path.join(vault, m), { recursive: true });
+  const nu = Date.parse('2026-11-26T10:00:00Z');
+  const ing = I.maak({ dir, vault, profielenDir: path.join(ROOT, 'intake', 'profielen'), filterPad: path.join(ROOT, 'bisync-filter.txt'),
+    primair: () => true, vv: VV, nu: () => nu, fout: () => {}, marker: P, nachtgrendel: () => false, vrijeBytes: () => 50 * 1024 ** 3,
+    pdftekst: async () => '', liveBron: (b) => b === 'app:tabula', stuur: () => {} });
+  let indeling = 0;
+  const r = R.maak({ dir, vault, vv: VV, nu: () => nu + 60000, marker: P,
+    pdfBbox: async () => '<page></page>', ocr: async () => null, docx: async () => null, paginas: async () => 1,
+    handvatten: async () => ({ compilatienummer: 1, entiteiten: [], niet_dezelfde: [], ids: [] }), eigenAdressen: () => ['david@voorbeeld.example'],
+    live: () => ({ 'app:tabula': true }), lenzenLive: () => ['kennis', 'geen', 'systeem', 'facturen', 'keten', 'deadlines'],
+    jev: async (x) => ({ ref: x.ref, gemeten: true, injectie_kans: 0.01, aanspreking: false }),
+    indeling: async () => { indeling++; return { ok: true, categorie: 'Onbekend' }; },
+    naamOk: (nm) => !/[\\/:*?"<>|]/.test(nm), vaultPauze: () => false, bewaarNa: () => 1, datum: () => '2026-11-26',
+    kaartZet: async (p) => ({ sleutel: p.sleutel }), kaartStatus: async () => ({ ok: true }), kaartOpen: async () => [], melding: () => {} });
+  try {
+    // vóór: zonder plek (oude Tabula) → twijfel, geen entiteit
+    const eA = T.brainEnvelop({ input: 'Verzonnen aantekening over de koffieautomaat in de wachtkamer.', title: 'Koffie', sheet: 'blad-a', plek: null }, BW.K.geheimen, nu);
+    assert.equal(eA.env.meta.plek, undefined, 'zonder plek geen veld in de envelop');
+    const a = await ing.leverIntern('tabula', eA.env, {});
+    // na: plek Tolgaarde uit de keuzelijst
+    const eB = T.brainEnvelop({ input: 'Verzonnen aantekening over de fietsenstalling achter het gebouw.', title: 'Fietsen', sheet: 'blad-b', plek: 'TG' }, BW.K.geheimen, nu);
+    assert.equal(eB.env.meta.plek, 'TG');
+    const b = await ing.leverIntern('tabula', eB.env, {});
+    assert.equal(a.ok && b.ok, true, JSON.stringify([a, b]));
+    // een plek buiten de lijst weigert de ingang (profiel: keuze)
+    const eX = T.brainEnvelop({ input: 'Verzonnen derde aantekening.', sheet: 'blad-x' }, BW.K.geheimen, nu); eX.env.meta.plek = 'KM';
+    const x = await ing.leverIntern('tabula', eX.env, {});
+    assert.equal(x.ok, false, JSON.stringify(x)); assert.match(String(x.reden), /keuze:meta\.plek/);
+    const u = await r.ronde();
+    assert.equal(u.fout, 0, JSON.stringify(u));
+    const pA = r.plekVan(a.stuk_id), pB = r.plekVan(b.stuk_id);
+    assert.equal(pA.staat, 'twijfel', JSON.stringify(pA)); assert.equal(pA.paden.length, 0);
+    assert.equal(pB.staat === 'automatisch' || pB.staat === 'klaar', true, JSON.stringify(pB));
+    assert.equal(pB.entiteit, 'TG'); assert.equal(pB.paden.length, 1); assert.match(pB.paden[0], /^10_Zakelijk\/Tolgaarde\/raw_input\/2026-11-26_1100_tabula_/);
+    assert.equal(ing._db.prepare("SELECT uitkomst FROM besluit WHERE stuk_id = ? AND stap = 'zeker_genoeg'").get(b.stuk_id).uitkomst, 'automatisch');
+    assert.equal(ing._db.prepare("SELECT count(*) n FROM besluit WHERE stuk_id = ? AND stap = 'vangnet'").get(b.stuk_id).n, 0, 'met plek geen sorteermodel');
+    assert.equal(indeling, 1, 'alleen het blad zonder plek ging langs het sorteermodel');
+    // zinnen: nieuwe Tabula krijgt bij twijfel de plekknoppen, de oude niet
+    assert.match(T.plekZin(pA, false, { knoppen: true }), /Kies hieronder waar het heen moet\.\n⟦plek-kiezen⟧$/);
+    assert.equal(T.plekZin(pA, false), 'OVIS Intake twijfelt over de plek; kies hem in Socev › Intake.');
+    assert.match(T.plekZin(pB, false, { knoppen: true }), /^Vastgelegd in de Second Brain: 10_Zakelijk\/Tolgaarde\/raw_input\/.* \(Tolgaarde\)\./);
+    // plekknop (zelfde tekst = dubbel): alleen de knop ('GH!') mag de twijfel opheffen
+    assert.deepEqual(T.plekLees('GH!'), { plek: 'GH', knop: true, nieuw: true });
+    assert.deepEqual(T.plekLees('GH'), { plek: 'GH', knop: false, nieuw: true });
+    assert.deepEqual(T.plekLees('socev'), { plek: null, knop: false, nieuw: true });
+    assert.deepEqual(T.plekLees(''), { plek: null, knop: false, nieuw: false });
+    assert.deepEqual(T.plekLees('KM!'), { plek: null, knop: false, nieuw: true });
+    const a2 = await ing.leverIntern('tabula', T.brainEnvelop({ input: 'Verzonnen aantekening over de koffieautomaat in de wachtkamer.', title: 'Koffie', sheet: 'blad-a', plek: 'GH' }, BW.K.geheimen, nu + 1000).env, {});
+    assert.equal(a2.uitkomst, 'dubbel'); assert.equal(a2.stuk_id, a.stuk_id);
+    assert.equal(T.dubbelKies(r.plekVan(a.stuk_id)), true);
+    assert.equal(T.dubbelKies(pB), false, 'een geplaatst blad verplaatst de knop niet');
+    assert.equal(T.dubbelKies({ paden: [], staat: 'vastgehouden' }), false);
+    assert.equal(T.dubbelKies({ paden: [], staat: 'klaar', lens: 'geen' }), true, 'eerder "niet bewaren": alsnog een plek');
+    const k = await r.appKeuze({ stuk_id: a.stuk_id, versie: pA.versie, keuze: 'bestemming', lens: 'kennis', entiteit: 'GH' }, 'app:tabula');
+    assert.equal(k.status, 200, JSON.stringify(k));
+    const pA2 = r.plekVan(a.stuk_id);
+    assert.equal(pA2.entiteit, 'GH'); assert.match(pA2.paden[0], /^10_Zakelijk\/Groenhouten\/raw_input\//);
+    assert.match(T.plekZin(pA2, true, { knoppen: true, gekozen: true }), /^Vastgelegd in de Second Brain: 10_Zakelijk\/Groenhouten\/raw_input\/.* \(Groenhouten\)\./);
+    assert.match(T.plekZin(pA2, true, { knoppen: true }), /^Dit blad stond al in de Second Brain/);
+    assert.equal(T.plekZin({ paden: [], staat: 'klaar', lens: 'geen' }, true, { knoppen: true }).split('\n').pop(), T.K.PLEK_KIEZEN);
+  } finally { r.sluit(); ing.sluit(); fs.rmSync(basis, { recursive: true, force: true }); }
+});

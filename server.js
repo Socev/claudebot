@@ -30412,7 +30412,8 @@ async function tabulaBrain(x) {
   const T = require(path.join(__dirname, 'tabula-loket.js'));
   if (!intake || typeof intake.leverIntern !== 'function' || !intakeLiveBron('app:tabula')) return { ok: false, output: 'Stuur naar de Second Brain staat nu uit in OVIS Intake; er is niets opgeslagen.' };
   const geheimen = require(path.join(__dirname, 'brain-web.js')).K.geheimen;
-  const e = T.brainEnvelop(x, geheimen, Date.now());
+  const pk = T.plekLees(x.plek);   // wv4169: plek uit Tabula ('' = oude Tabula; 'TG!' = plekknop na twijfel)
+  const e = T.brainEnvelop(Object.assign({}, x, { plek: pk.plek }), geheimen, Date.now());
   if (e.fout) return { ok: false, output: e.fout };
   let r = null;
   try { r = await intake.leverIntern('tabula', e.env, {}); } catch (err) { logError('tabula-intake', err); r = null; }
@@ -30420,7 +30421,15 @@ async function tabulaBrain(x) {
   if (!r.ok) return { ok: false, output: 'OVIS Intake weigerde het blad (' + String(r.reden || 'onbekend').slice(0, 60) + ').' };
   const id = r.stuk_id, dubbel = r.uitkomst === 'dubbel';
   const ir = intakeRouterHaal();
-  let p = ir && id ? ir.plekVan(id) : null;
+  let p = ir && id ? ir.plekVan(id) : null, gekozen = false;
+  // wv4169: een plekknop (Davids uitdrukkelijke keuze) op een blad dat al in Intake stond zonder plek: dezelfde keuze als Socev › Intake.
+  // Een gewone herhaling (keuzelijst, geen knop) laat de twijfel staan (Codex ontwerpreview MOET 1).
+  if (dubbel && pk.knop && pk.plek && ir && typeof ir.appKeuze === 'function' && T.dubbelKies(p)) {
+    let k = null;
+    try { k = await ir.appKeuze({ stuk_id: id, versie: p.versie, keuze: 'bestemming', lens: 'kennis', entiteit: pk.plek }, 'app:tabula'); } catch (err) { logError('tabula-keuze', err); k = null; }
+    if (!k || k.status >= 300) return { ok: false, output: 'OVIS Intake nam de plek nu niet aan' + (k && k.j && k.j.fout ? ' (' + String(k.j.fout).slice(0, 120) + ')' : '') + '; probeer het zo nog eens.' };
+    gekozen = true; p = ir.plekVan(id);
+  }
   const klaar = function (q) { return !!(q && (q.paden.length || ['vastgehouden', 'twijfel', 'bewaard', 'weg'].indexOf(q.staat) >= 0)); };
   const t0 = Date.now();
   while (ir && id && !klaar(p) && Date.now() - t0 < 50000) {
@@ -30429,7 +30438,7 @@ async function tabulaBrain(x) {
     p = ir.plekVan(id);
     if (!klaar(p)) await tabulaWacht(u && u.bezig ? 2000 : 4000);
   }
-  return { ok: true, output: T.plekZin(p, dubbel) };
+  return { ok: true, output: T.plekZin(p, dubbel, { knoppen: pk.nieuw, gekozen }) };
 }
 const tabulaLoket = (function () {
   const p = path.join(__dirname, 'tabula-loket.js');

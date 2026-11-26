@@ -1637,6 +1637,9 @@ function maak(o) {
           const en = entiteitBepaal(r, x, af);
           // wv3962: map-ingang — de map bepaalt de entiteit (meta.map_entiteit, door het profiel beperkt tot de maps met een ingang)
           if (s.profiel === 'map@1' && KENNIS_MAP[meta.map_entiteit]) { en.knoop = meta.map_entiteit; en.kracht = 'hoog'; en.bewijs = 'map'; en.twijfel = null; en.kenmerken = ['map']; }
+          // wv4169 (besluitenpagina nr 117 / 2C17, David Ja 25-11 22:24): in Tabula kiest David zelf de plek (meta.plek, door het profiel beperkt tot
+          // de entiteiten met een raw_input-map); de router neemt hem over zoals de map bij map@1. Marker, Jev en Davids regels gaan zoals altijd voor.
+          if (s.profiel === 'tabula@1' && KENNIS_MAP[meta.plek]) { en.knoop = meta.plek; en.kracht = 'hoog'; en.bewijs = 'tabula'; en.twijfel = null; en.kenmerken = ['tabula_plek']; }
           const labels = Array.from(new Set([].concat(meta.entiteit || [], delen.map(function (d) { const m = safeJson(d.meta); return m && m.entiteit; }).filter(Boolean)))).map(function (l) { return LABEL_KNOOP[l] || null; }).filter(Boolean);
           B('entiteit', en.knoop || 'onbekend', en.kracht, { kenmerken: en.kenmerken, twijfel: en.twijfel || null, label_route: labels });
           // Davids regels gaan vóór de standaard (wv1408); de marker ging hierboven al voor

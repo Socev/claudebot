@@ -16,7 +16,8 @@
   "blad": { "type": "tekst", "max": 120, "vorm": "^[A-Za-z0-9._:-]{1,120}$", "verplicht": true },
   "geschreven_op": { "type": "tijd", "verplicht": true },
   "sleutels_weggelaten": { "type": "geheel", "min": 0, "verplicht": true },
-  "ingekort": { "type": "ja/nee", "verplicht": true }
+  "ingekort": { "type": "ja/nee", "verplicht": true },
+  "plek": { "type": "keuze", "waarden": ["TG", "GH", "HAGRO", "POT", "HOLD", "PHBV", "SEL", "DBH", "GHAWA", "PRIVE"], "verplicht": false, "uitleg": "wv4169 (2C17): de plek die David in Tabula koos (Naar: … ▾); de router neemt hem over als entiteit (hoog), net als map_entiteit bij map@1. Ontbreekt hij: de router kiest zoals vroeger." }
  },
  "onderdelen": {
   "hoofdtekst": { "min": 1, "max": 1, "mime": ["text/markdown"], "max_mb": 1 }
