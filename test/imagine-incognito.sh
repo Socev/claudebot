@@ -84,5 +84,15 @@ for k in kecht:"1g kruisproef: echt beeld" ktel:"1c telweek: niets gewist" kafro
   elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"
   else echo "ROOD  kruisproef ${k%%:*} werd rood, maar niet op ${k#*:}"; grep -E "^ROOD" /tmp/imagine-toets.$$ | head -3; f=1; fi
 done
+# wv4096: Maak er 4, Nog een (variant als versie), stand vast aanzetten; drie kruisproeven moeten ROOD
+node --no-warnings test/imagine-reeks.test.js > /tmp/imagine-toets.$$ 2>&1; r=$?
+tail -n 1 /tmp/imagine-toets.$$; grep -E "^ROOD" /tmp/imagine-toets.$$
+[ $r = 0 ] || { echo "ROOD  test/imagine-reeks.test.js"; f=1; }
+for k in kvers:"1a Maak er 4" kreeks:"1d resultaat = één beeld" kvast:"6b aan zonder verse vingerafdruk"; do
+  IMAGINE_KRUIS=${k%%:*} node --no-warnings test/imagine-reeks.test.js > /tmp/imagine-toets.$$ 2>&1
+  if [ $? = 0 ]; then echo "ROOD  kruisproef ${k%%:*} bleef groen"; f=1
+  elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"
+  else echo "ROOD  kruisproef ${k%%:*} werd rood, maar niet op ${k#*:}"; grep -E "^ROOD" /tmp/imagine-toets.$$ | head -3; f=1; fi
+done
 rm -f /tmp/imagine-toets.$$
 exit $f
