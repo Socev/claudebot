@@ -225,11 +225,11 @@ function maak(deps) {
     const doel = aan ? 'actief' : 'proef';
     for (const id of l) { try { if (aan) S.activeer(id, ctx2); else S.opProef(id, ctx); } catch (e) { /* telt bij het nalopen */ } }
     let n = 0, mis = 0;
-    for (const id of l) {
-      let f = null;
-      try { f = await S.flowVan(id); } catch (e) { f = null; }
-      if (!f) continue;   // een stuk-/voorbeeldflow die er niet is
-      if (f.status === doel) n++; else mis++;
+    for (let i = 0; i < l.length; i++) {
+      let f = null, kapot = false;
+      try { f = await S.flowVan(l[i]); } catch (e) { kapot = true; }   // review ronde 2 MOET 1: een leesfout telt als mislukt
+      if (!f && !kapot && i > 0) continue;   // een stuk-/voorbeeldflow die er niet is
+      if (f && f.status === doel) n++; else mis++;
     }
     log('imagine vast ' + (aan ? 'aan ' : 'uit ') + sleutel + ' flows=' + n + (mis ? ' mis=' + mis : ''));
     if (mis) return { status: 500, fout: (aan ? 'vast aanzetten' : 'terugzetten') + ' lukte niet helemaal: ' + mis + ' van ' + (n + mis) + ' onderdelen staan nog ' + (aan ? 'op proef' : 'vast aan') + '; probeer het opnieuw', vast: aan ? 'proef' : 'actief' };
@@ -241,11 +241,12 @@ function maak(deps) {
       let f = null;
       try { f = await S.flowVan(s.flow); } catch (e) { f = null; }
       // wv3021: kan deze stand een masker en hoeveel voorbeelden? (alleen als die flow er is en klaar staat)
-      let masker = false, refs = 0;
+      let masker = false, refs = 0, plusVast = false;
       if (PLUS[s.id]) {
         for (let n = 0; n <= REFS_MAX; n++) {
           let p = null;
           try { p = await S.flowVan(PLUS[s.id] + '-' + n); } catch (e) { p = null; }
+          if (p && p.status === 'actief') plusVast = true;   // wv4096 review ronde 2 MOET 2: vast = vast als één onderdeel nog vast staat
           if (!p || !p.klaar) break;
           if (n === 0) masker = true; else refs = n;
         }
@@ -253,7 +254,7 @@ function maak(deps) {
       uit.push({ id: s.id, naam: s.naam, karakter: s.karakter, opdracht: s.opdracht === true, ...(s.model ? { model: s.model, kort: s.kort } : {}), klaar: !!(f && f.klaar), reden: f ? f.reden : 'deze stand staat niet in de Studio',
         tijd: f ? f.tijd : '', vers_per_keer: !!(f && f.vers_per_keer), masker: masker, refs_max: masker ? refs : 0,
         // wv4096 (2C61 e): David kan zelf kiezen of deze stand per beeld een vingerafdruk vraagt (proef) of vast aan staat (actief)
-        sleutel: vastSleutel(s), vast: f && !f.betaald && (f.status === 'proef' || f.status === 'actief') ? f.status : null,
+        sleutel: vastSleutel(s), vast: f && !f.betaald && (f.status === 'proef' || f.status === 'actief') ? (plusVast ? 'actief' : f.status) : null,
         velden: f ? f.velden.filter(function (v) { return v.soort !== 'beeld' && v.soort !== 'seed' && !/^pod_/.test(v.naam); }) : [] });
     }
     return uit;

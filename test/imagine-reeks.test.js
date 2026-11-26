@@ -175,7 +175,7 @@ async function afAlles(S) { for (const id of [...S.live.keys()]) { S.af(id, beel
   {
     const l = (await app(im, '/app/imagine', 'GET', null, ctxNiet)).body;
     const q = l.standen.find((s) => s.id === 'opdracht-qwen');
-    toets('6a standen tonen sleutel en vast', q && q.sleutel === 'opdracht-qwen' && q.vast === 'proef' && l.teksten.some((t) => t.sleutel === 'tekst-moss' && t.vast === 'proef'), [q && q.sleutel, q && q.vast, l.teksten.map((t) => t.sleutel)]);
+    toets('6a standen tonen sleutel en vast (één voorbeeldflow staat al vast = de stand toont vast)', q && q.sleutel === 'opdracht-qwen' && q.vast === 'actief' && l.teksten.some((t) => t.sleutel === 'tekst-moss' && t.vast === 'proef'), [q && q.sleutel, q && q.vast, l.teksten.map((t) => t.sleutel)]);
     const r0 = await app(im, '/app/imagine/vast/opdracht-qwen', 'POST', { aan: true }, ctxNiet);
     toets('6b aan zonder verse vingerafdruk: 403 vers_nodig, niets veranderd', r0.status === 403 && r0.body.vers_nodig && S.act.length === 0, r0);
     const c = ctxVers();
@@ -192,7 +192,15 @@ async function afAlles(S) { for (const id of [...S.live.keys()]) { S.af(id, beel
     await app(im, '/app/imagine/vast/opdracht-qwen', 'POST', { aan: true }, ctxVers());
     const r4 = await app(im, '/app/imagine/vast/opdracht-qwen', 'POST', { aan: false }, ctxNiet);
     toets('6h terugzetten half gelukt: geen 200, zegt hoeveel nog vast staan', r4.status === 500 && /1 van 4/.test(r4.body.fout), r4);
+    const lh = (await app(im, '/app/imagine', 'GET', null, ctxNiet)).body.standen.find((x) => x.id === 'opdracht-qwen');
+    toets('6i half teruggezet: de stand toont nog "vast" (zodat David opnieuw kan terugzetten)', lh.vast === 'actief', lh.vast);
     S.opProef = oud;
+    const r6 = await app(im, '/app/imagine/vast/opdracht-qwen', 'POST', { aan: false }, ctxNiet);
+    toets('6j opnieuw terugzetten lukt dan helemaal', r6.status === 200 && S.flows['beeld-plus-qwen-1'] === 'proef', [r6, S.flows]);
+    const ofv = S.flowVan; S.flowVan = async function (id) { if (id === 'beeld-plus-qwen-0') throw new Error('nep leesfout'); return ofv(id); };
+    const r7 = await app(im, '/app/imagine/vast/opdracht-qwen', 'POST', { aan: false }, ctxNiet);
+    toets('6k leesfout tijdens nalopen = geen 200', r7.status === 500, r7);
+    S.flowVan = ofv;
     const r3 = await app(im, '/app/imagine/vast/bestaat-niet', 'POST', { aan: true }, ctxVers());
     toets('6g onbekende stand: 404', r3.status === 404, r3.status);
   }
