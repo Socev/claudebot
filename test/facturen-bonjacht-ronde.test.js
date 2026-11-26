@@ -315,12 +315,12 @@ test('concept aan pa: luik zegt "er staat al een concept in de draad" (409) = ni
   n.antwoord = () => ({ status: 409, j: { ok: false, fout: 'er staat al een concept in deze draad', bestaand_concept: ['x'] } });
   // wv4103: aanhef en slot aan André uit de mailstem-bron (verzonnen regel; de lezer is een functie, geen vault)
   const FA = require(path.join(ROOT, 'facturen-aanhef.js'));
-  FA.zetLezer(() => '## Aanhef en slot per vaste ontvanger\n- André: aanhef "Hallo papa," · slot "Liefs, / Davidje"\n');
+  FA.zetLezer(() => '## Aanhef en slot per vaste ontvanger\n- André: aanhef "Hallo papa," · slot "Liefs, / David Schaap"\n');
   const v = await n.klik(l.id);
   FA.zetLezer(null);
   assert.equal(v.status, 200); assert.equal(v.j.concept.status, 'mislukt'); assert.equal(v.j.concept.al_in_gmail, true);
   assert.equal(n.mail.length, 1); assert.equal(n.mail[0].thread_id, l.draad_id);
-  assert.match(n.mail[0].bericht, /^Hallo papa,\n/); assert.match(n.mail[0].bericht, /\n\nLiefs,\nDavidje$/);
+  assert.match(n.mail[0].bericht, /^Hallo papa,\n/); assert.match(n.mail[0].bericht, /\n\nLiefs,\nDavid Schaap$/);
   // onzeker (time-out): stand onbekend; opnieuw alleen met nogmaals
   n.antwoord = () => ({ status: 504, j: null });
   const v2 = await n.klik(l.id);

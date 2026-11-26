@@ -44,10 +44,10 @@ test('zonder lezer: exact de oude tekst (terugval)', () => {
 });
 
 test('één regel op één plek: alle vaste mails aan André volgen (aanhef en slot)', () => {
-  FA.zetLezer(() => BRON('- André (zijn vader): aanhef "Hallo papa," · slot "Liefs, / Davidje"'));
+  FA.zetLezer(() => BRON('- André (zijn vader): aanhef "Hallo papa," · slot "Liefs, / David Schaap"'));
   const m = mails();
   for (const k of ['sepa', 'maandspec', 'boekstuk_concept', 'boekstuk_auto', 'pot', 'pot_correctie']) assert.equal(kop(m[k]), 'Hallo papa,', k);
-  for (const k of ['sepa', 'maandspec', 'boekstuk_concept', 'pot', 'pot_correctie']) assert.equal(staart(m[k]), 'Liefs,\nDavidje', k);
+  for (const k of ['sepa', 'maandspec', 'boekstuk_concept', 'pot', 'pot_correctie']) assert.equal(staart(m[k]), 'Liefs,\nDavid Schaap', k);
   assert.match(m.boekstuk_auto, /Dit bericht is automatisch verstuurd namens David\.$/, 'automatisch boekstuk houdt zijn vaste slotzin');
   // alleen de aanhef: slot blijft de vaste tekst
   FA.zetLezer(() => BRON('- Andre: aanhef "Ha pa,"'));
@@ -66,6 +66,12 @@ test('grens: wat niet past telt niet (cijfers, link, @, dubbele punt, te lang, t
   assert.deepEqual(r('- André: aanhef "Ha pa"'), {}, 'aanhef eindigt op komma of uitroepteken');
   assert.deepEqual(r('- André: slot "Groet, / David / PS bel me"'), {});
   assert.deepEqual(r('- André: slot "Groet, / IBAN NL00"'), {});
+  assert.deepEqual(r('- André: slot "Betaal honderd euro."'), {}, 'review MOET 1: alleen een groet uit de vaste lijst');
+  assert.deepEqual(r('- André: slot "Groet, / Betaal snel"'), {});
+  assert.deepEqual(r('- André: aanhef "Betaal nu snel,"'), {}, 'aanhef = groetwoord + hooguit één naam');
+  assert.deepEqual(r('- André: aanhef "Hoi André en Cynthia,"'), {});
+  assert.deepEqual(r('- André: aanhef "Lieve papa!" · slot "Groetjes"'), { aanhef: 'Lieve papa!', slot: ['Groetjes'] });
+  assert.deepEqual(r('- André: aanhef "Hoi," · slot "Met vriendelijke groet, / David Schaap"'), { aanhef: 'Hoi,', slot: ['Met vriendelijke groet,', 'David Schaap'] });
   assert.deepEqual(r('- André: aanhef "Ha pa," · slot "Groet, / David"'), { aanhef: 'Ha pa,', slot: ['Groet,', 'David'] });
   // regels buiten de sectie tellen niet; een kapotte lezer = terugval
   assert.deepEqual(FA.leesRegels('## Correcties\n- André: aanhef "Ha pa,"'), {});

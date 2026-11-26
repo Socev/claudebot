@@ -10,15 +10,20 @@
  * facturen-boekstuk.js (Google Home-boekstuk) en pot-afschrift.js (POT-afschrift). Allemaal aan André.
  *
  * Grens (het bestand is ook door Socev schrijfbaar, en twee van deze mails gaan op Davids knop of vrijgave direct de deur uit):
- * - alleen letters, spatie, apostrof en koppelteken, plus één leesteken aan het eind; geen cijfers, @, links of dubbele punt;
- *   aanhef ≤ 30 tekens, slot ≤ 2 regels van ≤ 25 tekens. Wat niet past telt niet: dan de vaste tekst uit de code (terugval).
+ * - vaste vormen (review Codex MOET 1: vrije woorden lieten "Betaal honderd euro." als slot door): aanhef = een groetwoord uit GROETWOORD
+ *   plus hooguit één naam (letters, ≤ 20) en een komma of uitroepteken; slot = een groet uit SLOT1, eventueel gevolgd door een regel uit SLOT2.
+ *   Wat niet past telt niet: dan de vaste tekst uit de code (terugval). Een nieuwe vorm = deze lijsten uitbreiden (machinekamer, met toets).
  * - puur (CI: geen require, geen klok): de lezer (functie → tekst van het bestand) spuiten alleen server.js en bank-lezer.js in (zetLezer);
  *   zonder lezer (toetsen, andere processen) altijd de terugval. Leesfout, te groot of geen sectie = terugval, nooit een fout naar de mailmaker.
  */
 
 const KOP = /^##\s+Aanhef en slot per vaste ontvanger\s*$/;
-const AANHEF_RE = /^[\p{L}][\p{L}' -]{0,28}[,!]$/u;
-const SLOTREGEL_RE = /^[\p{L}][\p{L}' -]{0,23}[\p{L},!.]$|^[\p{L}]$/u;
+const GROETWOORD = ['ha', 'hoi', 'hallo', 'hey', 'hé', 'beste', 'dag', 'lieve', 'goedemorgen', 'goedemiddag', 'goedenavond'];
+const AANHEF_RE = /^(\p{L}+)(?: ([\p{L}][\p{L}'-]{0,19}))?[,!]$/u;
+const SLOT1 = ['groet', 'groetjes', 'gr', 'liefs', 'hartelijke groet', 'vriendelijke groet', 'met vriendelijke groet', 'dank', 'dank je wel', 'bedankt', 'tot snel'];
+const SLOT2 = ['David', 'David Schaap'];
+const aanhefGoed = (a) => { const m = AANHEF_RE.exec(a); return !!m && GROETWOORD.includes(m[1].toLowerCase()); };
+const slotGoed = (d) => d.length >= 1 && d.length <= 2 && SLOT1.includes(d[0].replace(/[,!.]$/, '').toLowerCase()) && (d.length === 1 || SLOT2.includes(d[1]));
 const MAX_BYTES = 262144;
 let LEZER = null;
 
@@ -38,11 +43,11 @@ function leesRegels(tekst) {
     if (!k) continue;
     const v = {};
     const ah = /\baanhef\s+"([^"\n]{1,40})"/.exec(m[2]);
-    if (ah && AANHEF_RE.test(ah[1].trim())) v.aanhef = ah[1].trim();
+    if (ah && aanhefGoed(ah[1].trim())) v.aanhef = ah[1].trim();
     const sl = /\bslot\s+"([^"\n]{1,60})"/.exec(m[2]);
     if (sl) {
       const delen = sl[1].split(' / ').map((x) => x.trim()).filter(Boolean);
-      if (delen.length >= 1 && delen.length <= 2 && delen.every((x) => SLOTREGEL_RE.test(x))) v.slot = delen;
+      if (slotGoed(delen)) v.slot = delen;
     }
     if (v.aanhef || v.slot) uit[k] = Object.assign(uit[k] || {}, v);
   }
