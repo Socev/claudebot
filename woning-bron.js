@@ -12,8 +12,13 @@
 //   woningWaarde(tax)   de laatste taxatie met een gewone marktwaarde: { waarde, peildatum, na_verbouwing } (na verbouwing is een voorwaardelijke
 //                       waarde voor een geplande verbouwing: alleen ter info, telt nooit mee).
 //   bankstand(vault)    de nieuwste "Prive - <datum> - Hypotheek bank vs Excel data.json" in 20_Prive/Bronnen/Financien → bankstandUit.
-//   bankstandUit(j, d)  { op, totaal, delen: [{ model: 'HypoN', bank_deel, restschuld, rente_pct }] } uit een al gelezen json (d = datum uit de
-//                       bestandsnaam, als het bankveld geen datum noemt).
+//   bankstandUit(j, d)  { op, totaal, delen: [{ model: 'HypoN', bank_deel, restschuld, rente_pct, rentevast }] } uit een al gelezen json (d = datum
+//                       uit de bestandsnaam, als het bankveld geen datum noemt). rentevast = "rentevast_tm_excel_groen" (je Excel; de bank toont
+//                       geen rentevaste data), dezelfde datum die Financiën als eerste renteherziening noemt.
+//   holdingLening(vault, vandaag)  wv4170 (2C54): de woninglening van de Holding uit de nieuwste "Holding - <datum> - DGA-reconstructie data.json"
+//                       (10_Zakelijk/Holding/Bronnen), met de stand zoals Financiën (financien-vermogen.js) hem op die dag rekent: de hoofdsom vanaf de
+//                       ingangsdatum, daarna de stand van de laatste jaarrekening (31-12) die al voorbij is. { hoofdsom, ingang, rente_pct, stand,
+//                       stand_op, stand_bron, bron } of null.
 // Geen adres of bedrag in de code (deze repo is openbaar). Alleen fs en path; schrijft niets; geen netwerk.
 'use strict';
 const fs = require('fs'), path = require('path');
@@ -90,7 +95,7 @@ function bankstandUit(j, datum) {
   const op = datumUit((/(\d{1,2}-\d{1,2}-\d{4})/.exec(String(j.bron_bank || '')) || [])[1]) || datumUit(datum) || null;
   const delen = (Array.isArray(j.leningdelen) ? j.leningdelen : []).slice(0, 20).map(function (d) {
     return { model: /^Hypo\d{1,2}$/.test(String(d && d.excel_deel)) ? d.excel_deel : null, bank_deel: /^\d{1,4}$/.test(String(d && d.bank_leningdeel)) ? String(d.bank_leningdeel) : null,
-      restschuld: getal(d && d.bank_restschuld), rente_pct: getal(d && d.bank_rente_pct) };
+      restschuld: getal(d && d.bank_restschuld), rente_pct: getal(d && d.bank_rente_pct), rentevast: datumUit(d && d.rentevast_tm_excel_groen) };
   });
   return { op: op, totaal: getal(j.bank_totaal_restschuld), delen: delen };
 }
@@ -105,4 +110,32 @@ function bankstand(vault) {
   return b ? Object.assign(b, { bron: path.join(D_HYPO, hit.n) }) : null;
 }
 
-module.exports = { taxaties: taxaties, woningWaarde: woningWaarde, bankstand: bankstand, bankstandUit: bankstandUit, datumUit: datumUit, euroUit: euroUit, D_HYPO: D_HYPO, RE_HYPO: RE_HYPO };
+// ── woninglening van de Holding (wv4170) ──
+const D_DGA = path.join('10_Zakelijk', 'Holding', 'Bronnen'), RE_DGA = /^Holding - (\d{4}-\d{2}-\d{2}) - DGA-reconstructie data\.json$/;
+function holdingLeningUit(j, vandaag) {
+  const c = j && j.contracten && j.contracten.woninglening;
+  if (!c || typeof c !== 'object') return null;
+  const s = j.woninglening_verloop && j.woninglening_verloop.samenvatting || {};
+  const jr = s.jaarrekening && typeof s.jaarrekening === 'object' ? s.jaarrekening : {};
+  const dag = String(vandaag || new Date().toISOString()).slice(0, 10);
+  const hoofdsom = getal(c.hoofdsom), ingang = datumUit(c.ingangsdatum);
+  // dezelfde trap als financien-vermogen.js: € 0 vóór de ingang, dan de hoofdsom, dan elke jaarrekeningstand vanaf 31-12 van dat jaar
+  const standen = [].concat(ingang && hoofdsom !== null ? [{ op: ingang, stand: hoofdsom, bron: 'contract' }] : [],
+    Object.keys(jr).filter(function (k) { return /^\d{4}$/.test(k) && getal(jr[k]) !== null; }).sort().map(function (k) { return { op: k + '-12-31', stand: getal(jr[k]), bron: 'jaarrekening ' + k }; }))
+    .filter(function (x) { return x.op <= dag; }).sort(function (a, b) { return a.op < b.op ? -1 : a.op > b.op ? 1 : 0; });
+  const t = standen[standen.length - 1] || null;
+  if (!t && !(ingang && ingang > dag)) return null;
+  return { hoofdsom: hoofdsom, ingang: ingang, rente_pct: getal(c.rente_pct), stand: t ? t.stand : 0, stand_op: t ? t.op : null, stand_bron: t ? t.bron : 'nog niet ingegaan' };
+}
+function holdingLening(vault, vandaag) {
+  let namen = [];
+  try { namen = fs.readdirSync(path.join(vault, D_DGA)); } catch (e) { return null; }
+  const hit = namen.map(function (n) { const m = RE_DGA.exec(n); return m ? { n: n, d: m[1] } : null; }).filter(Boolean).sort(function (a, b) { return a.d < b.d ? 1 : a.d > b.d ? -1 : 0; })[0];
+  if (!hit) return null;
+  const p = path.join(vault, D_DGA, hit.n), st = fs.statSync(p);
+  if (!st.isFile() || st.size > MAX_JSON) return null;
+  const h = holdingLeningUit(JSON.parse(fs.readFileSync(p, 'utf8')), vandaag);
+  return h ? Object.assign(h, { bron: path.join(D_DGA, hit.n) }) : null;
+}
+
+module.exports = { holdingLening: holdingLening, holdingLeningUit: holdingLeningUit, taxaties: taxaties, woningWaarde: woningWaarde, bankstand: bankstand, bankstandUit: bankstandUit, datumUit: datumUit, euroUit: euroUit, D_HYPO: D_HYPO, RE_HYPO: RE_HYPO };

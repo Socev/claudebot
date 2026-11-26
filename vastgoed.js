@@ -242,6 +242,7 @@ function leesBox(md) {
   const typ = (tabelRij(md, 'Bouwnummer / type') || '').match(/type ([\w.]+)/); if (typ) f('bouw', 'Type box', typ[1]);
   const vl = md.match(/Vloerbelasting type [\w.]+ \(deze box\): max\. (\d+) kg\/m²/); if (vl) f('bouw', 'Vloerbelasting', `max. ${vl[1]} kg/m²`);
   const eig = tabelRij(md, 'Eigenaren') || tabelRij(md, 'Rechthebbende'); if (eig) f('overzicht', 'Eigenaar', kaal(eig));
+  const geb = tabelRij(md, 'Gebruik'); if (geb) f('overzicht', 'Gebruik', kaal(geb).slice(0, 120));   // wv4170 (2C54 d): eigen gebruik of verhuurd
   const ks = md.match(/Koop-\/aanneemsom:\s*(€\s*[\d.,]+)\s*incl\. btw/);
   const ksDag = datumUit((md.match(/digitaal getekend \*\*([^*]+)\*\*/) || [])[1]);
   if (ks && euroUit(ks[1])) u.reeks.push({ reeks: 'aankoop', peildatum: ksDag || '1900-01-01', waarde: euroUit(ks[1]), eenheid: 'euro', toelichting: 'koop-aanneemsom incl. btw' });
@@ -315,6 +316,8 @@ function leesHypotheek(md, bank) {
       for (const x of paar) {
         x.d.restschulden.push({ peildatum: bank.op, waarde: x.b.restschuld, bron: 'bank' });
         if (x.b.rente_pct !== null) x.d.rente_bank = String(x.b.rente_pct).replace('.', ',') + '%';
+        // wv4170 (2C54): noemt de pagina geen rentevaste datum ("onbekend"), dan die uit je Excel (dezelfde als Financiën), met de bron erbij
+        if (x.b.rentevast && !datumUit(x.d.rentevast_tot)) x.d.rentevast_tot = x.b.rentevast.split('-').reverse().map(Number).join('-') + ' (je Excel)';
       }
       u.bank_bron = bank.bron || 'json';
       return u;
@@ -467,7 +470,7 @@ const STUK_SOORT = { tekening: 'Tekeningen en bouwplannen', constructie: 'Palenp
   akte: 'Akten en kadaster', koop: 'Koop en garantie', vve: 'VvE en splitsing', energie: 'Energie', offerte: 'Offertes en facturen', regels: 'Regels en vergunningen', overig: 'Overig' };
 
 // Het hele dossier lezen: { objecten: [...], verbouwingen: [...], stukken: [...] }. Geen schrijfactie, geen netwerk.
-function leesDossierMap(vault) {
+function leesDossierMap(vault, vandaag) {
   const huis = path.join(vault, HUIS);
   let namen = [];
   try { namen = fs.readdirSync(huis).filter((n) => n.endsWith('.md') && !n.startsWith('.')).sort(); } catch (e) { throw new Fout(503, 'het huisdossier in de vault is niet te lezen'); }
@@ -521,7 +524,9 @@ function leesDossierMap(vault) {
     const doel = doelBox.length ? doelBox.map((b) => b.sleutel) : garage ? boxen.map((b) => b.sleutel) : objecten.filter((o) => o.soort === 'woning').map((o) => o.sleutel);
     stukken.push({ pad: `${BRONNEN}/${n}`, naam: n.replace(/^[^-]+ - /, ''), soort: soortStuk(n), datum: d ? d[1] : null, objecten: doel, grootte });
   }
-  return { objecten, verbouwingen, stukken, hypotheek };
+  // wv4170 (2C54): de woninglening van de Holding (zolder en badkamers), dezelfde lezer en stand als Financiën
+  let holding = null; try { holding = WB.holdingLening(vault, (vandaag || new Date()).toISOString().slice(0, 10)); } catch (e) { holding = null; }
+  return { objecten, verbouwingen, stukken, hypotheek, holding };
 }
 
 // ---------------------------------------------------------------- dossierstand (0–100) en waarde-indicatie
@@ -547,6 +552,37 @@ function indicatie(reeksen, index) {
     na_verbouwing: na ? { waarde: Math.round(na.waarde * factor / 1000) * 1000, basis: na.waarde } : null,
     index_toen: toen, index_nu: { waarde: index.laatste[1], periode: index.laatste[0] }, factor: Math.round(factor * 1000) / 1000,
     uitleg: 'Indicatie: de marktwaarde uit de laatste taxatie, opgehoogd met de landelijke CBS-prijsindex voor bestaande koopwoningen. Geen taxatie en geen advies; buurt, staat en latere verbouwingen tellen niet mee.' };
+}
+// wv4170 (2C54, Fable-review "Een 9 - vastgoed" § S1/S4): de drie getallen die bij een verbouwing eerst komen.
+//   hypotheek  de leningdelen van de woning (de delen die bij een box horen staan bij die box; samen = de hele hypotheek van de hypotheekpagina)
+//   holding    de woninglening van de Holding (zolder en badkamers; telt mee in de eigenwoningschuld en in Financiën), meegeteld in restschuld
+//   overwaarde indicatie − restschuld; heet altijd indicatie (de waarde is geen taxatie). Ontbreekt een stand, dan geen getal (null + reden).
+//   rentevast  de vroegste rentevaste datum van een leningdeel met restschuld, over de hele hypotheek (ook het deel van een box)
+function geldKern(woning, objecten, holding) {
+  const alle = objecten.flatMap((o) => (o.leningdelen || []).map((d) => Object.assign({ object: o.sleutel, object_naam: o.naam }, d)));
+  const eigen = alle.filter((d) => d.object === woning.sleutel);
+  const som = (l) => (l.length && l.every((d) => d.restschuld !== null && d.restschuld !== undefined) ? Math.round(l.reduce((s, d) => s + d.restschuld, 0) * 100) / 100 : null);
+  const hyp = som(eigen), totaal = som(alle);
+  const op = eigen.map((d) => d.restschuld_op).filter(Boolean).sort().pop() || null;
+  const elders = Object.values(alle.filter((d) => d.object !== woning.sleutel).reduce((t, d) => { (t[d.object] = t[d.object] || { naam: d.object_naam, restschuld: 0 }).restschuld += d.restschuld || 0; return t; }, {}))
+    .map((x) => ({ naam: x.naam, restschuld: Math.round(x.restschuld * 100) / 100 }));
+  const h = holding && holding.ok && Number.isFinite(holding.stand) ? { stand: holding.stand, stand_op: holding.stand_op || null, stand_bron: holding.stand_bron || null, rente_pct: holding.rente_pct ?? null } : null;
+  const reden = [];
+  if (hyp === null) reden.push(eigen.length ? 'niet elk leningdeel heeft een stand' : 'geen leningdelen gelezen');
+  if (!h) reden.push((holding && holding.reden) || 'de lening van de Holding is niet gelezen');
+  const restschuld = hyp !== null && h ? Math.round((hyp + h.stand) * 100) / 100 : null;
+  const ind = woning.indicatie ? woning.indicatie.waarde : null;
+  if (ind === null) reden.push('nog geen indicatie (taxatie en CBS-index nodig)');
+  const rv = alle.filter((d) => (d.restschuld || 0) > 0).map((d) => ({ d, dag: datumUit(d.rentevast_tot) })).filter((x) => x.dag)
+    .sort((a, b) => (a.dag < b.dag ? -1 : a.dag > b.dag ? 1 : 0))[0];
+  const zonder = alle.filter((d) => (d.restschuld || 0) > 0 && !datumUit(d.rentevast_tot)).length;
+  return {
+    hypotheek: { restschuld: hyp, op, delen: eigen.length, alle_delen: alle.length, totaal, elders },
+    holding: h,
+    restschuld, overwaarde: restschuld !== null && ind !== null ? Math.round(ind - restschuld) : null, indicatie: ind,
+    rentevast: rv ? { datum: rv.dag, deel: rv.d.naam, restschuld: rv.d.restschuld, excel: /je excel/i.test(rv.d.rentevast_tot || ''), zonder_datum: zonder } : null,
+    reden: reden.length ? reden : null,
+  };
 }
 function dossierstand(o, feiten, reeksen, stukken, nu) {
   const vandaag = (nu || new Date()).toISOString().slice(0, 10);
@@ -660,7 +696,7 @@ function maak(o) {
   }
 
   function leesDossier() {
-    const d = leesDossierMap(vault);
+    const d = leesDossierMap(vault, nu());
     if (!d.objecten.length) throw new Fout(422, 'geen woning- of garageboxpagina gevonden in het huisdossier');
     const op = nu().toISOString();   // review ZOU 3: dezelfde klok als de dag-grens bij openen
     const boxen = d.objecten.filter((x) => x.soort === 'garagebox').map((x) => ({ sleutel: x.sleutel, vve: x.vve, zoek: x.zoek, eigenaar: (x.feiten.find((f) => f.veld === 'Eigenaar') || {}).waarde }));
@@ -719,6 +755,7 @@ function maak(o) {
         }
         geld.hypotheek = { ok: true, op, delen: d.hypotheek.delen.length, reden: d.hypotheek.bank_afwijking || null };
       } else geld.hypotheek = { ok: false, op, reden: d.hypotheek ? 'geen tabel Leningdelen op de hypotheekpagina' : 'geen hypotheekpagina gevonden' };
+      geld.holding = d.holding ? Object.assign({ ok: true, op }, d.holding) : { ok: false, op, reden: 'de lening van de Holding is niet te lezen (DGA-json)' };
       const oudGeld = (() => { try { return JSON.parse((db.prepare(`SELECT waarde FROM meta WHERE sleutel = 'geld'`).get() || {}).waarde || '{}') || {}; } catch (e) { return {}; } })();
       if (bank.ok) {
         db.prepare(`DELETE FROM reeks WHERE herkomst = 'bank'`).run();
@@ -852,10 +889,13 @@ function maak(o) {
           indicatie: obj.soort === 'woning' ? indicatie(reeksen, index) : null, leningdelen,
           vve: obj.soort === 'garagebox' ? ((geld.bank || {}).boxen || {})[obj.sleutel] || null : null };
       });
+      // wv4170 (2C54): restschuld, overwaarde (indicatie) en rentevast tot voor de woning, uit dezelfde leningdelen als het tabblad Waarde
+      const won = objecten.find((x) => x.soort === 'woning');
+      if (won) won.geld_kern = geldKern(won, objecten, geld.holding || null);
       const aanroepen = db.prepare('SELECT COUNT(*) AS n, MAX(tijd) AS laatst FROM aanroep').get();
       const kaal2 = (x) => (x ? { ok: !!x.ok, op: x.op || null, mislukt_op: x.mislukt_op || null, reden: x.reden || null } : null);
       return { ok: true, objecten, prijsindex: index ? { laatste: index.laatste, jaren: index.jaren } : null, aanroepen: { n: aanroepen.n, laatst: aanroepen.laatst },
-        rubrieken: RUBRIEKEN, stuk_soorten: STUK_SOORT, geld: { hypotheek: kaal2(geld.hypotheek), verbouwing: kaal2(geld.verbouwing), bank: kaal2(geld.bank), tibber: kaal2(geld.tibber) } };
+        rubrieken: RUBRIEKEN, stuk_soorten: STUK_SOORT, geld: { hypotheek: kaal2(geld.hypotheek), verbouwing: kaal2(geld.verbouwing), bank: kaal2(geld.bank), tibber: kaal2(geld.tibber), holding: kaal2(geld.holding) } };
     }, false);
   }
   function beelden(id) {
@@ -937,5 +977,5 @@ function maak(o) {
   return { app, info, leesDossier, ververs, overzicht, wozHerken, wozControle, wozVastleggen };
 }
 
-module.exports = { maak, leesWoning, leesBox, leesDossierMap, dossierstand, indicatie, soortStuk, euroUit, datumUit, bagSoort, SCHEMA_VERSIE,
+module.exports = { maak, geldKern, leesWoning, leesBox, leesDossierMap, dossierstand, indicatie, soortStuk, euroUit, datumUit, bagSoort, SCHEMA_VERSIE,
   leesHypotheek, hypotheekReeksen, laatsteStand, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout };
