@@ -29,6 +29,9 @@ test('eersteRegel: zonder kopteken, vet en linkdoel', () => {
   assert.strictEqual(eersteRegel('## Kern\nrest'), 'rest');
   assert.strictEqual(eersteRegel('## Alleen een kop'), 'Alleen een kop');
   assert.strictEqual(eersteRegel('\n\n**Kort:** zie [p. 3](/nza#stuk=x&plek=3)'), 'Kort: zie p. 3');
+  // wv4143: de kop In het kort (als kop of als vette regel) is nooit de eerste regel
+  assert.strictEqual(eersteRegel('### In het kort\n- De NZa telt 53 uur [NZa 30-06-2026, p. 4](/nza#stuk=bob-2026&plek=4)\n- b\n- c'), 'De NZa telt 53 uur NZa 30-06-2026, p. 4');
+  assert.strictEqual(eersteRegel('**In het kort**\n- Niet in het dossier. Wel x\n- b'), 'Niet in het dossier. Wel x');
 });
 
 test('nieuw antwoord = nieuwe draad (0700/0600), bronnen, niet_in_dossier; mislukte eerste vraag = geen draad', async () => {

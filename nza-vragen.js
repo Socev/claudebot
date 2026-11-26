@@ -50,7 +50,8 @@ function eersteRegel(md) {
   // eerste regel tekst (geen kopje, geen tabelrand); alleen kopjes = het eerste kopje
   const schoon = function (x) { return x.replace(/^[#>*\-\s|]+/, '').replace(/[*_`|]+/g, ' ').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim(); };
   const regels = String(md || '').split('\n').filter(function (x) { return x.trim() && !/^\s*\|?[\s:|-]+\|?\s*$/.test(x); });
-  const tekst = regels.find(function (x) { return !/^\s*#/.test(x) && schoon(x); });
+  // wv4143: een antwoord begint met "### In het kort"; schrijft het model die kop als vette regel, dan telt hij ook niet als eerste regel
+  const tekst = regels.find(function (x) { return !/^\s*#/.test(x) && schoon(x) && !/^in het kort:?$/i.test(schoon(x)); });
   const r = schoon(tekst || regels[0] || '');
   return r.length > 160 ? r.slice(0, 157) + '…' : r;
 }
