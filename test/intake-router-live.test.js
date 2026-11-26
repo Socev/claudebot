@@ -1205,3 +1205,24 @@ test('wv4094: dagkaart met nakijken noemt waarom Intake nog vraagt en Even nakij
   const [k2] = R.kaartenVoorDag({ datum: '2026-11-25', twijfel: 2, marker: 0, nakijken: true });
   assert.match(k2.waarom, /geld, privé of zakelijk/); assert.ok(k2.stappen.some((s) => /Even nakijken/.test(s)));
 });
+
+// ── wv4100 (besluitenpagina nr 393 / 3C93 drie plekken per postvak, nr 394 / 3C94 één zin op de kaart en in de Geschiedenis) ──
+test('wv4100 3C93/3C94: kaart zonder eigen kandidaten krijgt de vaakst gekozen plekken van dat postvak; de zin van het model staat op kaart en in de Geschiedenis', async () => {
+  const E = nkOmgeving([ONB, ONB, ONB, { plek: 'Onbekend', zekerheid: 'laag', zin: 'Vraag over \nde planning <b>' }, ONB]);
+  const a = E.mail('a@ander.example', 'Een'); await E.r.ronde();
+  await E.volgende(); const b = E.mail('b@ander.example', 'Twee'); await E.r.ronde();
+  await E.volgende(); const c = E.mail('c@ander.example', 'Drie'); await E.r.ronde();
+  for (const [id, ent] of [[a, 'GH'], [b, 'TG'], [c, 'TG']]) assert.equal((await E.r.appKeuze({ stuk_id: id, keuze: 'bestemming', lens: 'kennis', entiteit: ent }, 'app:proef')).status, 200);
+  await E.volgende(); const d = E.mail('d@ander.example', 'Vier'); await E.r.ronde();
+  await E.volgende(); const e = E.mail('e@ander.example', 'Vijf', { bron: 'outlook:tolgaarde' }); await E.r.ronde();
+  assert.equal(E.ls(d).staat, 'twijfel'); assert.equal(E.ls(e).staat, 'twijfel');
+  const ov = await E.r.appOverzicht(50);
+  const sd = ov.stukken.find((x) => x.stuk_id === d), se = ov.stukken.find((x) => x.stuk_id === e);
+  assert.deepEqual(sd.kandidaten.map((k) => k.id), ['TG', 'GH']);   // TG 2×, GH 1× in gmail:david
+  assert.equal(sd.zin, 'Vraag over de planning b');   // één regel, geen hoekhaken
+  assert.ok(!se.kandidaten.some((k) => k.id === 'GH'));   // ander postvak: Davids Gmail-keuzes tellen daar niet
+  const g = await E.r.appGeschiedenis({});
+  const alle = g.dagen.flatMap((x) => x.stukken);
+  assert.equal(alle.find((x) => x.stuk_id === a).zin, 'Onduidelijk stuk.');
+  E.r.sluit();
+});

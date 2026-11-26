@@ -2892,7 +2892,17 @@ function maak(o) {
     }
     return uit;
   }
-  function binnenbak(row, sam, ls, meta, namen, perAfzender) {
+  // wv4100 (3C93b): bron (postvak) → plekken die David daar de laatste 90 dagen het vaakst koos (alleen Brain-plekken; Niet bewaren heeft een eigen knop)
+  function keuzesPerPostvak() {
+    const uit = new Map();
+    for (const c of db.prepare("SELECT c.wat, l.bron FROM correctie c JOIN live_stuk l ON l.stuk_id = c.stuk_id WHERE c.leren_mag = 1 AND c.tijd >= ? AND c.wat LIKE '%\"entiteit\":\"%'").all(nuIso(nu() - 90 * DAG))) {
+      const w = safeJson(c.wat) || {};
+      if (!c.bron || (w.lens && w.lens !== 'kennis') || !w.entiteit || !KENNIS_MAP[w.entiteit]) continue;
+      const x = uit.get(c.bron) || new Map(); x.set(w.entiteit, (x.get(w.entiteit) || 0) + 1); uit.set(c.bron, x);
+    }
+    return uit;
+  }
+  function binnenbak(row, sam, ls, meta, namen, perAfzender, perPostvak) {
     const uit = { versie: ls ? ls.versie : row.versie, voorstel: null, kandidaten: [], reden: redenTekst(sam, ls),
       mogelijk_medisch: !!(sam.mogelijk_medisch || sam.na_keuze), buiten_brain: !!(ls && ls.staat === 'bewaard' && ls.keuze === 'hard') };
     if (!ls || ls.staat !== 'twijfel' || row.status !== 'beoordeeld') return uit;
@@ -2907,6 +2917,10 @@ function maak(o) {
     const pa = perAfzender.get(adresVan(meta.van || ''));
     if (pa) for (const e of Array.from(pa.entries()).sort(function (a, b) { return b[1] - a[1]; })) voeg(e[0]);
     for (const l of sam.label_route || []) voeg(l);
+    // wv4100 (besluitenpagina nr 393 / 3C93, David Ja 25-11 21:50): altijd drie plekken om uit te kiezen; wat ontbreekt vullen de plekken die
+    // David in dit postvak het vaakst koos (bij gelijke stand de vaste volgorde van de sortering: eerst gekozen in de lijst)
+    const pp = perPostvak && perPostvak.get(ls.bron || sam.bron || '');
+    if (pp && k.length < 3) for (const e of Array.from(pp.entries()).sort(function (a, b) { return b[1] - a[1]; })) voeg(e[0]);
     uit.kandidaten = k.slice(0, 3).map(function (x) { return { id: x, naam: namen.get(x) || x }; });
     let lens = tw.length ? tw[0].lens : null;
     if (lens === 'vragen') lens = 'kennis';
@@ -2976,15 +2990,24 @@ function maak(o) {
   function entNamen(r) { const m = new Map(); if (r) for (const e of r.ent.values()) if (e.eigen && KNOOP_RE.test(String(e.k || ''))) m.set(e.k, e.naam || e.k); return m; }
   function stukVoorApp(row, r, actief, ctx) {
     const sam = safeJson(row.samenvatting) || {};
-    const ls = db.prepare('SELECT staat, keuze, versie FROM live_stuk WHERE stuk_id = ?').get(row.stuk_id);
+    const ls = db.prepare('SELECT staat, keuze, versie, bron FROM live_stuk WHERE stuk_id = ?').get(row.stuk_id);
     const basis = { stuk_id: row.stuk_id, status: row.status, op: row.op, bron: sam.bron || null, profiel: sam.profiel || null,
       live: ls ? { staat: ls.staat, keuze: ls.keuze || null, uitgevoerd: db.prepare("SELECT lens, doel, pad FROM uitvoering WHERE stuk_id = ? AND pad LIKE '%.md' AND uitkomst IN ('nieuw','gelijk') ORDER BY id DESC LIMIT 1").get(row.stuk_id) || null } : null };
     if (ls) {
       ctx = ctx || { namen: entNamen(r), perAfzender: null };
       if (ls.staat === 'twijfel' && !ctx.perAfzender) ctx.perAfzender = keuzesPerAfzender();
+      if (ls.staat === 'twijfel' && !ctx.perPostvak) ctx.perPostvak = keuzesPerPostvak();
       const sb = row.status === 'beoordeeld' ? stukBasis(row) : null;
       const mt = sb ? (safeJson(sb.meta) || {}) : {};
-      Object.assign(basis, binnenbak(row, sam, ls, mt, ctx.namen, ctx.perAfzender || new Map()));
+      Object.assign(basis, binnenbak(row, sam, ls, mt, ctx.namen, ctx.perAfzender || new Map(), ctx.perPostvak || new Map()));
+      // wv4100 (besluitenpagina nr 394 / 3C94, David Ja 25-11 21:51): de ene zin die het lerende model al gaf over waar het stuk over gaat, op
+      // de kaart en in de Geschiedenis. Geen extra modelronde: een stuk dat het model niet las (regel, register, Jev) heeft geen zin.
+      // Alleen bij een beoordeeld stuk (een vastgehouden stuk heeft geen model gezien en blijft zonder inhoud).
+      if (row.status === 'beoordeeld') {
+        const vz = db.prepare("SELECT bewijs FROM besluit WHERE stuk_id = ? AND versie = ? AND stap = 'vangnet' ORDER BY id DESC LIMIT 1").get(row.stuk_id, ls.versie);
+        const zin = vz ? (safeJson(vz.bewijs) || {}).zin : null;
+        if (typeof zin === 'string' && zin.trim()) basis.zin = eenRegel(zin, 200);
+      }
       if (basis._b && !afzenderNogSterk(r, sam, mt)) basis._b = null;   // wv2710 review ronde 2 MOET 3 (zonder register: geen bundels)
     }
     if (!ctx || !ctx.bundels) delete basis._b;   // wv2710: de bundelsleutel alleen in het overzicht (bundelsZet) en bij appBundel
@@ -3121,9 +3144,7 @@ function maak(o) {
       const inFact = !!db.prepare("SELECT 1 FROM uitvoering WHERE stuk_id = ? AND versie = ? AND lens = 'facturen'").get(row.stuk_id, ls.versie);
       s.plek = plekNu(ls, safeJson(row.samenvatting) || {});
       s.beslist = 'vanzelf'; s.beslist_op = ls.sinds;
-      const vn = db.prepare("SELECT bewijs FROM besluit WHERE stuk_id = ? AND versie = ? AND stap = 'vangnet' ORDER BY id DESC LIMIT 1").get(row.stuk_id, ls.versie);
-      const zin = vn ? (safeJson(vn.bewijs) || {}).zin : null;
-      if (typeof zin === 'string' && zin) s.zin = zin.slice(0, 200);   // de ene zin van het model over waar het stuk over gaat
+      // de zin van het model zet stukVoorApp (wv4100)
       s.kan = { klopt: true, verplaats: !inFact, in_facturen: inFact || undefined, toch_bewaren: false, verwijder: false };
       return s;
     });
