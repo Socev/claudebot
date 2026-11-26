@@ -99,3 +99,12 @@ test('box: "Gebruik" uit de Kerngegevens wordt een feit (eigen gebruik of verhuu
     assert.strictEqual(x.u.objecten.find((o) => o.naam === 'Garagebox 7').feiten.some((f) => f.veld === 'Gebruik'), false);
   } finally { x.weg(); }
 });
+
+test('review MOET 1: een boxdeel zonder stand = onbekend subtotaal en geen totaal (nooit € 0)', () => {
+  const won = { sleutel: 'w', naam: 'Woning', indicatie: { waarde: 500000 }, leningdelen: [{ naam: 'Hypo1 Huis', restschuld: 1000, rentevast_tot: '1-5-2031' }] };
+  const box = { sleutel: 'b', naam: 'Garagebox 7', leningdelen: [{ naam: 'Hypo3 Garagebox', restschuld: null, rentevast_tot: '1-5-2031' }] };
+  const k = V.geldKern(won, [won, box], { ok: true, stand: 10 });
+  assert.deepStrictEqual(k.hypotheek.elders, [{ naam: 'Garagebox 7', restschuld: null }]);
+  assert.strictEqual(k.hypotheek.totaal, null);
+  assert.strictEqual(k.restschuld, 1010);
+});

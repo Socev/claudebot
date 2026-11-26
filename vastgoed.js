@@ -564,8 +564,9 @@ function geldKern(woning, objecten, holding) {
   const som = (l) => (l.length && l.every((d) => d.restschuld !== null && d.restschuld !== undefined) ? Math.round(l.reduce((s, d) => s + d.restschuld, 0) * 100) / 100 : null);
   const hyp = som(eigen), totaal = som(alle);
   const op = eigen.map((d) => d.restschuld_op).filter(Boolean).sort().pop() || null;
-  const elders = Object.values(alle.filter((d) => d.object !== woning.sleutel).reduce((t, d) => { (t[d.object] = t[d.object] || { naam: d.object_naam, restschuld: 0 }).restschuld += d.restschuld || 0; return t; }, {}))
-    .map((x) => ({ naam: x.naam, restschuld: Math.round(x.restschuld * 100) / 100 }));
+  // review wv4170 MOET 1: een deel zonder stand maakt het subtotaal van die box onbekend (null), nooit stil € 0
+  const elders = Object.values(alle.filter((d) => d.object !== woning.sleutel).reduce((t, d) => { (t[d.object] = t[d.object] || { naam: d.object_naam, delen: [] }).delen.push(d); return t; }, {}))
+    .map((x) => ({ naam: x.naam, restschuld: som(x.delen) }));
   const h = holding && holding.ok && Number.isFinite(holding.stand) ? { stand: holding.stand, stand_op: holding.stand_op || null, stand_bron: holding.stand_bron || null, rente_pct: holding.rente_pct ?? null } : null;
   const reden = [];
   if (hyp === null) reden.push(eigen.length ? 'niet elk leningdeel heeft een stand' : 'geen leningdelen gelezen');
