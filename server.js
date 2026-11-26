@@ -2972,19 +2972,24 @@ async function sessieProefOverdracht(jobId, j, chatId, ws, sessionId) {
   if (j.sessie_eigen === SP.HEARTBEAT_SESSIE) {
     soort = 'heartbeat';
     const van = Math.max(sessieProefTijd.heartbeat || 0, SP.dagGrens(tNu));
+    const g = await appGeschiedenisRuw('hoofd');
+    if (g.fout) throw g.fout;   // Codex wv4101 MOET 1: markering pas na een gelukte lezing (anders sloeg de volgende tik deze berichten over)
+    u = SP.heartbeatBlok(g.items, van, tNu, appEenRegel);
     sessieProefTijd.heartbeat = j.created || tNu;
-    u = SP.heartbeatBlok((await appGeschiedenisRuw('hoofd')).items, van, tNu, appEenRegel);
   } else if (chatId === SP.HOOFD_CHAT) {
-    const st = SP.stand(SESSIE_PROEF_PAD);
     const van = Math.max(sessieProefTijd.hoofd || 0, SP.dagGrens(tNu));
-    sessieProefTijd.hoofd = j.created || tNu;
-    if (!st.heartbeat) return '';
+    if (!SP.stand(SESSIE_PROEF_PAD).heartbeat) { sessieProefTijd.hoofd = j.created || tNu; return ''; }
     soort = 'hoofd';
-    u = SP.hoofdBlok((await appGeschiedenisRuw('hoofd')).items, van, tNu, appEenRegel);
+    const g = await appGeschiedenisRuw('hoofd');
+    if (g.fout) throw g.fout;   // idem MOET 1
+    u = SP.hoofdBlok(g.items, van, tNu, appEenRegel);
+    sessieProefTijd.hoofd = j.created || tNu;
   } else if (chatId === SP.MK_CHAT && !sessionId) {
     if (!SP.stand(SESSIE_PROEF_PAD).mk) return '';
     soort = 'machinekamer';
-    u = SP.mkBlok((await appGeschiedenisRuw('machinekamer')).items, tNu, appEenRegel, jobId);
+    const g = await appGeschiedenisRuw('machinekamer');
+    if (g.fout) throw g.fout;   // onleesbaar log: geen overdracht, liever dan een vals 'eerste beurt'
+    u = SP.mkBlok(g.items, tNu, appEenRegel, jobId);
   }
   if (!u) return '';
   if (u.n || soort === 'machinekamer') schrijfLog(nu() + ' sessie-proef ' + velden({ soort: soort, job: jobId, n: u.n, reden: u.reden || '' }));

@@ -134,5 +134,17 @@ test('sessieProefOverdracht in vm: heartbeat, hoofd, machinekamer, uit', async f
   logboek.hoofd = [{ t: new Date(Date.now() - 3600e3).toISOString(), soort: 'socev', bron: 'heartbeat', antwoord: 'Hallo van de heartbeat' }];
   const h2 = await ctx.f('j9', { created: Date.now() }, '40687', 'vault', 'x');
   if (SP.dagGrens(Date.now()) < Date.now() - 3600e3) assert.match(h2, /Hallo van de heartbeat/);
+  // Codex MOET 1: leesfout → markering blijft staan; de volgende beurt krijgt het bericht alsnog
+  ctx.sessieProefTijd.hoofd = Date.now() - 2 * 3600e3;
+  const voor = ctx.sessieProefTijd.hoofd;
+  ctx.appGeschiedenisRuw = async function () { return { items: [], fout: new Error('EIO') }; };
+  await assert.rejects(ctx.f('j10', { created: Date.now() }, '40687', 'vault', 'x'));
+  assert.strictEqual(ctx.sessieProefTijd.hoofd, voor, 'hoofd-markering niet doorgeschoven');
+  const hbVoor = ctx.sessieProefTijd.heartbeat;
+  await assert.rejects(ctx.f('j11', { sessie_eigen: 'heartbeat', created: Date.now() }, '40687', 'vault', ''));
+  assert.strictEqual(ctx.sessieProefTijd.heartbeat, hbVoor, 'heartbeat-markering niet doorgeschoven');
+  ctx.appGeschiedenisRuw = async function (k) { return { items: logboek[k] || [] }; };
+  const h3 = await ctx.f('j12', { created: Date.now() }, '40687', 'vault', 'x');
+  if (SP.dagGrens(Date.now()) < Date.now() - 3600e3) assert.match(h3, /Hallo van de heartbeat/, 'tweede poging levert het bericht');
   fs.rmSync(d, { recursive: true });
 });
