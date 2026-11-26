@@ -298,7 +298,7 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
   let u = await M.ronde({ kandidaten: [kand[1], kand[0]].concat(kand.slice(2)), lees, haal });
   toets('3 ronde: 6 kandidaten gelezen, 5 mails als pakje herkend (nieuwsbrief niet), alleen aantallen terug', u.ok && u.gelezen === 6 && u.herkend === 5 && Object.values(u).every((v) => typeof v !== 'string'), u);
   let l = M.lijst([]).body;
-  const vind = (re) => l.lopend.concat(l.eerder).find((p) => re.test(String(p.winkel) + ' ' + String(p.code) + ' ' + String(p.bestelnr)));
+  const vind = (re) => l.lopend.concat(l.aandacht || [], l.eerder).find((p) => re.test(String(p.winkel) + ' ' + String(p.code) + ' ' + String(p.bestelnr)));
   toets('3 PostNL: bezorgd blijft bezorgd ook als de oudere mail later verwerkt wordt', vind(/3SPROE/) && vind(/3SPROE/).stand === 'bezorgd', vind(/3SPROE/));
   toets('3 DHL 3SPRFD: stand van de vervoerder (onderweg, za 7 nov 10:00–18:00), bron vervoerder', vind(/3SPRFD/) && vind(/3SPRFD/).stand === 'onderweg' && vind(/3SPRFD/).bron === 'vervoerder' && vind(/3SPRFD/).verwacht_van === '10:00', vind(/3SPRFD/));
   const am = vind(/111-2223334/);
@@ -328,7 +328,7 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
   const id = vind(/3SPRFD/).id;
   toets('3 Naar Eerder: ongeldige id of vorm geweigerd', M.verberg('../x', { verborgen: true }).status === 400 && M.verberg(id, {}).status === 400 && M.verberg('0123456789ab', { verborgen: true }).status === 404);
   toets('3 Naar Eerder en Terug', M.verberg(id, { verborgen: true }).status === 200 && M.lijst([]).body.eerder.some((p) => p.id === id) && M.verberg(id, { verborgen: false }).status === 200
-    && M.lijst([]).body.lopend.some((p) => p.id === id));
+    && M.lijst([]).body.lopend.concat(M.lijst([]).body.aandacht).some((p) => p.id === id));   // wv4147: over zijn dag = Vraagt aandacht
   // Shopper: gekocht bij Proefwinkel → koppelt aan het pakje van Proefwinkel; gekocht bij Nepwinkel → verwacht
   nu = Date.parse('2026-11-05T09:00:00Z');
   l = M.lijst([{ id: 'aaaaaaaaaaaa', wens: 'Proefkast', winkel: 'Proefwinkel', datum: '2026-11-03' }, { id: 'bbbbbbbbbbbb', wens: 'Nepstoel', winkel: 'Nepwinkel', datum: '2026-11-04' },
@@ -400,7 +400,7 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
       && M5.lijst([]).body.eerder.length === 1 && M5.lijst([]).body.lopend.length === 1);
     M5.verwerkMail({ gmail_id: 'w4', van: 'PostNL <n@edm.postnl.nl>', onderwerp: 'Nieuw pakket van Andere Zaak', tekst: 'Track & trace-code\n3SANDR111222333', datum: '2026-11-25T08:00:00Z' });
     n5 = Date.parse('2026-11-25T12:00:00Z');
-    toets('5 winkel: een pakje van die winkel ruim twee weken later voegt niet samen', M5.lijst([]).body.eerder.concat(M5.lijst([]).body.lopend).filter((p) => /Andere Zaak/.test(p.winkel)).length === 2);
+    toets('5 winkel: een pakje van die winkel ruim twee weken later voegt niet samen', M5.lijst([]).body.eerder.concat(M5.lijst([]).body.lopend, M5.lijst([]).body.aandacht).filter((p) => /Andere Zaak/.test(p.winkel)).length === 2);   // wv4147: de oude bestelling staat onder Vraagt aandacht
     // review Codex MOET 1: twee bestellingen van één winkel en één pakje: één gaat op, de andere blijft Besteld
     M5.verwerkMail({ gmail_id: 'w5', van: 'Dubbelzaak <x@dubbelzaak.nl>', onderwerp: 'Bedankt voor je bestelling', tekst: 'Bestelnummer DZ1001\nBezorgadres', datum: '2026-11-20T08:00:00Z' });
     M5.verwerkMail({ gmail_id: 'w6', van: 'Dubbelzaak <x@dubbelzaak.nl>', onderwerp: 'Bedankt voor je bestelling', tekst: 'Bestelnummer DZ1002\nBezorgadres', datum: '2026-11-21T08:00:00Z' });
@@ -485,9 +485,9 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
     const lees7 = async (id) => { gel7.push(id); return mail('DPD <n@dpd.nl>', 'Je pakket is in ons sorteercentrum', 'Pakketnummer 09990001112223\nBezorgadres\nProef Persoon\nProefstraat 9\n' + PC, '2026-11-13T08:00:00Z'); };
     const r7 = await M7.ronde({ kandidaten: [], lees: lees7 });
     const p7 = M7.lijst([]).body.lopend.find((p) => p.id === 'aaaaaaaaaaa1');
-    toets('6 aanvullen: oude bank krijgt de kolommen; open pakje leest zijn mail één keer opnieuw (adres + tussenstand), bezorgd pakje niet', r7.ok && r7.aangevuld === 1 && gel7.join() === 'v1' && p7 && p7.adres === 'Proefstraat 9' && p7.stand_detail === 'Bij het sorteercentrum', [r7, gel7, p7]);
+    toets('6 aanvullen: oude bank krijgt de kolommen; open pakje leest zijn mail één keer opnieuw (adres + tussenstand); wv4147: een pakje dat de laatste week bezorgd is ook (bestemming)', r7.ok && r7.aangevuld === 2 && gel7.slice().sort().join() === 'v1,v2' && p7 && p7.adres === 'Proefstraat 9' && p7.stand_detail === 'Bij het sorteercentrum', [r7, gel7, p7]);
     await M7.ronde({ kandidaten: [], lees: lees7 });
-    toets('6 aanvullen: de volgende ronde leest niets opnieuw', gel7.length === 1, gel7);
+    toets('6 aanvullen: de volgende ronde leest niets opnieuw', gel7.length === 2, gel7);
     // review Codex MOET 1: lukt het lezen niet, dan een volgende ronde opnieuw (hooguit 3 rondes), niet voorgoed overgeslagen
     { const { DatabaseSync } = require('node:sqlite'); const o = new DatabaseSync(path.join(W7, 'pakjes.sqlite'));
       o.exec("UPDATE zending SET aanvul = NULL, adres = NULL, stand_detail = NULL WHERE id = 'aaaaaaaaaaa1'"); o.close(); }
@@ -535,7 +535,7 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
     const st = b.indexOf('function pakjesOnderwerpen'), en = b.indexOf('async function pakjesLees');
     const fsrc = b.slice(st, en);
     toets('4 server.js: pakjesOnderwerpen leest alleen (readOnly, geen INSERT/UPDATE/DELETE), lijst krijgt hem mee, route geleverd', st > 0 && /new DatabaseSync\(f, \{ readOnly: true \}\)/.test(fsrc) && !/INSERT|UPDATE|DELETE|schrijfLog/.test(fsrc)
-      && (b.match(/pakjes\.lijst\(pakjesGekocht\(\), pakjesOnderwerpen\)/g) || []).length === 2 && /\\\/geleverd\$/.test(b) && /appTeller\('pakjes_geleverd', 60/.test(b));
+      && (b.match(/pakjes\.lijst\(pakjesGekocht\(\), pakjesOnderwerpen\)/g) || []).length >= 2 &&   /* wv4147: ochtend, teller, kaarten en /smal lezen dezelfde lijst (was al rood op main: 5) */ /\\\/geleverd\$/.test(b) && /appTeller\('pakjes_geleverd', 60/.test(b));
     const MD = fs.mkdtempSync(path.join(os.tmpdir(), 'pakjes-mm-'));
     const fout = [];
     const maakF = new Function('MAILMAN_DIR', 'fs', 'path', 'require', 'logError', fsrc + '\nreturn pakjesOnderwerpen;');
@@ -577,6 +577,75 @@ const mail = (van, onderwerp, tekst, datum) => ({ van, onderwerp, tekst, datum: 
     const b = fs.readFileSync('server.js', 'utf8'), st = b.indexOf("if (actie === 'pakjes')"), blok = b.slice(st, b.indexOf("if (actie === 'facturen')", st));
     toets('5 server.js: /smal/pakjes alleen lijst + kaal (geen verberg, geleverd, ronde), eigen grens', st > 0 && /\.kaal\(u\.body\)/.test(blok) && !/verberg|geleverd|pakjesRonde|ververs/.test(blok)
       && /const SMAL_GRENS = \{[^\n}]*\bpakjes: 30\b/.test(b) && !/SMAL_ALLEEN_PAS = new Set\(\[[^\]]*'pakjes'/.test(b));
+  }
+  // ── 9. wv4147 (2C89): bestemming, Vraagt aandacht, Voor jou-kaart, mailconcept-bron (verzonnen postcodes en winkels) ──
+  {
+    const ADR = [{ postcode: PC, naam: 'thuis', plaatsen: ['Proefdorp'] }, { postcode: PC2, naam: 'praktijk', plaatsen: ['Proefstad'] }];
+    toets('9 bestemming: postcode van het pakje wint; een andere postcode = ander', P.bestemmingUit({ pc: PC2, tekst: 'Proefdorp ' + PC }, ADR) === 'praktijk'
+      && P.bestemmingUit({ pc: '5555XX' }, ADR) === 'ander' && P.bestemmingVanPc(PC.slice(0, 4) + ' ' + PC.slice(4), ADR) === 'thuis');
+    toets('9 bestemming: plaats uit het adres gaat vóór de mailtekst', P.bestemmingUit({ adres: 'Proefstraat 9, Proefstad', tekst: 'factuur ' + PC }, ADR) === 'praktijk');
+    toets('9 bestemming: één postcode in de tekst (ook met spatie en aan de plaats vast); twee = niets', P.bestemmingUit({ tekst: 'Bezorgadres\nProefstraat 1\n' + PC.slice(0, 4) + ' ' + PC.slice(4) + ' PROEFDORP' }, ADR) === 'thuis'
+      && P.bestemmingUit({ tekst: 'naar ' + PC + ' en factuur ' + PC2 }, ADR) === null);
+    toets('9 bestemming: plaatsnaam alleen als los woord; beide plaatsen = niets; geen adressen in de config = niets', P.bestemmingUit({ tekst: 'bezorgd in proefstad' }, ADR) === 'praktijk'
+      && P.bestemmingUit({ tekst: 'Proefstadweg en Proefdorpsestraat' }, ADR) === null && P.bestemmingUit({ tekst: 'Proefdorp of Proefstad' }, ADR) === null
+      && P.bestemmingUit({ tekst: 'Proefdorp' }, []) === null);
+    const W9 = fs.mkdtempSync(path.join(os.tmpdir(), 'pk9-'));
+    fs.writeFileSync(path.join(W9, 'config.json'), JSON.stringify({ postcodes: [PC, PC2], adressen: ADR }));
+    let n9 = Date.parse('2026-11-10T09:00:00Z');
+    const M9 = P.maak({ dir: W9, nu: () => n9 });
+    M9.verwerkMail({ gmail_id: 'n1', van: 'DPD <n@dpd.nl>', onderwerp: 'Je pakket komt eraan', tekst: 'Pakketnummer 09990001112299\nverwachte bezorging dinsdag 10 november\nBezorgadres\nProefstraat 9\nProefstad', datum: '2026-11-09T08:00:00Z' });
+    M9.verwerkMail({ gmail_id: 'n2', van: 'Proefwinkel Oost <bestel@proefoost.nl>', onderwerp: 'Bedankt voor je bestelling', tekst: 'Bestelnummer PO123456\nBezorgadres\nProefstraat 1\n' + PC + ' Proefdorp\nVerzendkosten 0,00', datum: '2026-11-09T08:00:00Z' });
+    let l9 = M9.lijst([]).body;
+    const dpd = l9.lopend.find((p) => p.vervoerder === 'DPD'), po = l9.lopend.find((p) => p.winkel && /Proefwinkel Oost/.test(p.winkel));
+    toets('9 lijst: bestemming op de kaart (praktijk uit het adres, thuis uit de postcode); geen postcode in de lijst', dpd && dpd.bestemming === 'praktijk' && po && po.bestemming === 'thuis'
+      && !JSON.stringify(l9).includes(PC) && !JSON.stringify(l9).includes(PC2), [dpd, po]);
+    toets('9 lijst: op de dag zelf geen aandacht; lege aandacht-lijst bestaat', Array.isArray(l9.aandacht) && l9.aandacht.length === 0);
+    n9 = Date.parse('2026-11-11T09:00:00Z');
+    l9 = M9.lijst([]).body;
+    const a1 = l9.aandacht.find((p) => p.vervoerder === 'DPD');
+    toets('9 aandacht: over zijn dag = Vraagt aandacht (reden over_dag, sinds de dag erna), niet meer in lopend', a1 && a1.aandacht.reden === 'over_dag' && a1.aandacht.was_dag === '2026-11-10'
+      && a1.aandacht.sinds === '2026-11-10T23:00:00.000Z' && !l9.lopend.some((p) => p.id === a1.id), a1);
+    toets('9 aandacht: bestelling zonder bezorger nog geen 5 dagen stil = gewoon lopend', l9.lopend.some((p) => p.id === po.id));
+    n9 = Date.parse('2026-11-15T09:00:00Z');
+    l9 = M9.lijst([]).body;
+    const a2 = l9.aandacht.find((p) => p.id === po.id);
+    toets('9 aandacht: alleen mail en 6 dagen stil = Vraagt aandacht (stil, 6 dagen); oudste reden bovenaan', a2 && a2.aandacht.reden === 'stil' && a2.aandacht.dagen_stil === 6 && l9.aandacht[0].id === a1.id, l9.aandacht.map((p) => p.aandacht));
+    toets('9 aandacht: kan_mail alleen met een mail van een winkel (niet van een vervoerder)', (() => {
+      const kop = new Map([['n1', { onderwerp: 'x', domein: 'dpd.nl' }], ['n2', { onderwerp: 'y', domein: 'proefoost.nl' }]]);
+      const l = M9.lijst([], () => kop).body; return l.aandacht.find((p) => p.id === po.id).kan_mail === true && l.aandacht.find((p) => p.id === a1.id).kan_mail === false; })());
+    // Voor jou-kaarten
+    n9 = Date.parse('2026-11-18T09:00:00Z');
+    l9 = M9.lijst([]).body;
+    let pl = P.kaartPlan({ aandacht: l9.aandacht, punten: [], nu: n9, nuKort: 'wo 18 nov 10:00' });
+    toets('9 kaart: na 7 dagen in aandacht één kaart (alleen het DPD-pakje: sinds 10-11 23:00), sleutel klein, waar overal, tik = Pakjes', pl.zet.length === 1 && pl.zet[0].sleutel === 'pakjes-aandacht-' + a1.id
+      && /^[a-z0-9-]+$/.test(pl.zet[0].sleutel) && pl.zet[0].waar === 'overal' && pl.zet[0].herkomst.doel.scherm === 'pakjes' && pl.zet[0].titel.length <= 90 && pl.zet[0].waarom.length <= 400
+      && !/PO123456|09990001112299|Proefstraat/.test(JSON.stringify(pl.zet[0])), pl);
+    toets('9 kaart: bestaat de sleutel al (ook gesloten), dan geen nieuwe', P.kaartPlan({ aandacht: l9.aandacht, punten: [{ sleutel: 'pakjes-aandacht-' + a1.id, status: 'gedaan', gesloten_door: 'david' }], nu: n9 }).zet.length === 0);
+    toets('9 kaart: buiten 07–22 uur geen nieuwe kaart', P.kaartPlan({ aandacht: l9.aandacht, punten: [], nu: Date.parse('2026-11-18T22:30:00Z') }).zet.length === 0);
+    toets('9 kaart: hooguit 3 nieuwe per ronde', P.kaartPlan({ aandacht: [1, 2, 3, 4, 5].map((i) => ({ id: 'aaaaaaaaaa0' + i, winkel: 'W' + i, vervoerder: 'DPD', aandacht: { reden: 'stil', sinds: '2026-11-01T00:00:00Z', dagen_stil: 9 } })), punten: [], nu: n9 }).zet.length === 3);
+    M9.geleverd(a1.id, { geleverd: true });
+    l9 = M9.lijst([]).body;
+    pl = P.kaartPlan({ aandacht: l9.aandacht, punten: [{ sleutel: 'pakjes-aandacht-' + a1.id, status: 'open' }, { sleutel: 'pakjes-aandacht-' + po.id, status: 'open' }, { sleutel: 'pakjes-aandacht-bbbbbbbbbbbb', status: 'gedaan' }, { sleutel: 'iets-anders', status: 'open' }], nu: n9 });
+    toets('9 kaart: Is geleverd = kaart dicht met bewijs; nog in aandacht = blijft; al gesloten of andere sleutel = niets', pl.dicht.length === 1 && pl.dicht[0].sleutel === 'pakjes-aandacht-' + a1.id && pl.dicht[0].van === 'open' && /Vraagt aandacht/.test(pl.dicht[0].bewijs), pl.dicht);
+    // mailconcept-bron
+    const cb = M9.conceptBron(po.id);
+    toets('9 conceptBron: mails, winkel, bestelnummer, eerste mail; ongeldig/onbekend geweigerd', cb.status === 200 && cb.bron.mails.length === 1 && cb.bron.mails[0].gmail_id === 'n2' && cb.bron.winkel === 'Proefwinkel Oost'
+      && cb.bron.bestelnr === 'PO123456' && M9.conceptBron('../x').status === 400 && M9.conceptBron('0123456789ab').status === 404, cb);
+    M9.conceptGezet(cb.bron.ids);
+    toets('9 conceptBron: binnen 24 uur na een concept = 409 (al klaar); een dag later weer', M9.conceptBron(po.id).status === 409 && (n9 += 25 * 3600000, M9.conceptBron(po.id).status === 200));
+    n9 = Date.parse('2026-12-20T09:00:00Z');
+    l9 = M9.lijst([]).body;
+    toets('9 aandacht: na 30 dagen stilte toch naar Eerder', l9.eerder.some((p) => p.id === po.id) && !l9.aandacht.some((p) => p.id === po.id));
+    toets('9 kaal: Vraagt aandacht telt mee als lopend voor de Actie-Bewaker', P.kaal({ lopend: [], aandacht: [{ winkel: 'Proefwinkel', stand: 'onderweg' }] }).lopend.length === 1);
+    M9.sluit(); fs.rmSync(W9, { recursive: true, force: true });
+  }
+  {
+    const b = fs.readFileSync('server.js', 'utf8'), st = b.indexOf('async function pakjesMailconcept('), blok = b.slice(st, b.indexOf('\n}\n', st));
+    toets('9 server.js: mailconcept-route met eigen grens (6/uur), alleen een concept via het mailluik, vaste tekst (geen mailtekst uit de bron), één per 24 uur', st > 0
+      && /\/mailconcept\$\/\.exec\(route\)/.test(b) && /appTeller\('pakjes_concept', 6, 3600000\)/.test(b) && /pakjes\.conceptBron\(id, samen\)/.test(blok) && /bericht: pakjesConceptTekst\(c\.bron\)/.test(blok)
+      && /pakjes\.conceptGezet\(c\.bron\.ids\)/.test(blok) && !/verstuur|send|mail_lezen|pakjesLees/i.test(blok));
+    toets('9 server.js: kaartronde na de pakjesronde, eens per uur, alleen primair', /pakjesRonde\(\{ bron: 'klok' \}\)\.then\(function \(\) \{ return pakjesKaartRonde\(\); \}\)/.test(b)
+      && /async function pakjesKaartRonde\(o\) \{\n  if \(!pakjes \|\| !rolPrimair\(\)/.test(b) && /55 \* 60000/.test(b));
   }
   toets('4 uitrol.sh: pakjes.js in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bpakjes\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
   fs.rmSync(W, { recursive: true, force: true });

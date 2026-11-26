@@ -29801,7 +29801,7 @@ function pakjesTik() {
   if (!pakjes || !SERVER_ECHT || !rolPrimair()) return;
   const hm = new Date().toLocaleTimeString('sv-SE', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' });
   if (hm < '06:30' || hm > '23:00') return;
-  pakjesRonde({ bron: 'klok' }).catch(function (e) { logError('pakjes-ronde', e); });
+  pakjesRonde({ bron: 'klok' }).then(function () { return pakjesKaartRonde(); }).catch(function (e) { logError('pakjes-ronde', e); });   // wv4147: kaarten na de ronde, eens per uur
 }
 if (pakjes && SERVER_ECHT) { setTimeout(pakjesTik, 90000).unref(); setInterval(pakjesTik, 15 * 60000).unref(); }
 // gekochte zoektochten uit Shopper (wens, winkel, datum): een berekende koppeling, er wordt niets geschreven
@@ -29817,6 +29817,7 @@ appStaat.tellers.pakjes = [];
 appStaat.tellers.pakjes_ververs = [];
 appStaat.tellers.pakjes_verberg = [];
 appStaat.tellers.pakjes_geleverd = [];
+appStaat.tellers.pakjes_concept = [];   // wv4147
 async function appPakjes(req, res, a, route, d) {
   if (!pakjes) return appWeiger(res, 404, 'Pakjes zit niet in deze versie van de pod', 'pakjes ontbreekt');
   if (!appTeller('pakjes', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens pakjes');
@@ -29835,6 +29836,11 @@ async function appPakjes(req, res, a, route, d) {
       if (!appTeller('pakjes_verberg', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens pakjes verberg');
       u = pakjes.verberg(m[1], d);
     }
+    else if ((m = /^POST \/app\/pakjes\/([^/]*)\/mailconcept$/.exec(route))) {   // wv4147 (2C89 e): mailconcept aan de winkel (David verstuurt)
+      soort = 'mailconcept';
+      if (!appTeller('pakjes_concept', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 6)', 'grens pakjes concept');
+      u = await pakjesMailconcept(m[1], d && d.samen);
+    }
     else if ((m = /^POST \/app\/pakjes\/([^/]*)\/geleverd$/.exec(route))) {   // wv3062: "Is geleverd" (en terug)
       soort = 'geleverd';
       if (!appTeller('pakjes_geleverd', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens pakjes geleverd');
@@ -29845,6 +29851,102 @@ async function appPakjes(req, res, a, route, d) {
   if (soort === 'lijst' && u.status === 200) res._app.stil = true;
   else res._app.reden = 'pakjes ' + soort + (m ? ' ' + (/^[0-9a-f]{12}$/.test(m[1]) ? m[1] : 'ongeldig') : '') + ' ' + u.status;
   return appStuur(res, u.status, u.body);
+}
+// wv4147 (besluitenpagina nr 189 = 2C89 e, David Ja 25-11-2026 22:13): "Mailconcept aan de winkel" bij een pakje onder Vraagt aandacht.
+// De pod zoekt bij het pakje (en de samengevoegde rij) de jongste mail van de winkel (geen vervoerder, geen no-reply-adres; mailman.sqlite
+// alleen lezen: afzender, draad, onderwerp) en zet via het mailluik (AI - Mailconcept naar Gmail, zelfde webhook als Bandjes en POT) een CONCEPT
+// in die draad aan dat adres. Vaste tekst met winkel, bestelnummer, besteldag, verwachte dag en volgcode; geen mailtekst uit de bron. David
+// leest na en verstuurt. Eén per pakje per 24 uur (pakjes.conceptBron/conceptGezet), 6 per uur. Log: alleen het pakje-id en de uitkomst.
+const PAKJES_NOREPLY = /^(no-?reply|do-?not-?reply|donotreply|noreply[-.+_]|mailer-daemon|bounce|notifications?@|notificatie|nieuwsbrief|newsletter)/i;
+function pakjesWinkelMail(mails) {
+  const f = path.join(MAILMAN_DIR, 'mailman.' + 'sqlite');
+  if (!mails.length || !fs.existsSync(f)) return null;
+  const P = require(path.join(__dirname, 'pakjes.js'));
+  const { DatabaseSync } = require('node:sqlite');
+  let db = null;
+  try {
+    db = new DatabaseSync(f, { readOnly: true });
+    db.exec('PRAGMA busy_timeout = 500;');
+    const q = db.prepare("SELECT afzender, afzender_domein, thread_id, onderwerp, ontvangen FROM besluit WHERE postvak = 'gmail:david' AND gmail_id = ?");
+    const r = mails.slice(0, 40).map(function (x) { return q.get(String(x.gmail_id)); }).filter(function (x) {
+      return x && /^[^\s@<>"]+@[^\s@<>"]+\.[a-z]{2,}$/i.test(String(x.afzender || '')) && !P.isVervoerderDomein(x.afzender_domein);
+    }).sort(function (a, b) { return String(a.ontvangen || '') < String(b.ontvangen || '') ? 1 : -1; });
+    if (!r.length) return { geen: true };
+    const goed = r.find(function (x) { return !PAKJES_NOREPLY.test(String(x.afzender)); });
+    return goed ? { aan: String(goed.afzender), thread_id: goed.thread_id ? String(goed.thread_id) : null, onderwerp: goed.onderwerp || null } : { noreply: true };
+  } catch (e) { logError('pakjes-concept', new Error('mailman.sqlite niet te lezen')); return null; }
+  finally { if (db) { try { db.close(); } catch (e) { /* niets */ } } }
+}
+function pakjesDagTekst(dag) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dag || ''))) return null;
+  return new Intl.DateTimeFormat('nl-NL', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(dag + 'T12:00:00Z'));
+}
+function pakjesConceptTekst(b) {
+  const eerste = b.eerste ? new Date(b.eerste).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }) : null;
+  const regels = ['Goedendag,', ''];
+  regels.push('Op ' + (pakjesDagTekst(eerste) || 'een eerdere datum') + ' kreeg ik van jullie bericht over mijn bestelling' + (b.bestelnr ? ' (bestelnummer ' + b.bestelnr + ')' : '') + '. '
+    + (b.verwacht_dag ? 'Het pakket zou op ' + pakjesDagTekst(b.verwacht_dag) + ' bezorgd worden, maar het is nog niet aangekomen.' : 'Het pakket is nog niet aangekomen en ik heb er sindsdien niets meer over gehoord.')
+    + (b.code ? ' De volgcode' + (b.vervoerder && b.vervoerder !== 'Nog geen bezorger' && b.vervoerder !== 'Anders' ? ' bij ' + b.vervoerder : '') + ' is ' + b.code + '.' : ''));
+  regels.push('', 'Kunnen jullie nagaan waar het pakket is en mij laten weten wanneer het komt?', '', 'Met vriendelijke groet,', '', 'David Schaap');
+  return regels.join('\n');
+}
+async function pakjesMailconcept(id, samen) {
+  const c = pakjes.conceptBron(id, samen);
+  if (c.status !== 200) return c;
+  const w = pakjesWinkelMail(c.bron.mails);
+  if (!w) return { status: 503, body: { ok: false, fout: 'De mail van de winkel is nu niet te lezen; probeer het zo opnieuw.' } };
+  if (w.geen) return { status: 422, body: { ok: false, fout: 'Bij dit pakje is geen mail van de winkel zelf; alleen van de bezorger. Zoek het contactadres op de site van de winkel.' } };
+  if (w.noreply) return { status: 422, body: { ok: false, fout: 'De winkel mailde vanaf een adres dat geen antwoord leest (no-reply). Zoek het contactadres op de site van de winkel.' } };
+  const geheim = process.env.N8N_WEBHOOK_MAILCONCEPT;
+  if (!geheim || typeof appWebhookUrl !== 'function') return { status: 503, body: { ok: false, fout: 'Het mailluik is op de pod niet ingericht.' } };
+  const ond = String(w.onderwerp || '').replace(/^\s*((re|fw|fwd|aw|antw)\s*:\s*)+/i, '').replace(/[\r\n]+/g, ' ').trim();
+  const onderwerp = (ond ? 'Re: ' + ond : 'Vraag over mijn bestelling' + (c.bron.bestelnr ? ' ' + c.bron.bestelnr : '')).slice(0, 150);
+  const body = JSON.stringify(Object.assign({ secret: geheim, aan: w.aan, onderwerp: onderwerp, bericht: pakjesConceptTekst(c.bron) }, w.thread_id ? { thread_id: w.thread_id } : {}));
+  for (let poging = 0; poging < 2; poging++) {
+    let url;
+    try { url = await appWebhookUrl(POT_AF_MAILWF, null, 'pakjesMailUrl', poging > 0); } catch (e) { return { status: 503, body: { ok: false, fout: 'Het mailluik is niet te vinden.' } }; }
+    let r;
+    try { r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body, signal: AbortSignal.timeout(25000) }); }
+    catch (e) { schrijfLog(nu() + ' pakjes concept ' + velden({ pakje: id, uit: 'geen antwoord' })); return { status: 504, body: { ok: false, onzeker: true, fout: 'Geen antwoord van het mailluik. Kijk in Gmail bij Concepten of het er toch staat voor je het opnieuw probeert.' } }; }
+    if (r.status === 404 && poging === 0) { try { await r.arrayBuffer(); } catch (e) {} continue; }
+    if (r.status === 409) { try { await r.arrayBuffer(); } catch (e) {} pakjes.conceptGezet(c.bron.ids); return { status: 409, body: { ok: false, al: true, fout: 'In deze mailwisseling met de winkel staat al een concept in Gmail (bij Concepten).' } }; }
+    let j = null; try { j = await r.json(); } catch (e) { j = null; }
+    if (!r.ok || !j || j.ok !== true || typeof j.concept_id !== 'string') {
+      schrijfLog(nu() + ' pakjes concept ' + velden({ pakje: id, uit: 'http ' + r.status }));
+      return { status: 502, body: { ok: false, fout: r.status === 400 || r.status === 401 || r.status === 403 ? 'Het mailluik weigerde het concept.' : 'Het mailluik gaf geen bevestiging; kijk in Gmail bij Concepten.' } };
+    }
+    pakjes.conceptGezet(c.bron.ids);
+    schrijfLog(nu() + ' pakjes concept ' + velden({ pakje: id, uit: 'klaar', draad: !!w.thread_id }));
+    return { status: 200, body: { ok: true, concept: true, in_draad: !!w.thread_id } };
+  }
+  return { status: 503, body: { ok: false, fout: 'Het mailluik is niet te vinden.' } };
+}
+// wv4147 (2C89 e): eens per uur na de pakjesronde de Voor jou-kaarten voor pakjes die een week onder Vraagt aandacht staan (pakjes.kaartPlan);
+// alleen op de primaire kant; een fout raakt de ronde niet. Log: alleen aantallen.
+const pakjesKaartStaat = { laatst: 0, bezig: false };
+async function pakjesKaartRonde(o) {
+  if (!pakjes || !rolPrimair() || pakjesKaartStaat.bezig) return null;
+  if (!(o && o.dwing) && Date.now() - pakjesKaartStaat.laatst < 55 * 60000) return null;
+  pakjesKaartStaat.bezig = true; pakjesKaartStaat.laatst = Date.now();
+  const uit = { gezet: 0, dicht: 0, fouten: 0 };
+  try {
+    const P = require(path.join(__dirname, 'pakjes.js'));
+    if (typeof P.kaartPlan !== 'function') return null;
+    const l = pakjes.lijst(pakjesGekocht(), pakjesOnderwerpen);
+    if (!l || !l.body || !Array.isArray(l.body.aandacht)) throw new Error('pakjeslijst onleesbaar');
+    const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
+    if (!j || !Array.isArray(j.punten)) throw new Error('kaartenlijst onleesbaar');
+    const pl = P.kaartPlan({ aandacht: l.body.aandacht, punten: j.punten.map(function (p) { return { sleutel: p.sleutel, status: p.status, gesloten_door: p.gesloten_door }; }), nu: Date.now(), nuKort: bankNuKort() });
+    for (const k of pl.zet) { try { const r = await appSbRpc('mk_voor_jou_zet', { p: k }); if (r && r.sleutel) uit.gezet++; else uit.fouten++; } catch (e) { uit.fouten++; logError('pakjes-kaart', e); } }
+    for (const k of pl.dicht) {
+      try { const r = await appSbRpc('mk_voor_jou_status', { p_sleutel: k.sleutel, p_van: k.van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: k.bewijs, p_reden: 'pakjes-kaart: pakje vraagt geen aandacht meer' }); if (r && r.ok === true) uit.dicht++; else uit.fouten++; }
+      catch (e) { uit.fouten++; logError('pakjes-kaart', e); }
+    }
+    if (uit.gezet || uit.dicht) appStaat.vjCache = null;
+    if (uit.gezet || uit.dicht || uit.fouten) schrijfLog(nu() + ' pakjes kaarten ' + velden(uit));
+    return uit;
+  } catch (e) { logError('pakjes-kaart', e); return null; }
+  finally { pakjesKaartStaat.bezig = false; }
 }
 // ── einde OVIS Pakjes ──
 // ── OVIS OSINT (wv2694, 7-11-2026; ontwerp "OVIS OSINT - openbare bronnen over personen, adressen, bedrijven en nummers" § 4–5; David Ja 7-11 21:32) ──

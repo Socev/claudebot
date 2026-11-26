@@ -145,7 +145,7 @@ function maak(opt) {
       const j = await b.pakjes();
       const body = j && j.body ? j.body : j;
       if (!body || !Array.isArray(body.lopend)) throw new Error('pakjes: geen antwoord');
-      const alle = body.lopend.concat(Array.isArray(body.eerder) ? body.eerder : []);
+      const alle = body.lopend.concat(Array.isArray(body.aandacht) ? body.aandacht : [], Array.isArray(body.eerder) ? body.eerder : []);   // wv4147: ook Vraagt aandacht
       const raak = alle.filter(function (z) { return z && past(kern, [z.winkel, z.omschrijving, z.onderwerp, z.vervoerder, z.code, z.bestelnr]); })
         .sort(nieuwsteEerst('laatst'));
       if (!raak.length) return null;

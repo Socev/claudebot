@@ -29,6 +29,10 @@ const DAG = 86400000;
 const STANDEN = ['besteld', 'aangemeld', 'onderweg', 'vandaag', 'afhaalpunt', 'bezorgd'];
 const VERVOERDERS = { postnl: 'PostNL', dhl: 'DHL', dpd: 'DPD', gls: 'GLS', ups: 'UPS', amazon: 'Amazon', dragonfly: 'Dragonfly', fedex: 'FedEx', gofo: 'GOFO', anders: 'Anders', winkel: 'Nog geen bezorger' };
 const EERDER_NA = 7 * DAG, STIL_NA = 30 * DAG, STIL_MAIL_NA = 10 * DAG, WEG_NA = 90 * DAG, MAIL_WEG_NA = 60 * DAG;
+// wv4147 (2C89 e): een pakje dat over zijn dag is of te lang niets laat horen, staat onder Vraagt aandacht (in plaats van stil naar Eerder);
+// te lang = 5 dagen als alleen de mail iets zegt, 10 dagen als de pod het zelf volgt; na 30 dagen stilte toch naar Eerder. Na een week
+// in Vraagt aandacht één kaart in Voor jou (kaartPlan).
+const AANDACHT_MAIL_NA = 5 * DAG, AANDACHT_VOLG_NA = 10 * DAG, AANDACHT_KAART_NA = 7 * DAG;
 const MAX_TEKST = 200000;
 
 // ── kleine hulpjes ──
@@ -59,6 +63,33 @@ function geldigeDag(s) { if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s))) return fals
 function iso(x) { const t = Date.parse(x); return isFinite(t) ? new Date(t).toISOString() : null; }
 function idVan(sleutel) { return crypto.createHash('sha256').update(sleutel).digest('hex').slice(0, 12); }
 function postcode(x) { const m = /^\s*([1-9]\d{3})\s?([A-Za-z]{2})\s*$/.exec(String(x || '')); return m ? m[1] + m[2].toUpperCase() : null; }
+/*
+ * wv4147 (2C89 a; David 14-11: "waar gaat hij heen?"): thuis of de praktijk. adressen = [{postcode, naam: 'thuis'|'praktijk', plaatsen: []}]
+ * uit config.json. Volgorde: (1) de postcode van het pakje (PostNL-volgen of de jouw.postnl.nl-link; een andere geldige = 'ander'),
+ * (2) de plaats uit het adres na een adreskop in de mail, (3) precies één van Davids postcodes in de mailtekst, (4) precies één van de
+ * plaatsnamen als los woord. Twee namen tegelijk = niets. Alleen het woord wordt bewaard, nooit een postcode uit de tekst.
+ */
+const BESTEMMING_NAMEN = ['thuis', 'praktijk'];
+function bestemmingVanPc(pc, adressen) {
+  const q = postcode(pc);
+  if (!q || !Array.isArray(adressen) || !adressen.length) return null;
+  const a = adressen.find((x) => postcode(x.postcode) === q);
+  return a ? a.naam : 'ander';
+}
+function woordIn(t, w) { return new RegExp('(^|[^a-zà-ÿ])' + w.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^a-zà-ÿ])').test(t); }
+function bestemmingUit(o, adressen) {
+  if (!Array.isArray(adressen) || !adressen.length) return null;
+  const vanPc = o && o.pc ? bestemmingVanPc(o.pc, adressen) : null;
+  if (vanPc) return vanPc;
+  const een = (namen) => { const u = Array.from(new Set(namen)); return u.length === 1 ? u[0] : null; };
+  const plaatsVan = (t) => een(adressen.filter((a) => (a.plaatsen || []).some((p) => woordIn(t, p))).map((a) => a.naam));
+  if (o && o.adres) { const r = plaatsVan(String(o.adres).toLowerCase()); if (r) return r; }
+  const tekst = String(o && o.tekst || '').slice(0, MAX_TEKST);
+  const plat = tekst.replace(/\s+/g, '').toUpperCase();
+  const r3 = een(adressen.filter((a) => { const q = postcode(a.postcode); return q && new RegExp('(^|[^0-9])' + q).test(plat); }).map((a) => a.naam));
+  if (r3) return r3;
+  return plaatsVan(tekst.toLowerCase());
+}
 
 const MAANDEN = { januari: 1, februari: 2, maart: 3, april: 4, mei: 5, juni: 6, juli: 7, augustus: 8, september: 9, oktober: 10, november: 11, december: 12,
   jan: 1, feb: 2, mrt: 3, apr: 4, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, okt: 10, nov: 11, dec: 12 };
@@ -595,8 +626,8 @@ const HERKEN_VERSIE = '4';   // wv3062: adres en tussenstand uit de mail; wv3535
 // voor het scherm), stand_detail = tussenstand uit de jongste mail, geleverd_hand = David tikte "Is geleverd" (tijd; NULL = teruggedraaid),
 // aanvul = versie waarmee de open pakjes van vóór deze kolommen één keer hun jongste mails opnieuw lieten lezen.
 // wv3535: via = 'intrapost' als een Intrapost-mail in deze rij kwam (koppelt het Dragonfly-pakje met een INTRA-code aan de winkel)
-const EXTRA_KOLOMMEN = ['adres TEXT', 'stand_detail TEXT', 'geleverd_hand TEXT', 'aanvul TEXT', 'via TEXT'];
-const AANVUL_VERSIE = '1';
+const EXTRA_KOLOMMEN = ['adres TEXT', 'stand_detail TEXT', 'geleverd_hand TEXT', 'aanvul TEXT', 'via TEXT', 'bestemming TEXT', 'concept_op TEXT'];   // wv4147: bestemming (thuis/praktijk/ander), concept_op (mailconcept aan de winkel)
+const AANVUL_VERSIE = '2';   // wv4147: de open pakjes lezen hun jongste mails nog één keer, nu ook voor de bestemming
 const VERVOERDER_DOMEINEN = ['postnl.nl', 'dhl.com', 'dhl.nl', 'dhl.de', 'dhlecommerce.nl', 'dhlparcel.nl', 'dpd.nl', 'dpd.com', 'dpd.de', 'dpdgroup.com', 'gls-info.nl',
   'gls-group.eu', 'gls-group.com', 'gls.nl', 'gls-netherlands.com', 'ups.com', 'dragonflyinternational.com', 'dragonflyshipping.nl', 'fedex.com', 'gofo.com', 'gofoexpress.nl'];
 // wv3062: het mailonderwerp voor op de kaart (platte tekst): Fwd:/RE: eraf, witruimte samen, hooguit 120 tekens
@@ -645,6 +676,14 @@ function maak(o) {
       return (Array.isArray(j.postcodes) ? j.postcodes : []).map(postcode).filter(Boolean).slice(0, 5);
     } catch (e) { return []; }
   }
+  // wv4147: [{postcode, naam: 'thuis'|'praktijk', plaatsen: [..]}] uit config.json (adressen); zonder = geen bestemming
+  function adressen() {
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
+      return (Array.isArray(j.adressen) ? j.adressen : []).filter((a) => a && postcode(a.postcode) && BESTEMMING_NAMEN.includes(a.naam)).slice(0, 5)
+        .map((a) => ({ postcode: postcode(a.postcode), naam: a.naam, plaatsen: (Array.isArray(a.plaatsen) ? a.plaatsen : []).map((x) => schoon(x, 40)).filter(Boolean).slice(0, 5) }));
+    } catch (e) { return []; }
+  }
   function nuIso() { return new Date(klok()).toISOString(); }
 
   // bekende mail-id's (om niet opnieuw te lezen)
@@ -668,6 +707,7 @@ function maak(o) {
         .find((r) => winkelWoorden(r.winkel).some((x) => ww.includes(x))) || null;
     }
     const tijd = h.tijd || nu;
+    const best = bestemmingUit({ pc: h.pc, adres: h.adres, tekst: m.tekst }, adressen());   // wv4147
     // wv3535: een Dragonfly-pakje met een INTRA-code komt van Intrapost; de winkel staat in de Intrapost-mail van 4 dagen ervoor tot 1 dag erna (alleen
     // als dat er precies één is). Zo gaat de bestelling van die winkel in dit pakje op (samenWinkel). De andere richting: koppelIntra hieronder.
     const intraWinkel = (t) => {
@@ -683,8 +723,8 @@ function maak(o) {
     if (!z) {
       const id = idVan(h.sleutel);
       d.prepare(`INSERT INTO zending (id, sleutel, vervoerder, code, bestelnr, winkel, omschrijving, pc, stand_mail, mail_tijd, verwacht_dag, verwacht_van, verwacht_tot, eerste, bijgewerkt,
-        adres, stand_detail, aanvul, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, h.sleutel, h.vervoerder, h.code, h.bestelnr, h.winkel, h.omschrijving, h.pc, h.stand, tijd,
-        h.verwacht_dag, h.verwacht_van, h.verwacht_tot, tijd, nu, h.adres || null, h.detail || null, AANVUL_VERSIE, h.via || null);
+        adres, stand_detail, aanvul, via, bestemming) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, h.sleutel, h.vervoerder, h.code, h.bestelnr, h.winkel, h.omschrijving, h.pc, h.stand, tijd,
+        h.verwacht_dag, h.verwacht_van, h.verwacht_tot, tijd, nu, h.adres || null, h.detail || null, AANVUL_VERSIE, h.via || null, best);
       z = { id };
     } else {
       const nieuwer = !z.mail_tijd || tijd >= z.mail_tijd;
@@ -694,10 +734,11 @@ function maak(o) {
       // bezorgd blijft bezorgd: een oudere mail die later binnenkomt zet de stand niet terug
       const stand = nieuwer && !(z.stand_mail === 'bezorgd' && RANG[h.stand] < RANG.bezorgd) ? h.stand : z.stand_mail;
       d.prepare(`UPDATE zending SET sleutel = ?, vervoerder = ?, winkel = COALESCE(winkel, ?), omschrijving = COALESCE(omschrijving, ?), pc = COALESCE(pc, ?),
-        stand_mail = ?, mail_tijd = ?, verwacht_dag = ?, verwacht_van = ?, verwacht_tot = ?, eerste = MIN(eerste, ?), bijgewerkt = ?, adres = ?, stand_detail = ?, via = COALESCE(via, ?) WHERE id = ?`).run(
+        stand_mail = ?, mail_tijd = ?, verwacht_dag = ?, verwacht_van = ?, verwacht_tot = ?, eerste = MIN(eerste, ?), bijgewerkt = ?, adres = ?, stand_detail = ?, via = COALESCE(via, ?), bestemming = ? WHERE id = ?`).run(
         sleutel, vervoerder, h.winkel, h.omschrijving, h.pc, stand, nieuwer ? tijd : z.mail_tijd,
         nieuwer && h.verwacht_dag ? h.verwacht_dag : z.verwacht_dag, nieuwer && h.verwacht_dag ? h.verwacht_van : z.verwacht_van, nieuwer && h.verwacht_dag ? h.verwacht_tot : z.verwacht_tot,
-        tijd, nu, (nieuwer ? h.adres || z.adres : z.adres || h.adres) || null, (nieuwer ? h.detail : z.stand_detail) || null, h.via || null, z.id);
+        tijd, nu, (nieuwer ? h.adres || z.adres : z.adres || h.adres) || null, (nieuwer ? h.detail : z.stand_detail) || null, h.via || null,
+        (nieuwer ? best || z.bestemming : z.bestemming || best) || null, z.id);
     }
     // wv3535 koppelIntra: kwam de Intrapost-mail ná het Dragonfly-pakje binnen, dan krijgt dat pakje alsnog de winkel (precies één INTRA-pakje zonder
     // winkel, eerste mail van 1 dag vóór tot 4 dagen na deze mail)
@@ -777,11 +818,13 @@ function maak(o) {
       // wv3062: open pakjes van vóór de kolommen adres/stand_detail lezen hun jongste mails één keer opnieuw (hooguit 5 pakjes en 3 mails per pakje
       // per ronde); alleen adres en tussenstand worden bijgezet, de rest van de rij blijft zoals hij was
       // review Codex MOET 1: alleen af als er iets gelezen is (of er geen mail meer is); mislukt het lezen, dan een volgende ronde opnieuw, hooguit 3 keer
-      const aanvul = d.prepare(`SELECT id, aanvul FROM zending WHERE (aanvul IS NULL OR aanvul <> ?) AND verborgen IS NULL AND geleverd_hand IS NULL AND bezorgd_op IS NULL
-        AND COALESCE(stand_volg, stand_mail) <> 'bezorgd' AND eerste >= ? ORDER BY eerste DESC LIMIT 5`).all(AANVUL_VERSIE, new Date(nuMs - STIL_NA).toISOString());
+      // wv4147: ook de pakjes die de laatste week bezorgd zijn (die staan nog in de lijst; de bestemming hoort ook op hun kaart)
+      const aanvul = d.prepare(`SELECT id, aanvul FROM zending WHERE (aanvul IS NULL OR aanvul <> ?) AND verborgen IS NULL
+        AND ((geleverd_hand IS NULL AND bezorgd_op IS NULL AND COALESCE(stand_volg, stand_mail) <> 'bezorgd') OR bijgewerkt >= ?) AND eerste >= ? ORDER BY eerste DESC LIMIT 5`).all(
+        AANVUL_VERSIE, new Date(nuMs - EERDER_NA).toISOString(), new Date(nuMs - STIL_NA).toISOString());
       for (const z of aanvul) {
         const ms = d.prepare('SELECT gmail_id FROM mail WHERE zending_id = ? ORDER BY tijd DESC LIMIT 3').all(z.id);
-        let adres = null, detail = null, eerst = true, gelezen = 0;
+        let adres = null, detail = null, eerst = true, gelezen = 0, best = null;
         for (const x of ms) {
           let m = null;
           try { m = await r.lees(x.gmail_id); } catch (e) { m = null; }
@@ -789,11 +832,12 @@ function maak(o) {
           if (h && eerst) detail = h.detail || null;
           if (m && typeof m.tekst === 'string') { eerst = false; gelezen++; }
           if (h && h.adres && !adres) adres = h.adres;
-          if (adres && !eerst) break;
+          if (h && !best) best = bestemmingUit({ pc: h.pc, adres: h.adres, tekst: m.tekst }, adressen());   // wv4147
+          if (adres && best && !eerst) break;
         }
         const poging = (/^poging:(\d+)$/.exec(String(z.aanvul || '')) || [0, 0])[1] * 1 + 1;
         const klaar = gelezen > 0 || !ms.length || poging >= 3;
-        d.prepare('UPDATE zending SET adres = COALESCE(adres, ?), stand_detail = COALESCE(stand_detail, ?), aanvul = ? WHERE id = ?').run(adres, detail, klaar ? AANVUL_VERSIE : 'poging:' + poging, z.id);
+        d.prepare('UPDATE zending SET adres = COALESCE(adres, ?), stand_detail = COALESCE(stand_detail, ?), bestemming = COALESCE(bestemming, ?), aanvul = ? WHERE id = ?').run(adres, detail, best, klaar ? AANVUL_VERSIE : 'poging:' + poging, z.id);
         uit.aangevuld = (uit.aangevuld || 0) + 1;
       }
       if (r.haal) {
@@ -820,7 +864,7 @@ function maak(o) {
     d.prepare('DELETE FROM lees_fout WHERE laatst < ?').run(new Date(nu - MAIL_WEG_NA).toISOString());
   }
   // De stand die David ziet: de vervoerder wint als die iets weet, anders de mail. 'vandaag' alleen op de dag zelf.
-  function weergave(z, vandaag, pcs) {
+  function weergave(z, vandaag, pcs, adr) {
     const volgt = !!z.stand_volg;
     let stand = volgt ? z.stand_volg : z.stand_mail;
     if (!volgt && z.stand_mail !== 'bezorgd' && z.bezorgd_op) stand = 'bezorgd';
@@ -849,6 +893,7 @@ function maak(o) {
       bron: volgt ? 'vervoerder' : 'mail', ververst: z.ververst && !z.ververs_fout ? z.ververst : null,
       laatst: laatstT, eerste: z.eerste, link: volgLink(z, pcs), verborgen: !!z.verborgen,
       adres: z.adres || null, stand_detail: det, handmatig: !!z.geleverd_hand, onderwerp: null,   // wv3062
+      bestemming: bestemmingVanPc(z.pc, adr) || z.bestemming || null,   // wv4147: thuis | praktijk | ander
     };
   }
   function sorteer(a, b) {
@@ -868,7 +913,7 @@ function maak(o) {
       const gw = woorden(g.winkel);
       const past = lopend.concat(eerder).find((p) => !p.shopper && p.eerste && nlDag(Date.parse(p.eerste)) >= dagPlus(g.datum, -1)
         && gw.length && woorden(p.winkel).some((w) => gw.includes(w)));
-      if (past) past.shopper = schoon(g.wens, 160);
+      if (past) { past.shopper = schoon(g.wens, 160); past.shopper_id = g.id || null; }   // wv4147 (2C89 d): tik = naar Shopper
       else verwacht.push({ shopper_id: g.id || null, wens: schoon(g.wens, 160), winkel: schoon(g.winkel, 80), gekocht_op: g.datum });
     });
     return verwacht;
@@ -889,6 +934,7 @@ function maak(o) {
       o.vervoerder = 'Amazon via ' + w.vervoerder; o.code = w.code; o.samen_id = w.id;
       o._groep = (o._groep || [o.id]).concat(w._groep || [w.id]);   // wv3062: voor het mailonderwerp van de hele groep
       o.adres = o.adres || w.adres;
+      o.bestemming = o.bestemming || w.bestemming;   // wv4147
       if (o.handmatig && o.stand === 'bezorgd') { /* wv3062: David tikte Is geleverd op de Amazon-rij: die wint */ }
       else if (w.handmatig && w.stand === 'bezorgd') { o.stand = 'bezorgd'; o.handmatig = true; o.bezorgd_op = w.bezorgd_op; o.stand_detail = null; o.verwacht_dag = null; o.verwacht_van = null; o.verwacht_tot = null; }
       else if (w.bron === 'vervoerder' || RANG[w.stand] > RANG[o.stand]) {
@@ -918,6 +964,7 @@ function maak(o) {
       if (!o.samen_id) o.samen_id = w.id;
       o._groep = (o._groep || [o.id]).concat(w._groep || [w.id]);   // wv3062
       o.adres = o.adres || w.adres;
+      o.bestemming = o.bestemming || w.bestemming;   // wv4147
       if (!o.bestelnr) o.bestelnr = w.bestelnr;
     });
     return ws.filter((w) => !weg.has(w.id));
@@ -948,21 +995,80 @@ function maak(o) {
     ws.forEach((w) => { delete w._groep; });
     return ws;
   }
+  // wv4147 (2C89 e): waarom dit pakje aandacht vraagt, of null. Niet bezorgd, niet zelf naar Eerder, niet zelf op geleverd gezet; (1) de
+  // verwachte dag is voorbij, of (2) het laatste teken is ouder dan 5 dagen (alleen mail) of 10 dagen (de pod volgt het zelf). sinds = het
+  // moment waarop de eerste reden begon (dag na de verwachte dag, of laatste teken + grens); berekend, niet bewaard.
+  function aandachtVan(w, nu, vandaag, volgbaar) {
+    if (w.stand === 'bezorgd' || w.verborgen || w.handmatig) return null;
+    const laatst = Date.parse(w.laatst), grens = volgbaar ? AANDACHT_VOLG_NA : AANDACHT_MAIL_NA;
+    const over = !!(w.verwacht_dag && w.verwacht_dag < vandaag);
+    const stil = isFinite(laatst) && laatst < nu - grens;
+    if (!over && !stil) return null;
+    const t = [];
+    if (over) t.push(Date.parse(dagPlus(w.verwacht_dag, 1) + 'T00:00:00+01:00'));
+    if (stil) t.push(laatst + grens);
+    return { reden: over ? 'over_dag' : 'stil', sinds: new Date(Math.min(...t)).toISOString(), dagen_stil: isFinite(laatst) ? Math.max(0, Math.floor((nu - laatst) / DAG)) : null,
+      was_dag: over ? w.verwacht_dag : null };
+  }
   function lijst(gekocht, onderwerpen) {
-    const d = open(), nu = klok(), vandaag = nlDag(nu), pcs = postcodes();
-    const lopend = [], eerder = [];
+    const d = open(), nu = klok(), vandaag = nlDag(nu), pcs = postcodes(), adr = adressen();
+    const lopend = [], eerder = [], aandacht = [];
     const rijen = d.prepare('SELECT * FROM zending').all(), wn = new Set(rijen.filter((z) => z.vervoerder === 'winkel').map((z) => z.id));
-    for (const w of vulOnderwerp(d, samenWinkel(samenAmazon(rijen.map((z) => weergave(z, vandaag, pcs))), wn), onderwerpen)) {
-      // bezorgd: 7 dagen in de lijst; niet bezorgd en 30 dagen stil (bij een vervoerder die we volgen) of 10 dagen stil (alleen mail): naar Eerder
-      const volgbaar = ['PostNL', 'DHL', 'GLS', 'PostNL of DHL'].includes(w.vervoerder) || w.bron === 'vervoerder';
-      const oud = w.stand === 'bezorgd' ? Date.parse(w.bezorgd_op) < nu - EERDER_NA : Date.parse(w.laatst) < nu - (volgbaar ? STIL_NA : STIL_MAIL_NA);
-      (w.verborgen || oud ? eerder : lopend).push(w);
+    const groep = new Map();   // wv4147: welke rijen bij een kaart horen (voor de winkelmail van het mailconcept)
+    const ws = samenWinkel(samenAmazon(rijen.map((z) => weergave(z, vandaag, pcs, adr))), wn);
+    ws.forEach((w) => groep.set(w.id, (w._groep || [w.id]).slice()));
+    for (const w of vulOnderwerp(d, ws, onderwerpen)) {
+      // bezorgd: 7 dagen in de lijst; niet bezorgd en 30 dagen stil: naar Eerder. wv4147: wat over zijn dag is of 5/10 dagen stil, staat
+      // daarvoor onder Vraagt aandacht (vroeger ging een pakje dat alleen uit de mail kwam na 10 dagen stil naar Eerder)
+      // wv4147 (review 20-11 los 2): GLS NL is niet te volgen (gemeten 13-11); GOFO en Dragonfly wel
+      const volgbaar = ['PostNL', 'DHL', 'GOFO', 'Dragonfly', 'PostNL of DHL'].includes(w.vervoerder) || w.bron === 'vervoerder';
+      const oud = w.stand === 'bezorgd' ? Date.parse(w.bezorgd_op) < nu - EERDER_NA : Date.parse(w.laatst) < nu - STIL_NA;
+      if (w.verborgen || oud) { eerder.push(w); continue; }
+      const a = aandachtVan(w, nu, vandaag, volgbaar);
+      if (a) { w.aandacht = a; aandacht.push(w); } else lopend.push(w);
     }
+    // wv4147: kan er een mailconcept aan de winkel? Alleen als er bij het pakje een mail is van een afzender die geen vervoerder is
+    if (aandacht.length && typeof onderwerpen === 'function') {
+      const q = d.prepare('SELECT gmail_id FROM mail WHERE zending_id = ?');
+      const ids = new Map();
+      aandacht.forEach((w) => ids.set(w, (groep.get(w.id) || [w.id]).flatMap((z) => q.all(z).map((r) => String(r.gmail_id)))));
+      let kop = null;
+      try { kop = onderwerpen(Array.from(ids.values()).flat()); } catch (e) { kop = null; }
+      aandacht.forEach((w) => {
+        w.kan_mail = !!(kop && typeof kop.get === 'function') && ids.get(w).some((g) => { const k = kop.get(g); return k && k.domein && !VERVOERDER_DOMEINEN.some((v) => op(String(k.domein).toLowerCase(), v)); });
+      });
+    }
+    aandacht.sort((a, b) => String(a.aandacht.sinds) < String(b.aandacht.sinds) ? -1 : 1);
     lopend.sort(sorteer);
     eerder.sort((a, b) => String(b.laatst) < String(a.laatst) ? -1 : 1);
-    const verwacht = koppel(lopend, eerder, gekocht, vandaag);
+    const verwacht = koppel(lopend.concat(aandacht), eerder, gekocht, vandaag);
     const r = d.prepare('SELECT start, eind, fout FROM ronde ORDER BY id DESC LIMIT 1').get();
-    return { status: 200, body: { ok: true, lopend, eerder: eerder.slice(0, 60), verwacht, laatste_ronde: r ? (r.eind || r.start) : null, ronde_fout: r && r.fout ? true : false } };
+    return { status: 200, body: { ok: true, lopend, aandacht, eerder: eerder.slice(0, 60), verwacht, laatste_ronde: r ? (r.eind || r.start) : null, ronde_fout: r && r.fout ? true : false } };
+  }
+  /*
+   * wv4147 (2C89 e): de bron voor het mailconcept aan de winkel: de gmail-id's van het pakje (en de samengevoegde rij), met winkel,
+   * bestelnummer, eerste mail en verwachte dag. server.js zoekt daarbij de jongste mail van de winkel (mailman.sqlite) en zet het concept
+   * via het mailluik; conceptGezet onthoudt het tijdstip (één per pakje per 24 uur).
+   */
+  function conceptBron(id, samen) {
+    if (!/^[0-9a-f]{12}$/.test(String(id))) return { status: 400, body: { ok: false, fout: 'ongeldig pakje' } };
+    const d = open(), z = d.prepare('SELECT * FROM zending WHERE id = ?').get(id);
+    if (!z) return { status: 404, body: { ok: false, fout: 'pakje niet gevonden' } };
+    const s = typeof samen === 'string' && /^[0-9a-f]{12}$/.test(samen) && samen !== id ? d.prepare('SELECT * FROM zending WHERE id = ?').get(samen) : null;
+    const rij = [z].concat(s ? [s] : []);
+    const nu = klok();
+    const laatst = rij.map((x) => x.concept_op).filter(Boolean).sort().pop();
+    if (laatst && Date.parse(laatst) > nu - DAG) return { status: 409, body: { ok: false, al: true, fout: 'Voor dit pakje staat vandaag al een mailconcept klaar in Gmail (bij Concepten).' } };
+    const q = d.prepare('SELECT gmail_id, tijd FROM mail WHERE zending_id = ? ORDER BY tijd DESC');
+    const mails = rij.flatMap((x) => q.all(x.id).map((r) => ({ gmail_id: String(r.gmail_id), tijd: r.tijd || '' }))).sort((a, b) => (a.tijd < b.tijd ? 1 : -1));
+    const w = (veld) => rij.map((x) => x[veld]).find(Boolean) || null;
+    const verwacht = w('volg_dag') || w('verwacht_dag');
+    return { status: 200, bron: { ids: rij.map((x) => x.id), mails, winkel: w('winkel'), bestelnr: w('bestelnr'), code: w('code'),
+      vervoerder: VERVOERDERS[w('gevolgd') || z.vervoerder] || null, eerste: rij.map((x) => x.eerste).sort()[0], verwacht_dag: verwacht } };
+  }
+  function conceptGezet(ids) {
+    const d = open(), nu = nuIso();
+    (ids || []).filter((x) => /^[0-9a-f]{12}$/.test(String(x))).forEach((x) => d.prepare('UPDATE zending SET concept_op = ? WHERE id = ?').run(nu, x));
   }
   function verberg(id, dat) {
     if (!/^[0-9a-f]{12}$/.test(String(id))) return { status: 400, body: { ok: false, fout: 'ongeldig pakje' } };
@@ -995,7 +1101,50 @@ function maak(o) {
     } catch (e) { return { aan: true, fout: true }; }
   }
   function sluit() { if (db) { try { db.close(); } catch (e) { /* niets */ } db = null; } }
-  return { herken, isKandidaat, ronde, lijst, verberg, geleverd, info, sluit, verwerkMail, teVolgen, volg, _laatst: () => laatst };
+  return { herken, isKandidaat, ronde, lijst, verberg, geleverd, info, sluit, verwerkMail, teVolgen, volg, conceptBron, conceptGezet, _laatst: () => laatst };
+}
+
+/*
+ * wv4147 (2C89 e): Voor jou-kaarten voor pakjes die een week onder Vraagt aandacht staan. Puur: server.js leest de lijst (lijst().body.aandacht)
+ * en de kaarten (mk_voor_jou_lijst, ook gesloten) en voert het plan uit (mk_voor_jou_zet / mk_voor_jou_status door agent).
+ *  - zet: per pakje met aandacht.sinds ≥ 7 dagen geleden één kaart, sleutel pakjes-aandacht-<id>, nooit opnieuw als die sleutel al bestaat
+ *    (ook gesloten); hooguit 3 nieuwe per ronde; alleen tussen 07 en 22 uur.
+ *  - dicht: een open of uitgestelde kaart (status open/later) van een pakje dat niet meer onder Vraagt aandacht staat (bezorgd, geleverd,
+ *    naar Eerder, weg), alleen als de lijst gelezen kon worden; door agent, met bewijs.
+ */
+const KAART_PREFIX = 'pakjes-aandacht-';
+const KAART_RE = /^pakjes-aandacht-([0-9a-f]{12})$/;
+function kortTekst(t, n) { t = String(t || '').replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1).replace(/\s+\S*$/, '') + '…' : t; }
+function dagKort(dag) { const d = new Date(dag + 'T12:00:00Z'); return isNaN(d) ? dag : new Intl.DateTimeFormat('nl-NL', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' }).format(d).replace(/\./g, ''); }
+function aandachtZin(p) {
+  const a = p.aandacht || {};
+  if (a.reden === 'over_dag' && a.was_dag) return 'Verwacht was ' + dagKort(a.was_dag) + (a.dagen_stil != null ? '; het laatste nieuws is van ' + a.dagen_stil + ' dagen geleden' : '') + '.';
+  return 'Al ' + (a.dagen_stil != null ? a.dagen_stil : 'een aantal') + ' dagen geen nieuws van de winkel of de bezorger.';
+}
+function kaartVan(p, nuKort) {
+  const naam = p.winkel || p.omschrijving ? kortTekst(p.winkel || p.omschrijving, 50) : 'van ' + kortTekst(p.vervoerder, 30);
+  return { sleutel: KAART_PREFIX + p.id, soort: 'doen', waar: 'overal', prive: true, duur_min: 3, volgorde: 55,
+    titel: kortTekst('Pakje ' + naam + ' — kijken of het binnen is', 90),
+    waarom: kortTekst(aandachtZin(p) + ' Pakjes weet niet of het er is; het staat al een week bovenaan onder Vraagt aandacht.', 400),
+    stappen: ['Tik op deze kaart: je komt in Pakjes, bovenaan bij Vraagt aandacht.',
+      'Is het binnen: tik Is geleverd.',
+      p.kan_mail ? 'Is het er niet: tik Mailconcept aan de winkel; het concept staat dan in Gmail bij Concepten, jij kijkt het na en verstuurt.' : 'Is het er niet: tik de volglink of neem contact op met de winkel.',
+      'Hoeft het niet meer: tik Naar Eerder. Deze kaart gaat dan vanzelf dicht.'],
+    meting: kortTekst((nuKort ? nuKort + ': ' : '') + 'onder Vraagt aandacht sinds ' + String(p.aandacht && p.aandacht.sinds || '').slice(0, 10) + '.', 300),
+    herkomst: { module: 'pakjes', handmatig: 'pakjes', doel: { scherm: 'pakjes' } } };
+}
+function nlUur(ms) { return Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(new Date(ms))); }
+function kaartPlan(x) {
+  const uit = { zet: [], dicht: [] };
+  const nu = x.nu, punten = Array.isArray(x.punten) ? x.punten : [], aandacht = Array.isArray(x.aandacht) ? x.aandacht : [];
+  const bestaat = new Map(punten.filter((p) => p && KAART_RE.test(String(p.sleutel))).map((p) => [p.sleutel, p]));
+  const nog = new Set(aandacht.map((p) => KAART_PREFIX + p.id));
+  bestaat.forEach((p, s) => { if (!nog.has(s) && (p.status === 'open' || p.status === 'later')) uit.dicht.push({ sleutel: s, van: p.status, bewijs: 'het pakje staat niet meer onder Vraagt aandacht in Pakjes (bezorgd, geleverd of naar Eerder)' }); });
+  const uur = nlUur(nu);
+  if (uur < 7 || uur >= 22) return uit;
+  aandacht.filter((p) => p && /^[0-9a-f]{12}$/.test(String(p.id)) && p.aandacht && Date.parse(p.aandacht.sinds) <= nu - AANDACHT_KAART_NA && !bestaat.has(KAART_PREFIX + p.id))
+    .slice(0, 3).forEach((p) => uit.zet.push(kaartVan(p, x.nuKort)));
+  return uit;
 }
 
 // wv4125 (besluit nr 419 / 3C119): de lijst voor POST /smal/pakjes (Actie-Bewaker, skill actie-bewaker aankoop.py): alleen wat nodig is om
@@ -1017,7 +1166,8 @@ function kaal(body) {
   const rij = (w) => ({ winkel: schoon(w.winkel), omschrijving: schoon(w.omschrijving), onderwerp: onderwerp(w.onderwerp), vervoerder: w.vervoerder || null,
     stand: w.stand || null, eerste: w.eerste || null, laatst: w.laatst || null, bezorgd_op: w.bezorgd_op || null, verwacht_dag: w.verwacht_dag || null, verborgen: !!w.verborgen });
   const lijst = (x) => (Array.isArray(x) ? x : []).filter((w) => w && typeof w === 'object').map(rij);
-  return { ok: true, lopend: lijst(b.lopend), eerder: lijst(b.eerder), laatste_ronde: b.laatste_ronde || null, ronde_fout: !!b.ronde_fout };
+  return { ok: true, lopend: lijst((Array.isArray(b.lopend) ? b.lopend : []).concat(Array.isArray(b.aandacht) ? b.aandacht : [])), eerder: lijst(b.eerder), laatste_ronde: b.laatste_ronde || null, ronde_fout: !!b.ronde_fout };   // wv4147: Vraagt aandacht telt als lopend
 }
 
-module.exports = { kaal, maak, herken, adresUit, detailUit, onderwerpSchoon, isKandidaat, leesDhl, leesPostnl, leesGls, leesGofo, leesDragonfly, volgAdressen, volgLink, dagUit, tijdvakUit, standUit, STANDEN };
+function isVervoerderDomein(dom) { return VERVOERDER_DOMEINEN.some((v) => op(String(dom || '').toLowerCase(), v)); }   // wv4147
+module.exports = { kaal, kaartPlan, KAART_PREFIX, isVervoerderDomein, bestemmingUit, bestemmingVanPc, maak, herken, adresUit, detailUit, onderwerpSchoon, isKandidaat, leesDhl, leesPostnl, leesGls, leesGofo, leesDragonfly, volgAdressen, volgLink, dagUit, tijdvakUit, standUit, STANDEN };

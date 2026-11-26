@@ -208,7 +208,7 @@ async function bufferZet(zend, tabel, bron, datum, tekst, wacht) {
 }
 
 // Pakjes-teller: zelfde regel als vandaagTeller in de app (src/pakjes.ts): lopend, niet verborgen, stand vandaag of afhaalpunt.
-function pakjesVandaag(l) { return ((l && Array.isArray(l.lopend)) ? l.lopend : []).filter(function (p) { return p && !p.verborgen && (p.stand === 'vandaag' || p.stand === 'afhaalpunt'); }).length; }
+function pakjesVandaag(l) { return ((l && Array.isArray(l.lopend)) ? l.lopend : []).concat((l && Array.isArray(l.aandacht)) ? l.aandacht : []).filter(function (p) { return p && !p.verborgen && (p.stand === 'vandaag' || p.stand === 'afhaalpunt'); }).length; }
 
 // ── Fase 2 (wv3815): ochtend- en avondeditie, schuif per App ──
 // Welke regels gaan in een editie? Levend, ongezien, laan editie, de schuif editie van die App aan, datum ≤ de editiedag, de editie past
@@ -299,7 +299,8 @@ function pakjesAanmeldingen(staat, body, moment, dag, nu) {
   if (moment !== 'ochtend' && moment !== 'avond') throw fout('onbekend moment');
   if (!DAG_RE.test(String(dag))) throw fout('ongeldige dag');
   const s = normaal(staat);
-  const lopend = ((body && Array.isArray(body.lopend)) ? body.lopend : []).filter(function (p) { return p && !p.verborgen; });
+  // wv4147: een pakje onder Vraagt aandacht (bijv. al dagen bij het afhaalpunt) telt ook mee
+  const lopend = ((body && Array.isArray(body.lopend)) ? body.lopend : []).concat((body && Array.isArray(body.aandacht)) ? body.aandacht : []).filter(function (p) { return p && !p.verborgen; });
   const dagEind = eindeDagErna(dagMin1(dag));
   const uit = [];
   const een = function (onderwerp, editie, lijstP, kop) {
