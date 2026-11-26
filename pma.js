@@ -779,6 +779,28 @@ function maak(o) {
   }
 
   // ── Overzicht: alleen aantallen per kwartaal / maand / registreerder ──
+  // wv4148 (2C50): wat opvalt in de declaraties van één praktijk, over alle ingelezen dagen.
+  // - voorlopig_oud: type V zonder factuurdatum terwijl de boekingsdatum op de exportdatum van zijn eigen export al meer dan twee
+  //   kalendermaanden oud was (die export is de stand van de dag; een latere export ververst hem). Een jongere regel is gewoon nog in de maand.
+  // - nultarief: type V (om te declareren) met tarief € 0. Type O (niet declareren) telt niet.
+  // - meer_tarieven: een code met in één kalenderjaar meer dan één tarief boven € 0 (€ 0 staat al onder nultarief).
+  // - te_koppelen: Promedico-namen met regels die nog niet bevestigd of genegeerd zijn (zelfde regel als Koppelen in de app).
+  function valtOp(db, codes, praktijk) {
+    const naam = (code, oms) => (codes.get(code) || {}).naam || oms || code || '';
+    const oud = db.prepare("SELECT substr(r.dag, 1, 7) AS maand, r.code, MIN(r.omschrijving) AS oms, COUNT(*) AS n FROM regel r JOIN export e ON e.id = r.export_id " +
+      "WHERE r.praktijk = ? AND r.voorlopig = 1 AND r.dag < date(e.exportdatum, '-2 months') GROUP BY maand, r.code ORDER BY maand, r.code").all(praktijk)
+      .map((r) => ({ maand: r.maand, code: r.code, naam: naam(r.code, r.oms), n: r.n }));
+    const nul = db.prepare("SELECT code, MIN(omschrijving) AS oms, COUNT(*) AS n, SUM(voorlopig) AS v FROM regel WHERE praktijk = ? AND type = 'V' AND tarief_cent = 0 GROUP BY code ORDER BY n DESC, code").all(praktijk)
+      .map((r) => ({ code: r.code, naam: naam(r.code, r.oms), n: r.n, voorlopig: r.v }));
+    const meer = db.prepare("SELECT substr(dag, 1, 4) AS jaar, code, MIN(omschrijving) AS oms, GROUP_CONCAT(DISTINCT tarief_cent) AS t FROM regel WHERE praktijk = ? AND type = 'V' AND tarief_cent > 0 " +
+      "GROUP BY jaar, code HAVING COUNT(DISTINCT tarief_cent) > 1 ORDER BY jaar DESC, code").all(praktijk)
+      .map((r) => ({ jaar: r.jaar, code: r.code, naam: naam(r.code, r.oms), tarieven: String(r.t).split(',').map(Number).sort((a, b) => a - b) }));
+    const st = namenStand(db);
+    const koppel = db.prepare('SELECT naam, bevestigd, negeer FROM registreerder WHERE praktijk = ?').all(praktijk)
+      .filter((r) => !r.bevestigd && !r.negeer && ((st.get(praktijk + '\u0001' + r.naam) || {}).n || 0) > 0).length;
+    return { voorlopig_oud: { n: oud.reduce((a, r) => a + r.n, 0), per: oud }, nultarief: { n: nul.reduce((a, r) => a + r.n, 0), per: nul }, meer_tarieven: meer, te_koppelen: koppel };
+  }
+
   function overzicht() {
     return metDb((db) => {
       const leeg = { ok: true, groepen: GROEPEN.map((g) => ({ id: g, naam: GROEP_NAAM[g] })), praktijken: [], exports: [], nog_in_te_delen: [] };
@@ -848,12 +870,12 @@ function maak(o) {
         p.klassen = basis.map((c) => (codes.get(c) || {}).subgroep || c);
         // maanden: verrichtingen per groep en per subgroep (consultduur, visite kort/lang, M&I per soort), dekking
         const maanden = new Map();
-        const mnd = (m) => { if (!maanden.has(m)) maanden.set(m, { maand: m, groepen: {}, sub: {}, voorlopig: 0, dagen: 0, dagen_gedekt: 0, kalender: '' }); return maanden.get(m); };
+        const mnd = (m) => { if (!maanden.has(m)) maanden.set(m, { maand: m, groepen: {}, sub: {}, subc: {}, voorlopig: 0, dagen: 0, dagen_gedekt: 0, kalender: '' }); return maanden.get(m); };
         for (const r of db.prepare('SELECT substr(dag, 1, 7) AS m, code, type, COUNT(*) AS n, SUM(tarief_cent) AS c, SUM(voorlopig) AS v FROM regel WHERE praktijk = ? GROUP BY m, code, type').iterate(p.code)) {
           const x = mnd(r.m), g = groepVan(codes, r.code, r.type);
           const gg = x.groepen[g] || (x.groepen[g] = { n: 0, cent: 0 }); gg.n += r.n; gg.cent += r.c;
           const sub = r.type === 'O' ? null : (codes.get(r.code) || {}).subgroep;
-          if (sub && (g === 'consult' || g === 'visite' || g === 'mi' || g === 'poh-ggz')) { const sk = g + ':' + sub; x.sub[sk] = (x.sub[sk] || 0) + r.n; }
+          if (sub && (g === 'consult' || g === 'visite' || g === 'mi' || g === 'poh-ggz')) { const sk = g + ':' + sub; x.sub[sk] = (x.sub[sk] || 0) + r.n; x.subc[sk] = (x.subc[sk] || 0) + r.c; }   // wv4148: subc = bedrag per soort
           x.voorlopig += r.v;
         }
         const gedekt = new Set(db.prepare('SELECT dag FROM dagbron WHERE praktijk = ?').all(p.code).map((r) => r.dag));
@@ -883,8 +905,14 @@ function maak(o) {
         p.registreerders = [...regs.entries()].sort((a, b) => a[0].localeCompare(b[0], 'nl')).map(([naam, per]) => ({ naam, soort: soort.get(naam) || 'persoon',
           maanden: [...per.entries()].sort().map(([m, x]) => Object.assign({ maand: m }, x)) }));
         p.voorlopig = db.prepare('SELECT COUNT(*) AS n FROM regel WHERE praktijk = ? AND voorlopig = 1').get(p.code).n;
+        // wv4148 (2C50, David 25-11-2026 Ja): datastand bovenaan en blok "Valt op". Alleen tellingen per code en maand, nooit per patiënt.
+        const db0 = db.prepare('SELECT MIN(dag) AS a, MAX(dag) AS b FROM dagbron WHERE praktijk = ?').get(p.code);
+        p.data_van = db0.a || null; p.data_tot = db0.b || null;
+        p.laatste_export = (db.prepare("SELECT MAX(exportdatum) AS d FROM export WHERE praktijk = ? AND stand = 'actief'").get(p.code) || {}).d || null;
+        p.valt_op = valtOp(db, codes, p.code);
       }
       uit.praktijken = uit.praktijken.filter((p) => p.kwartalen.length || p.maanden.length || uit.exports.some((e) => e.praktijk === p.code));
+      uit.bekend = Object.values(PRAKTIJKEN).map((x) => ({ code: x.code, naam: x.naam }));   // wv4148: ook "Groenhouten: nog geen export"
       uit.klein_aantal = 30;
       return uit;
     }, false);

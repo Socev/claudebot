@@ -414,3 +414,41 @@ test('wv3045 zelfde inhoud in een andere volgorde (zonder nummer) = kwartaal en 
   const A3 = tweeling(Object.assign(M.exportA(), { exportdatum: '2026-02-04' })); A3.regels.reverse();
   assert.deepStrictEqual(lees(mm, A3).body.samenvatting.dagen, { nieuw: 0, gelijk: 31, wijzigt: 0, ouder: 0, andere_vorm: 0 });
 });
+
+// wv4148 (2C50, David 25-11-2026): datastand, bedrag per M&I-soort en "Valt op" — met de hand geteld op verzonnen regels
+test('wv4148 Valt op: na twee maanden niet gefactureerd (tegen de eigen export), tarief € 0, meer tarieven, te koppelen; datastand en subc', () => {
+  const { m } = nieuw();
+  const V = (code, oms, tarief, dag, factuur, reg) => ({ code, oms, type: 'V', reg: reg || 'A. Proefsen', tarief, dag, factuur });
+  const regels = [
+    V('12010', 'Consult kort', '7.00', '2026-03-02', null), V('12010', 'Consult kort', '7.00', '2026-03-02', null), V('12010', 'Consult kort', '7.00', '2026-03-09', null),   // 3 oud
+    V('12011', 'Consult middel', '14.00', '2026-05-20', null), V('12011', 'Consult middel', '14.00', '2026-05-21', null),   // jong voorlopig: niet oud
+    V('12100', 'Kardia', '0', '2026-04-02', '2026-04-30', 'B. Verzonnen'), V('12100', 'Kardia', '0', '2026-04-03', '2026-04-30'),   // tarief 0, gefactureerd
+    V('12905', 'Stikstof', '0', '2026-03-03', null),   // tarief 0 én oud
+    V('12011', 'Consult middel', '15.00', '2026-04-06', '2026-04-30'),   // tweede tarief van 12011 in 2026
+    V('13005', 'ECG', '50.00', '2026-04-07', '2026-04-30'), V('13005', 'ECG', '50.00', '2026-04-08', '2026-04-30'),
+    { oms: 'Niet declareren', type: 'O', reg: 'A. Proefsen', tarief: '0', dag: '2026-03-04', factuur: null },   // type O telt nergens
+  ];
+  inlees(m, { agb: '009870', exportdatum: '2026-06-10', begin: '2026-03-01', eind: '2026-05-31', regels, zonderPnr: true });
+  let o = m.app({ methode: 'GET', pad: '/app/pma' }).body;
+  let p = o.praktijken.find((x) => x.code === 'TG');
+  assert.deepStrictEqual([p.data_van, p.data_tot, p.laatste_export], ['2026-03-01', '2026-05-31', '2026-06-10']);
+  assert.deepStrictEqual(o.bekend.map((x) => x.code).sort(), ['GH', 'TG']);
+  const v = p.valt_op;
+  assert.strictEqual(v.voorlopig_oud.n, 4);
+  assert.deepStrictEqual(v.voorlopig_oud.per.map((x) => [x.maand, x.code, x.n]), [['2026-03', '12010', 3], ['2026-03', '12905', 1]]);
+  assert.strictEqual(v.nultarief.n, 3);
+  assert.deepStrictEqual(v.nultarief.per.map((x) => [x.code, x.n, x.voorlopig]), [['12100', 2, 0], ['12905', 1, 1]]);
+  assert.deepStrictEqual(v.meer_tarieven.map((x) => [x.jaar, x.code, x.tarieven]), [['2026', '12011', [1400, 1500]]]);
+  const pp = m.app({ methode: 'GET', pad: '/app/pma/personeel' }).body;
+  const koppelApp = pp.registreerders.filter((r) => r.praktijk === 'TG' && !r.bevestigd && !r.negeer && r.n > 0).length;
+  assert.strictEqual(v.te_koppelen, 2); assert.strictEqual(v.te_koppelen, koppelApp);   // zelfde regel als het scherm Koppelen
+  assert.strictEqual(p.maanden.find((x) => x.maand === '2026-04').subc['mi:ECG'], 10000);
+  // een nieuwere export factureert de dagen van maart: niet meer oud; de jonge regel van mei blijft niet oud tegen zijn eigen export
+  inlees(m, { agb: '009870', exportdatum: '2026-08-20', begin: '2026-03-01', eind: '2026-03-31', zonderPnr: true,
+    regels: regels.filter((r) => r.dag < '2026-04-01').map((r) => (r.type === 'V' ? Object.assign({}, r, { factuur: '2026-03-31' }) : r)) });
+  p = m.app({ methode: 'GET', pad: '/app/pma' }).body.praktijken.find((x) => x.code === 'TG');
+  assert.strictEqual(p.valt_op.voorlopig_oud.n, 0);
+  assert.deepStrictEqual(p.valt_op.nultarief.per.map((x) => [x.code, x.n, x.voorlopig]), [['12100', 2, 0], ['12905', 1, 0]]);
+  assert.strictEqual(p.laatste_export, '2026-08-20');
+  assert.doesNotMatch(JSON.stringify(p.valt_op), /9\d{5}/);   // geen (verzonnen) patiëntnummer
+});
