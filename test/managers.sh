@@ -243,6 +243,15 @@ const wacht = () => new Promise((r) => setImmediate(r));
     toets('8d MrLean: 1 open, 2 besloten met stand en datum, totaal 3', ml.aantal === 1 && ml.groepen.besloten === 2 && ml.totaal === 3 && ml.besloten.length === 2 && ml.besloten[0].besluit.stand === 'klaar' && ml.besloten[0].besluit.op === '2026-11-05T06:27:00Z' && ml.besloten[0].uitleg === 'Je zei Ja op 5-11.' && ml.besloten[1].uitleg === '', ml);
     toets('8d Design + UI-deel: groepen opgeteld, jou bovenaan, dan ernstig voor licht, besloten van het deel mee', ds.groepen.jou === 1 && ds.groepen.mk === 2 && ds.groepen.besloten === 1 && ds.totaal === 4 && ds.aantal === 3 && ds.top.map((x) => x.id).join() === 'DS1-a,UI2-a,UI1-a' && ds.besloten.length === 1 && ds.besloten[0].id === 'UI3-a', ds);
     toets('8d punt draagt groep en besluit (rij-id niet naar de app)', ds.top[0].groep === 'jou' && ds.top[0].besluit.stand === 'wacht op jou' && !('rij' in ds.top[0].besluit), ds.top[0]);
+    const veel = { aantal: 12, totaal: 12, groepen: { jou: 1, mk: 3, onderhoud: 8, besloten: 0 }, per_ernst: {}, hartslag: null, besloten: [],
+      top: [pt('DS1-j', 'jou')].concat([1, 2, 3].map((i) => pt('DS2-m' + i, 'mk')), [1, 2, 3, 4, 5].map((i) => pt('DS3-o' + i, 'onderhoud'))) };
+    const veelUi = { aantal: 9, totaal: 9, groepen: { jou: 4, mk: 5, onderhoud: 0, besloten: 0 }, per_ernst: {}, hartslag: null, besloten: [],
+      top: [1, 2, 3, 4].map((i) => pt('UI1-j' + i, 'jou')).concat([1, 2, 3, 4, 5].map((i) => pt('UI2-m' + i, 'mk'))) };
+    const dv = m.stand({ design: veel, ui: veelUi }, {}).find((x) => x.id === 'design').bevindingen;
+    const per = (g) => dv.top.filter((x) => x.groep === g).length;
+    toets('8d Codex MOET 1: na samenvoegen hooguit 5 per groep, onderhoud valt niet weg', per('jou') === 5 && per('mk') === 5 && per('onderhoud') === 5 && dv.top[0].groep === 'jou' && dv.top[dv.top.length - 1].groep === 'onderhoud', dv.top.map((x) => x.id));
+    const dj = m.stand({ data: { aantal: 1, totaal: 1, groepen: { jou: 1, mk: 0, onderhoud: 0, besloten: 0 }, per_ernst: {}, hartslag: null, besloten: [], top: [pt('DM9-x', 'jou')] } }, {}).find((x) => x.id === 'data').bevindingen;
+    toets('8d Codex MOET 2: vaste onderhoudszin niet bij een punt dat op David wacht', dj.top[0].uitleg === '' && dj.top[0].groep === 'jou', dj.top[0]);
     const oud = m.stand({ ciso: { aantal: 7, per_ernst: {}, hartslag: null, top: [1, 2, 3, 4, 5, 6, 7].map((i) => ({ id: 'C' + i + '-x', ernst: 'warning' })) } }, {}).find((x) => x.id === 'ciso').bevindingen;
     toets('8d oude RPC (zonder groepen): geen groepen/besloten op de kaart, top hooguit 5, punt zonder groep', !('groepen' in oud) && !('besloten' in oud) && oud.top.length === 5 && oud.top[0].groep === null, oud);
   }

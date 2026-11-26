@@ -72,6 +72,11 @@ function sorteer(l) {
   return l.sort(function (a, b) { const x = rangPunt(a), y = rangPunt(b); return x[0] - y[0] || x[1] - y[1] || String(b.laatst_gezien || '').localeCompare(String(a.laatst_gezien || '')); });
 }
 const GROEPEN_LEEG = { jou: 0, mk: 0, onderhoud: 0, besloten: 0 };
+// hooguit n punten per groep (de RPC doet dat per manager; na samenvoegen met een deel opnieuw), volgorde blijft (review Codex MOET 1)
+function perGroep(l, n) {
+  const tel = {};
+  return l.filter(function (b) { const g = b.groep || '?'; tel[g] = (tel[g] || 0) + 1; return tel[g] <= n; });
+}
 function samenvoegen(d, x) {
   if (!x) return d;
   if (!d) return x;
@@ -314,10 +319,10 @@ function maak(o) {
           return { id: String(b.id || ''), ernst: String(b.ernst || ''), status: String(b.status || ''), samenvatting: String(b.samenvatting || ''),
             detail: String(b.detail || ''), sinds: b.eerst_gezien || null,
             // wv4123: groep en één gewone zin (uitleg uit de state, anders de vaste zin van een onderhoudscontrole, anders leeg = samenvatting)
-            groep: b.groep ? String(b.groep) : null, uitleg: String(b.uitleg || ONDERHOUD_ZIN[String(b.check || '')] || ''), besluit: besluit };
+            groep: b.groep ? String(b.groep) : null, uitleg: String(b.uitleg || (b.groep === 'onderhoud' && ONDERHOUD_ZIN[String(b.check || '')]) || ''), besluit: besluit };   // vaste zin alleen bij onderhoud (Codex MOET 2)
         };
         const top = (Array.isArray(d.top) ? d.top : []).map(punt);
-        bev = { aantal: Number(d.aantal) || 0, per_ernst: d.per_ernst || {}, top: d.groepen ? top.slice(0, 15) : top.slice(0, 5), verborgen: false };
+        bev = { aantal: Number(d.aantal) || 0, per_ernst: d.per_ernst || {}, top: d.groepen ? perGroep(top, 5) : top.slice(0, 5), verborgen: false };
         if (d.groepen) {   // wv4123: alleen met de nieuwe RPC; een oude geeft geen groepen en de app valt terug op één getal
           const g = {};
           Object.keys(GROEPEN_LEEG).forEach(function (x) { g[x] = Number(d.groepen[x]) || 0; });
