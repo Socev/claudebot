@@ -9991,7 +9991,13 @@ function appBriefingVorm(x) {
   let k = l.findIndex(function (r) { return /^(\*\*)?\s*goedemorgen\b/i.test(r); });
   if (k < 0) k = l.findIndex(function (r) { return isKop(r) && /(maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|zondag)/i.test(r); });
   const kop = k >= 0 ? appKort(appBriefingPlat(l[k]), 160) : null;
-  const regels = l.slice(k + 1).filter(function (r) {
+  // wv4151 (3C37/3C115): krantvorm. Staat er een kop "De drie van vandaag", dan is de voorvertoning precies dat stuk (de drie punten en de
+  // regel met de vraag die n8n Opmaak eronder zet), tot de volgende kop; anders zoals vroeger de eerste regels na de kop.
+  const kopNaam = function (r) { return appBriefingPlat(r).replace(/:$/, '').trim().toLowerCase(); };
+  const dr = l.findIndex(function (r, i) { return i > k && isKop(r) && kopNaam(r) === 'de drie van vandaag'; });
+  let stuk = l.slice(k + 1);
+  if (dr >= 0) { const na = l.slice(dr + 1), e = na.findIndex(isKop); stuk = e >= 0 ? na.slice(0, e) : na; }
+  const regels = stuk.filter(function (r) {
     if (isKop(r)) return false;
     const p = appBriefingPlat(r);
     const z = p.replace(/^[•\-*]\s*/, '');
@@ -18488,7 +18494,9 @@ async function berichtNieuw(res, d) {
   const gewenst = berichtPushGewenst();
   // wv452 (Fable KAN 3): het actielijstje van 07:05 zegt "de knoppen staan in Voor jou"; de rijen staan dan al open (n8n markeert ze vóór
   // dit bericht), dus het geheugen van Vandaag (3 min) weg, anders toont Ververs nog "nog niet verstuurd" zonder knoppen
-  if (bron === 'actielijst' && appStaat.vandaag) appStaat.vandaag.data = null;
+  // wv4151 (3C81): het lijstje staat sinds 27-11-2026 in de briefing (rijen gaan om 07:01 open, het bericht van 07:05 is alleen nog vangnet),
+  // dus ook bij de briefing het geheugen van Vandaag te doen weg
+  if ((bron === 'actielijst' || bron === 'briefing') && appStaat.vandaag) appStaat.vandaag.data = null;
   res._log = { bericht: id, kanaal: doelKanaal, bron: bron, klasse: klasse, soort: soort, agenda: ag ? ag.soort : undefined, op_kaart: opKaart ? opKaart.sleutel : undefined,
     autovragen: autov ? autov.vragen.length + (autov.fouten.length ? '/' + autov.fouten.length + ' fout' : '') : undefined };   // wv4016
   if (autov && autov.vragen.length && bron === 'briefing' && doelKanaal === 'hoofd') {
