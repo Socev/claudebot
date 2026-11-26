@@ -4843,7 +4843,8 @@ function handleRequest(req, res) {
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
       weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
       contactringen: typeof contactringenInfo === 'function' ? contactringenInfo() : { aan: false },
-      open_eindjes: typeof openEindjesInfo === 'function' ? openEindjesInfo() : { aan: false },   // wv4007: stand, storingen (geen namen of inhoud)   // wv2894: zondagseintje binnenste kring (stand, geen namen of nummers)
+      open_eindjes: typeof openEindjesInfo === 'function' ? openEindjesInfo() : { aan: false },
+      wachter_kaarten: typeof wachterKaartenInfo === 'function' ? wachterKaartenInfo() : { aan: false },   // wv4124: tellingen per stand (geen namen)   // wv4007: stand, storingen (geen namen of inhoud)   // wv2894: zondagseintje binnenste kring (stand, geen namen of nummers)
       agenda_potlood: typeof agendaPotloodInfo === 'function' ? agendaPotloodInfo() : { aan: false },   // wv3741: potloodlaag (laatste ronde, alleen aantallen)
       kalender: typeof kalenderInfo === 'function' ? kalenderInfo() : { aan: false },   // wv2333: OVIS Calendar in de app (laatste lijst: aantal, duur; geen titels)
       shopper: typeof shopperInfo === 'function' ? shopperInfo() : { aan: false },   // wv2264: OVIS Shopper (aantal zoektochten, open, onleesbaar en tijdstip; geen wensen)
@@ -6286,6 +6287,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
 APP_GLIJD_ROUTES.add('POST /app/nieuws/gezien');   // wv3689: iets in het loket gezien = David die leest
 ['POST /app/dagplan/veeg', 'POST /app/dagplan/weg', 'POST /app/dagplan/erbij'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv3906: David die zijn dag regelt
 APP_GLIJD_ROUTES.add('POST /app/briefing/punt');   // wv3685: een tik onder een briefingpunt = David die werkt
+APP_GLIJD_ROUTES.add('POST /app/voor-jou/wachter');   // wv4124: een wachterknop is David die werkt
 APP_GLIJD_ROUTES.add('POST /app/voor-jou/woord');   // wv3250: een steekwoordkeuze is David die werkt   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
 APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
@@ -13630,7 +13632,9 @@ async function appVoorJouDetail(req, res, a, idTekst) {
   });
   const stappen = (Array.isArray(p.stappen) ? p.stappen : []).slice(0, 12).map(appVjStap);
   const sw = await appSwSetVoor(p);   // wv3250: steekwoordkeuzes per woord; dan geen Ja / Nee / Anders voor de hele rij
-  appStuur(res, 200, Object.assign(appVjKort(p, vandaag), { ok: true, woorden: sw || undefined,
+  let wk = null;
+  try { wk = wachterKaarten ? wachterKaarten.detail(p) : null; } catch (e) { logError('wachter-kaarten', e); }   // wv4124: knoppen van de nachtwachter
+  appStuur(res, 200, Object.assign(appVjKort(p, vandaag), { ok: true, woorden: sw || undefined, wachter: wk || undefined,
     auto: p.soort === 'besluit' && typeof telVoorstelKort === 'function' ? telVoorstelKort(p.id) : undefined,   // wv3771: klaargezet in de auto (weergave; de knop blijft de knop)
     waarom: p.waarom ? appKort(appVjGewoon(p.waarom), 600) : null, stappen: stappen, herkomst: herkomst, vraag: vraag,
     knoplink: vjKnoplinkVoor(p),   // wv4192 (3C91): { tekst, url } zolang hij geldt, { tekst, verlopen } daarna; alleen hier
@@ -13716,6 +13720,93 @@ async function appVoorJouKeuze(req, res, a, d) {
     : keuze === 'later' ? 'Op later gezet tot ' + appVjDag(tot) + '.' : keuze === 'vervallen' ? 'Weggehaald: niet meer nodig.' : 'Teruggedraaid.';
   const q = r.punt || {};
   appStuur(res, 200, { ok: true, melding: melding, punt: Object.assign(appVjKort(Object.assign({}, p, { status: q.status || p.status, later_tot: q.later_tot }), vandaag), { terug_ms: appVjTerugMs(id, Date.now(), a.id) }) });
+}
+
+// ── wv4124 (besluitenpagina nr 370 = 3C70, David Ja 25-11-2026 22:05): elke nachtwachtermelding een kaart met 2–3 passende knoppen ──
+// Logica, catalogus en grenzen in wachter-kaarten.js (ontwerp + Codex r1/r2: /opt/data/mk-scripts/wv4124/ontwerp.md). Hier alleen de io:
+// staat in /opt/data/wachter-kaarten/staat.json (700/600), wachtertabellen n8n (actie, correspondentie, agenda; zelfde route als kkSluitActie)
+// en secondbrain.personeel_state (via personeel_state_zet). Kaart 06:52 (na open-eindjes), ronde elke 10 min. Niets wordt verstuurd.
+const WK_MOD = (function () { try { return require(path.join(__dirname, 'wachter-kaarten.js')); } catch (e) { logError('wachter-kaarten', e); return null; } })();
+const WK_DIR = process.env.WK_DIR || '/opt/data/wachter-kaarten';
+const WK_SESSIE = { 'actie-bewaker': 'actie', 'correspondentie-wachter': 'correspondentie', 'agenda-wachter': 'agenda', 'personeels-wachter': 'personeel' };
+const WK_TABEL = { actie: { n8n: process.env.WK_ACTIE_TABEL || 'vNAY2dVRpSx1l3Ri', sleutel: 'actie_id' },
+  correspondentie: { n8n: process.env.WK_CORR_TABEL || 'pnX6vvg2iv256HAB', sleutel: 'thread_id' },
+  agenda: { n8n: process.env.WK_AGENDA_TABEL || 'C93pbYXResajCypA', sleutel: 'event_id' },
+  personeel: { pg: process.env.WK_PERSONEEL_TABEL || 'secondbrain.personeel_state', fn: process.env.WK_PERSONEEL_FN || 'secondbrain.personeel_state_zet', sleutel: 'item_id' } };
+const WK_PORTIE_BRON = { actie: 'actie_state', correspondentie: 'correspondentie_state' };
+function wkSql(q) { return smalSbQuery(q).then(function (r) { if (r.status !== 200) throw new Error('databank: ' + String(r.fout || r.status).slice(0, 120)); return r.rijen; }); }
+const wachterKaarten = WK_MOD ? WK_MOD.maak({
+  nu: function () { return Date.now(); },
+  datum: function () { return appYmd(Date.now()); },
+  klok: function () { return new Intl.DateTimeFormat('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date()); },
+  lees: function () { try { return JSON.parse(fs.readFileSync(path.join(WK_DIR, 'staat.json'), 'utf8')); } catch (e) { if (e.code !== 'ENOENT') logError('wachter-kaarten', e); return null; } },
+  schrijf: function (s) {
+    fs.mkdirSync(WK_DIR, { recursive: true, mode: 0o700 });
+    const f = path.join(WK_DIR, 'staat.json'), tmp = f + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(s), { mode: 0o600 }); fs.renameSync(tmp, f);
+  },
+  rij: async function (w, sleutel) {
+    const T = WK_TABEL[w];
+    if (T.pg) {
+      const r = await wkSql('select row_to_json(t) as r from ' + T.pg + ' t where t.' + T.sleutel + ' = ' + smalDollar(String(sleutel)) + ' limit 1');
+      return r[0] ? r[0].r : null;
+    }
+    const rijen = await appN8nRijen(T.n8n, { type: 'and', filters: [{ columnName: T.sleutel, condition: 'eq', value: sleutel }] }, 5);
+    return rijen.find(function (x) { return x && x[T.sleutel] === sleutel; }) || null;
+  },
+  // optimistisch: alleen als status en bevinding nog zijn zoals gelezen (zoals kkSluitActie en Plan state)
+  werk: async function (w, sleutel, gelezen, data) {
+    const T = WK_TABEL[w];
+    if (T.pg) {
+      const rij = Object.assign({ item_id: sleutel }, data);
+      const r = await wkSql('select ' + T.fn + '(' + smalDollar(JSON.stringify(rij)) + "::jsonb) as uit where exists (select 1 from " + T.pg + ' t where t.item_id = ' + smalDollar(String(sleutel)) +
+        ' and t.status = ' + smalDollar(String(gelezen.status || '')) + " and md5(coalesce(t.bevinding, '')) = " + smalDollar(crypto.createHash('md5').update(String(gelezen.bevinding || '')).digest('hex')) + ')');
+      return { n: r.length && r[0].uit && r[0].uit.ok !== false ? 1 : 0 };
+    }
+    const f = [{ columnName: T.sleutel, condition: 'eq', value: sleutel }, { columnName: 'status', condition: 'eq', value: gelezen.status }];
+    if (typeof gelezen.bevinding === 'string' && gelezen.bevinding !== '') f.push({ columnName: 'bevinding', condition: 'eq', value: gelezen.bevinding });
+    const j = await appN8nZend('PATCH', '/data-tables/' + T.n8n + '/rows/update', { filter: { type: 'and', filters: f }, data: data, returnData: true });
+    return { n: Array.isArray(j) ? j.length : (Array.isArray(j && j.data) ? j.data.length : 0) };
+  },
+  inLijstje: async function (w, sleutel, datum) {
+    const bron = WK_PORTIE_BRON[w];
+    if (!bron) return false;
+    const rijen = await appN8nRijen(APP_PORTIE_TABEL, { type: 'and', filters: [{ columnName: 'sleutel', condition: 'eq', value: sleutel }, { columnName: 'datum', condition: 'eq', value: datum }] }, 5);
+    return rijen.some(function (r) { return r && r.bron === bron; });
+  },
+  rpc: function (naam, args) { return appSbRpc(naam, args).then(function (j) { appStaat.vjCache = null; return j; }); },
+  log: function (o) { schrijfLog(nu() + ' wachter-kaarten ' + JSON.stringify(o).slice(0, 400)); }
+}) : null;
+function wachterKaartenInfo() { try { return wachterKaarten ? wachterKaarten.info() : { aan: false }; } catch (e) { return { aan: false, fout: true }; } }
+let wkBezig = false, wkRondeOp = 0;
+async function wachterKaartenTik() {
+  if (!wachterKaarten || wkBezig || !rolPrimair()) return;
+  wkBezig = true;
+  try {
+    try { await wachterKaarten.kaartStap(); } catch (e) { logError('wachter-kaarten-kaart', e); }
+    if (Date.now() - wkRondeOp >= WK_MOD.RONDE_MS) { wkRondeOp = Date.now(); try { await wachterKaarten.ronde(); } catch (e) { logError('wachter-kaarten-ronde', e); } }
+  } finally { wkBezig = false; }
+}
+if (wachterKaarten && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setInterval(function () { wachterKaartenTik(); }, 60000).unref(); }
+// POST /app/voor-jou/wachter {id, keuze}. Onder het invoerslot, sessie glijdt, alleen de primaire kant, zelfde uurteller als Voor jou.
+async function appVoorJouWachter(req, res, a, d) {
+  const id = d.id, keuze = String(d.keuze || '');
+  if (!Number.isInteger(id) || id < 1 || id > 999999999 || !/^[a-z]{3,16}$/.test(keuze)) return appWeiger(res, 400, 'ongeldige keuze', 'wk velden');
+  if (!wachterKaarten) return appWeiger(res, 404, 'deze knoppen zitten niet in deze versie', 'wk ontbreekt');
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het straks', 'rol passief');
+  if (!appTeller('voorjou', APP_VJ_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_VJ_PER_UUR + ')', 'grens voor-jou');
+  let punten;
+  try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
+  const p = punten.find(function (x) { return x.id === id; });
+  if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'wk ' + id + ' weg');
+  let u;
+  try { u = await wachterKaarten.tik(p, keuze); } catch (e) { logError('wachter-kaarten', e); return appWeiger(res, 503, 'dat lukte nu niet; probeer het zo opnieuw', 'wk fout'); }
+  appStaat.vjCache = null;
+  res._app.reden = 'wachter-knop #' + id + ' ' + keuze + ' -> ' + (u.ok ? 'ok' : String(u.status || 'fout'));
+  if (!u.ok) return appStuur(res, u.status || 409, { ok: false, fout: u.fout, wachter: wachterKaarten.detail(p) || undefined });
+  let punt;
+  try { const lijst = await appVjPunten(); const q = lijst.find(function (x) { return x.id === id; }); if (q) punt = appVjKort(q, appYmd(Date.now())); } catch (e) { punt = undefined; }
+  appStuur(res, 200, { ok: true, melding: u.melding, wachter: wachterKaarten.detail(p) || undefined, punt: punt });
 }
 
 // ── wv3250 (David 17-11-2026 07:33): steekwoordkeuzes per woord in de kaart ──
@@ -16921,6 +17012,7 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/voor-jou/') === 0) return appVoorJouDetail(req, res, a, route.slice('GET /app/voor-jou/'.length));
         if (route === 'POST /app/voor-jou/keuze') return appVoorJouKeuze(req, res, a, d);
         if (route === 'POST /app/voor-jou/woord') return appVoorJouWoord(req, res, a, d);   // wv3250
+        if (route === 'POST /app/voor-jou/wachter') return appVoorJouWachter(req, res, a, d);   // wv4124
         if (route === 'POST /app/voor-jou/knop') return appVoorJouKnop(req, res, reg, a, s, d);   // wv404
         if (route === 'POST /app/te-lezen') return appTeLezenZet(req, res, a, d);   // wv2245
         if (route === 'POST /app/anders') return appAnders(req, res, reg, a, s, d);   // wv1821
@@ -32186,8 +32278,10 @@ async function podRondeDraai(manager, prompt) {
 // wv1030 #1). SOCEV_AGENT_SLEUTEL (elk smal gesprek) opent deze routes niet; API_SECRET (machinekamer) wel, allemaal.
 // DEKT NIET: een ander proces met dezelfde uid kan het bestand lezen zolang de beurt loopt (zie MK_SESSIES, Fable wv689 #9).
 const SESSIE_ROUTES = {
-  'personeels-wachter': ['state:personeel'],
-  'correspondentie-wachter': ['eindjes', 'eindjes/oordeel'],   // wv4007: Open Eindjes-wachter (kandidaten halen, oordeel terug)
+  'personeels-wachter': ['state:personeel', 'wachter-kaart'],
+  'correspondentie-wachter': ['eindjes', 'eindjes/oordeel', 'wachter-kaart'],   // wv4007: Open Eindjes-wachter (kandidaten halen, oordeel terug)
+  'actie-bewaker': ['wachter-kaart'],                 // wv4124 (3C70): knoppen per melding (wachter-kaarten.js)
+  'agenda-wachter': ['wachter-kaart'],
   'vault-concierge': ['state:concierge', 'sync-fouten'],
   'cijfer-meester': ['zorgdata'],                     // app-kanaal
   'cijfermeester': ['zorgdata']                       // @cijfermeester_bot
@@ -32268,9 +32362,9 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20, 'wachter-kaart': 30 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
-const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata', 'eindjes', 'eindjes/oordeel']);   // wv4007: eindjes alleen beurtpas of API_SECRET   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
+const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata', 'eindjes', 'eindjes/oordeel', 'wachter-kaart']);   // wv4124: wachter-kaart idem   // wv4007: eindjes alleen beurtpas of API_SECRET   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
 const SMAL_CF_ACCOUNT = '23df9b0607bb70f6d7f15a63ec843d6d';
 const SMAL_CF_BASIS = process.env.SMAL_CF_BASIS || 'https://api.cloudflare.com';   // alleen de toets wijst elders heen
@@ -32550,6 +32644,13 @@ async function smalActie(actie, d, wie) {
   }
   // wv3083: noodknop machinekamer (zie mkNoodknop). Socev-sleutel = door socev (alleen met vraag_id van Davids verse Ja); API_SECRET = machinekamer.
   // wv4007: Open Eindjes-wachter — kandidaten (staarten) en oordeel; alleen de beurtpas van de Correspondentie-Wachter of API_SECRET
+  if (actie === 'wachter-kaart') {   // wv4124 (3C70): de wachter volgt uit de beurtpas; alleen de machinekamer (API_SECRET) mag hem noemen
+    if (!wachterKaarten) return { status: 404, j: { ok: false, fout: 'wachter-kaarten.js zit niet in deze release' } };
+    if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
+    const w = wie && wie.pas ? WK_SESSIE[wie.pas.sessie] : (wie && wie.mk ? String(d.wachter || '') : '');
+    if (!w || WK_MOD.WACHTERS.indexOf(w) < 0) return { status: 403, j: { ok: false, fout: 'onbekende wachter voor deze beurt' } };
+    return { status: 200, j: await wachterKaarten.zet(w, d.meldingen) };
+  }
   if (actie === 'eindjes' || actie === 'eindjes/oordeel') {
     if (!openEindjes) return { status: 404, j: { ok: false, fout: 'open-eindjes.js zit niet in deze release' } };
     if (actie === 'eindjes') return { status: 200, j: await openEindjes.haal({ vers: d.vers === true && !!(wie && wie.mk) }) };
