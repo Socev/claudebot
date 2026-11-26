@@ -137,7 +137,9 @@ for(i=0;i<V.length;i++){V[i].classList.toggle('aan',V[i]===a);var B=V[i].querySe
   const mdB = md && Array.isArray(md.belangrijk) && (md.belangrijk.length || md.leeg_tonen) ? md.belangrijk : null;
   // wv4141 (2C55): felicitatiepagina op de verjaardag zelf (maandag ook wie za/zo jarig was): alleen voornaam, vaste tekst, weg om middernacht
   const jd = Array.isArray(i.jarig_dag) && (i.jarig_dag.length || i.jarig_leeg) ? i.jarig_dag : null;
-  const nPan = info.length + (jd ? 1 : 0) + (nw ? 1 : 0) + (mdN ? 1 : 0) + (mdB ? 1 : 0);
+  // wv4149 (2C31): weekpagina (alleen wat schermInhoud doorliet; lege dagen = alleen app-voorbeeld zonder rooster)
+  const wk = i.week && typeof i.week === 'object' && Array.isArray(i.week.dagen) ? i.week : null;
+  const nPan = info.length + (jd ? 1 : 0) + (wk ? 1 : 0) + (nw ? 1 : 0) + (mdN ? 1 : 0) + (mdB ? 1 : 0);
   const zicht = Number.isInteger(toon) && toon >= 0 && toon <= nPan ? toon : 0;
   const nwTijd = (ms) => { const a = amsDelen(ms); return a.datum === nwDag ? String(a.uur).padStart(2, '0') + ':' + String(a.min).padStart(2, '0') : 'gisteren'; };
   let plek = 0;
@@ -146,6 +148,16 @@ for(i=0;i<V.length;i++){V[i].classList.toggle('aan',V[i]===a);var B=V[i].querySe
     + (jd.length ? `<div class="jarigen">${jd.slice(0, 6).map((x) => `<div class="jr"><div class="jn">${esc(x.naam)}</div><div class="jw">${x.wanneer === 'vandaag' ? 'is vandaag jarig' : 'was ' + esc(x.wanneer) + ' jarig'}</div></div>`).join('')}</div>`
       : '<div class="niets">Op een verjaardag staat hier de felicitatie (alleen de voornaam). Op maandag ook wie in het weekend jarig was.</div>')
     + '<div class="voet">Van harte gefeliciteerd!</div></section>' : '';
+  // wv4149: vijf werkdagen onder elkaar; vandaag rode rand, voorbije dagen grijs, feestdag als label; weg op de wandklok na de vrijdag van de week
+  const wkNaam = (x) => `<span class="an">${esc(x.naam)}${x.wanneer && x.wanneer !== 'hele dag' ? `<em> ${esc(x.wanneer)}</em>` : ''}</span>`;
+  const wkTekens = wk ? wk.dagen.reduce((n, d) => n + d.artsen.slice(0, WEEK_NAMEN_MAX).reduce((m, x) => m + String(x.naam).length + (x.wanneer && x.wanneer !== 'hele dag' ? 9 : 0) + 3, 0), 0) : 0;
+  const wkMaat = (WEEK_MAAT.find(([n]) => wkTekens > n) || [0, ''])[1];
+  const weekHtml = wk ? `<section class="paneel week${wkMaat ? ' ' + wkMaat : ''}${zicht === ++plek ? ' aan' : ''}" data-s="${WEEK_S}"${wk.maandag ? ` data-tot="${Date.parse(plusDag(wk.maandag, 5) + 'T00:00:00+01:00')}"` : ''}><div class="ph"><h1>${esc(wk.kop || 'Deze week op Tolgaarde')}</h1><div class="lab">Artsen</div></div>`
+    + (wk.dagen.length ? `<div class="wk">${wk.dagen.map((d) => `<div class="wr${d.vandaag ? ' nu' : ''}${d.voorbij ? ' voorbij' : ''}"><div class="wd2"><div class="dat"><span class="wd">${esc(d.wd)}</span><span class="dg">${esc(d.dg)}</span><span class="mn">${esc(d.mn)}</span></div>`
+      + (d.feestdag || d.vandaag ? `<div class="wc">${d.vandaag ? '<span class="chip a">Vandaag</span>' : ''}${d.feestdag ? `<span class="chip">${esc(d.feestdag)}</span>` : ''}</div>` : '') + '</div>'
+      + `<div class="wn">${d.artsen.length ? d.artsen.slice(0, WEEK_NAMEN_MAX).map(wkNaam).join('') + (d.artsen.length > WEEK_NAMEN_MAX ? `<span class="an">+${d.artsen.length - WEEK_NAMEN_MAX}</span>` : '') : '<span class="leeg">Geen rooster bekend</span>'}</div></div>`).join('')}</div>`
+      : '<div class="niets">Nog geen rooster voor deze week binnen.</div>')
+    + `<div class="voet">Artsen en waarnemers volgens het rooster · bijgewerkt ${esc(amsTekst(gemaakt))}</div></section>` : '';
   const nieuwsHtml = nw ? `<section class="paneel nieuws${zicht === ++plek ? ' aan' : ''}" data-s="${INFO_S}"${nw.items.length ? ` data-tot="${Number(nw.nieuwste) + NIEUWS_OUD_MS}"` : ''}><div class="ph"><h1>Nieuws</h1><div class="lab">NOS</div></div>`
     + (nw.items.length ? nw.items.slice(0, NIEUWS_N).map((x) => `<div class="nws"><span class="nt">${esc(nwTijd(x.ms))}</span><span class="nk">${esc(x.kop)}</span></div>`).join('')
       : '<div class="niets">Nu geen recent nieuws: de NOS is niet bereikbaar of het nieuwste bericht is ouder dan 6 uur. Dan staat dit scherm niet op de tv.</div>')
@@ -167,7 +179,7 @@ for(i=0;i<V.length;i++){V[i].classList.toggle('aan',V[i]===a);var B=V[i].querySe
   // wv4141 (2C55): stipjes (k van n) in plaats van "Info k/n"; sc.lab (alleen app-voorbeeld) = tekst, sc.stip = [k, n] (app-voorbeeld)
   const stip = (k, n) => n > 1 ? `<span class="stip" aria-label="${k + 1} van ${n}">${Array.from({ length: n }, (_, m) => `<i${m === k ? ' class="op"' : ''}></i>`).join('')}</span>` : '';
   const ptDatum = (d) => { const x = datumDelen(d); return x.dg + ' ' + x.mn; };
-  const infoHtml = jarigHtml + nieuwsHtml + medHtml + info.map((sc, k) => `<section class="paneel info${zicht === k + 1 + plek ? ' aan' : ''}" data-s="${INFO_S}" data-tot="${Date.parse(plusDag(sc.tot, 1) + 'T00:00:00+01:00')}"><div class="ph"><h1>${esc(sc.kop)}</h1><div class="lab">${sc.lab ? esc(sc.lab) : Array.isArray(sc.stip) ? stip(sc.stip[0], sc.stip[1]) : stip(k, info.length)}</div></div>`
+  const infoHtml = jarigHtml + weekHtml + nieuwsHtml + medHtml + info.map((sc, k) => `<section class="paneel info${zicht === k + 1 + plek ? ' aan' : ''}" data-s="${INFO_S}" data-tot="${Date.parse(plusDag(sc.tot, 1) + 'T00:00:00+01:00')}"><div class="ph"><h1>${esc(sc.kop)}</h1><div class="lab">${sc.lab ? esc(sc.lab) : Array.isArray(sc.stip) ? stip(sc.stip[0], sc.stip[1]) : stip(k, info.length)}</div></div>`
     + (sc.intro ? `<p class="intro">${esc(sc.intro)}</p>` : '')
     + `<div class="punten">${sc.punten.map((x) => `<div class="punt"><div class="pt">${esc(x.titel)}</div>${x.tekst ? `<div class="px">${esc(x.tekst)}</div>` : ''}${x.tot ? `<div class="ptot">t/m ${esc(ptDatum(x.tot))}</div>` : ''}</div>`).join('')}</div>`
     + `<div class="voet">Bron: ${esc(sc.bron)}</div></section>`).join('');
@@ -211,6 +223,12 @@ html,body{margin:0;height:100%;background:#fff;color:#5B5C60;font-family:'Libera
 .slinger{height:110px;margin:-10px 0 10px}.slinger svg{width:100%;height:110px}
 .jarigen{display:flex;flex-wrap:wrap;gap:40px 80px;align-content:center;flex:1;padding:10px 0 30px}.jr{min-width:0}
 .jn{font-size:120px;font-weight:bold;color:#ED1C24;line-height:1.05;overflow-wrap:anywhere}.jw{font-size:42px;color:#3E3F42;margin-top:8px}
+.wk{display:flex;flex-direction:column}.wr{display:flex;align-items:center;gap:26px;padding:12px 16px 12px 18px;border-bottom:2px solid #D9DADC;border-left:8px solid transparent;min-height:128px}
+.wr.nu{border-left-color:#ED1C24;background:#FDF1F1}.wr.voorbij{opacity:.45}.wd2{flex:none;width:220px}.wd2 .dat{width:220px}
+.wn{flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:4px 36px;font-size:38px;font-weight:bold;color:#3E3F42;line-height:1.2}
+.k1 .wn{font-size:34px;gap:2px 32px}.k2 .wn{font-size:30px;gap:2px 28px}.k3 .wn{font-size:27px;gap:0 24px}.k2 .wr,.k3 .wr{min-height:110px;padding-top:8px;padding-bottom:8px}
+.wn em{font-style:normal;font-weight:normal;color:#88898C;font-size:.75em}.wn .leeg{font-weight:normal;color:#88898C;font-size:32px}.an{max-width:100%;overflow-wrap:anywhere}
+.wc{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}.wc .chip{font-size:19px;padding:3px 10px}
 .oud-tekst{display:none;font-size:44px;color:#3E3F42}body.oud .podium>*,body.oud .weer-blok,body.oud .blok{display:none}body.oud .podium .oud-tekst{display:block}
 </style></head>
 <body data-soort="scherm" data-gemaakt="${Number(gemaakt)}" data-houdbaar="${Number(houdbaar_tot)}">
@@ -258,6 +276,16 @@ const NIEUWS_ID = crypto.createHash('sha256').update('nieuws:nos').digest('hex')
 const JARIG_ID = crypto.createHash('sha256').update('jarig:vandaag').digest('hex').slice(0, 16);
 const SLINGER_SVG = '<svg viewBox="0 0 1200 110" preserveAspectRatio="none" aria-hidden="true"><path d="M0 8 Q600 70 1200 8" fill="none" stroke="#88898C" stroke-width="3"/>'
   + Array.from({ length: 13 }, (_, k) => { const x = 40 + k * 86, y = 8 + 62 * (1 - Math.pow((x - 600) / 600, 2)) * 0.97; return `<path d="M${x - 26} ${y.toFixed(0)} L${x + 26} ${y.toFixed(0)} L${x} ${(y + 44).toFixed(0)} Z" fill="${k % 2 ? '#D9DADC' : '#ED1C24'}"/>`; }).join('') + '</svg>';
+// ── wv4149 (2C31, David Ja 25-11-2026): pagina "Deze week op Tolgaarde" — per werkdag (ma–vr) de artsen en waarnemers uit het artsenrooster,
+// zelfde namen en dagdeel als het railvak (artsenVandaag per dag), vandaag gemarkeerd, vanaf vrijdag 12:00 de volgende week, feestdagen berekend.
+// Op de tv alleen met een EIGEN registerrij WEEK_RIJ (status aan, naast de basisrij) die WEEK_ZIN bevat, zoals Medisch nieuws (wv3154); daarvoor
+// alleen als proef in de app. Ontwerp + Codex-review: mk-scripts/personeelsscherm/week/ontwerp.md (MOET 1: tijdlijn vanaf de maandag lezen).
+const WEEK_RIJ = 'personeelsscherm-week';
+const WEEK_ZIN = 'Deze week op Tolgaarde: per werkdag (maandag tot en met vrijdag) welke artsen en waarnemers';
+const WEEK_ID = crypto.createHash('sha256').update('week:tolgaarde').digest('hex').slice(0, 16);
+const WEEK_S = 25, WEEK_NAMEN_MAX = 6;
+// letter kleiner naarmate de week meer tekst heeft (tekens van namen + dagdeel over vijf dagen); gemeten 26-11: ± 15 namen, ± 200 tekens per week
+const WEEK_MAAT = [[420, 'k3'], [300, 'k2'], [200, 'k1']];
 const NIEUWS_WEG = /https?:|www\.|@/i;   // een kop met een adres of link komt er niet op
 function nieuwsEntiteit(m, x) {
   const vast = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
@@ -522,6 +550,45 @@ function artsenVandaag(rijen, vandaag, meds, vol) {
     const x = { naam, wanneer: dd }; gezien.set(k, x); uit.push(x);
   }
   return uit.sort((a, b) => (a.naam === 'Waarnemer') - (b.naam === 'Waarnemer') || a.naam.localeCompare(b.naam, 'nl'));
+}
+// ── wv4149: week en feestdagen ──
+// Pasen (anonieme Gregoriaanse rekenregel, Meeus/Jones/Butcher) → JJJJ-MM-DD
+function paasZondag(j) {
+  const a = j % 19, b = Math.floor(j / 100), c = j % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const mnd = Math.floor((h + l - 7 * m + 114) / 31), dag = ((h + l - 7 * m + 114) % 31) + 1;
+  return j + '-' + String(mnd).padStart(2, '0') + '-' + String(dag).padStart(2, '0');
+}
+// landelijke feestdagen (Bevrijdingsdag alleen in lustrumjaren, Koningsdag op zondag = zaterdag ervoor); alleen de naam, niet "praktijk dicht"
+function feestdagen(j) {
+  const p = paasZondag(j), kd = j + '-04-27', m = new Map();
+  m.set(j + '-01-01', 'Nieuwjaarsdag'); m.set(p, 'Eerste Paasdag'); m.set(plusDag(p, 1), 'Tweede Paasdag');
+  m.set(new Date(kd + 'T12:00:00Z').getUTCDay() === 0 ? j + '-04-26' : kd, 'Koningsdag');
+  if (j % 5 === 0) m.set(j + '-05-05', 'Bevrijdingsdag');
+  m.set(plusDag(p, 39), 'Hemelvaartsdag'); m.set(plusDag(p, 49), 'Eerste Pinksterdag'); m.set(plusDag(p, 50), 'Tweede Pinksterdag');
+  m.set(j + '-12-25', 'Eerste Kerstdag'); m.set(j + '-12-26', 'Tweede Kerstdag');
+  return m;
+}
+function feestdag(datum) { return feestdagen(Number(String(datum).slice(0, 4))).get(datum) || ''; }
+// welke week: Amsterdamse tijd; vrijdag vanaf 12:00, zaterdag en zondag = de volgende week
+function weekMaandag(t) {
+  const a = amsDelen(t), volgende = a.dag >= 5 || (a.dag === 4 && a.uur >= 12), ma = plusDag(a.datum, -a.dag);
+  return { maandag: volgende ? plusDag(ma, 7) : ma, volgende };
+}
+// ruwe week (bewaard in stand.week): per werkdag de artsen zoals het railvak ze die dag zou tonen
+function weekRooster(rijen, maandag, meds, vol) {
+  return { sleutel: maandag, vol: !!vol, dagen: [0, 1, 2, 3, 4].map((k) => { const d = plusDag(maandag, k); return { datum: d, artsen: artsenVandaag(rijen, d, meds, vol) }; }) };
+}
+// wat de pagina toont, op moment t: alleen als de bewaarde week de week van nu is (anders null); vandaag/voorbij/feestdag per dag
+function weekBeeld(w, t) {
+  const { maandag, volgende } = weekMaandag(t);
+  if (!w || w.sleutel !== maandag || !Array.isArray(w.dagen) || w.dagen.length !== 5) return null;
+  const vandaag = ymd(t);
+  return { kop: volgende ? 'Volgende week op Tolgaarde' : 'Deze week op Tolgaarde', maandag, volgende, dagen: w.dagen.map((d) => {
+    const x = datumDelen(d.datum);
+    return { datum: d.datum, wd: x.wd, dg: x.dg, mn: x.mn, vandaag: d.datum === vandaag, voorbij: d.datum < vandaag, feestdag: feestdag(d.datum),
+      artsen: (Array.isArray(d.artsen) ? d.artsen : []).map((y) => ({ naam: String(y.naam), wanneer: String(y.wanneer) })) };
+  }) };
 }
 function agendaPunten(rijen, vandaag, eigen) {
   const uit = [];
@@ -791,6 +858,14 @@ function maak(o) {
     const m = { nieuws: u[MEDISCH_ID] ? [] : b.nieuws, belangrijk: u[BELANGRIJK_ID] ? [] : b.belangrijk };
     return m.nieuws.length || m.belangrijk.length ? m : null;
   }
+  // ── weekpagina (wv4149) ──
+  // op de tv alleen met de eigen rij (naast de basisrij), niet uitgezet in de app, en volle namen nooit zonder de zin in de basisrij
+  const weekMag = () => toestemming() && rijMag(WEEK_ZIN, WEEK_RIJ);
+  function weekOpTv(s, t) {
+    if (!weekMag() || uitLijst()[WEEK_ID]) return null;
+    if (s && s.week && s.week.vol && !volleNaamMag()) return null;
+    return weekBeeld(s && s.week, t);
+  }
   function eigenPunten() { try { const j = JSON.parse(fs.readFileSync(path.join(dir, 'punten.json'), 'utf8')); return Array.isArray(j) ? j : []; } catch (e) { return []; } }
   async function weerVers(s, t) {
     if (s.weer && s.weer_op && t - s.weer_op < WEER_MS) return s.weer;
@@ -803,8 +878,9 @@ function maak(o) {
     const s = leesStand(), vandaag = ymd(t), oud = s.inhoud || {};
     const aan = toestemming(), vol = aan && volleNaamMag();
     let rijen = null;
+    const wm = weekMaandag(t).maandag;   // wv4149 (Codex MOET 1): vanaf de maandag van de getoonde week, ook midden in de week
     if (typeof o.tijdlijn === 'function') {
-      try { const r = await o.tijdlijn(vandaag, plusDag(vandaag, AGENDA_DAGEN)); if (Array.isArray(r)) rijen = r; else throw new Error('x'); }
+      try { const r = await o.tijdlijn(wm < vandaag ? wm : vandaag, plusDag(vandaag, AGENDA_DAGEN)); if (Array.isArray(r)) rijen = r; else throw new Error('x'); }
       catch (e) { fout('personeelsscherm-agenda', new Error('tijdlijn lezen faalde')); }
     }
     const meds = aan ? leesMedewerkers(o.vault, vandaag) : [];
@@ -830,8 +906,13 @@ function maak(o) {
     inhoud.medisch = medischOpTv(leesStand(), t);
     inhoud.medisch_tv = aan && medischMag();
     inhoud.bronnen.medisch = inhoud.medisch ? inhoud.medisch.nieuws.length + inhoud.medisch.belangrijk.length : 0;
+    // wv4149: weekrooster bewaard zodra de basisrij aan is (proef in de app); tijdlijn mislukt = het oude alleen als het dezelfde week is.
+    // Zonder basisrij geen namen in de stand. inhoud.week = alleen wat op de tv mag (verandering = nieuwe envelop).
+    const week = !aan ? null : rijen ? weekRooster(rijen, wm, meds, vol) : (s.week && s.week.sleutel === wm && !!s.week.vol === vol ? s.week : null);
+    inhoud.week = weekOpTv({ week }, t);
+    inhoud.bronnen.week = inhoud.week ? inhoud.week.dagen.length : 0;
     const ish = crypto.createHash('sha256').update(JSON.stringify(inhoud.info)).digest('hex');
-    wijzig((x) => { x.inhoud = inhoud; x.inhoud_op = t; x.weer = s.weer || null; x.weer_op = s.weer_op || null; x.info_sha = ish;
+    wijzig((x) => { x.inhoud = inhoud; x.inhoud_op = t; x.week = week; x.weer = s.weer || null; x.weer_op = s.weer_op || null; x.info_sha = ish;
       if (s.nieuws_poging) { x.nieuws = s.nieuws || null; x.nieuws_poging = s.nieuws_poging; } });
     return inhoud;
   }
@@ -851,7 +932,9 @@ function maak(o) {
     const medisch = medischOpTv(s, t);
     // wv4141: felicitatiepagina alleen met de registerrij, van vandaag en niet uitgezet
     const jarig_dag = aan && Array.isArray(i.jarig_dag) && i.jarig_dag.length && !uitLijst()[JARIG_ID] ? i.jarig_dag : null;
-    return Object.assign({}, i, { artsen: aan ? artsen : null, jarig: aan ? i.jarig : null, jarig_dag, info, nieuws, medisch,
+    // wv4149: weekpagina bij elke publicatie opnieuw tegen rij, zin, uit-knop en de week van nu (nooit uit een oude stand doorgeschoven)
+    const week = aan ? weekOpTv(s, t) : null;
+    return Object.assign({}, i, { artsen: aan ? artsen : null, jarig: aan ? i.jarig : null, jarig_dag, week, info, nieuws, medisch,
       wd_tekst: d.wdl, dag_tekst: d.dg + ' ' + d.mnl, klok_tekst: String(a.uur).padStart(2, '0') + ':' + String(a.min).padStart(2, '0') });
   }
   function inhoudSha(i) { const c = Object.assign({}, i || {}); delete c.bronnen; return crypto.createHash('sha256').update(JSON.stringify(c)).digest('hex'); }
@@ -921,6 +1004,7 @@ function maak(o) {
     const x = id === NIEUWS_ID ? (toestemming() && nieuwsMag() ? { tot: '9999-12-31' } : null)
       : id === MEDISCH_ID || id === BELANGRIJK_ID ? (toestemming() && medischMag() ? { tot: '9999-12-31' } : null)   // wv3154: zelfde als het NOS-scherm
       : id === JARIG_ID ? (toestemming() ? { tot: '9999-12-31' } : null)   // wv4141: felicitatiepagina
+      : id === WEEK_ID ? (weekMag() ? { tot: '9999-12-31' } : null)   // wv4149: weekpagina, alleen met de eigen rij
       : infoKandidaten(vandaag).find((y) => y.id === id);
     if (aan && !x) return { status: 409, body: { ok: false, fout: 'Dit scherm kan niet meer aan: het is niet (meer) door jou goedgekeurd of de looptijd is voorbij.' } };
     if (!aan && !x && !uitLijst()[id]) return { status: 404, body: { ok: false, fout: 'Dit scherm staat niet (meer) op de tv.' } };
@@ -997,12 +1081,19 @@ function maak(o) {
     const vandaag = ymd(t), kand = infoKandidaten(vandaag), u = uitLijst();
     const opTv = infoSchermen(vandaag).map((x) => x.id);
     const inh = schermInhoud(s, t);
-    const lijst = [{ id: 'hoofd', soort: 'hoofd', titel: 'Komende weken', looptijd_s: opTv.length || inh.nieuws || inh.medisch || inh.jarig_dag ? INFO_HOOFD_S : null, aan: true, uit: false }];
+    const lijst = [{ id: 'hoofd', soort: 'hoofd', titel: 'Komende weken', looptijd_s: opTv.length || inh.nieuws || inh.medisch || inh.jarig_dag || inh.week ? INFO_HOOFD_S : null, aan: true, uit: false }];
     // wv4141: felicitatiepagina (alleen met de registerrij); voorbeeld met wie vandaag jarig is, of de uitlegregel
     if (toestemming()) {
       const jdNu = s.inhoud && s.inhoud.datum === vandaag && Array.isArray(s.inhoud.jarig_dag) ? s.inhoud.jarig_dag : [];
       lijst.push({ id: JARIG_ID, soort: 'info', titel: 'Gefeliciteerd (jarig vandaag)', looptijd_s: INFO_S, van: null, tot: null, aan: !!inh.jarig_dag, uit: !!u[JARIG_ID],
         html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [], nieuws: null, medisch: null, jarig_dag: jdNu, jarig_leeg: true }), toon: 1 }) });
+    }
+    // wv4149: weekpagina; vóór de Ja (geen eigen rij) alleen als proef: voorbeeld met het bewaarde rooster, niet op de tv, geen aan-knop
+    if (toestemming()) {
+      const mag = weekMag(), wb = weekBeeld(s.week, t);
+      const leegWeek = { kop: weekMaandag(t).volgende ? 'Volgende week op Tolgaarde' : 'Deze week op Tolgaarde', maandag: null, dagen: [] };
+      lijst.push({ id: WEEK_ID, soort: 'info', titel: 'Deze week op Tolgaarde', looptijd_s: WEEK_S, van: null, tot: null, proef: !mag, aan: !!inh.week, uit: !!u[WEEK_ID],
+        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [], jarig_dag: null, nieuws: null, medisch: null, week: wb || leegWeek }), toon: 1 }) });
     }
     // wv3023: nieuwsscherm (alleen met de registerzin); voorbeeld met de koppen die nu op de tv staan, of de uitlegregel als er geen vers nieuws is
     if (toestemming() && nieuwsMag()) {
@@ -1251,6 +1342,7 @@ function maak(o) {
         bewaard: s.medisch && s.medisch.items ? Object.keys(s.medisch.items).length : 0,
         op_tv: s.inhoud && s.inhoud.medisch ? { nieuws: s.inhoud.medisch.nieuws.length, belangrijk: s.inhoud.medisch.belangrijk.length } : null,
         bronnen: s.medisch && s.medisch.bronnen ? Object.fromEntries(Object.entries(s.medisch.bronnen).map(([k, v]) => [k, { ok: v && v.ok ? iso(v.ok) : null, n: v && Number.isFinite(v.n) ? v.n : 0, fout: v && v.fout ? iso(v.fout) : null }])) : null },
+      week: { mag: weekMag(), uit: !!uitLijst()[WEEK_ID], sleutel: s.week ? s.week.sleutel : null, op_tv: s.inhoud && s.inhoud.week ? s.inhoud.week.dagen.length : null },   // wv4149: geen namen
       info_uit: s.info_uit ? Object.keys(s.info_uit).length : 0, aanvragen: (s.aanvragen || []).filter((a) => a && nu() - a.op < AANVRAAG_BEWAAR_MS).length,   // wv3020
       bronnen: s.inhoud ? s.inhoud.bronnen || null : null };   // alleen tellingen, nooit namen
   }
@@ -1259,5 +1351,5 @@ function maak(o) {
 }
 
 module.exports = { maak, bouwHtml, D1_SCHEMA, inWerktijd, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
-  VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, JARIG_ID, MEDISCH_ZIN, MEDISCH_RIJ, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN,
-  _t: { medischTekst, medischItems, medischBijwerken, medischBeeld, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, artsenVandaag, jarigen, jarigDag, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };
+  VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, JARIG_ID, WEEK_RIJ, WEEK_ZIN, WEEK_ID, MEDISCH_ZIN, MEDISCH_RIJ, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN,
+  _t: { paasZondag, feestdagen, feestdag, weekMaandag, weekRooster, weekBeeld, medischTekst, medischItems, medischBijwerken, medischBeeld, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, artsenVandaag, jarigen, jarigDag, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };

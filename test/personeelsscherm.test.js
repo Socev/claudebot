@@ -279,7 +279,7 @@ function fase1(o = {}) {
   const z = opzet(o);
   const tel = { tijdlijn: 0, weer: 0, nieuws: 0, medisch: 0, medisch_bron: [] };
   const m = PS.maak({ dir: z.dir, vault, registerPad: reg, vragenPad, d1: z.D.d1, cf: z.C.cf, nu: z.nu, melding: async () => {}, fout: () => {},
-    tijdlijn: async () => { tel.tijdlijn++; if (o.tijdlijnFaalt) throw new Error('weg'); return rijen; }, weer: async () => { tel.weer++; return weer; },
+    tijdlijn: async (van, tot) => { tel.tijdlijn++; tel.van = van; if (o.tijdlijnFaalt || tel.faalt) throw new Error('weg'); return rijen.filter((r) => String(r.eind_datum || r.begin_datum) >= van); },   /* wv4149: zoals de RPC vanaf 'van' */ weer: async () => { tel.weer++; return weer; },
     nieuws: o.nieuws ? async () => { tel.nieuws++; return o.nieuws(); } : undefined, nieuwsTimeoutMs: o.nieuwsTimeoutMs,   // wv3023
     medisch: o.medisch ? async (b) => { tel.medisch++; tel.medisch_bron.push(b); return o.medisch(b); } : undefined });   // wv3154
   return Object.assign(z, { m, zetReg, tel, vault, vragenPad });
@@ -503,7 +503,7 @@ test('wv3020 uit: meteen een nieuwe envelop zonder dat scherm (hoger volgnr), bl
   await f.m.tik();
   assert.match(html(f.D), /Proefinfo een/);
   const st = await f.m.appStand();
-  const [een, twee] = st.schermen.filter((x) => x.soort === 'info' && x.id !== PS.JARIG_ID);
+  const [een, twee] = st.schermen.filter((x) => x.soort === 'info' && x.id !== PS.JARIG_ID && x.id !== PS.WEEK_ID);
   assert.strictEqual(een.titel, 'Proefinfo een'); assert.strictEqual(een.aan, true); assert.strictEqual(twee.aan, true);
   const v0 = f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr;
   t += 1000; f.zet(t);
@@ -536,7 +536,7 @@ test('wv3020 uit: meteen een nieuwe envelop zonder dat scherm (hoger volgnr), bl
 
 test('wv3020 aan alleen met Ja en binnen de looptijd: andere/onbekende id, Ja weg, tekst gewijzigd of verlopen = geweigerd (kruisproeven)', async () => {
   const t = Date.parse('2026-11-16T09:00:00Z');
-  const mk = async () => { const f = fase2({ vragen: jaVoor(SET) }); f.zet(t); await f.m.tik(); const st = await f.m.appStand(); return { f, ids: st.schermen.filter((x) => x.soort === 'info' && x.id !== PS.JARIG_ID).map((x) => x.id) }; };
+  const mk = async () => { const f = fase2({ vragen: jaVoor(SET) }); f.zet(t); await f.m.tik(); const st = await f.m.appStand(); return { f, ids: st.schermen.filter((x) => x.soort === 'info' && x.id !== PS.JARIG_ID && x.id !== PS.WEEK_ID).map((x) => x.id) }; };
   let { f, ids } = await mk();
   const aan = (id) => f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id, aan: true } });
   assert.strictEqual((await aan('nietgoed')).status, 400);
@@ -569,6 +569,8 @@ test('wv3020 voorbeeld per scherm: eigen doek met dat paneel zichtbaar, titel, l
   const f = fase2({ vragen: jaVoor(SET) });
   f.zet(Date.parse('2026-11-16T09:00:00Z')); await f.m.tik();
   const st = await f.m.appStand();
+  const wk = st.schermen.splice(2, 1)[0];   // wv4149: weekpagina (zonder eigen registerrij = proef) direct na de felicitatiepagina
+  assert.deepStrictEqual([wk.id, wk.titel, wk.proef, wk.aan, wk.looptijd_s], [PS.WEEK_ID, 'Deze week op Tolgaarde', true, false, 25]);
   assert.strictEqual(st.schermen.length, 4);   // wv4141: + felicitatiepagina
   assert.deepStrictEqual(st.schermen.map((x) => [x.soort, x.titel, x.looptijd_s]), [['hoofd', 'Komende weken', 30], ['info', 'Gefeliciteerd (jarig vandaag)', 20], ['info', 'Proefinfo een', 20], ['info', 'Proefinfo twee', 20]]);
   assert.strictEqual(st.schermen[0].html, undefined); assert.strictEqual(st.voorbeeld_html, html(f.D));
@@ -1211,4 +1213,119 @@ test('wv4141 verjaardag zonder jaar: veld verjaardag MM-DD telt als er geen gebo
   pag('c', { type: 'medewerker', naam: 'Proef Drie', geboortedatum: '1980-05-01', verjaardag: '06-06' });
   const m = PS._t.leesMedewerkers(vault, '2026-11-25').sort((x, y) => x.voornaam.localeCompare(y.voornaam));
   assert.deepStrictEqual(m.map((x) => x.geboren).sort(), ['03-12', '05-01', null].sort());
+});
+
+// ── wv4149 (2C31): pagina "Deze week op Tolgaarde"; verzonnen rooster uit fase1 (ma 16-11: Jorrit ochtend, Sanne, Wietske, 3 waarnemers; di 17-11 Morgen Dokter) ──
+const WEEK_TEKST = ['Deze week op Tolgaarde: per werkdag (maandag tot en met vrijdag) welke artsen en waarnemers volgens het artsenrooster werken.'];
+function weekOpzet(o = {}) {
+  const f = fase1(Object.assign({ aan: true }, o));
+  const reg = path.join(f.vault, 'register.json');
+  const zetWeek = (wk = 'aan', wkTekst = WEEK_TEKST, basis = o.aan === undefined ? true : o.aan, basisTekst = o.tekst || ['i. artsen van vandaag (voornaam en dagdeel)']) => fs.writeFileSync(reg, JSON.stringify({ rijen: [{ id: 'ander', status: 'aan', tekst: WEEK_TEKST }]
+    .concat(basis ? [{ id: 'personeelsscherm-vast', status: basis === true ? 'aan' : basis, tekst: basisTekst }] : [])
+    .concat(wk ? [{ id: PS.WEEK_RIJ, status: wk, tekst: wkTekst }] : []) }));
+  zetWeek(o.wk === undefined ? 'aan' : o.wk, o.wkTekst);
+  return Object.assign(f, { zetWeek });
+}
+const weekPaneel = (h) => { const m = /<section class="paneel week[^"]*"[^>]*>[\s\S]*?<\/section>/.exec(h); return m ? m[0] : null; };
+const weekRijen = (p) => [...(p || '').matchAll(/<div class="wr( nu)?( voorbij)?"><div class="wd2"><div class="dat"><span class="wd">(\w+)<\/span><span class="dg">(\d+)<\/span><span class="mn">(\w+)<\/span><\/div>(?:<div class="wc">([\s\S]*?)<\/div>)?<\/div><div class="wn">([\s\S]*?)<\/div><\/div>/g)]
+  .map((m) => ({ nu: !!m[1], voorbij: !!m[2], dag: m[3] + ' ' + m[4] + ' ' + m[5], chips: m[6] || '', namen: [...m[7].matchAll(/<span class="an">([^<]*)(?:<em> ([^<]*)<\/em>)?<\/span>/g)].map((x) => x[1] + (x[2] ? ' (' + x[2] + ')' : '')) }));
+
+test('wv4149 Pasen, feestdagen en weekkeuze (vrijdag 12:00, weekend = volgende week)', () => {
+  const T = PS._t;
+  assert.deepStrictEqual([2024, 2025, 2026, 2027, 2038].map(T.paasZondag), ['2024-03-31', '2025-04-20', '2026-04-05', '2027-03-28', '2038-04-25']);
+  assert.strictEqual(T.feestdag('2025-04-26'), 'Koningsdag', '27-4-2025 is een zondag'); assert.strictEqual(T.feestdag('2025-04-27'), '');
+  assert.strictEqual(T.feestdag('2025-05-05'), 'Bevrijdingsdag'); assert.strictEqual(T.feestdag('2026-05-05'), '', 'alleen lustrumjaren');
+  assert.deepStrictEqual(['2026-12-25', '2026-12-26', '2027-01-01', '2027-03-29', '2027-05-06', '2027-05-17', '2026-12-24', '2026-12-31'].map(T.feestdag),
+    ['Eerste Kerstdag', 'Tweede Kerstdag', 'Nieuwjaarsdag', 'Tweede Paasdag', 'Hemelvaartsdag', 'Tweede Pinksterdag', '', '']);
+  const w = (x) => { const r = T.weekMaandag(Date.parse(x)); return r.maandag + (r.volgende ? ' volgende' : ''); };
+  assert.deepStrictEqual(['2026-11-16T07:00:00Z', '2026-11-18T09:00:00Z', '2026-11-20T10:59:00Z', '2026-11-20T11:00:00Z', '2026-11-21T12:00:00Z', '2026-11-22T22:59:00Z', '2026-11-22T23:00:00Z'].map(w),
+    ['2026-11-16', '2026-11-16', '2026-11-16', '2026-11-23 volgende', '2026-11-23 volgende', '2026-11-23 volgende', '2026-11-23']);
+  assert.strictEqual(T.weekBeeld({ sleutel: '2026-11-09', dagen: [{}, {}, {}, {}, {}] }, Date.parse('2026-11-18T09:00:00Z')), null, 'bewaarde week van vorige week = niets');
+});
+
+test('wv4149 zonder eigen registerrij: proef in de app, niet op de tv, niet aan te zetten (kruisproef); zonder basisrij ook geen namen in de stand', async () => {
+  const t = Date.parse('2026-11-18T09:00:00Z');
+  for (const [w, o] of [['geen weekrij', { wk: false }], ['weekrij uit', { wk: 'uit' }], ['rij zonder de zin', { wkTekst: ['Deze week: artsen.'] }],
+    ['zin alleen in de basisrij', { wk: false, tekst: ['i. artsen van vandaag (voornaam en dagdeel). ' + WEEK_TEKST[0]] }]]) {
+    const f = weekOpzet(o); f.zet(t); await f.m.tik();
+    assert.strictEqual(weekPaneel(html(f.D)), null, w + ': niet op de tv');
+    assert.doesNotMatch(html(f.D), /op Tolgaarde/, w);
+    const st = await f.m.appStand(), wk = st.schermen.find((x) => x.id === PS.WEEK_ID);
+    assert.deepStrictEqual([wk.proef, wk.aan], [true, false], w);
+    assert.deepStrictEqual(weekRijen(weekPaneel(wk.html))[0].namen, ['Jorrit (ochtend)', 'Sanne', 'Wietske', 'Waarnemer', 'Waarnemer', 'Waarnemer'], w + ': proef toont het rooster');
+    assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.WEEK_ID, aan: true } })).status, 409, w);
+    assert.strictEqual(f.m.info().week.mag, false); assert.strictEqual(f.m.info().week.op_tv, null);
+  }
+  for (const basis of [false, 'uit']) {
+    const g = weekOpzet({ aan: basis }); g.zet(t); await g.m.tik(); await g.m.publiceer();
+    assert.strictEqual(weekPaneel(html(g.D)), null); assert.ok(!(await g.m.appStand()).schermen.some((x) => x.id === PS.WEEK_ID));
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(g.dir, 'stand.json'), 'utf8')).week, null, 'geen namen bewaard zonder basisrij');
+  }
+});
+
+test('wv4149 met registerrij: vijf werkdagen gelijk aan het railvak per dag, vandaag gemarkeerd, voorbije dagen grijs; tijdlijn vanaf maandag (Codex MOET 1)', async () => {
+  const f = weekOpzet(); f.zet(Date.parse('2026-11-18T09:00:00Z')); await f.m.tik();
+  assert.strictEqual(f.tel.van, '2026-11-16', 'woensdag: lezen vanaf maandag');
+  const p = weekPaneel(html(f.D)); assert.ok(p);
+  assert.match(p, /<h1>Deze week op Tolgaarde<\/h1>/); assert.match(p, /data-s="25"/); assert.match(p, new RegExp('data-tot="' + Date.parse('2026-11-21T00:00:00+01:00') + '"'));
+  const r = weekRijen(p);
+  assert.deepStrictEqual(r.map((x) => x.dag), ['ma 16 nov', 'di 17 nov', 'wo 18 nov', 'do 19 nov', 'vr 20 nov']);
+  assert.deepStrictEqual(r.map((x) => [x.nu, x.voorbij]), [[false, true], [false, true], [true, false], [false, false], [false, false]]);
+  assert.match(r[2].chips, /Vandaag/);
+  // zelfde namen als het railvak die dag zou tonen (één bron: artsenVandaag)
+  assert.deepStrictEqual(r[0].namen, ['Jorrit (ochtend)', 'Sanne', 'Wietske', 'Waarnemer', 'Waarnemer', 'Waarnemer']);
+  assert.deepStrictEqual(r[1].namen, ['Morgen'], 'roostercode MD = voornaam, zoals het railvak'); assert.deepStrictEqual(r[2].namen, []); assert.match(p, /Geen rooster bekend/);
+  assert.doesNotMatch(p, /Andere|Kwakkel|JB 8-12|SvH|assistent|POH/i, 'andere praktijk, achternaam zonder zin, roostertitel en assistentes niet');
+  const i = f.m.info();
+  assert.deepStrictEqual(i.week, { mag: true, uit: false, sleutel: '2026-11-16', op_tv: 5 }); assert.doesNotMatch(JSON.stringify(i), /Jorrit|Sanne|Wietske/, '/health zonder namen');
+  assert.strictEqual((await f.m.appStand()).schermen.find((x) => x.id === PS.WEEK_ID).aan, true);
+  // volle naam alleen met de zin in de basisrij
+  const v = weekOpzet({ tekst: ['i. ' + PS.VOLLE_NAAM_ZIN + ', ook waarnemers, en dagdeel)'] }); v.zet(Date.parse('2026-11-18T09:00:00Z')); await v.m.tik();
+  assert.deepStrictEqual(weekRijen(weekPaneel(html(v.D)))[1].namen, ['Morgen Dokter']);
+  assert.ok(weekRijen(weekPaneel(html(v.D)))[0].namen.includes('Hidde Invaller'));
+  // zin daarna weg uit de basisrij: bewaarde volle namen niet meer op de tv
+  v.zetWeek('aan', WEEK_TEKST, true, ['i. artsen van vandaag (voornaam en dagdeel)']); await v.m.publiceer();
+  assert.strictEqual(weekPaneel(html(v.D)), null);
+});
+
+test('wv4149 vrijdag 12:00 de volgende week (nieuwe envelop), uit in de app = meteen weg, tijdlijn mislukt = oude week alleen als het dezelfde week is', async () => {
+  const f = weekOpzet();
+  f.zet(Date.parse('2026-11-20T10:50:00Z')); await f.m.tik();
+  assert.match(weekPaneel(html(f.D)), /<h1>Deze week op Tolgaarde/);
+  const v0 = f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr;
+  f.zet(Date.parse('2026-11-20T11:25:00Z')); await f.m.tik();
+  assert.ok(f.D.sq.prepare('SELECT volgnr FROM envelop').get().volgnr > v0, 'nieuwe envelop');
+  const p = weekPaneel(html(f.D));
+  assert.match(p, /<h1>Volgende week op Tolgaarde/); assert.deepStrictEqual(weekRijen(p).map((x) => x.dag), ['ma 23 nov', 'di 24 nov', 'wo 25 nov', 'do 26 nov', 'vr 27 nov']);
+  assert.ok(weekRijen(p).every((x) => !x.nu && !x.voorbij));
+  // uit / aan
+  assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.WEEK_ID, aan: false } })).status, 200);
+  assert.strictEqual(weekPaneel(html(f.D)), null); assert.strictEqual(f.m.info().week.uit, true);
+  f.zet(Date.parse('2026-11-20T12:00:00Z')); await f.m.tik(); assert.strictEqual(weekPaneel(html(f.D)), null, 'blijft uit bij de tik');
+  assert.strictEqual((await f.m.app({ pad: '/app/personeelsscherm/info', methode: 'POST', body: { id: PS.WEEK_ID, aan: true } })).status, 200);
+  assert.ok(weekPaneel(html(f.D)));
+  // tijdlijn mislukt: dezelfde week blijft, de week erna niet
+  f.tel.faalt = true;
+  f.zet(Date.parse('2026-11-23T08:00:00Z')); await f.m.tik();
+  assert.match(weekPaneel(html(f.D)), /<h1>Deze week op Tolgaarde/, 'maandag: zelfde week als vrijdagmiddag, uit de stand');
+  f.zet(Date.parse('2026-11-27T12:00:00Z')); await f.m.tik();
+  assert.strictEqual(weekPaneel(html(f.D)), null, 'nieuwe week zonder tijdlijn = geen pagina');
+});
+
+test('wv4149 feestdag als label, meer dan zes namen = +n, lege week = uitlegregel (alleen app-voorbeeld)', () => {
+  const T = PS._t, t = Date.parse('2026-12-22T09:00:00Z');
+  const veel = Array.from({ length: 10 }, (_, k) => ({ naam: 'Proefarts ' + k, wanneer: k ? 'hele dag' : 'middag' }));
+  const w = T.weekBeeld({ sleutel: '2026-12-21', dagen: ['2026-12-21', '2026-12-22', '2026-12-23', '2026-12-24', '2026-12-25'].map((d, k) => ({ datum: d, artsen: k === 1 ? veel : [] })) }, t);
+  const p = weekPaneel(PS.bouwHtml({ gemaakt: t, houdbaar_tot: t + 1, leeg: false, inhoud: { agenda: [], week: w }, toon: 1 }));
+  const r = weekRijen(p);
+  assert.match(r[4].chips, /<span class="chip">Eerste Kerstdag<\/span>/); assert.strictEqual(r[3].chips, '');
+  assert.strictEqual(r[1].namen.length, 7); assert.strictEqual(r[1].namen[0], 'Proefarts 0 (middag)'); assert.strictEqual(r[1].namen[6], '+4');
+  assert.match(p, /<section class="paneel week aan"/, 'weinig tekst = gewone letter');
+  const lang = (n) => ({ sleutel: '2026-12-21', dagen: w.dagen.map((d) => ({ datum: d.datum, artsen: Array.from({ length: n }, (_, k) => ({ naam: 'Proefnaam ' + k, wanneer: 'ochtend' })) })) });
+  assert.deepStrictEqual([1, 2, 3, 4].map((n) => (/<section class="paneel week( k\d)?/.exec(PS.bouwHtml({ gemaakt: t, houdbaar_tot: t + 1, leeg: false, inhoud: { agenda: [], week: T.weekBeeld(lang(n), t) } }))[1] || '').trim()), ['', 'k1', 'k2', 'k3'], 'meer tekst = kleinere letter'); assert.match(p, /paneel week aan/);
+  const leeg = weekPaneel(PS.bouwHtml({ gemaakt: t, houdbaar_tot: t + 1, leeg: false, inhoud: { agenda: [], week: { kop: 'Deze week op Tolgaarde', maandag: null, dagen: [] } } }));
+  assert.match(leeg, /Nog geen rooster/); assert.doesNotMatch(leeg, /data-tot/);
+  // esc: een naam met opmaak komt als tekst op het scherm
+  const x = PS.bouwHtml({ gemaakt: t, houdbaar_tot: t + 1, leeg: false, inhoud: { agenda: [], week: Object.assign({}, w, { dagen: w.dagen.map((d) => Object.assign({}, d, { artsen: [{ naam: '<b>x</b>', wanneer: 'hele dag' }] })) }) } });
+  assert.doesNotMatch(x, /<b>x<\/b>/);
 });
