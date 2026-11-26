@@ -53,7 +53,7 @@ toets('onbekend -> null (alle domeinen)', c.lessenDomein('iets-anders', '') === 
 const cc = maak({}, true);   // wv3227: met het register
 toets('wv3227: OVIS Code-sessie -> machine; verzonnen id -> null', cc.lessenDomein('ovis-code-texere', '') === 'machine' && cc.lessenDomein('ovis-code-onzin', '') === null && c.lessenDomein('ovis-code-texere', '') === null);
 const gc = cc.nachtresetTik(Date.parse('2026-10-10T02:10:00Z'));
-toets('wv3227: 04:10 ook elke OVIS Code-sessie in de wachtrij (5 + 70), geen verzonnen', gc.length === 5 + cc.CODE_IDS.length && gc.indexOf('ovis-code-texere') >= 0 && gc.indexOf('ovis-code-onzin') < 0, gc.length);
+toets('wv3227: 04:10 ook elke OVIS Code-sessie in de wachtrij (6 + 70; wv4101 heartbeat), geen verzonnen', gc.length === 6 + cc.CODE_IDS.length && gc.indexOf('ovis-code-texere') >= 0 && gc.indexOf('ovis-code-onzin') < 0, gc.length);
 
 // K3: de gedeelde bot doet geen lessenaanroep; de app-sessie vraagt domein 'beide' op
 const lesBlok = knip('const LESSEN_AAN = ', 'async function processJob');
@@ -70,23 +70,23 @@ Object.assign(c.chatSessions, sess);
 // 10-10-2026 zomertijd: 01:59Z = 03:59 Amsterdam, 02:10Z = 04:10, 03:00Z = 05:00
 toets('03:59 Amsterdam: niets', c.nachtresetTik(Date.parse('2026-10-10T01:59:00Z')).length === 0 && c.rij.length === 0);
 const g = c.nachtresetTik(Date.parse('2026-10-10T02:10:00Z'));
-toets('04:10 Amsterdam: vijf sessies in de wachtrij (sinds 12-10 telegram-debug, wv424 mcp-check, wv3087 ovis-nza)', JSON.stringify(g) === '["cijfer-meester","ovis-nza","cijfermeester","telegram-debug","mcp-check"]' && c.rij.length === 5, g);
+toets('04:10 Amsterdam: zes sessies in de wachtrij (sinds 12-10 telegram-debug, wv424 mcp-check, wv3087 ovis-nza, wv4101 heartbeat)', JSON.stringify(g) === '["cijfer-meester","ovis-nza","cijfermeester","telegram-debug","mcp-check","heartbeat"]' && c.rij.length === 6, g);
 toets('nog niets gewist vóór de wachtrij draait', c.chatSessions['cijfer-meester'] === 'a');
 c.rij.forEach(function (x) { x.fn(); });
 toets('cijfer-meester: alle breinen gewist', !c.chatSessions['cijfer-meester'] && !c.chatSessions['codex:cijfer-meester'] && !c.chatSessions['gemini:cijfer-meester']);
 toets('cijfermeester: alle breinen gewist', !c.chatSessions['cijfermeester'] && !c.chatSessions['codex:cijfermeester']);
 toets('andere sessies ongemoeid', c.chatSessions['40687'] === 'e' && c.chatSessions['ghawa:cijfer-meester'] === 'f', c.chatSessions);
-toets('opgeslagen en gelogd', c.bewaard === 2 && c.log.length === 5 && /nachtreset sessie=cijfer-meester gewist=ja/.test(c.log[0]), c.log);
+toets('opgeslagen en gelogd', c.bewaard === 2 && c.log.length === 6 && /nachtreset sessie=cijfer-meester gewist=ja/.test(c.log[0]), c.log);
 c.rij = [];
 toets('04:50 dezelfde dag: niet nog eens', c.nachtresetTik(Date.parse('2026-10-10T02:50:00Z')).length === 0 && c.rij.length === 0);
 toets('05:00: niets', c.nachtresetTik(Date.parse('2026-10-10T03:00:00Z')).length === 0);
 c.nachtresetTik(Date.parse('2026-10-11T02:05:00Z'));
 c.rij.forEach(function (x) { x.fn(); });
-toets('volgende nacht opnieuw, lege sessie = geen opslag', c.rij.length === 5 && c.bewaard === 2 && /gewist=leeg/.test(c.log[5]), c.log);
+toets('volgende nacht opnieuw, lege sessie = geen opslag', c.rij.length === 6 && c.bewaard === 2 && /gewist=leeg/.test(c.log[6]), c.log);
 // Wintertijd (na 25-10-2026): 03:10Z = 04:10 Amsterdam, 02:10Z = 03:10
 c.rij = [];
 toets('wintertijd 03:10 Amsterdam: niets', c.nachtresetTik(Date.parse('2026-11-02T02:10:00Z')).length === 0);
-toets('wintertijd 04:10 Amsterdam: reset', c.nachtresetTik(Date.parse('2026-11-02T03:10:00Z')).length === 5);
+toets('wintertijd 04:10 Amsterdam: reset', c.nachtresetTik(Date.parse('2026-11-02T03:10:00Z')).length === 6);
 // Beurt die ná de reset in dezelfde wachtrij komt, ziet een lege sessie; de volgorde regelt enqueue (FIFO per sleutel).
 const uit = maak({ NACHTRESET: '0' });
 toets('NACHTRESET=0: uit', uit.nachtresetTik(Date.parse('2026-10-10T02:10:00Z')).length === 0 && uit.rij.length === 0);

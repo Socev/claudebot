@@ -2929,6 +2929,7 @@ function jobEindLog(jobId, j, ws) {
 const NACHTRESET_AAN = process.env.NACHTRESET !== '0';
 const NACHTRESET_SESSIES = ['cijfer-meester', 'ovis-nza', 'cijfermeester', 'telegram-debug', 'mcp-check'];   // telegram-debug (machinekamer, ook app-kanaal machinekamer): 12-10-2026, David — de sessie stond op ± 880.000 tokens per stap; mcp-check: wv424, de MCP-gezondheidscheck kreeg een eigen sessie (machinekamer-klasse)
 (typeof CODE_IDS === 'undefined' ? [] : CODE_IDS).forEach(function (id) { NACHTRESET_SESSIES.push(CODE_APPS.SESSIE_VOOR + id); });   // wv3227: elk OVIS Code-gesprek begint elke nacht vers (STAND blijft)
+NACHTRESET_SESSIES.push('heartbeat');   // wv4101: eigen heartbeat-sessie (sessie-proef.js), elke nacht vers; eerste tik 07:05
 const NACHTRESET_UUR = 4;
 const nachtresetGedaan = {};   // sessiesleutel -> JJJJ-MM-DD (Amsterdam)
 function nachtresetTik(tijd) {
@@ -2958,6 +2959,37 @@ function nachtresetTik(tijd) {
 setInterval(function () { try { nachtresetTik(); } catch (e) { logError('nachtreset', e); } }, 10 * 60 * 1000).unref();
 setTimeout(function () { try { nachtresetTik(); } catch (e) { logError('nachtreset', e); } }, 5000).unref();
 // ── einde nachtreset ─────────────────────────────────────────────────────────────────────────────────────────────────
+// wv4101 (proefweek C62): sessie-proef.js — heartbeat in een eigen sessie + overdrachten. Instelling per beurt uit SESSIE_PROEF_PAD
+// ({"aan": false} = terug, zonder uitrol). Module ontbreekt of faalt = oud gedrag (alles in 40687, geen overdracht).
+const SESSIE_PROEF_PAD = process.env.SESSIE_PROEF_PAD || path.join(HOME, 'sessie-proef.json');
+function sessieProefMod() { try { return require('./sessie-proef.js'); } catch (e) { return null; } }
+const sessieProefTijd = { heartbeat: 0, hoofd: 0 };   // laatste start heartbeat-tik / hoofdbeurt (geheugen; na herstart: vandaag 04:00)
+async function sessieProefOverdracht(jobId, j, chatId, ws, sessionId) {
+  const SP = sessieProefMod();
+  if (!SP || ws !== DEFAULT_WS) return '';
+  const tNu = Date.now();
+  let u = null, soort = '';
+  if (j.sessie_eigen === SP.HEARTBEAT_SESSIE) {
+    soort = 'heartbeat';
+    const van = Math.max(sessieProefTijd.heartbeat || 0, SP.dagGrens(tNu));
+    sessieProefTijd.heartbeat = j.created || tNu;
+    u = SP.heartbeatBlok((await appGeschiedenisRuw('hoofd')).items, van, tNu, appEenRegel);
+  } else if (chatId === SP.HOOFD_CHAT) {
+    const st = SP.stand(SESSIE_PROEF_PAD);
+    const van = Math.max(sessieProefTijd.hoofd || 0, SP.dagGrens(tNu));
+    sessieProefTijd.hoofd = j.created || tNu;
+    if (!st.heartbeat) return '';
+    soort = 'hoofd';
+    u = SP.hoofdBlok((await appGeschiedenisRuw('hoofd')).items, van, tNu, appEenRegel);
+  } else if (chatId === SP.MK_CHAT && !sessionId) {
+    if (!SP.stand(SESSIE_PROEF_PAD).mk) return '';
+    soort = 'machinekamer';
+    u = SP.mkBlok((await appGeschiedenisRuw('machinekamer')).items, tNu, appEenRegel, jobId);
+  }
+  if (!u) return '';
+  if (u.n || soort === 'machinekamer') schrijfLog(nu() + ' sessie-proef ' + velden({ soort: soort, job: jobId, n: u.n, reden: u.reden || '' }));
+  return u.blok || '';
+}
 
 // ── Werklessen op context (19-9-2026, akkoord David: "Ja dat mag") ──────────
 // WAAROM DIT HIER STAAT. CLAUDE.md liet elke sessie `00_Systeem/Werklessen.md`
@@ -3155,7 +3187,8 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
       }
     }
     // Gereedschap 'lezen': geen sessiegeheugen en geen lessenblok (machinale klus); cwd = de eigen jobmap.
-    const sKey = lezen ? '' : sessieSleutel(key, keuze.runtime);
+    const sesKey = j.sessie_eigen ? sessionKey(ws, j.sessie_eigen) : key;   // wv4101: heartbeat in eigen sessie (wachtrij blijft key)
+    const sKey = lezen ? '' : sessieSleutel(sesKey, keuze.runtime);
     const sessieGelezen = Date.now();   // wv895 (Fable diffreview #4): een /reset ná dit moment wint, ook als hij vóór j.started valt
     let sessionId = lezen ? '' : (explicitSession || (sKey ? chatSessions[sKey] : '') || '');
     // wv998 (Fable #3): een sessie van vóór de werkmap (of zonder transcript) hervat niet maar begint vers; --resume faalde anders
@@ -3166,7 +3199,9 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     const lesblok = lezen ? '' : await lessenBlok(prompt, chatId, '');
     // 'lezen' werkt in de jobmap, niet in de workspace: altijd de kale map-hint.
     const misRegel = invoerMis.length ? '\n\n[Systeem: ' + invoerMis.length + ' meegestuurd(e) bestand(en) kon(den) niet in de invoermap worden gezet: ' + invoerMis.join(', ') + '. Zeg dat tegen David.]' : '';
-    const fullPrompt = lesblok + prompt + misRegel + '\n\n' + (lezen ? WORKSPACES.vault : space).hint(indir, outdir);
+    let overdracht = '';   // wv4101 (sessie-proef.js): context ná de opdracht (tokenboekhouding herkent op de aanhef), nooit een beurt tegenhouden
+    if (!lezen && !explicitSession) { try { overdracht = await sessieProefOverdracht(jobId, j, String(chatId || ''), ws, sessionId); } catch (e) { logError('sessie-proef', e); } }
+    const fullPrompt = lesblok + prompt + (overdracht ? '\n\n' + overdracht.trim() : '') + misRegel + '\n\n' + (lezen ? WORKSPACES.vault : space).hint(indir, outdir);
     j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
     const runOpts = { progress: j.progress, lastFile: path.join(base, 'codex-last.md') };
     if (j.max_ms > 0) runOpts.maxMs = j.max_ms;   // wv3157: Dubbelcheck OVIS NZa hooguit 20 min
@@ -3210,7 +3245,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     r.workspace = ws;
     if (keuze.model && !r.fallback_van) r.model = keuze.model;
     if (j.noodknop && !r.ok) { r.error = 'gestopt-noodknop'; r.output = mkNoodTekst(j); }   // wv3083: zeggen wie stopte (anders "inactiviteit")
-    if (sKey && r.session_id && !((sessieResetOp[key] || 0) > sessieGelezen)) { chatSessions[sKey] = r.session_id; saveSessions(); }   // wv895: een reset tijdens de beurt wint
+    if (sKey && r.session_id && !((sessieResetOp[sesKey] || 0) > sessieGelezen)) { chatSessions[sKey] = r.session_id; saveSessions(); }   // wv895: een reset tijdens de beurt wint
     j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
     jobEindLog(jobId, j, ws);
   } catch (e) {
@@ -4973,6 +5008,8 @@ function handleRequest(req, res) {
       // wv277: bron "telegram" (alleen de twee Telegram-workflows) -> na afloop ook in het app-log (appTelegramSpiegel). Elke andere waarde telt niet.
       const spiegel = d.bron === 'telegram';
       jobs[jobId] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: chatId, runtime: keuze.runtime, gereedschap: gereedschap || undefined, bron: spiegel ? 'telegram' : undefined };
+      // wv4101: een heartbeat-tik (vaste aanhef) krijgt een eigen sessie; wachtrij, rechten en kanaal blijven die van 40687
+      if (!gereedschap && ws === DEFAULT_WS) { try { const SP = sessieProefMod(); if (SP && SP.isHeartbeat(chatId, prompt, d.session_id) && SP.stand(SESSIE_PROEF_PAD).heartbeat) jobs[jobId].sessie_eigen = SP.HEARTBEAT_SESSIE; } catch (e) { logError('sessie-proef', e); } }
       // wv275: Socevs afweging van een agentrapport (AI - Agent-rapport geeft agent_job mee). Kwam de opdracht uit een
       // [AUTO]-beurt en zit David nog in de auto, dan een regel vooraf en na afloop een aankondiging op de telefoon.
       let telHint = '';
