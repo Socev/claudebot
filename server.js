@@ -18572,6 +18572,7 @@ function handleApp(req, res) {
         if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
         if (route.indexOf('POST /app/memorylane/') === 0 || route.indexOf('GET /app/memorylane/') === 0) return appMemorylane(req, res, a, s, route, d);   // wv2114
         if (route.indexOf('GET /app/tripper/') === 0) return typeof appTripper === 'function' ? appTripper(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv2136: OVIS Tripper (alleen lezen)
+        if (route === 'GET /app/tabula' || route.indexOf('GET /app/tabula/blad/') === 0 || route.indexOf('GET /app/tabula/zoek/') === 0 || route === 'POST /app/tabula/vang' || route === 'POST /app/tabula/koppel') return typeof appTabula === 'function' ? appTabula(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'tabula');   // wv4238: Apps › Tabula (lezen, zoeken, vangen in Inbox)
         if (route === 'GET /app/gambia') return typeof appGambia === 'function' ? appGambia(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gambia');   // wv3950: Apps › Gambia (alleen lezen)
         if (route === 'GET /app/ghawa' || /^GET \/app\/ghawa\/(overzicht|bouw|apotheek|geld|vragen|documenten|fondsen|ronde|donateurs|teboeken|indelen|doelen|stichting|overleg|mensen|voorstellen|vbijlage\/v[0-9]{3}|activiteit\/[A-Za-z0-9]{1,4})$/.test(route)
           || /^POST \/app\/ghawa\/(indelen|fonds|afschrift|ronde|bank|vraag|gmail|boek|terug|bon|voorstel)$/.test(route)   // wv3919: vraag (antwoord/gesloten), gmail (concept); wv3953: boek, terug, bon (Te boeken)
@@ -33361,6 +33362,108 @@ const tabulaLoket = (function () {
 })();
 function tabulaInfo() { if (!tabulaLoket) return { aan: false, module: false }; try { return tabulaLoket.health(); } catch (e) { return { fout: true }; } }
 if (tabulaLoket && (SERVER_ECHT || process.env.TABULA_TOETS_BASIS)) setTimeout(function () { try { tabulaLoket.start(); } catch (e) { logError('tabula-start', e); } }, SERVER_ECHT ? 20000 : 500).unref();
+
+// ── Apps › Tabula (wv4238, besluitenpagina nr 956 = L56 deel 1, David Ja 25-11-2026 22:25; ontwerp mk-scripts/wv4238/ontwerp.md, Codex
+// ontwerpreview GO-MET-WIJZIGINGEN) ──
+// Davids kladblok op de telefoon: bladen (nieuwste boven), een blad lezen, zoeken in alle bladen, één regel "vang iets" in het Inbox-blad.
+// tabula-bladen.js leest via tabula.socev.dev met een eigen lezercode (rol lezer in de Worker: alleen /pull, /hello, /vang) en houdt de
+// bladen alleen in het geheugen (geen schijf). De lezercode komt uit Davids eigen handeling: koppelcode van de pc (OVIS › Koppel een
+// andere pc) in de app → POST /app/tabula/koppel → Worker → kluis tabula_lezer_code (vault.create_secret/update_secret, zoals
+// nmbrs_refresh). Nooit in log, env, vault of antwoord; audit en log noemen alleen aantallen.
+//   GET  /app/tabula              { gekoppeld, bladen }
+//   GET  /app/tabula/blad/<id>    { blad: { …, tekst } }
+//   GET  /app/tabula/zoek/<q>     { treffers }   (q URL-gecodeerd in het pad: de app tekent alleen het pad)
+//   POST /app/tabula/vang         { tekst } → { ok, blad, nieuw }   (onder het invoerslot)
+//   POST /app/tabula/koppel       { code }  → { ok }                 (onder het invoerslot; 409 als er al een werkende koppeling is)
+const TABULA_LEZER_NAAM = 'tabula_lezer_code';
+let tabulaLezerCache = null;   // { w, tot }; alleen in het geheugen
+const tabulaBladen = (function () {
+  const p = path.join(__dirname, 'tabula-bladen.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ basis: SERVER_ECHT ? null : process.env.TABULA_TOETS_BASIS, fetch: function (u, opt) { return fetch(u, opt); } }); }
+  catch (e) { logError('tabula-bladen', e); return null; }
+})();
+appStaat.tellers.tabula = [];
+async function tabulaLezerKluis(query) {
+  if (!sbBeheerKan()) throw new Error('kluistoegang ontbreekt op de pod');
+  const r = await sbBeheerQuery(query, { ua: 'socev-tabula-lezer/1', ms: 20000 });
+  if (!r || !r.ok) { if (r) await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + (r ? r.status : 'geen antwoord')); }   // het antwoord kan de query citeren
+  const j = await r.json();
+  if (!Array.isArray(j)) throw new Error('kluis gaf geen rijen');
+  return j;
+}
+async function tabulaLezerCode() {
+  if (process.env.TABULA_TOETS_LEZER !== undefined && !SERVER_ECHT) return process.env.TABULA_TOETS_LEZER || null;   // alleen de toets
+  if (tabulaLezerCache && Date.now() < tabulaLezerCache.tot) return tabulaLezerCache.w;
+  const rijen = await tabulaLezerKluis("select decrypted_secret as w from vault.decrypted_secrets where name = '" + TABULA_LEZER_NAAM + "'");
+  const w = rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
+  tabulaLezerCache = { w: w || null, tot: Date.now() + (w ? 10 : 1) * 60 * 1000 };
+  return tabulaLezerCache.w;
+}
+// Aanmaken of bijwerken; vorm vooraf getoetst (base64url, geen $ of quote), dus het dollar-citaat is dicht.
+async function tabulaLezerBewaar(code) {
+  if (process.env.TABULA_TOETS_LEZER !== undefined && !SERVER_ECHT) { process.env.TABULA_TOETS_LEZER = code; return; }
+  if (typeof code !== 'string' || !/^[A-Za-z0-9_-]{30,100}$/.test(code)) throw new Error('lezercode heeft een onverwachte vorm');
+  const n = (await tabulaLezerKluis("select count(*)::int as n from vault.secrets where name = '" + TABULA_LEZER_NAAM + "'"))[0];
+  if (!n || (n.n !== 0 && n.n !== 1)) throw new Error('kluis: ' + TABULA_LEZER_NAAM + ' niet eenduidig');
+  const q = n.n === 1 ? "select count(*)::int as n from (select vault.update_secret(id, $tl$" + code + "$tl$) from vault.secrets where name = '" + TABULA_LEZER_NAAM + "') x"
+    : "select count(*)::int as n from (select vault.create_secret($tl$" + code + "$tl$, '" + TABULA_LEZER_NAAM + "', 'OVIS Tabula lezercode van de Socev-app (rol lezer: lezen + vangen in Inbox); gekoppeld door David in Apps › Tabula; intrekken op de pc (wv4238)')) x";
+  const z = (await tabulaLezerKluis(q))[0];
+  if (!z || z.n !== 1) throw new Error('kluis: niet precies één regel geschreven');
+  tabulaLezerCache = null;
+}
+async function appTabula(req, res, a, route, d) {
+  if (!tabulaBladen) return appWeiger(res, 404, 'Tabula zit niet in deze versie van de pod', 'tabula ontbreekt');
+  if (!appTeller('tabula', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens tabula');
+  let code;
+  try { code = await tabulaLezerCode(); } catch (e) { logError('tabula-lezer-kluis', e); return appWeiger(res, 503, 'Tabula is nu niet te lezen; probeer het zo opnieuw', 'tabula kluis fout'); }
+  if (route === 'POST /app/tabula/koppel') {
+    if (!appTeller('tabula-koppel', 10, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens tabula-koppel');
+    try {
+      if (code && await tabulaBladen.werkt(code)) return appWeiger(res, 409, 'Tabula is al gekoppeld; trek de telefoon eerst in op je pc (OVIS › Gekoppelde pc\'s) als je opnieuw wilt koppelen', 'tabula al gekoppeld');
+      const k = await tabulaBladen.koppel(d && d.code);
+      if (!k.ok) return appWeiger(res, k.status, k.fout, 'tabula koppel ' + k.status);
+      await tabulaLezerBewaar(k.code);
+      tabulaBladen.vergeet();
+      res._app.reden = 'tabula gekoppeld';
+      schrijfLog(nu() + ' tabula: de Socev-app is gekoppeld als lezer');
+      return appStuur(res, 200, { ok: true });
+    } catch (e) { logError('tabula-koppel', e); return appWeiger(res, 503, 'koppelen lukte nu niet; probeer het zo opnieuw', 'tabula koppel fout'); }
+  }
+  if (!code) { res._app.reden = 'tabula niet gekoppeld'; return appStuur(res, 200, { ok: true, gekoppeld: false, bladen: [] }); }
+  const padDeel = function (voor) { try { return decodeURIComponent(route.slice(voor.length)); } catch (e) { return ''; } };
+  try {
+    if (route === 'POST /app/tabula/vang') {
+      if (!appTeller('tabula-vang', 60, 3600000)) return appWeiger(res, 429, 'te veel vangsten dit uur', 'grens tabula-vang');
+      const v = await tabulaBladen.vang(code, d && d.tekst);
+      if (!v.ok) return appWeiger(res, v.status, v.fout, 'tabula vang ' + v.status);
+      res._app.reden = 'tabula vang' + (v.nieuw ? ' (nieuw Inbox-blad)' : '');
+      return appStuur(res, 200, { ok: true, blad: v.blad, nieuw: v.nieuw });
+    }
+    if (route.indexOf('GET /app/tabula/blad/') === 0) {
+      const b = await tabulaBladen.blad(code, padDeel('GET /app/tabula/blad/'));
+      if (!b) return appWeiger(res, 404, 'dit blad is er niet (meer)', 'tabula blad onbekend');
+      res._app.reden = 'tabula blad ' + b.tekens + ' tekens';
+      return appStuur(res, 200, { ok: true, gekoppeld: true, blad: b });
+    }
+    if (route.indexOf('GET /app/tabula/zoek/') === 0) {
+      const z = await tabulaBladen.zoek(code, padDeel('GET /app/tabula/zoek/').slice(0, 200));
+      res._app.reden = 'tabula zoek ' + z.treffers.length + ' treffers';
+      return appStuur(res, 200, Object.assign({ ok: true, gekoppeld: true }, z));
+    }
+    if (route === 'GET /app/tabula') {
+      const l = await tabulaBladen.lijst(code);
+      res._app.reden = 'tabula ' + l.bladen.length + ' bladen';
+      return appStuur(res, 200, Object.assign({ ok: true, gekoppeld: true }, l));
+    }
+  } catch (e) {
+    if (e && e.code === 'ingetrokken') { tabulaLezerCache = null; tabulaBladen.vergeet(); res._app.reden = 'tabula ingetrokken'; return appStuur(res, 200, { ok: true, gekoppeld: false, ingetrokken: true, bladen: [] }); }
+    logError('tabula-app', e);
+    return appWeiger(res, 503, 'Tabula is nu niet te lezen; probeer het zo opnieuw', 'tabula fout');
+  }
+  return appWeiger(res, 404, 'onbekend', 'tabula onbekend');
+}
+// ── einde Apps › Tabula ──
 
 // wv3962 (besluit nr 133 = 2C33 deel 2, David 22-11-2026): MAP-INGANG. Een los bestand in raw_input van Tolgaarde gaat via OVIS Intake
 // (map@1); het origineel verhuist daarna naar Bronnen/Intake/. Aan per bron in router.json live["vault:tolgaarde"] (terugrol: weg = uit; de

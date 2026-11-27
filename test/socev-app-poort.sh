@@ -1410,6 +1410,13 @@ async function bewijs(o) {
     toets('9 wv3950: /app/gambia zonder sessie -> 401', r.status === 401, r.status);
     r = await vraag('GET', '/app/gambia', undefined, { pot: P.jar });
     toets('9 wv3950: /app/gambia met sessie voorbij de poort (404 zonder appGambia in dit blok)', r.status === 404, r.status);
+    // wv4238 (Apps › Tabula): Davids eigen notities; zonder sessie niets, ook niet vangen of koppelen
+    for (const [m, pad] of [['GET', '/app/tabula'], ['GET', '/app/tabula/blad/x'], ['GET', '/app/tabula/zoek/x'], ['POST', '/app/tabula/vang'], ['POST', '/app/tabula/koppel']]) {
+      r = await vraag(m, pad, m === 'POST' ? { tekst: 'x', code: 'ABCDE-FGHJK' } : undefined, {});
+      toets('9 wv4238: ' + m + ' ' + pad + ' zonder sessie -> 401', r.status === 401, r.status);
+    }
+    r = await vraag('GET', '/app/tabula', undefined, { pot: P.jar });
+    toets('9 wv4238: /app/tabula met sessie voorbij de poort (404 zonder appTabula in dit blok)', r.status === 404, r.status);
     // wv2333 (OVIS Calendar): de tijdlijn is privé (agendatitels); zonder sessie niets, ook niet met een venster
     for (const pad of ['/app/kalender', '/app/kalender/2026-11-01/2026-11-30']) {
       r = await vraag('GET', pad, undefined, {});
