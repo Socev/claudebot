@@ -917,6 +917,11 @@ function bestemmingenLive(s, afz, ent, x, lenzen) {
  */
 const EIGEN_VERZONDEN_LENZEN = ['facturen', 'keten', 'deadlines'];
 const NAKIJK_REDENEN = ['entiteit_niet_zeker', 'geen_entiteit'];   // wv4094 (3C101): alleen deze twijfel van de kennislens mag eerst plaatsen, daarna nakijken
+// wv4367: Davids eigen markering in Gmail (dezelfde als MARKERINGS_LABELS in mailman.js; _AI_/Verwerkt zet de Mail Processor na het ophalen)
+function aiLabel(meta) { const lab = meta && Array.isArray(meta.labels) ? meta.labels : [];
+  return lab.some(function (l) { return l === '_AI_' || String(l).indexOf('_AI_/') === 0 || l === 'AI/SecondBrain/Unprocessed'; }); }
+// wv4367: twijfel die Intake bij een _AI_-stuk zelf op de beste gok plaatst (de kennislens zonder zekere plek, een voorstel "Niet bewaren", geen bestemming)
+const AI_REDENEN = NAKIJK_REDENEN.concat(['entiteit_zonder_map']);
 // wv2660: bij een webpagina gaat elke andere lens dan WEB_LENZEN naar de schaduw (reden 'webpagina'); blijft er niets over, dan de kennislens
 // zonder automatisch (David kiest de plek). schaduw wordt aangevuld (zelfde array).
 function webLenzen(s, bs, schaduw) {
@@ -1301,7 +1306,33 @@ function maak(o) {
     const aan = !!(j && j.aan === true);
     const auto = j && Array.isArray(j.auto) ? j.auto.filter(function (z) { return ZEKERHEDEN.indexOf(z) >= 0; }) : ['hoog'];
     // wv4094 (3C19 / 3C101): praktijkpost-terugval en "eerst plaatsen, daarna nakijken" (router.json postvak_terugval, nakijken; standaard uit)
-    return { aan: aan, auto: auto, postvak: !!(j && j.postvak === true), nakijken: !!(j && j.nakijken === true) }; }
+    // wv4367 (wv4326 stap 3, David 27-11 "bouw door"): een stuk met Davids label _AI_ (of uit een draad met zo'n stuk) plaatst Intake zelf (router.json ai_label_zelf)
+    return { aan: aan, auto: auto, postvak: !!(j && j.postvak === true), nakijken: !!(j && j.nakijken === true), aiZelf: !!(j && j.ai_zelf === true) }; }
+  // wv4367: draagt dit stuk of een ander stuk uit dezelfde Gmail-draad (zelfde bron, thread_id) Davids label _AI_? En waar landde het vorige stuk
+  // uit die draad (Davids keuze, anders de kennisplek die Intake zelf koos)? → { ai: 'eigen' | 'draad' | null, plek: knoop | null }
+  function aiDraad(s, meta) {
+    const eigen = aiLabel(meta);
+    let ai = eigen ? 'eigen' : null, plek = null;
+    const tid = meta && typeof meta.thread_id === 'string' && meta.thread_id ? meta.thread_id : null;
+    if (!tid || String(s.bron).indexOf('gmail:') !== 0) return { ai, plek };
+    const rows = db.prepare("SELECT s.stuk_id, s.meta, s.aangemaakt FROM stuk s WHERE s.bron = ? AND s.stuk_id <> ? AND json_extract(s.meta, '$.thread_id') = ? " +
+      'AND s.versie = (SELECT MAX(versie) FROM stuk WHERE stuk_id = s.stuk_id) ORDER BY s.aangemaakt DESC, s.stuk_id DESC LIMIT 50').all(s.bron, s.stuk_id, tid);
+    for (const x of rows) {
+      const m = safeJson(x.meta) || {};
+      if (!ai && aiLabel(m)) ai = 'draad';
+      if (plek || !(x.aangemaakt <= s.aangemaakt)) continue;
+      const ls = db.prepare('SELECT versie, staat, keuze FROM live_stuk WHERE stuk_id = ?').get(x.stuk_id);
+      if (!ls) continue;
+      const k = /^kennis:([A-Z]+)$/.exec(ls.keuze || '');
+      if (k && KENNIS_MAP[k[1]]) { plek = k[1]; continue; }
+      if (ls.keuze || (ls.staat !== 'automatisch' && ls.staat !== 'klaar')) continue;
+      const rs = db.prepare('SELECT samenvatting FROM router_stuk WHERE stuk_id = ? AND versie = ?').get(x.stuk_id, ls.versie);
+      const b = ((rs && safeJson(rs.samenvatting)) || {}).bestemmingen || [];
+      const kb = b.find(function (y) { return y.lens === 'kennis' && y.zou_auto && KENNIS_MAP[y.doel]; });
+      if (kb) plek = kb.doel;
+    }
+    return { ai, plek };
+  }
   // Davids laatste plek-keuzes als voorbeeld (alleen keuzes met leren_mag, de laatste keuze per stuk, vóór nu, niet dit stuk zelf, niet een stuk
   // dat zich tot een AI richtte); eerst die van hetzelfde afzenderadres. Regel = postvak | afzenderadres | onderwerp (≤ 90) → plek.
   function leerVoorbeelden(s, van) {
@@ -1650,7 +1681,7 @@ function maak(o) {
           const rg = jevStop ? null : regelZoek(regelsActief(), mk);
           let bs, schaduwLenzen = [];
           const stand = leerStand();   // wv4094: postvak-terugval en nakijken
-          let vnUit = null, zouPrive = false, nakijk = false;
+          let vnUit = null, zouPrive = false, nakijk = false, aiStand = null;
           const priveVroeg = function () { try { const kr = o.priveKring ? o.priveKring() : null; return !!(kr && priveGrens({ kring: kr, tekst, soorten: eigen ? eigen.soorten : [] }).zou_prive); } catch (e) { return true; } };
           const eigenVerz = s.profiel === 'mail@1' && eigenVerzonden(meta, eigenAdr);
           if (!live) { bs = rg ? regelBestemmingen(rg, en, { velden: vd.velden }) : bestemmingen(so, af, en, { velden: vd.velden, label_entiteit: labels[0] || null });
@@ -1718,7 +1749,44 @@ function maak(o) {
           // twee verschillende voorstellen, privé/zakelijk (Privé in een signaal of de privégrens), geld, de AI-tekstcontrole (jevStop), een regel
           // van David, of "niet bewaren" van het model. Mogelijk medisch telt hier niet (David: nooit filteren).
           if (live && stand.nakijken && en.bewijs === 'postvak') nakijk = true;
-          if (live && stand.nakijken && !rg && !jevStop) {
+          // wv4367 (wv4326 stap 3, David 27-11: "als ik op een thread het label AI heb gegooid, dat je hem dan volgt, bekijkt waar het hoort, zelf een
+          // besluit neemt"): bij Davids _AI_ (op dit stuk of eerder in de draad) vraagt Intake niet meer bij geen idee, twee voorstellen, privé of zakelijk,
+          // een entiteit zonder map of "niet bewaren" (van het model of de regels), maar plaatst het op de beste gok (model → entiteit → plek van het vorige
+          // stuk uit de draad → Privé) en zet het op Even nakijken. "Niet bewaren" kiest Intake hier nooit zelf. Een vraag blijft: geld, de AI-tekstcontrole
+          // (jevStop), een regel van David, en twijfel van een andere lens (facturen, deadlines, keten).
+          let aiKlaar = false;
+          if (live && stand.nakijken && stand.aiZelf && !rg && !jevStop && s.profiel === 'mail@1' && lenzenLive().indexOf('kennis') >= 0) {
+            let ad = { ai: null, plek: null };
+            try { ad = aiDraad(s, meta); } catch (e) { if (o.fout) o.fout('intake-router-ai-draad', e); }
+            const tw = bs.filter(function (b) { return !b.zou_auto; });
+            const weg = function (b) { return b.lens === 'geen' || (b.lens === 'vragen' && b.reden === 'geen_bestemming'); };
+            const kanZelf = tw.every(function (b) { return weg(b) || (b.lens === 'kennis' && AI_REDENEN.indexOf(b.reden) >= 0); });
+            if (ad.ai && kanZelf && (tw.length || bs.some(weg))) {
+              aiKlaar = true;
+              // geld = een geldspoor in de router zelf (soort bewijsstuk/keten, een facturen-, keten- of deadlineslens, ook in de schaduw) of een IBAN in de
+              // tekst; een los geldwoord of bedrag (een nieuwsbrief met prijzen, "betalen" in een gesprek) niet: droogproef 14 d, 40 van de 43 resterende
+              // vragen op _AI_-stukken kwamen alleen van dat woord
+              const geld = ibanIn(tekst) || so.soort === 'bewijsstuk' || so.soort === 'keten' || bs.concat(schaduwLenzen).some(function (b) { return EIGEN_VERZONDEN_LENZEN.indexOf(b.lens) >= 0; });
+              if (geld) {
+                // geld blijft een vraag; een vanzelf "Niet bewaren" wordt dan ook een vraag (nooit stil weg bij _AI_)
+                bs = bs.map(function (b) { return weg(b) && b.zou_auto ? Object.assign({}, b, { zou_auto: false, reden: 'ai_label' }) : b; });
+                B('nakijken', 'vragen', null, { waarom: 'geld', ai_label: ad.ai });
+              } else {
+                const kb = bs.find(function (b) { return b.lens === 'kennis'; }) || null;
+                const kies = [[vnUit && vnUit.knoop, 'model'], [vnUit && vnUit.vermoeden, 'model'], [kb && kb.doel, 'entiteit'], [en.knoop, 'entiteit'], [ad.plek, 'draad'], ['PRIVE', 'prive']]
+                  .find(function (x) { return x[0] && KENNIS_MAP[x[0]]; });
+                const voorstel = kies[0];
+                const was = tw.map(function (b) { return b.lens + ':' + b.reden; }).concat(bs.filter(function (b) { return weg(b) && b.zou_auto; }).map(function (b) { return b.lens + ':vanzelf'; }));
+                if (vnUit && vnUit.niet_bewaren) was.push('model:niet_bewaren');
+                bs = bs.filter(function (b) { return !weg(b); }).map(function (b) { return b.lens === 'kennis' ? Object.assign({}, b, { doel: voorstel, zou_auto: true, reden: null, nakijken: b.reden || 'ai_label' }) : b; });
+                if (!bs.some(function (b) { return b.lens === 'kennis'; })) bs.push({ lens: 'kennis', doel: voorstel, zou_auto: true, reden: null, nakijken: 'ai_label' });
+                en.knoop = voorstel; en.bewijs = 'nakijken'; nakijk = true;
+                B('nakijken', voorstel, null, { was: was.join('+'), voorstel_uit: kies[1], ai_label: ad.ai });
+              }
+            }
+            if (ad.ai) aiStand = ad.ai;
+          }
+          if (!aiKlaar && live && stand.nakijken && !rg && !jevStop) {
             const tw = bs.filter(function (b) { return !b.zou_auto; });
             const kb = tw.length === 1 && tw[0].lens === 'kennis' && NAKIJK_REDENEN.indexOf(tw[0].reden) >= 0 ? tw[0] : null;
             if (kb) {
@@ -1765,6 +1833,7 @@ function maak(o) {
           if (live) { sam.live = true; sam.entiteit_bewijs = en.bewijs || (rg ? 'regel' : 'regels'); sam.jev = jv.gemeten ? (jv.boven ? 'boven' : 'onder') : 'geen_uitslag'; if (jv.overgeslagen) sam.jev_overgeslagen = jv.overgeslagen; if (schaduwLenzen.length) sam.schaduw_lenzen = schaduwLenzen.map(function (b) { return b.lens; }); if (naKeuze || zachtDoor) sam.na_keuze = true; if (zachtDoor || (naKeuze && marker !== 'geen')) sam.mogelijk_medisch = true; if (zachtDoor) sam.weging = weging && weging.hard ? 'hard' : 'zacht'; }
           sam.label_gelijk = labels.length ? labels.indexOf(en.knoop) >= 0 : null;
           if (nakijk) sam.nakijken = true;   // wv4094: op de nakijklijst (Even nakijken)
+          if (aiStand) sam.ai_label = aiStand;   // wv4367: Davids _AI_ op dit stuk ('eigen') of eerder in de draad ('draad')
           if (priveSchaduw) sam.prive_schaduw = priveSchaduw;   // wv2336: de privégrens zou dit stuk bij Privé zetten; echte uitkomst prive/zakelijk/onbekend
           bestem = bs;
           if (o.pdfSchaduw && !lt.deels.length && !lt.onleesbaar.length && !naKeuze && !zachtDoor) {   // review wv2336 ZOU 4: geen model op een (zacht) vrijgegeven stuk
@@ -3207,6 +3276,8 @@ function maak(o) {
       s.beslist = 'vanzelf'; s.beslist_op = ls.sinds;
       // de zin van het model zet stukVoorApp (wv4100); bij de weekronde (wv4206) de zin van de nakijker
       if (inWeek.has(row.stuk_id)) { s.zin = 'Nagekeken: ' + wk.get(row.stuk_id).waarom; s.nagekeken = true; }
+      // wv4367: Davids _AI_-label; zonder zin van het model zegt de kaart waarom Intake niets vroeg
+      else if (!s.zin) { const sm = safeJson(row.samenvatting) || {}; if (sm.ai_label) s.zin = sm.ai_label === 'draad' ? 'Hoort bij een draad met jouw label AI; Intake koos zelf deze plek.' : 'Jij gaf dit het label AI; Intake koos zelf deze plek.'; }
       s.kan = { klopt: true, verplaats: !inFact, in_facturen: inFact || undefined, toch_bewaren: false, verwijder: false };
       return s;
     });

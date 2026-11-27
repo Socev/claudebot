@@ -25498,7 +25498,7 @@ function intakeRouterHaal() {
       lenzenLive: function () { const j = intakeRouterStand(); return j && Array.isArray(j.lenzen_live) ? j.lenzen_live : null; },
       // wv3683: het sorteermodel leert van Davids keuzes (indeling_leren true) en plaatst alleen vanzelf bij de zekerheden in indeling_auto (standaard hoog)
       indelingLeren: function () { const j = intakeRouterStand(); return { aan: !!(j && j.indeling_leren === true), auto: j && Array.isArray(j.indeling_auto) ? j.indeling_auto : null,
-        postvak: !!(j && j.postvak_terugval === true), nakijken: !!(j && j.nakijken === true) }; },   // wv4094 (3C19, 3C101)
+        postvak: !!(j && j.postvak_terugval === true), nakijken: !!(j && j.nakijken === true), ai_zelf: !!(j && j.ai_label_zelf === true) }; },   // wv4094 (3C19, 3C101); wv4367 ai_label_zelf
       // wv4206 (3C177): wat de wekelijkse nakijkronde van de machinekamer anders zou doen (hooguit 10; de router toetst vorm, leeftijd en stand)
       nakijkWeek: function () { try { return JSON.parse(fs.readFileSync(path.join(INTAKE_DIR, 'nakijk-week.json'), 'utf8')); } catch (e) { return null; } },
       // wv2336: patiëntcontrole in Intake — 'schaduw' (wegen en loggen, vasthouden zoals voorheen) of 'door' (zacht gaat door met label, hard stil buiten)
