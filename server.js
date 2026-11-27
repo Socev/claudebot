@@ -18088,7 +18088,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/mail/zaken' || /^GET \/app\/mail\/zaken\/(jij|socev|weg|afgedaan|zien)\/[1-9]\d?$/.test(route)) return typeof appMailZaken === 'function' ? appMailZaken(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mail');   // wv2218: Apps › Mail (zaakregister, alleen lezen); wv2291: groep zien
         if (route === 'GET /app/werkstroom' || route.indexOf('GET /app/werkstroom/') === 0) return typeof appWerkstroom === 'function' ? appWerkstroom(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'werkstroom');   // wv2002: Werkstroom (alleen lezen)
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
-        if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk' || route === 'POST /app/intake/geschiedenis' || route === 'POST /app/intake/verwijder' || route === 'POST /app/intake/bundel') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
+        if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk' || route === 'POST /app/intake/geschiedenis' || route === 'POST /app/intake/verwijder' || route === 'POST /app/intake/bundel' || route === 'POST /app/intake/mailman-vraag') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
         if (route === 'GET /app/brain/entiteiten' || route === 'GET /app/brain/entiteiten/nu' || route.indexOf('GET /app/brain/entiteit/') === 0 || route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
         if (route === 'GET /app/managers' || route.indexOf('GET /app/managers/rapporten/') === 0) return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers; wv4128: Nu draaien weg (C64), rapporten erbij (3C136)
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
@@ -24726,6 +24726,8 @@ function intakeRouterHaal() {
   if (!fs.existsSync(p)) return null;
   try {
     intakeRouterMod = require(p).maak({ dir: INTAKE_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
+      // wv4133 (3C137): Davids plek-keuze voor een mail telt bij MailMan (Niet bewaren / Facturen = correctie); mailman staat verderop (TDZ: try)
+      naKeuze: function (x) { try { if (mailman && typeof mailman.intakeKeuze === 'function') mailman.intakeKeuze({ postvak: x.bron, gmail_id: x.bron_id, lens: x.lens }); } catch (e) { logError('intake-mailman-keuze', e); } },
       pdfBbox: function (pad) { return intakeProces('pdftotext', ['-q', '-bbox', '-l', '20', '-enc', 'UTF-8', pad, '-'], { ms: 30000 }); },
       paginas: async function (pad) { const t = await intakeProces('pdfinfo', [pad], { ms: 15000 }); const m = t && /^Pages:\s+(\d+)/m.exec(t); return m ? Number(m[1]) : null; },
       // wv3403 (A29): xml-deel van een kantoorbestand (xlsx, pptx, odt/ods/odp); afgekapt op de 4e6 tekens van intakeProces = null (onleesbaar)
@@ -24780,7 +24782,21 @@ async function appIntakeRouter(req, res, a, s, d, route) {
   if (!ir || typeof ir.appOverzicht !== 'function') return appWeiger(res, 404, 'De Intake-router staat uit of zit niet in deze versie van de pod', 'intake-router uit');
   let r;
   try {
-    if (route === 'GET /app/intake/router') { res._app.stil = true; return appStuur(res, 200, await ir.appOverzicht(80)); }
+    if (route === 'GET /app/intake/router') {
+      res._app.stil = true;
+      const ov = await ir.appOverzicht(80);
+      // wv4133 (3C137): "Voortaan niet meer naar Intake?" — na twee gelijke keuzes voor één afzender (MailMan telt ze); een fout daar raakt Intake niet
+      try { if (ov && mailman && typeof mailman.intakeVragen === 'function') ov.mailman_vragen = mailman.intakeVragen(3); } catch (e) { logError('intake-mailman-vragen', e); }
+      return appStuur(res, 200, ov);
+    }
+    if (route === 'POST /app/intake/mailman-vraag') {   // wv4133: Ja = MailMan-regel (zichtbaar en uit te zetten in MailMan › Regels), Nee = niet meer vragen
+      if (!rolPrimair()) return appWeiger(res, 503, 'niet de actieve kant', 'intake-mailman-vraag niet primair');
+      if (!mailman || typeof mailman.intakeVraagAntwoord !== 'function') return appWeiger(res, 404, 'MailMan zit niet in deze versie van de pod', 'intake-mailman-vraag');
+      r = mailman.intakeVraagAntwoord(d || {}, 'app:' + String(appStudioCtx(a, s).apparaat || '').slice(0, 40));
+      if (r.status === 200) res._app.reden = 'intake-mailman-vraag ' + String(d && d.antwoord || '').slice(0, 4);
+      else res._app.reden = 'intake: ' + String(r.j && r.j.fout || '').slice(0, 60);
+      return appStuur(res, r.status, r.j);
+    }
     if (route === 'POST /app/intake/toets') r = await ir.appToets(d || {});
     else if (route === 'POST /app/intake/stuk') { res._app.stil = true; r = await ir.appStuk(d || {}); }   // het hele stuk (ook vastgehouden): alleen David, niet in het log
     else if (route === 'POST /app/intake/geschiedenis') {   // wv2618: Geschiedenis per dag (stap 5), zelfde privacygrens als het overzicht
@@ -25032,6 +25048,16 @@ const mailman = (function () {
       proces: intakeProces, verkoopTmp: '/dev/shm' });
   } catch (e) { logError('mailman', e); return null; }
 })();
+// wv4133 (3C137): eenmalig per start Davids eerdere Intake-keuzes naar MailMan naspelen (herhaalveilig: UNIQUE per mail en richting)
+setTimeout(function () {
+  try {
+    const ir = intakeRouterStand() ? intakeRouterHaal() : null;
+    if (!ir || typeof ir.mailKeuzes !== 'function' || !mailman || typeof mailman.intakeKeuze !== 'function' || !rolPrimair()) return;
+    let n = 0;
+    for (const x of ir.mailKeuzes()) { const u = mailman.intakeKeuze({ postvak: x.bron, gmail_id: x.bron_id, lens: x.lens, tijd: x.tijd }); if (u && u.geteld) n++; }
+    if (n) console.log('[mailman] wv4133: ' + n + ' Intake-keuze(s) als correctie nagespeeld');
+  } catch (e) { logError('intake-mailman-naspel', e); }
+}, 90000).unref();
 function mailmanIsPad(req) { const p = reqPath(req); return p === '/mailman' || p.indexOf('/mailman/') === 0; }
 function mailmanStuur(res, status, obj) {
   try { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(obj)); } catch (e) { logError('mailman-stuur', e); }

@@ -927,13 +927,17 @@ function maak(o) {
     ['postvak', 'inbox_lijst TEXT'], ['postvak', 'zaken_tijd TEXT'],   // wv2218 zaakregister
     ['besluit', 'terug_tijd TEXT'], ['besluit', 'terug_poging INTEGER NOT NULL DEFAULT 0'],
     ['zaak', 'zou_weg TEXT'], ['zaak', 'zou_reden TEXT'], ['zaak', 'zou_versie INTEGER'],   // wv2469
-    ['verkoop', 'vorige TEXT'], ['besluit', 'juist_door TEXT']]) {   // wv3077: juist_door 'mail-app' = Naar Facturen/Brain uit de Mail-App (elke mail)
+    ['verkoop', 'vorige TEXT'], ['besluit', 'juist_door TEXT'],
+    ['correctie', 'adres TEXT'], ['correctie', 'bron TEXT']]) {   // wv4133 (3C137): bron 'intake' = Davids keuze in Intake (adres = afzenderadres); NULL = label in Gmail   // wv3077: juist_door 'mail-app' = Naar Facturen/Brain uit de Mail-App (elke mail)
    // wv2911: status vóór 'weg_david';    // wv2455 proefweek vanzelf weg   // wv2259 terug bij Geen factuur   // wv2218 zaakregister: laatste volledige inboxlijst, laatste berekening
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
   // wv2259: Ecobank-meldingen die de pod verwerkte (bron: server.js na de Ecobank-ronde) en wat MailMan ermee deed
   db.exec('CREATE TABLE IF NOT EXISTS ecobank_mail (postvak TEXT NOT NULL, gmail_id TEXT NOT NULL, bekend_tijd TEXT NOT NULL, pogingen INTEGER NOT NULL DEFAULT 0, ' +
     'poging_tijd TEXT, archief_tijd TEXT, eraf TEXT, PRIMARY KEY (postvak, gmail_id))');
+  // wv4133 (3C137): Davids antwoord op "Voortaan niet meer naar Intake?" per afzenderadres en richting (ja = regel gemaakt, nee = niet meer vragen)
+  db.exec('CREATE TABLE IF NOT EXISTS intake_vraag (postvak TEXT NOT NULL, adres TEXT NOT NULL, naar TEXT NOT NULL, antwoord TEXT NOT NULL, regel_id INTEGER, tijd TEXT NOT NULL, door TEXT, ' +
+    'PRIMARY KEY (postvak, adres, naar))');
   function tx(f) {
     db.exec('BEGIN IMMEDIATE');
     try { const r = f(); db.exec('COMMIT'); return r; } catch (e) { try { db.exec('ROLLBACK'); } catch (x) { /* al dicht */ } throw e; }
@@ -2914,13 +2918,97 @@ function maak(o) {
       .map(function (x) { return Object.assign({}, x); });
   }
   // Regelvoorstel (ontwerp § B8.4): ≥ 2 dezelfde correcties per afzenderdomein; MailMan maakt nooit zelf een regel (knop Maak regel in de App)
+  // wv4133 (3C137): correcties uit Intake (bron 'intake') per afzenderADRES (een domein als gmail.com is te breed), apart van de Gmail-labels
   function regelvoorstellen(pv) {
-    return db.prepare("SELECT afzender_domein domein, naar, count(*) n, max(tijd) laatst FROM correctie WHERE postvak = ? AND afzender_domein IS NOT NULL AND afzender_domein != '' AND naar != 'TWIJFEL' GROUP BY afzender_domein, naar HAVING count(*) >= 2 ORDER BY n DESC, laatst DESC LIMIT 20").all(pv)
+    const gm = db.prepare("SELECT afzender_domein domein, naar, count(*) n, max(tijd) laatst FROM correctie WHERE postvak = ? AND bron IS NULL AND afzender_domein IS NOT NULL AND afzender_domein != '' AND naar != 'TWIJFEL' GROUP BY afzender_domein, naar HAVING count(*) >= 2 ORDER BY n DESC, laatst DESC LIMIT 20").all(pv)
       .map(function (x) {
         const stroom = x.naar === 'INTAKE' ? 'intake' : (x.naar === 'FACTUUR' ? 'factuur' : null);
         return { domein: x.domein, naar: x.naar, aantal: x.n, laatst: x.laatst, tekst: x.domein + ' → ' + x.naar + ', ' + x.n + ' keer door jou zo gezet',
           regel: { postvak: pv, naam: x.domein + ' → ' + x.naar, stap: stroom ? 'in' : 'weg', stroom, labels: L2_REGEL.includes(x.naar) ? [x.naar] : [], voorwaarden: { van_domein: { op: 'is', w: x.domein } } } };
       });
+    return gm.concat(intakeVoorstellen(pv, 20));
+  }
+  // ── wv4133 (3C137): Intake leert MailMan ──
+  // Davids keuze in Intake voor een mail die MailMan naar Intake stuurde (stroom intake of twijfel, of een route naar Intake): Niet bewaren
+  // (lens geen) = MailMan had OVERIG moeten zetten, Facturen = FACTUUR. Een andere plek in de Brain (kennis, keten, systeem) bevestigt MailMan:
+  // geen correctie, en een eerdere Intake-correctie voor dezelfde mail vervalt (David koos opnieuw). Herhaalveilig (UNIQUE postvak, gmail_id, naar).
+  const INTAKE_NAAR = { geen: 'OVERIG', facturen: 'FACTUUR' };
+  const INTAKE_VRAAG_MIN = 2;
+  function intakeKeuze(x) {
+    x = isObj(x) ? x : {};
+    const pv = String(x.postvak || ''), id = String(x.gmail_id || ''), lens = String(x.lens || '');
+    if (!pv || !/^[0-9a-f]{6,40}$/i.test(id) || !postvak(pv)) return { ok: true, geteld: false, reden: 'geen MailMan-mail' };
+    const b = besluitVan(pv, id);
+    if (!b) return { ok: true, geteld: false, reden: 'MailMan kent deze mail niet' };
+    const st = stroomEffectief(b);
+    if (!(st === 'intake' || st === 'twijfel' || routeGet(pv, id))) return { ok: true, geteld: false, reden: 'MailMan stuurde deze mail niet naar Intake' };
+    const naar = INTAKE_NAAR[lens] || null;
+    const tijd = typeof x.tijd === 'string' && !isNaN(Date.parse(x.tijd)) ? new Date(x.tijd).toISOString() : iso();
+    const adres = String(b.afzender || '').trim().toLowerCase().slice(0, 200) || null;
+    return tx(function () {
+      const weg = db.prepare("DELETE FROM correctie WHERE postvak = ? AND gmail_id = ? AND bron = 'intake'" + (naar ? ' AND naar != ?' : '')).run(...(naar ? [pv, id, naar] : [pv, id])).changes;
+      if (!naar) return { ok: true, geteld: false, weg, reden: 'plek in de Brain: MailMan zat goed' };
+      const n = db.prepare("INSERT OR IGNORE INTO correctie (postvak, gmail_id, afzender_domein, van, naar, tijd, adres, bron) VALUES (?, ?, ?, ?, ?, ?, ?, 'intake')")
+        .run(pv, id, b.afzender_domein || null, L2_HOOFD[st] || 'INTAKE', naar, tijd, adres).changes;
+      return { ok: true, geteld: n > 0, weg, naar };
+    });
+  }
+  // bestaat er al een actieve regel voor precies dit adres (of zijn domein) die het anders stuurt? Dan geen vraag en geen voorstel meer
+  function intakeRegelBestaat(pv, adres, naar) {
+    const stroom = naar === 'FACTUUR' ? 'factuur' : null;
+    return regels(pv).some(function (r) {
+      if (!r.actief) return false;
+      const v = r.voorwaarden || {}, sleutels = Object.keys(v);
+      const raak = (sleutels.length === 1 && v.van_adres && v.van_adres.op === 'is' && String(v.van_adres.w).toLowerCase() === adres)
+        || (sleutels.length === 1 && v.van_domein && v.van_domein.op === 'is' && adres.endsWith('@' + String(v.van_domein.w).toLowerCase()));
+      return raak && (stroom ? r.stap === 'in' && r.stroom === stroom : r.stap === 'weg');
+    });
+  }
+  function intakeVoorstellen(pv, max) {
+    return db.prepare("SELECT adres, naar, count(*) n, max(tijd) laatst FROM correctie WHERE postvak = ? AND bron = 'intake' AND adres IS NOT NULL AND adres != '' GROUP BY adres, naar HAVING count(*) >= ? ORDER BY laatst DESC LIMIT ?").all(pv, INTAKE_VRAAG_MIN, max)
+      .filter(function (x) { return !intakeRegelBestaat(pv, x.adres, x.naar); })
+      .map(function (x) {
+        const fac = x.naar === 'FACTUUR';
+        const dom = x.adres.indexOf('@') > 0 ? x.adres.slice(x.adres.indexOf('@') + 1) : x.adres;
+        const ant = db.prepare('SELECT antwoord, tijd FROM intake_vraag WHERE postvak = ? AND adres = ? AND naar = ?').get(pv, x.adres, x.naar);
+        return { bron: 'intake', adres: x.adres, domein: dom, naar: x.naar, aantal: x.n, laatst: x.laatst, antwoord: ant ? ant.antwoord : null,
+          tekst: x.adres + ' → ' + x.naar + ', ' + x.n + ' keer in Intake ' + (fac ? 'naar Facturen' : 'op Niet bewaren') + ' gezet',
+          regel: { postvak: pv, naam: (fac ? 'Meteen naar Facturen: ' : 'Niet naar Intake: ') + x.adres.slice(0, 55), stap: fac ? 'in' : 'weg', stroom: fac ? 'factuur' : null, labels: [],
+            voorwaarden: { van_adres: { op: 'is', w: x.adres } } } };
+      });
+  }
+  // Voor Intake: de open vragen (nog geen antwoord) over alle postvakken, nieuwste eerst, hooguit max
+  function intakeVragen(max) {
+    const uit = [];
+    for (const p of postvakken()) for (const v of intakeVoorstellen(p.id, 50)) if (!v.antwoord) uit.push(Object.assign({ postvak: p.id, postvak_naam: p.naam }, v));
+    uit.sort(function (a, b) { return String(b.laatst).localeCompare(String(a.laatst)); });
+    return uit.slice(0, Math.max(1, Math.min(10, Number(max) || 3))).map(function (v) {
+      return { sleutel: v.postvak + '|' + v.adres + '|' + v.naar, postvak: v.postvak, postvak_naam: v.postvak_naam, adres: v.adres, naar: v.naar, aantal: v.aantal, laatst: v.laatst };
+    });
+  }
+  // Davids antwoord: ja = de regel (bron voorstel, zichtbaar en uit te zetten in MailMan › Regels), nee = niet meer vragen (het voorstel blijft in MailMan)
+  function intakeVraagAntwoord(d, door) {
+    d = isObj(d) ? d : {};
+    const del = String(d.sleutel || '').split('|');
+    if (del.length !== 3) return { status: 400, j: { ok: false, fout: 'vraag onbekend' } };
+    const [pv, adres, naar] = del;
+    const antw = d.antwoord === 'ja' ? 'ja' : (d.antwoord === 'nee' ? 'nee' : '');
+    if (!antw) return { status: 400, j: { ok: false, fout: 'antwoord ja of nee' } };
+    if (!postvak(pv)) return { status: 400, j: { ok: false, fout: 'postvak onbekend' } };
+    const v = intakeVoorstellen(pv, 500).find(function (x) { return x.adres === adres && x.naar === naar; });
+    const al = db.prepare('SELECT antwoord, regel_id FROM intake_vraag WHERE postvak = ? AND adres = ? AND naar = ?').get(pv, adres, naar);
+    if (al && al.antwoord === antw) return { status: 200, j: { ok: true, uitkomst: 'al_zo', regel_id: al.regel_id || null } };
+    if (!v) return { status: 409, j: { ok: false, fout: intakeRegelBestaat(pv, adres, naar) ? 'Daar is al een regel voor.' : 'Deze vraag geldt niet meer; ververs.' } };
+    let regelId = null;
+    if (antw === 'ja') {
+      const r = regelRoute(Object.assign({ actie: 'nieuw', bron: 'voorstel' }, v.regel), door);
+      if (r.status !== 200) return r;
+      regelId = r.j.id;
+    }
+    db.prepare('INSERT INTO intake_vraag (postvak, adres, naar, antwoord, regel_id, tijd, door) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (postvak, adres, naar) DO UPDATE SET antwoord = excluded.antwoord, regel_id = excluded.regel_id, tijd = excluded.tijd, door = excluded.door')
+      .run(pv, adres, naar, antw, regelId, iso(), door || null);
+    wijzig('intake_vraag', pv + '|' + adres + '|' + naar, al || null, { antwoord: antw, regel_id: regelId }, door);
+    return { status: 200, j: { ok: true, uitkomst: antw === 'ja' ? 'regel' : 'niet_meer_vragen', regel_id: regelId, regel_naam: antw === 'ja' ? v.regel.naam : null } };
   }
   function overzicht() {
     const n = nu(), vandaag = new Date(dagStart(n)).toISOString(), morgen = new Date(dagStart(n) + 86400000).toISOString(), week = new Date(dagStart(n) - 6 * 86400000).toISOString();
@@ -3522,7 +3610,7 @@ function maak(o) {
     }
     return uit;
   }
-  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, ecobankBekend, inboxUit: function (pv) { return inboxUit(postvakken().find(function (p) { return p.id === pv; })); }, werkstroomTel, werkstroomLijst, mailBron, zakenLijst, voorwerkBron, mailNaar, mailLaag, mailRegel, mailLabelIds, mailTik, mailSluitBron, mailVerzondenAan, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
+  return { intakeKeuze, intakeVragen, intakeVraagAntwoord, n8n, app, sleutelOk, info, zorgen, opruim, telling, ecobankBekend, inboxUit: function (pv) { return inboxUit(postvakken().find(function (p) { return p.id === pv; })); }, werkstroomTel, werkstroomLijst, mailBron, zakenLijst, voorwerkBron, mailNaar, mailLaag, mailRegel, mailLabelIds, mailTik, mailSluitBron, mailVerzondenAan, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
 }
 
 function isPad(p) { return p === '/mailman' || String(p).indexOf('/mailman/') === 0; }

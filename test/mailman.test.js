@@ -3728,3 +3728,82 @@ test('wv4093 opruim: voorbeeld-onderwerp uit de verzonden mail na 14 dagen weg (
   assert.equal(h(vers).voorbeeld, null, 'na 14 dagen ook weg');
   assert.equal(db.prepare("SELECT count(*) n FROM regel_herkomst WHERE voorbeeld IS NOT NULL").get().n, 0);
 });
+
+// ── wv4133 (3C137): Intake leert MailMan ──
+test('wv4133: Intake-keuze Niet bewaren/Facturen telt als correctie; na twee keer één vraag; Ja = regel die de volgende mail anders zet en uit kan', () => {
+  const { mm, fouten } = nieuweKamer();
+  const pv = 'gmail:david', van = 'Winkel <Verkoop@winkel.invalid>';
+  const a = mail({ van }), b = mail({ van }), c = mail({ van: 'Ander <iemand@elders.invalid>' }), info = mail({ van });
+  draai(mm, pv, [a, b, c], { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 2.5 }); } });
+  for (const m of [a, b, c]) assert.equal(rij(mm, m.id).stroom, 'intake');
+  draai(mm, pv, [info], { jev: function () { return jevAntwoord({ systeem: 0.99, waarde: 0 }); } });
+  assert.notEqual(rij(mm, info.id).stroom, 'intake'); assert.notEqual(rij(mm, info.id).stroom, 'twijfel');
+  // MailMan stuurde de mail niet naar Intake, onbekende mail, geen MailMan-postvak: niets geteld
+  assert.equal(mm.intakeKeuze({ postvak: pv, gmail_id: info.id, lens: 'geen' }).geteld, false);
+  assert.equal(mm.intakeKeuze({ postvak: pv, gmail_id: 'abcdef0123456789', lens: 'geen' }).geteld, false);
+  assert.equal(mm.intakeKeuze({ postvak: 'outlook:tolgaarde', gmail_id: a.id, lens: 'geen' }).geteld, false);
+  // één keer: nog geen vraag
+  assert.equal(mm.intakeKeuze({ postvak: pv, gmail_id: a.id, lens: 'geen' }).geteld, true);
+  assert.equal(mm.intakeKeuze({ postvak: pv, gmail_id: a.id, lens: 'geen' }).geteld, false, 'herhaalveilig');
+  assert.equal(mm.intakeVragen(3).length, 0);
+  // een plek in de Brain bevestigt MailMan
+  assert.equal(mm.intakeKeuze({ postvak: pv, gmail_id: c.id, lens: 'kennis' }).geteld, false);
+  // tweede keer dezelfde afzender (andere hoofdletters in het adres): de vraag verschijnt
+  assert.equal(mm.intakeKeuze({ postvak: pv, gmail_id: b.id, lens: 'geen' }).geteld, true);
+  const n = mm._db.prepare("SELECT count(*) n FROM correctie WHERE bron = 'intake'").get().n;
+  assert.equal(n, 2);
+  let v = mm.intakeVragen(3);
+  assert.equal(v.length, 1); assert.equal(v[0].adres, 'verkoop@winkel.invalid'); assert.equal(v[0].naar, 'OVERIG'); assert.equal(v[0].aantal, 2);
+  // ook zichtbaar in MailMan (regelvoorstel uit Intake, per adres)
+  const p0 = mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === pv; });
+  const vz = p0.regelvoorstellen.find(function (x) { return x.bron === 'intake'; });
+  assert.ok(vz); assert.equal(vz.regel.stap, 'weg'); assert.deepEqual(vz.regel.voorwaarden, { van_adres: { op: 'is', w: 'verkoop@winkel.invalid' } });
+  assert.ok(p0.correcties.length >= 2);
+  // David kiest bij b toch een plek in de Brain: de correctie vervalt en de vraag gaat weg; terug naar Niet bewaren: weer terug
+  assert.equal(mm.intakeKeuze({ postvak: pv, gmail_id: b.id, lens: 'kennis' }).weg, 1);
+  assert.equal(mm.intakeVragen(3).length, 0);
+  mm.intakeKeuze({ postvak: pv, gmail_id: b.id, lens: 'geen' });
+  v = mm.intakeVragen(3); assert.equal(v.length, 1);
+  // Ja: regel (bron voorstel), vraag weg, tweede Ja = al_zo
+  const ja = mm.intakeVraagAntwoord({ sleutel: v[0].sleutel, antwoord: 'ja' }, 'app:proef');
+  assert.equal(ja.status, 200, JSON.stringify(ja.j)); assert.equal(ja.j.uitkomst, 'regel');
+  const regel = mm._db.prepare('SELECT * FROM regel WHERE id = ?').get(ja.j.regel_id);
+  assert.equal(regel.bron, 'voorstel'); assert.equal(regel.stap, 'weg'); assert.equal(regel.actief, 1);
+  assert.equal(mm.intakeVragen(3).length, 0);
+  assert.equal(mm.intakeVraagAntwoord({ sleutel: v[0].sleutel, antwoord: 'ja' }, 'app:proef').j.uitkomst, 'al_zo');
+  assert.equal(mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === pv; }).regelvoorstellen.filter(function (x) { return x.bron === 'intake'; }).length, 0);
+  // de volgende mail van die afzender gaat niet meer naar Intake
+  const d = mail({ van });
+  draai(mm, pv, [d], { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 2.5 }); } });
+  assert.equal(rij(mm, d.id).stroom, 'info'); assert.equal(rij(mm, d.id).regel_id, ja.j.regel_id);
+  // regel uit (MailMan › Regels): weer naar Intake
+  const uit = mm.app('POST /app/mailman/regel', { actie: 'aanuit', id: ja.j.regel_id, actief: false });
+  assert.equal(uit.status, 200, JSON.stringify(uit.j));
+  const e = mail({ van });
+  draai(mm, pv, [e], { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 2.5 }); } });
+  assert.equal(rij(mm, e.id).stroom, 'intake');
+  assert.deepEqual(fouten, []);
+});
+
+test('wv4133: Facturen in Intake → voorstel "meteen naar Facturen"; Nee = niet meer vragen, voorstel blijft in MailMan; foute invoer geweigerd', () => {
+  const { mm } = nieuweKamer();
+  const pv = 'gmail:david', van = 'Leverancier <nota@lever.invalid>';
+  const a = mail({ van }), b = mail({ van });
+  draai(mm, pv, [a, b], { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 2.5 }); } });
+  mm.intakeKeuze({ postvak: pv, gmail_id: a.id, lens: 'facturen' });
+  mm.intakeKeuze({ postvak: pv, gmail_id: b.id, lens: 'facturen' });
+  const v = mm.intakeVragen(3);
+  assert.equal(v.length, 1); assert.equal(v[0].naar, 'FACTUUR');
+  assert.equal(mm.intakeVraagAntwoord({ sleutel: 'x', antwoord: 'ja' }).status, 400);
+  assert.equal(mm.intakeVraagAntwoord({ sleutel: v[0].sleutel, antwoord: 'misschien' }).status, 400);
+  assert.equal(mm.intakeVraagAntwoord({ sleutel: pv + '|ander@x.invalid|FACTUUR', antwoord: 'ja' }).status, 409);
+  const nee = mm.intakeVraagAntwoord({ sleutel: v[0].sleutel, antwoord: 'nee' }, 'app:proef');
+  assert.equal(nee.status, 200); assert.equal(nee.j.uitkomst, 'niet_meer_vragen');
+  assert.equal(mm.intakeVragen(3).length, 0);
+  assert.equal(mm._db.prepare('SELECT count(*) n FROM regel WHERE bron = ?').get('voorstel').n, 0);
+  const vz = mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === pv; }).regelvoorstellen.find(function (x) { return x.bron === 'intake'; });
+  assert.ok(vz); assert.equal(vz.antwoord, 'nee'); assert.equal(vz.regel.stap, 'in'); assert.equal(vz.regel.stroom, 'factuur');
+  // later toch Ja (vanuit MailMan of opnieuw): regel naar Facturen
+  const ja = mm.intakeVraagAntwoord({ sleutel: v[0].sleutel, antwoord: 'ja' }, 'app:proef');
+  assert.equal(ja.status, 200); assert.equal(mm._db.prepare('SELECT stroom FROM regel WHERE id = ?').get(ja.j.regel_id).stroom, 'factuur');
+});

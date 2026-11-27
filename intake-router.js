@@ -2546,6 +2546,8 @@ function maak(o) {
     // wv2618 (stap 5, Verplaats): vóór de nacht verhuizen de bijlagen mee en gaan de oude kopieën weg (het oude .md pas als het nieuwe er staat);
     // ná de nacht blijven de oude bestanden en krijgt de oude raw_input een rechtzet-notitie. Wat nu niet lukt, probeert elke ronde opnieuw.
     if (opruimPlan) opruimOpen(id);
+    // wv4133 (3C137): MailMan leert van deze keuze (Niet bewaren / Facturen = MailMan had het anders moeten labelen); een fout daar raakt de keuze niet
+    if (o.naKeuze && sk) { try { o.naKeuze({ bron: sk.bron, bron_id: sk.bron_id, lens }); } catch (e) { if (o.fout) o.fout('intake-router-nakeuze', e); } }
     const v = await voerUit(id);
     if (lens === 'systeem') systeemLater();
     // wv1919: de facturenlens voert de koerier uit (elk uur), dus dan altijd 'aangeboden'
@@ -3381,7 +3383,12 @@ function maak(o) {
       stuk_lezen: { cache: stukCache.size, rij: leesRij.length, bezig: leesBezig }, stukken: o2, wacht, overgeslagen: Array.from(mislukt.values()).filter(function (n) { return n >= 3; }).length, laatste: stand.laatste, fouten: stand.fouten, laatste_fout: stand.laatste_fout };
   }
   if (o.startregels === true) { try { startregels(); } catch (e) { if (o.fout) o.fout('intake-startregels', e); } }
-  return { ronde, verwerkStuk, plekVan, telling, regel, lijst, info, appOverzicht, appGeschiedenis, verwijderMag, verwijderGevraagd, appWerkstroom, werkstroomTel, appToets, appRegel, appKeuze, appBundel, appStuk, voerUit, uitvoerRonde, kaartenRonde, ketenHercontrole, wachtOpDavid, verbeteringen, regels: regelsAlle,
+  // wv4133 (3C137): Davids plek-keuzes per mail (bron + bron_id + lens + tijd), voor het naspelen naar MailMan bij de start (herhaalveilig)
+  function mailKeuzes() {
+    return db.prepare("SELECT s.bron, s.bron_id, l.keuze, l.keuze_op FROM live_stuk l JOIN stuk s ON s.stuk_id = l.stuk_id AND s.versie = l.versie WHERE l.keuze_door IS NOT NULL AND l.keuze_door != 'router' AND l.keuze LIKE '%:%' AND s.bron LIKE 'gmail:%'").all()
+      .map(function (x) { return { bron: x.bron, bron_id: x.bron_id, lens: String(x.keuze).split(':')[0], tijd: x.keuze_op }; });
+  }
+  return { mailKeuzes, ronde, verwerkStuk, plekVan, telling, regel, lijst, info, appOverzicht, appGeschiedenis, verwijderMag, verwijderGevraagd, appWerkstroom, werkstroomTel, appToets, appRegel, appKeuze, appBundel, appStuk, voerUit, uitvoerRonde, kaartenRonde, ketenHercontrole, wachtOpDavid, verbeteringen, regels: regelsAlle,
     facturenAangeboden, facturenUitkomst, knoopVoor, facturenAlBekend,
     systeemRonde, startregels, _cache: { grootte: function () { return stukCache.size; }, rij: function () { return leesRij.length; } },
     sluit: function () { gesloten = true; if (systeemTimer) { clearTimeout(systeemTimer); systeemTimer = null; } db.close(); } };
