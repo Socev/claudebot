@@ -435,6 +435,67 @@ const wacht = () => new Promise((r) => setImmediate(r));
     fs.rmSync(d, { recursive: true, force: true });
   }
 
+  // ── 13. wv4204 (3C176): Deze week van je managers — twee regels per manager, knop alleen bij een open kaart ──
+  {
+    const nu = ms('2026-11-27T20:00:00Z');
+    const kaart = (id, x) => Object.assign({ id: id, hartslag: 'op tijd', weekronde: '2026-11-22T14:03:00Z', volgende: '2026-11-29T08:30:00Z', gemist: null, lopend: null }, x || {});
+    const wk = {
+      data: { nieuw: 24, nieuw_onderhoud: 23, vanzelf: 108, open_kaarten: 0, kaarten: [], besloten: 1, laatst_besloten: { titel: 'Opslag — oude bouwmappen weghalen?', op: '2026-11-22T18:01:00Z', antwoord: 'Ja' } },
+      ciso: { nieuw: 2, nieuw_onderhoud: 0, vanzelf: 4, open_kaarten: 2, kaarten: [{ id: 2701, titel: 'Beveiliging — twee punten afsluiten?' }, { id: 2690, titel: 'ouder' }], besloten: 0 },
+      design: { nieuw: 0, vanzelf: 0, open_kaarten: 0, kaarten: [], besloten: 0 },
+      ui: { nieuw: 1, vanzelf: 2, open_kaarten: 1, kaarten: [{ id: 2702, titel: 'Telefoon — knop groter?' }], besloten: 0 },
+      mrlean: { nieuw: 0, vanzelf: 0, open_kaarten: 0, kaarten: [], besloten: 0 },
+    };
+    const d1 = M.weekRegels(kaart('data'), wk, nu);
+    toets('13 Data: ronde-dag, nieuw met onderhoud, vanzelf opgelost; regel 2 = jouw besluit met antwoord; geen knop',
+      d1 && d1.regels.length === 2 && d1.regels[0] === 'Ronde zondag 22-11: 24 nieuwe punten, waarvan 23 onderhoud; 108 vanzelf opgelost.' &&
+      d1.regels[1] === 'Jij besliste deze week: Opslag — oude bouwmappen weghalen? (Ja).' && d1.kaarten.length === 0 && d1.bij_jou === 0, d1);
+    const c1 = M.weekRegels(kaart('ciso', { weekronde: '2026-11-23T05:12:00Z' }), wk, nu);
+    toets('13 CISO: open kaart = "Wacht op jou" + (en nog 1) en precies één knop (id van de nieuwste)',
+      c1.regels[1] === 'Wacht op jou: Beveiliging — twee punten afsluiten? (en nog 1)' && c1.kaarten.length === 1 && c1.kaarten[0].id === 2701 && c1.bij_jou === 2, c1);
+    const ds = M.weekRegels(kaart('design', { weekronde: '2026-11-14T09:00:00Z', volgende: '2026-11-28T09:00:00Z' }), wk, nu);
+    toets('13 Design telt het UI-deel mee (nieuw, vanzelf, kaart); ronde ouder dan een week → "Geen ronde deze week"',
+      ds.regels[0] === 'Geen ronde deze week: 1 nieuw punt; 2 vanzelf opgelost.' && ds.kaarten[0].id === 2702, ds);
+    const dsui = M.weekRegels(kaart('design'), { design: { open_kaarten: 1, kaarten: [{ id: 11, titel: 'oud design', aangemaakt: '2026-11-20T10:00:00Z' }] },
+      ui: { open_kaarten: 1, kaarten: [{ id: 12, titel: 'nieuw ui', aangemaakt: '2026-11-26T10:00:00Z' }] } }, nu);
+    toets('13 Codex MOET 1: Design + UI → de nieuwste kaart (ook als die van het UI-deel is), (en nog 1)', dsui.kaarten[0].id === 12 && dsui.regels[1] === 'Wacht op jou: nieuw ui (en nog 1)', dsui);
+    const ml = M.weekRegels(kaart('mrlean', { weekronde: '2026-11-10T09:00:00Z', volgende: '2026-12-02T09:00:00Z' }), wk, nu);
+    toets('13 MrLean: niets in de week → geen ronde + volgende; regel 2 "Niets bij jou."', ml.regels[0] === 'Deze week geen ronde; de volgende is woensdag 2-12.' && ml.regels[1] === 'Niets bij jou.', ml);
+    const ml2 = M.weekRegels(kaart('mrlean', { weekronde: '2026-11-27T16:13:00Z' }), wk, nu);
+    toets('13 ronde zonder verschil → "niets veranderd"', ml2.regels[0] === 'Ronde vrijdag 27-11: niets veranderd.', ml2);
+    const laat = M.weekRegels(kaart('mrlean', { hartslag: 'te laat', gemist: 'MrLean heeft woensdag niet gedraaid: x; volgende ronde woensdag 2-12; je hoeft niets te doen.' }), wk, nu);
+    toets('13 te laat → regel 1 = de gemiste-ronde-zin', laat.regels[0].indexOf('MrLean heeft woensdag niet gedraaid') === 0, laat);
+    const bb = M.weekRegels(kaart('bibliothecaris', { weekronde: '2026-11-27T01:30:00Z' }), { bibliothecaris: { nieuw: 1, vanzelf: 1 } }, nu);
+    toets('13 Bibliothecaris (script) → "Elke nacht gedraaid"', bb.regels[0] === 'Elke nacht gedraaid: 1 nieuw punt; 1 vanzelf opgelost.', bb);
+    toets('13 geen weekdata of onbekende manager → null', M.weekRegels(kaart('data'), null, nu) === null && M.weekRegels(kaart('onzin'), wk, nu) === null);
+    const vals = M.weekRegels(kaart('ciso'), { ciso: { open_kaarten: 1, kaarten: [{ id: 'x; drop', titel: 't' }, { id: -3, titel: 't' }] } }, nu);
+    toets('13 kaart zonder geldig id → geen knop en geen "Wacht op jou"', vals.kaarten.length === 0 && vals.regels[1] === 'Niets bij jou.', vals);
+    const lang = M.weekRegels(kaart('ciso'), { ciso: { open_kaarten: 1, kaarten: [{ id: 5, titel: 'woord '.repeat(80) }] } }, nu);
+    toets('13 lange titel ingekort (≤ 141 tekens)', lang.kaarten[0].titel.length <= 141 && /…$/.test(lang.kaarten[0].titel), lang.kaarten[0].titel.length);
+
+    // server.js: GET /app/managers vraagt de week op naast de stand (7 dagen), en zonder week (RPC faalt) blijft de stand gewoon
+    const vm = require('vm');
+    const s = fs.readFileSync('server.js', 'utf8');
+    const begin = s.indexOf('async function appManagers(req, res, a, d, route)');
+    const blok = s.slice(begin, s.indexOf('\n}\n', begin) + 3);
+    const roep = [];
+    let weekFaalt = false;
+    const c = { MANAGERS_MOD: M, managers: { stand: () => [kaart('data'), kaart('ciso')] }, Promise, Date, Object, Array, String, JSON,
+      managersRegister: () => null, managersAfsprakenLog: () => [], logError: () => {},
+      appSbRpc: async (n, a) => { roep.push([n, a]); if (n === 'mk_managers_week') { if (weekFaalt) throw new Error('42883'); return wk; } return { data: { aantal: 0 } }; },
+      appStuur: (res, st, j) => { res.st = st; res.j = j; }, appWeiger: (res, st, f) => { res.st = st; res.j = { ok: false, fout: f }; } };
+    vm.createContext(c);
+    vm.runInContext(blok + '\nthis.f = appManagers;', c);
+    let res = { _app: {} };
+    await c.f({}, res, {}, {}, 'GET /app/managers');
+    const wr = roep.find((x) => x[0] === 'mk_managers_week');
+    toets('13 server: RPC mk_managers_week met de vaste lijst en p_dagen 7; elke kaart krijgt week', res.st === 200 && wr && wr[1].p_dagen === 7 && JSON.stringify(wr[1].p_managers) === JSON.stringify(M.rpcInvoer()) &&
+      res.j.managers.every((k) => k.week && k.week.regels.length === 2), [res.j, wr]);
+    weekFaalt = true; res = { _app: {} };
+    await c.f({}, res, {}, {}, 'GET /app/managers');
+    toets('13 server: week-RPC faalt → 200, kaarten zonder week, geen foutregel', res.st === 200 && res.j.fout === null && res.j.managers.every((k) => k.week === undefined), res.j);
+  }
+
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(2); });

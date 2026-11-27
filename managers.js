@@ -447,6 +447,62 @@ function afspraken(reg, log, id) {
       sinds: bron && bron.datum ? String(bron.datum) : null, laatst: laatst[r.id] || null };
   });
 }
+// ── wv4204 (besluitenpagina nr 476 = 3C176, David Ja 25-11-2026): "Deze week van je managers" ──
+// Per manager hooguit twee regels: (1) wat er de laatste zeven dagen veranderde en wat vanzelf oploste, (2) wat nu bij David ligt
+// (de nieuwste open Voor jou-kaart van die manager, met de knop in de app) of wat hij deze week besliste. Er wordt niets gestuurd.
+// wk = uitvoer van de RPC mk_managers_week (per id, ook de delen zoals 'ui'), k = de kaart uit stand(). Geen wk = null (oude databank).
+const WEEK_DAGEN = 7;
+function weekSom(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  const n = function (x, y) { return (Number(x) || 0) + (Number(y) || 0); };
+  const lb = [a.laatst_besloten, b.laatst_besloten].filter(Boolean).sort(function (x, y) { return String(y.op || '').localeCompare(String(x.op || '')); })[0] || null;
+  return { nieuw: n(a.nieuw, b.nieuw), nieuw_onderhoud: n(a.nieuw_onderhoud, b.nieuw_onderhoud), vanzelf: n(a.vanzelf, b.vanzelf),
+    vanzelf_onderhoud: n(a.vanzelf_onderhoud, b.vanzelf_onderhoud), open_kaarten: n(a.open_kaarten, b.open_kaarten),
+    // Codex MOET 1: nieuwste kaart eerst over beide delen heen (de knop belooft de nieuwste open vraag)
+    kaarten: (Array.isArray(a.kaarten) ? a.kaarten : []).concat(Array.isArray(b.kaarten) ? b.kaarten : [])
+      .sort(function (x, y) { return String((y && y.aangemaakt) || '').localeCompare(String((x && x.aangemaakt) || '')); }),
+    besloten: n(a.besloten, b.besloten), laatst_besloten: lb };
+}
+function punten(n) { return n === 1 ? '1 nieuw punt' : n + ' nieuwe punten'; }
+function weekRegels(k, wk, t) {
+  const m = k && PER_ID[k.id];
+  if (!m || !wk || typeof wk !== 'object') return null;
+  let w = wk[m.id] || null;
+  (m.delen || []).forEach(function (id) { w = weekSom(w, wk[id] || null); });
+  w = w || {};
+  const num = function (x) { return Math.max(0, Number(x) || 0); };
+  const nieuw = num(w.nieuw), nOnd = Math.min(nieuw, num(w.nieuw_onderhoud)), vanzelf = num(w.vanzelf);
+  // regel 1: wat veranderde (en wat vanzelf oploste)
+  let r1;
+  const ronde = k.weekronde ? Date.parse(k.weekronde) : 0;
+  const binnen = ronde && t - ronde <= WEEK_DAGEN * DAG;
+  if (k.hartslag === 'te laat' && k.gemist && !k.lopend) r1 = k.gemist;
+  else if (!binnen && !nieuw && !vanzelf) {
+    const v = k.volgende ? Date.parse(k.volgende) : 0;
+    r1 = k.hartslag === 'nog nooit' ? 'Nog geen ronde gedraaid' + (v ? '; de eerste is ' + dagDatum(v) + '.' : '.') :
+      'Deze week geen ronde' + (v ? '; de volgende is ' + dagDatum(v) + '.' : '.');
+  } else {
+    const stuk = [];
+    if (nieuw) stuk.push(punten(nieuw) + (nOnd ? (nOnd === nieuw ? ', alle onderhoud' : ', waarvan ' + nOnd + ' onderhoud') : ''));
+    if (vanzelf) stuk.push(vanzelf + ' vanzelf opgelost');
+    const wanneer = m.soort === 'script' ? 'Elke nacht gedraaid' : (binnen ? 'Ronde ' + dagDatum(ronde) : 'Geen ronde deze week');
+    r1 = wanneer + ': ' + (stuk.length ? stuk.join('; ') : 'niets veranderd') + '.';
+  }
+  // regel 2: wat bij David ligt (knop in de app) of wat hij deze week besliste
+  const kaarten = (Array.isArray(w.kaarten) ? w.kaarten : []).filter(function (x) { return x && Number.isInteger(Number(x.id)) && Number(x.id) > 0; })
+    .map(function (x) { return { id: Number(x.id), titel: kort(String(x.titel || ''), 140) }; }).slice(0, 3);
+  const open = Math.max(num(w.open_kaarten), kaarten.length);
+  let r2;
+  if (open && kaarten.length) r2 = 'Wacht op jou: ' + kaarten[0].titel + (open > 1 ? ' (en nog ' + (open - 1) + ')' : '');
+  else if (num(w.besloten) && w.laatst_besloten) {
+    const lb = w.laatst_besloten;
+    r2 = 'Jij besliste ' + (num(w.besloten) === 1 ? 'deze week: ' : 'deze week ' + num(w.besloten) + ' vragen, laatst: ') + kort(String(lb.titel || ''), 140) +
+      (lb.antwoord && lb.antwoord !== 'Beantwoord' ? ' (' + lb.antwoord + ')' : '') + '.';
+  } else r2 = 'Niets bij jou.';
+  return { regels: [r1, r2], kaarten: open && kaarten.length ? kaarten.slice(0, 1) : [], bij_jou: open && kaarten.length ? open : 0 };
+}
+
 // Wat de RPC mk_managers_stand per manager nodig heeft (geen vrije invoer: alleen deze vaste lijst).
 function rpcInvoer() {
   return MANAGERS.concat(DELEN).filter(function (m) { return m.patroon; }).map(function (m) {
@@ -458,4 +514,4 @@ function rpcInvoer() {
 
 module.exports = { maak: maak, MANAGERS: MANAGERS, DELEN: DELEN, samenvoegen: samenvoegen, ONDERHOUD_ZIN: ONDERHOUD_ZIN, REDENEN: REDENEN, prompt: prompt, rapportRegels: rapportRegels, kort: kort, volgendeWeekronde: volgendeWeekronde,
   vorigeWeekronde: vorigeWeekronde, gemistZin: gemistZin, gemistUitTekst: gemistUitTekst, rapporten: rapporten, managerLink: managerLink, GEMIST_REDEN: GEMIST_REDEN,
-  amsNaarMs: amsNaarMs, rpcInvoer: rpcInvoer, VOOR_WEEKRONDE_MS: VOOR_WEEKRONDE_MS, besluitIds: besluitIds, besluitVorm: besluitVorm, afspraken: afspraken, AFSPRAAK_RE: AFSPRAAK_RE };
+  amsNaarMs: amsNaarMs, rpcInvoer: rpcInvoer, VOOR_WEEKRONDE_MS: VOOR_WEEKRONDE_MS, besluitIds: besluitIds, besluitVorm: besluitVorm, afspraken: afspraken, AFSPRAAK_RE: AFSPRAAK_RE, weekRegels: weekRegels, WEEK_DAGEN: WEEK_DAGEN };

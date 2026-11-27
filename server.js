@@ -29214,9 +29214,15 @@ async function appManagers(req, res, a, d, route) {
   if (route === 'GET /app/managers') {
     res._app.stil = true;   // de App ververst elke 30 s zolang er een ronde loopt
     let sb = null, fout = null;
+    // wv4204 (3C176): de week ("Deze week van je managers") naast de stand; faalt hij (of kent de databank hem nog niet), dan zonder week
+    const weekP = typeof MANAGERS_MOD.weekRegels === 'function'
+      ? appSbRpc('mk_managers_week', { p_managers: MANAGERS_MOD.rpcInvoer(), p_dagen: MANAGERS_MOD.WEEK_DAGEN }).catch(function (e) { logError('app-managers-week', e); return null; })
+      : Promise.resolve(null);
     try { sb = await appSbRpc('mk_managers_stand', { p_managers: MANAGERS_MOD.rpcInvoer() }); }
     catch (e) { logError('app-managers', e); fout = 'bevindingen en hartslag zijn nu niet leesbaar'; }
     const kaarten = managers.stand(sb);
+    const wk = await weekP;
+    if (wk && sb) { const t = Date.now(); kaarten.forEach(function (k) { k.week = MANAGERS_MOD.weekRegels(k, wk, t); }); }
     if (typeof MANAGERS_MOD.afspraken === 'function') {   // wv4135 (3C73): Dit mag ik zelf (registerrijen afspraak-<m>-*, status aan)
       const reg = managersRegister(), log = managersAfsprakenLog();
       kaarten.forEach(function (k) { k.afspraken = MANAGERS_MOD.afspraken(reg, log, k.id); });
