@@ -150,5 +150,40 @@ eis(u2['prijsindex'] is None and o2['beelden'] == [], 'index en beelden alleen o
 GEZIEN.clear()
 u3 = O.vastgoed({'objecten': [{'id': 3, 'vbo': ['Proefstraat 1'], 'pand': ['x'], 'percelen': [{'gemeente': 'Proef<script>', 'sectie': 'U', 'nummer': '1'}]}], 'beelden': False, 'index': False})
 eis(GEZIEN == [] and u3['objecten'][0]['feiten'] == [], 'een adres of rommel in plaats van een nummer: geen aanroep')
+# 4. wv4226 buurtwachter: straal rond een afgerond punt en de plannen van de gemeente; verzonnen records in de vorm van het SRU-antwoord (27-11-2026)
+def rec(ident, titel, rubriek, dag):
+    return {'recordData': {'gzd': {'originalData': {'meta': {'owmskern': {'identifier': ident, 'title': titel, 'type': [{'scheme': 'OVERHEIDgvop.Informatietype', '$': 'Beschikkingen'},
+        {'scheme': 'OVERHEIDop.Rubriek', '$': rubriek}]}, 'owmsmantel': {'available': dag}, 'tpmeta': {'publicatienaam': 'Gemeenteblad'}}},
+        'enrichedData': {'preferredUrl': 'https://zoek.officielebekendmakingen.nl/%s.html' % ident}}}}
+SRU = {'searchRetrieveResponse': {'numberOfRecords': 4, 'records': {'record': [rec('gmb-2026-100001', 'Aanvraag omgevingsvergunning Proeflaan 3, dakkapel', 'omgevingsvergunning', '2026-11-20'),
+    rec('gmb-2026-100002', 'Verkeersbesluit Proeflaan', 'verkeersbesluit of -mededeling', '2026-11-19'), rec('gmb-2026-100003', 'Omgevingsplan Proefdorp, wijziging', 'ruimtelijk plan of omgevingsdocument', '2026-11-18'),
+    rec('kwaad; drop', 'rommel', 'omgevingsvergunning', '2026-11-17')]}}}
+nep4 = dict(NEP); nep4['repository.overheid.nl/sru'] = SRU
+json.dump(nep4, open(os.path.join(T, 'nep.json'), 'w'))
+GEZIEN.clear()
+u4 = O.vastgoed({'buurt': {'rd': [194315.8, 469449.1], 'km': 0.25, 'gemeente': 'Proefgemeente', 'sinds': '2026-11-01'}})
+b4 = u4.get('buurt') or {}
+eis(u4['ok'] is True and b4.get('straal', {}).get('ok') is True and b4.get('gemeente', {}).get('ok') is True, 'buurt: beide vragen gelukt')
+eis([i['id'] for i in b4['straal']['items']] == ['gmb-2026-100001', 'gmb-2026-100003'], 'buurt straal: vergunning en plan, geen verkeersbesluit, geen rommel-id')
+eis([i['id'] for i in b4['gemeente']['items']] == ['gmb-2026-100003'], 'buurt gemeente: alleen de plan-rubriek')
+eis(b4['straal']['items'][0]['url'] == 'https://zoek.officielebekendmakingen.nl/gmb-2026-100001.html' and b4['straal']['items'][0]['datum'] == '2026-11-20', 'buurt: link en datum')
+qs = [up_q for up_q in (__import__('urllib.parse').parse.parse_qs(__import__('urllib.parse').parse.urlsplit(g['url']).query).get('query', [''])[0] for g in GEZIEN)]
+eis(len(qs) == 2 and 'within/rijksdriehoek "194300 469400 0.250"' in qs[0] and 'dt.available>=2026-11-01' in qs[0] and 'sortBy dt.available/sort.descending' in qs[0],
+    'buurt: punt afgerond op 100 m, straal 250 m, sinds, nieuwste eerst')
+eis('dt.creator=="Proefgemeente"' in qs[1] and 'ruimtelijk plan of omgevingsdocument' in qs[1], 'buurt: gemeente + plan-rubriek')
+eis(not any(t in json.dumps(qs) for t in ('194315', '469449', 'Proefstraat')), 'buurt: geen exact punt of straat naar buiten')
+eis(len(u4['aanroepen']) == 2 and all(a['naar_buiten'] for a in u4['aanroepen']), 'buurt: beide aanroepen gelogd')
+nep4['repository.overheid.nl/sru'] = {'searchRetrieveResponse': {'diagnostics': {'diagnostic': {'message': 'fout'}}}}
+json.dump(nep4, open(os.path.join(T, 'nep.json'), 'w'))
+b5 = O.vastgoed({'buurt': {'rd': [194315.8, 469449.1], 'gemeente': 'Proefgemeente'}})['buurt']
+eis(b5['straal']['ok'] is False and b5['gemeente']['ok'] is False and not b5['straal']['items'], 'buurt: een diagnose van de SRU = mislukt, geen lege meting')
+FAAL.add('repository.overheid.nl')
+b6 = O.vastgoed({'buurt': {'rd': [194315.8, 469449.1]}})['buurt']
+eis(b6['straal']['ok'] is False and 'gemeente' not in b6, 'buurt: time-out = mislukt; zonder gemeente geen gemeentevraag')
+FAAL.clear()
+GEZIEN.clear()
+b7 = O.vastgoed({'buurt': {'rd': ['Proefstraat', 1], 'gemeente': 'x<script>'}})['buurt']
+eis(GEZIEN == [] and b7 == {}, 'buurt: rommel als punt of gemeente = geen aanroep')
+json.dump(NEP, open(os.path.join(T, 'nep.json'), 'w'))
 print('vastgoed-laag: %d fout' % len(fout))
 sys.exit(1 if fout else 0)

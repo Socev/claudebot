@@ -53,6 +53,7 @@ VASTGOED_JS="$VJS" node --test test/vastgoed-kern.test.js >/dev/null 2>&1 && ech
 VASTGOED_JS="$VJS" node --test test/vastgoed-woz-moment.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-woz-moment.test.js (L41: WOZ-moment)" || { echo "ROOD  test/vastgoed-woz-moment.test.js"; f=1; }
 VASTGOED_JS="$VJS" node --test test/vastgoed-gesprek.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-gesprek.test.js (L39: Socev leest Vastgoed)" || { echo "ROOD  test/vastgoed-gesprek.test.js"; f=1; }
 VASTGOED_JS="$VJS" node --test test/vastgoed-kelder.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-kelder.test.js (2C49: kelderdossier, ronde, melding alleen bij verschil)" || { echo "ROOD  test/vastgoed-kelder.test.js"; f=1; }
+VASTGOED_JS="$VJS" node --test test/vastgoed-buurt.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-buurt.test.js (L38: buurtwachter, nooit twee keer dezelfde)" || { echo "ROOD  test/vastgoed-buurt.test.js"; f=1; }
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 python3 -I test/vastgoed-laag.py "$OPY" "$T" | tail -1; python3 -I test/vastgoed-laag.py "$OPY" "$T" >/dev/null 2>&1 || { echo "ROOD  test/vastgoed-laag.py"; f=1; }
 
@@ -107,6 +108,18 @@ if [ "${KRUIS:-0}" = 1 ]; then
   kruis vastgoed.js "dossier_op = excluded.dossier_op, weg_op = NULL\`)" "dossier_op = excluded.dossier_op\`)" "teruggekeerd object blijft gemarkeerd"
   kruis vastgoed.js "const actief = u.objecten.filter((x) => !x.weg_op);" "const actief = u.objecten;" "gemarkeerd object laat elke opening het dossier lezen"
   kruis vastgoed.js "db.prepare(\"SELECT 1 FROM pragma_table_info('object') WHERE name = 'weg_op'\").get() ? n('object', ' WHERE weg_op IS NOT NULL') : 0" "n('object', ' WHERE weg_op IS NOT NULL')" "/health faalt op een databank van vóór A15"
-  [ $k = 0 ] && echo "GROEN kruisproef: alle drieëndertig rood" || f=1
+  # wv4226 (L38): buurtwachter — eigen toets (test/vastgoed-buurt.test.js)
+  kruisb() {
+    kopie=$(mktemp -p "$PWD" vastgoed-kruis-tmp.XXXXXX.js)
+    python3 -c "import sys; s=open(sys.argv[1]).read(); a,b=sys.argv[2],sys.argv[3]; assert a in s, 'niet gevonden: '+a; open(sys.argv[4],'w').write(s.replace(a,b,1))" "$VJS" "$1" "$2" "$kopie" || { echo "FOUT  kruisproef: vervanging niet gevonden ($3)"; k=1; rm -f "$kopie"; return; }
+    VASTGOED_JS="$kopie" node --test test/vastgoed-buurt.test.js >/dev/null 2>&1 && { echo "FOUT  kruisproef groen: $3"; k=1; } || echo "rood  $3"
+    rm -f "$kopie"
+  }
+  kruisb "if (st[n.bron + '_op']) meld.push(" "meld.push(" "buurt: nulpunt meldt alles"
+  kruisb "|| gezien.has(i.id)) continue;" ") continue;" "buurt: een al geziene bekendmaking opnieuw"
+  kruisb "if (bw.b[k] && bw.b[k].ok === true) { st[k + '_op'] = op;" "if (true) { st[k + '_op'] = op;" "buurt: storing telt als gelukte vraag"
+  kruisb "const due = (k) => !st[k] || t0.getTime() - new Date(st[k]).getTime() >= BUURT_WEEK_MS;" "const due = (k) => true;" "buurt: elke dag naar buiten"
+  kruisb "if (f.groep === 'gld' || f.groep === 'sru') continue;" "if (f.groep === 'gld') continue;" "buurt: postcodelijst meldt dezelfde bekendmaking nog eens"
+  [ $k = 0 ] && echo "GROEN kruisproef: alle drieëndertig (+ vijf buurtwachter) rood" || f=1
 fi
 exit $f

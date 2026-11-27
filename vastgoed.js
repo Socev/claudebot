@@ -29,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const WB = require('./woning-bron.js');   // wv3923: gedeelde lezer voor taxaties en de bankstand van de hypotheek (ook Financiën)
 
-const SCHEMA_VERSIE = 5;   // 2 = fase 2 (wv3102): leningdeel, woz_eigen; reeksen lening/restschuld/verbouwing/servicekosten/stroom; 3 = object.weg_op (A15); 4 = woz_eigen.dagtekening/maten/concept_op (wv4229); 5 = wijziging (wv4182)
+const SCHEMA_VERSIE = 6;   // 6 = bekendmaking + wijziging.url (wv4226, buurtwachter); 2 = fase 2 (wv3102): leningdeel, woz_eigen; reeksen lening/restschuld/verbouwing/servicekosten/stroom; 3 = object.weg_op (A15); 4 = woz_eigen.dagtekening/maten/concept_op (wv4229); 5 = wijziging (wv4182)
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT);
 CREATE TABLE IF NOT EXISTS object (id INTEGER PRIMARY KEY AUTOINCREMENT, sleutel TEXT NOT NULL UNIQUE, soort TEXT NOT NULL CHECK (soort IN ('woning','garagebox')),
@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS leningdeel (id INTEGER PRIMARY KEY AUTOINCREMENT, obj
 CREATE TABLE IF NOT EXISTS woz_eigen (id INTEGER PRIMARY KEY AUTOINCREMENT, object INTEGER NOT NULL REFERENCES object(id), jaar INTEGER NOT NULL, peildatum TEXT NOT NULL,
   waarde REAL NOT NULL, pad TEXT, sha TEXT, bevestigd TEXT NOT NULL, UNIQUE (object, jaar));
 CREATE TABLE IF NOT EXISTS wijziging (id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, object TEXT, soort TEXT NOT NULL, sleutel TEXT NOT NULL, tekst TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS bekendmaking (id TEXT PRIMARY KEY, object TEXT NOT NULL, bron TEXT NOT NULL, datum TEXT, titel TEXT NOT NULL, rubriek TEXT, url TEXT, eerst_op TEXT NOT NULL);
 `;
 const HUIS = '20_Prive/Huis';
 const BRONNEN = '20_Prive/Bronnen/Huis';
@@ -70,6 +71,13 @@ const GELD_DAG_MS = 24 * 3600 * 1000;               // fase 2: bank, Tibber en h
 const RONDE_MAAND_MS = 30 * 24 * 3600 * 1000;      // wv4182: openbare gegevens zelf opnieuw ophalen als ze ouder zijn dan dit
 const KELDER_PDF_MS = 25 * 24 * 3600 * 1000;       // wv4182: Bestanden bewaart 30 dagen; ouder dan dit = nieuwe pdf
 const WIJZIGING_DAGEN = 365;
+// wv4226 (besluitenpagina nr 938 = L38): de buurtwachter. Eens per week (vanuit de dagelijkse ronde) nieuwe bekendmakingen binnen 250 m van de
+// woning en nieuwe plannen van de gemeente; een id die al in tabel bekendmaking staat wordt nooit opnieuw gemeld. Eerste keer = nulpunt (stil).
+const BUURT_WEEK_MS = 7 * 24 * 3600 * 1000;
+const BUURT_OVERLAP_DAGEN = 21;                   // late publicatie of indexering: elke week drie weken terugkijken (dubbel = id al gezien)
+const BUURT_EERST_DAGEN = 90;
+const BUURT_KM = 0.25;
+const BM_URL = /^https:\/\/zoek\.officielebekendmakingen\.nl\/[\w.-]+$/;
 const KORT = { jan: 1, feb: 2, mrt: 3, maa: 3, apr: 4, mei: 5, jun: 6, jul: 7, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, dec: 12 };
 const MAAND = { januari: 1, februari: 2, maart: 3, april: 4, mei: 5, juni: 6, juli: 7, augustus: 8, september: 9, oktober: 10, november: 11, december: 12 };
 
@@ -1011,7 +1019,7 @@ function kenmerken(ov, kelder) {   // → { sleutel: { tekst, soort, object } };
     const bs = o.bron_stand || {};
     for (const f of o.feiten || []) {
       if (f.herkomst !== 'extern' || f.soort === 'meetreeks' || !f.groep || !(bs[f.groep] && bs[f.groep].ok)) continue;
-      if (f.groep === 'gld') continue;
+      if (f.groep === 'gld' || f.groep === 'sru') continue;   // wv4226: bekendmakingen meldt de buurtwachter (op id), niet de maandelijkse postcodelijst
       uit[`f:${o.sleutel}:${f.groep}:${f.veld}`] = { tekst: String(f.waarde), soort: 'openbaar', object: o.sleutel, veld: f.veld, groep: f.groep };
     }
     for (const s of o.stukken || []) uit[`s:${o.sleutel}:${s.pad}`] = { tekst: s.naam, soort: 'stuk', object: o.sleutel };
@@ -1063,8 +1071,31 @@ function kenmerkenMetOud(nieuw, oud, ov) {
 }
 function wijzigingBericht(w, sinds) {
   if (!w.length) return null;
-  const k = w.some((x) => x.soort === 'kelder' || x.object === 'woning') ? 'Kelder' : 'Overzicht';
-  return `Vastgoed: ${w.length === 1 ? 'één ding' : w.length + ' dingen'} veranderd${sinds ? ' sinds ' + nlDag(sinds.slice(0, 10)) : ''} (${w[0].tekst.slice(0, 110)}${w.length > 1 ? ' …' : ''}). Zie Vastgoed › ${k}.`;
+  const bu = w.filter((x) => x.soort === 'buurt'), rest = w.filter((x) => x.soort !== 'buurt');
+  // wv4226: bekendmakingen bij het huis = één regel met de link van de nieuwste; de rest van de ronde zoals voorheen
+  const buurt = !bu.length ? '' : bu.length === 1 ? `${bu[0].tekst.slice(0, 200)}${bu[0].url ? ' ' + bu[0].url : ''}`
+    : `${bu.length} nieuwe bekendmakingen bij je huis, o.a. ${bu[0].tekst.replace(/^[^:]*:\s*/, '').slice(0, 140)}${bu[0].url ? ' ' + bu[0].url : ''}`;
+  if (!rest.length) return `Vastgoed: ${buurt}${bu.length > 1 ? '. Zie Vastgoed › Overzicht.' : ''}`;
+  const k = rest.some((x) => x.soort === 'kelder' || x.object === 'woning') ? 'Kelder' : 'Overzicht';
+  return `Vastgoed: ${rest.length === 1 ? 'één ding' : rest.length + ' dingen'} veranderd${sinds ? ' sinds ' + nlDag(sinds.slice(0, 10)) : ''} (${rest[0].tekst.slice(0, 110)}${rest.length > 1 ? ' …' : ''}). Zie Vastgoed › ${k}.${buurt ? ' En: ' + buurt : ''}`;
+}
+// wv4226: wat de buurtwachter teruggaf → nieuwe rijen (nog niet in de tabel) per bron; pure functie (toets)
+function buurtNieuw(r, gezien) {
+  const uit = [];
+  for (const bron of ['straal', 'gemeente']) {
+    const g = r && r[bron];
+    if (!g || g.ok !== true || !Array.isArray(g.items)) continue;
+    for (const i of g.items) {
+      if (!i || typeof i.id !== 'string' || !/^[a-z]{2,10}-\d{4}-\d{1,10}$/.test(i.id) || !i.titel || gezien.has(i.id)) continue;
+      gezien.add(i.id);
+      const titel = String(i.titel).replace(/\s+/g, ' ').trim().slice(0, 300);
+      let datum = null; try { datum = isoGoed(i.datum) ? i.datum : null; } catch (e) { datum = null; }   // isoGoed gooit bij maand 13
+      const url = typeof i.url === 'string' && BM_URL.test(i.url) ? i.url : null;
+      const tekst = (bron === 'gemeente' ? 'Plan van de gemeente: ' : 'Bekendmaking bij je huis: ') + titel.slice(0, 160) + (datum ? ` (${nlDag(datum)})` : '');
+      uit.push({ id: i.id, bron, datum, titel, rubriek: i.rubriek ? String(i.rubriek).slice(0, 80) : null, url, tekst });
+    }
+  }
+  return uit;
 }
 
 function maak(o) {
@@ -1086,6 +1117,7 @@ function maak(o) {
       db.exec(SCHEMA);
       if (!db.prepare("SELECT 1 FROM pragma_table_info('object') WHERE name = 'weg_op'").get()) db.exec('ALTER TABLE object ADD COLUMN weg_op TEXT');   // A15
       for (const k of ['dagtekening', 'maten', 'concept_op']) if (!db.prepare("SELECT 1 FROM pragma_table_info('woz_eigen') WHERE name = ?").get(k)) db.exec(`ALTER TABLE woz_eigen ADD COLUMN ${k} TEXT`);   // wv4229
+      if (!db.prepare("SELECT 1 FROM pragma_table_info('wijziging') WHERE name = 'url'").get()) db.exec('ALTER TABLE wijziging ADD COLUMN url TEXT');   // wv4226
       db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde").run(String(SCHEMA_VERSIE));
     }
     return db;
@@ -1339,7 +1371,8 @@ function maak(o) {
       const meta = (k) => (db.prepare('SELECT waarde FROM meta WHERE sleutel = ?').get(k) || {}).waarde || null;
       const heeftW = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wijziging'").get();   // wv4182: alleen-lezen vóór de eerste schrijfactie
       const gezienOp = meta('gezien_op');
-      const nieuw = heeftW ? db.prepare('SELECT op, object, soort, tekst FROM wijziging WHERE op > ? ORDER BY id DESC LIMIT 20').all(gezienOp || '') : [];
+      const metUrl = heeftW && !!db.prepare("SELECT 1 FROM pragma_table_info('wijziging') WHERE name = 'url'").get();   // wv4226: alleen-lezen vóór de migratie
+      const nieuw = heeftW ? db.prepare(`SELECT op, object, soort, tekst${metUrl ? ', url' : ''} FROM wijziging WHERE op > ? ORDER BY id DESC LIMIT 20`).all(gezienOp || '').map((z) => (z.url ? z : { op: z.op, object: z.object, soort: z.soort, tekst: z.tekst })) : [];
       let ronde = null; try { ronde = JSON.parse(meta('ronde') || 'null'); } catch (e) { ronde = null; }
       return { ok: true, objecten, prijsindex: index ? { laatste: index.laatste, jaren: index.jaren } : null, aanroepen: { n: aanroepen.n, laatst: aanroepen.laatst },
         nieuw, gezien_op: gezienOp, ronde: ronde ? { dag: ronde.dag || null, op: ronde.op || null } : null, kelder_pdf_op: meta('kelder_pdf_op'),
@@ -1476,13 +1509,16 @@ function maak(o) {
     }
     const ov = overzicht();
     let kel = null; try { kel = kelder(ov); } catch (e) { kel = null; }
+    const bw = bronnen && x.extern !== false ? await buurtHaal(ov, t0) : null;   // wv4226
     const op = nu().toISOString();
     return metDb((db) => {
       let oud = null; try { oud = JSON.parse(metaLees(db, 'kenmerken') || 'null'); } catch (e) { oud = null; }
       const nieuwK = kenmerkenMetOud(kenmerken(ov, kel), oud || {}, ov);
       const w = oud ? vergelijk(oud, nieuwK) : [];
-      const wi = db.prepare('INSERT INTO wijziging (op, object, soort, sleutel, tekst) VALUES (?,?,?,?,?)');
-      for (const y of w.slice(0, 100)) wi.run(op, y.object || null, y.soort, y.sleutel.slice(0, 300), y.tekst);
+      const bwUit = bw ? buurtBewaar(db, bw, op) : null;   // wv4226: nieuwe bekendmakingen (na het nulpunt) bij de wijzigingen
+      if (bwUit) w.push(...bwUit.meld);
+      const wi = db.prepare('INSERT INTO wijziging (op, object, soort, sleutel, tekst, url) VALUES (?,?,?,?,?,?)');
+      for (const y of w.slice(0, 100)) wi.run(op, y.object || null, y.soort, y.sleutel.slice(0, 300), y.tekst, y.url || null);
       db.prepare('DELETE FROM wijziging WHERE op < ?').run(new Date(t0.getTime() - WIJZIGING_DAGEN * 86400000).toISOString());
       metaZet(db, 'kenmerken', JSON.stringify(nieuwK));
       const vorige = (() => { try { return JSON.parse(metaLees(db, 'ronde') || 'null'); } catch (e) { return null; } })();
@@ -1492,8 +1528,52 @@ function maak(o) {
       const pdfOp = metaLees(db, 'kelder_pdf_op'), pdfHash = metaLees(db, 'kelder_pdf_hash');
       const pdfNodig = !!kel && (!pdfOp || t0.getTime() - new Date(pdfOp).getTime() > KELDER_PDF_MS || pdfHash !== kelHash);
       metaZet(db, 'ronde', JSON.stringify({ dag: x.dag || op.slice(0, 10), op, nulpunt: !oud, wijzigingen: w.length, opgehaald: opgehaald.length, mislukt: opgehaald.filter((y) => !y.geslaagd).length }));
-      return { nulpunt: !oud, wijzigingen: w.length, melding: !!tekst, opgehaald: opgehaald.length, pdf_nodig: pdfNodig, kelder_hash: kelHash };
+      return { nulpunt: !oud, wijzigingen: w.length, melding: !!tekst, opgehaald: opgehaald.length, pdf_nodig: pdfNodig, kelder_hash: kelHash,
+        buurt: bwUit ? { gevraagd: true, nieuw: bwUit.nieuw, gemeld: bwUit.meld.length } : { gevraagd: false } };
     }, true);
+  }
+  // wv4226: is de buurtwachter aan de beurt (per bron eens per week na de laatste gelukte vraag), en zo ja: vragen. Nooit een fout naar boven.
+  function buurtStand(db) { try { return JSON.parse(metaLees(db, 'buurt') || 'null') || {}; } catch (e) { return {}; } }
+  async function buurtHaal(ov, t0) {
+    const won = ((ov && ov.objecten) || []).find((o) => o.soort === 'woning' && !o.weg_op);
+    const rd = won && won.punt && Array.isArray(won.punt.rd) ? won.punt.rd : null;
+    const gf = won && (won.feiten || []).find((f) => f.herkomst === 'extern' && f.groep === 'ls' && f.veld === 'Gemeente');
+    const gemeente = gf ? String(gf.waarde) : null;
+    if (!rd && !gemeente) return null;
+    const st = metDb((db) => (db ? buurtStand(db) : {}), false);
+    const due = (k) => !st[k] || t0.getTime() - new Date(st[k]).getTime() >= BUURT_WEEK_MS;
+    const vraag = { rd: rd && due('straal_op') ? rd : null, gemeente: gemeente && due('gemeente_op') ? gemeente : null };
+    if (!vraag.rd && !vraag.gemeente) return null;
+    const basis = [vraag.rd && st.straal_op, vraag.gemeente && st.gemeente_op].filter(Boolean).map((z) => new Date(z).getTime());
+    const sindsMs = basis.length === [vraag.rd, vraag.gemeente].filter(Boolean).length && basis.length ? Math.min(...basis) - BUURT_OVERLAP_DAGEN * 86400000
+      : t0.getTime() - BUURT_EERST_DAGEN * 86400000;
+    const sinds = new Date(sindsMs).toISOString().slice(0, 10);
+    let r = null;
+    try { r = await bronnen({ buurt: { rd: vraag.rd || undefined, km: BUURT_KM, gemeente: vraag.gemeente || undefined, sinds } }); } catch (e) { r = null; }
+    const b = r && r.ok === true && r.buurt && typeof r.buurt === 'object' ? r.buurt : {};
+    return { won, vraag, b, aanroepen: (r && Array.isArray(r.aanroepen)) ? r.aanroepen : [] };
+  }
+  function buurtBewaar(db, bw, op) {
+    const st = buurtStand(db);
+    const ai = db.prepare('INSERT INTO aanroep (tijd, object, bron, host, naar_buiten, status, ms) VALUES (?,?,?,?,?,?,?)');
+    for (const a of bw.aanroepen.slice(0, 20)) ai.run(op, bw.won.id, String(a.bron || '').slice(0, 120), String(a.host || '').slice(0, 120), String(a.naar_buiten || '').slice(0, 200), String(a.status || '').slice(0, 20), Number(a.ms) || 0);
+    const gezien = new Set(db.prepare('SELECT id FROM bekendmaking').all().map((z) => z.id));
+    const nieuw = buurtNieuw(bw.b, gezien);
+    const bi = db.prepare('INSERT OR IGNORE INTO bekendmaking (id, object, bron, datum, titel, rubriek, url, eerst_op) VALUES (?,?,?,?,?,?,?,?)');
+    const meld = [];
+    for (const n of nieuw) {
+      if (bi.run(n.id, bw.won.sleutel, n.bron, n.datum, n.titel, n.rubriek, n.url, op).changes !== 1) continue;
+      // nulpunt per bron: de eerste gelukte vraag vult alleen de tabel
+      if (st[n.bron + '_op']) meld.push({ sleutel: 'b:' + n.id, soort: 'buurt', object: bw.won.sleutel, tekst: n.tekst.slice(0, 200), url: n.url });
+    }
+    for (const k of ['straal', 'gemeente']) {
+      const gevraagd = k === 'straal' ? !!bw.vraag.rd : !!bw.vraag.gemeente;
+      if (!gevraagd) continue;
+      if (bw.b[k] && bw.b[k].ok === true) { st[k + '_op'] = op; st[k + '_vol'] = Number(bw.b[k].n) > 50; } else st[k + '_mislukt'] = op;
+    }
+    st.op = op;
+    metaZet(db, 'buurt', JSON.stringify(st));
+    return { nieuw: nieuw.length, meld };
   }
   function rondeDag() { return metDb((db) => { if (!db) return null; try { return (JSON.parse(metaLees(db, 'ronde') || 'null') || {}).dag || null; } catch (e) { return null; } }, false); }
   function meldingOpen() { return metDb((db) => { if (!db) return null; try { return JSON.parse(metaLees(db, 'melding_open') || 'null'); } catch (e) { return null; } }, false); }
@@ -1540,7 +1620,8 @@ function maak(o) {
         objecten_weg: db.prepare("SELECT 1 FROM pragma_table_info('object') WHERE name = 'weg_op'").get() ? n('object', ' WHERE weg_op IS NOT NULL') : 0, leningdelen: n('leningdeel'), woz_eigen: n('woz_eigen'), reeksen_bank: n('reeks', " WHERE herkomst = 'bank'"), reeksen_tibber: n('reeks', " WHERE herkomst = 'tibber'"),
         geld: { hypotheek: ok(geld.hypotheek), bank: ok(geld.bank), tibber: ok(geld.tibber) },
         ronde: (() => { try { const r = JSON.parse((db.prepare("SELECT waarde FROM meta WHERE sleutel = 'ronde'").get() || {}).waarde || 'null'); return r ? { dag: r.dag, nulpunt: !!r.nulpunt, wijzigingen: r.wijzigingen, opgehaald: r.opgehaald, mislukt: r.mislukt } : null; } catch (e) { return null; } })(),
-        melding_open: !!db.prepare("SELECT 1 FROM meta WHERE sleutel = 'melding_open'").get(), kelder_pdf_op: (db.prepare("SELECT waarde FROM meta WHERE sleutel = 'kelder_pdf_op'").get() || {}).waarde || null };
+        melding_open: !!db.prepare("SELECT 1 FROM meta WHERE sleutel = 'melding_open'").get(),
+        buurt: (() => { try { const b = JSON.parse((db.prepare("SELECT waarde FROM meta WHERE sleutel = 'buurt'").get() || {}).waarde || 'null'); const t = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bekendmaking'").get() ? n('bekendmaking') : 0; return b ? { straal_op: b.straal_op || null, gemeente_op: b.gemeente_op || null, mislukt_op: b.straal_mislukt || b.gemeente_mislukt || null, bekendmakingen: t } : { bekendmakingen: t }; } catch (e) { return null; } })(), kelder_pdf_op: (db.prepare("SELECT waarde FROM meta WHERE sleutel = 'kelder_pdf_op'").get() || {}).waarde || null };
     }, false);
   }
   // wv4227 (L39): Socev in het gewone gesprek. Haalt het overzicht via exact dezelfde weg als GET /app/vastgoed (zelfde cijfers als het
@@ -1556,4 +1637,4 @@ function maak(o) {
 }
 
 module.exports = { maak, geldKern, leesWoning, leesBox, leesDossierMap, dossierstand, indicatie, soortStuk, euroUit, datumUit, bagSoort, SCHEMA_VERSIE,
-  leesHypotheek, hypotheekReeksen, laatsteStand, leesKelder, kelderDossier, kelderMd, kenmerken, kenmerkenMetOud, vergelijk, wijzigingBericht, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink };
+  leesHypotheek, hypotheekReeksen, laatsteStand, leesKelder, kelderDossier, kelderMd, kenmerken, kenmerkenMetOud, vergelijk, wijzigingBericht, buurtNieuw, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink };

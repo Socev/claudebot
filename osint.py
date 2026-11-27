@@ -2240,6 +2240,82 @@ def vastgoed_object(ctx, o, beelden):
             'punt': {'rd': [round(z, 1) for z in rd], 'll': [round(z, 6) for z in ll]} if len(rd) == 2 else None}
 
 
+# ---------------------------------------------------------------- vastgoed buurtwachter (wv4226, besluitenpagina nr 938 = L38)
+# Eens per week (vastgoed.js ronde): nieuwe officiële bekendmakingen rond de woning en nieuwe plannen van de gemeente, zonder sleutel.
+# Gemeten 27-11-2026 (handleiding SRU 2.0 van KOOP): w.locatiepunt within/rijksdriehoek "x y km" + dt.available>= + sortBy werkt; rond
+# de woning 250 m ≈ 12 per jaar (gros omgevingsvergunning). Plannen na de Omgevingswet hebben vaak alleen een gebiedsmarkering Gemeente
+# (geen punt): die apart op dt.creator == gemeente + rubriek "ruimtelijk plan of omgevingsdocument" (± 5 per jaar).
+# Naar buiten: het punt afgerond op 100 m, de straal, de gemeentenaam en een datum; nooit straat of huisnummer. Bewaart niets.
+VG_BUURT_RUBRIEK = re.compile(r'omgevings|ruimtelijk|bestemmingsplan|bouw|sloop|kap', re.I)
+VG_BUURT_PLAN = 'ruimtelijk plan of omgevingsdocument'
+VG_BUURT_MAX = 50
+VG_BM_URL = re.compile(r'^https://zoek\.officielebekendmakingen\.nl/[\w.-]+$')
+
+
+def bm_item(x):
+    """Eén SRU-record → {id, datum, titel, rubriek, url, blad} of None."""
+    try:
+        g = x['recordData']['gzd']
+        meta = g['originalData']['meta']
+    except (KeyError, TypeError):
+        return None
+    kern, mantel, tp = meta.get('owmskern') or {}, meta.get('owmsmantel') or {}, meta.get('tpmeta') or {}
+    ident = str(sru_tekst(kern.get('identifier')) or '')
+    titel = re.sub(r'\s+', ' ', str(sru_tekst(kern.get('title')) or '')).strip()
+    if not re.fullmatch(r'[a-z]{2,10}-\d{4}-\d{1,10}', ident) or not titel:
+        return None
+    typ = kern.get('type')
+    typ = typ if isinstance(typ, list) else [typ]
+    rub = next((str(t.get('$') or '') for t in typ if isinstance(t, dict) and t.get('scheme') == 'OVERHEIDop.Rubriek'), '')
+    dt = str(mantel.get('available') or mantel.get('date') or '')[:10]
+    url = (g.get('enrichedData') or {}).get('preferredUrl')
+    return {'id': ident, 'datum': dt if re.fullmatch(r'\d{4}-\d{2}-\d{2}', dt) else None, 'titel': titel[:300], 'rubriek': rub[:80] or None,
+            'url': url if isinstance(url, str) and VG_BM_URL.match(url) else None, 'blad': str(tp.get('publicatienaam') or '')[:60] or None}
+
+
+def bm_vraag(ctx, q, naar):
+    """→ (items, n) of (None, None) bij een fout (geen antwoord, diagnose van de SRU, of een antwoord zonder aantal)."""
+    r = jhaal(ctx, 'Officiële bekendmakingen (SRU)', 'https://repository.overheid.nl/sru?' + up.urlencode({'query': q, 'maximumRecords': VG_BUURT_MAX, 'httpAccept': 'application/json'}),
+              naar, timeout=30)
+    srr = r.get('searchRetrieveResponse') if isinstance(r, dict) else None
+    if not isinstance(srr, dict) or srr.get('diagnostics') or srr.get('numberOfRecords') is None:
+        return None, None
+    rec = (srr.get('records') or {}).get('record') or []
+    rec = [rec] if isinstance(rec, dict) else rec
+    return [i for i in (bm_item(x) for x in rec if isinstance(x, dict)) if i], int(srr.get('numberOfRecords') or 0)
+
+
+def vastgoed_buurt(ctx, b):
+    rd = b.get('rd')
+    ok_rd = isinstance(rd, list) and len(rd) == 2 and all(isinstance(z, (int, float)) and not isinstance(z, bool) for z in rd) and 0 < rd[0] < 300000 and 300000 < rd[1] < 625000
+    try:
+        km = min(1.0, max(0.05, float(b.get('km') or 0.25)))
+    except (TypeError, ValueError):
+        km = 0.25
+    sinds = str(b.get('sinds') or '')
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', sinds):
+        sinds = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
+    gem = b.get('gemeente')
+    gem = gem.strip() if isinstance(gem, str) and re.fullmatch(r"[A-Za-zÀ-ÿ' .()-]{2,60}", gem.strip()) else None
+    uit = {}
+    if ok_rd:
+        x, y = round(rd[0] / 100) * 100, round(rd[1] / 100) * 100
+        q = 'c.product-area==officielepublicaties AND w.locatiepunt within/rijksdriehoek "%d %d %.3f" AND dt.available>=%s sortBy dt.available/sort.descending' % (x, y, km, sinds)
+        try:
+            items, n = bm_vraag(ctx, q, 'punt afgerond op 100 m, straal %d m, sinds %s' % (round(km * 1000), sinds))
+        except PoortDicht:
+            items, n = None, None
+        uit['straal'] = {'ok': items is not None, 'n': n, 'items': [i for i in items or [] if VG_BUURT_RUBRIEK.search(i['rubriek'] or '')]}
+    if gem:
+        q = 'c.product-area==officielepublicaties AND dt.creator=="%s" AND dt.type="%s" AND dt.available>=%s sortBy dt.available/sort.descending' % (gem.replace('"', ''), VG_BUURT_PLAN, sinds)
+        try:
+            items, n = bm_vraag(ctx, q, 'gemeente %s, plannen, sinds %s' % (gem, sinds))
+        except PoortDicht:
+            items, n = None, None
+        uit['gemeente'] = {'ok': items is not None, 'n': n, 'items': [i for i in items or [] if (i['rubriek'] or '').lower() == VG_BUURT_PLAN]}
+    return uit
+
+
 def vastgoed(v):
     """OVIS Vastgoed (wv3085): Davids eigen objecten, alleen op nummers; geen opslag hier, de aanroeper bewaart. wie = david (App)."""
     SLEUTELS.clear()
@@ -2247,6 +2323,8 @@ def vastgoed(v):
     if isinstance(sl, dict):
         SLEUTELS.update({k: sl[k] for k in SLEUTEL_ENV if isinstance(sl.get(k), str)})
     ctx = Ctx('alles', v.get('beelden') is not False, 'david')
+    if isinstance(v.get('buurt'), dict):   # wv4226: alleen de buurtwachter
+        return {'ok': True, 'versie': VERSIE, 'buurt': vastgoed_buurt(ctx, v['buurt']), 'aanroepen': ctx.log}
     objecten = [o for o in (v.get('objecten') or []) if isinstance(o, dict)][:5]
     uit = [vastgoed_object(ctx, o, v.get('beelden') is not False) for o in objecten]
     index = None
