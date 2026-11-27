@@ -392,6 +392,28 @@ test('wv4205: geen adresbundel zonder voorstel, bij een afgewezen handtekening, 
   E.r.sluit();
 });
 
+test('wv4205 review ZOU 1: zelfde adres, ander voorstel = geen gezamenlijke bundel (3 TG + 1 GH: alleen de drie TG samen)', async () => {
+  const E = bundelOmgeving();
+  await metVoorstelTG(E, (o) => onbMail(E, o));
+  const ids = [1, 2, 3, 4].map((i) => onbMail(E, 'Gemengd ' + i));
+  await E.r.ronde();
+  // het vierde stuk krijgt een ander voorstel (het model wijst Proefhout aan)
+  const rij = E.db.prepare('SELECT r.rowid, r.samenvatting FROM router_stuk r JOIN live_stuk l ON l.stuk_id = r.stuk_id AND l.versie = r.versie WHERE r.stuk_id = ?').get(ids[3]);
+  const sam = JSON.parse(rij.samenvatting);
+  sam.bestemmingen = (sam.bestemmingen || []).map((b) => (b.lens === 'kennis' || b.lens === 'vragen') ? Object.assign({}, b, { lens: 'kennis', doel: 'GH' }) : b);
+  if (!sam.bestemmingen.some((b) => b.doel === 'GH')) sam.bestemmingen.unshift({ lens: 'kennis', doel: 'GH', zou_auto: false, reden: 'proef' });
+  E.db.prepare('UPDATE router_stuk SET samenvatting = ? WHERE rowid = ?').run(JSON.stringify(sam), rij.rowid);
+  const st = (await E.r.appOverzicht(80)).stukken.filter((s) => ids.includes(s.stuk_id));
+  const vier = st.find((s) => s.stuk_id === ids[3]), drie = st.filter((s) => s.stuk_id !== ids[3]);
+  assert.deepEqual(vier.voorstel, { lens: 'kennis', entiteit: 'GH' });
+  assert.ok(!vier.bundel, 'stuk met ander voorstel hoort niet in de bundel');
+  assert.ok(drie.every((s) => s.bundel && s.bundel === drie[0].bundel), JSON.stringify(drie.map((s) => s.bundel)));
+  // en met maar twee TG over is er geen bundel meer
+  assert.equal((await E.r.appKeuze({ stuk_id: ids[0], keuze: 'bestemming', lens: 'kennis', entiteit: 'TG', versie: versie(E, ids[0]) }, 'app:x')).status, 200);
+  assert.ok((await E.r.appOverzicht(80)).stukken.filter((s) => ids.includes(s.stuk_id)).every((s) => !s.bundel));
+  E.r.sluit();
+});
+
 test('wv4205: een adresbundel valt uit elkaar als een stuk intussen privé blijkt; de bundelroute weigert dan (409) en kiest niets', async () => {
   const E = bundelOmgeving();
   await metVoorstelTG(E, (o) => onbMail(E, o));
