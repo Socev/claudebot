@@ -6407,7 +6407,7 @@ APP_GLIJD_ROUTES.add('POST /app/zoek-snel/treffers');   // wv3682: de treffers v
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel/overal');
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel/gekozen');
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel/uitzoeken');   // wv3821: de tik op "Zoek het uit" = David die iets doet   // wv3743: een tik op een waarde = David die iets doet   // wv3742: de andere bronnen tegelijk met de treffers = David die typt
-['laad', 'bewerk', 'nieuw', 'vergelijk', 'uitbreiden', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/uitbreiden', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
+['laad', 'bewerk', 'nieuw', 'vergelijk', 'uitbreiden', 'keten', 'incognito/laad', 'incognito/bewerk', 'incognito/nieuw', 'incognito/uitbreiden', 'incognito/wis'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/imagine/' + r); });   // wv2984: OVIS Imagine = David die werkt
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze', 'past'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv3755: past   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag', 'medisch'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
 ['controleer', 'inlees', 'intrek', 'code', 'koppel', 'rol', 'rooster', 'persoon'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt (wv3047: koppel, rol, rooster, persoon)   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
@@ -22129,6 +22129,7 @@ async function appStudio(req, res, a, s, d, route) {
 // (zelfde poort als de Studio: sessie + handtekening; een stand op proef vraagt per keer een verse vingerafdruk):
 //   GET  /app/imagine, /app/imagine/bron/<id>, /app/imagine/v/<id>/(toon|deel/<n>)
 //   POST /app/imagine/(laad|bewerk|nieuw|vergelijk), /stop/<taak>, /bron/<id>/(fav|titel|weg), /v/<id>/(weg|immich|snij), /vergelijk/<groep>/kies (wv3021)
+//   wv4104: POST /app/imagine/keten (Oude foto tot leven: versie, stappen, model, beweging, beurt_id); /laad met hergebruik: true (MemoryLane)
 //   GET  /app/imagine/incognito, /app/imagine/incognito/b/<id>/(toon|deel/<n>)
 //   POST /app/imagine/incognito/(laad|bewerk|nieuw|wis), /incognito/stop/<taak>, /incognito/b/<id>/(weg|export)
 //   wv3044: GET /app/imagine/(incognito/)uitbreiden/<id>, POST /app/imagine/(incognito/)uitbreiden en …/uitbreiden/<id>/weg (opdracht uitbreiden;

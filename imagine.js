@@ -63,6 +63,17 @@
 //   meteen de beeldflow met de Engelse tekst; geen tweede tik en de app hoeft niet open te blijven. De vingerafdruk (flow op proef) wordt bij de
 //   tik verbruikt en geldt voor de tweede stap. De Engelse tekst wordt de opdracht van de versie (zichtbaar bij het beeld, "Pas aan en maak
 //   opnieuw"), de titel blijft Davids eigen tekst. Opnieuw en vanzelf opnieuw schrijven opnieuw uit (instel.uitschrijven). Alleen gewone stand.
+//
+// OUDE FOTO TOT LEVEN (wv4104, besluitenpagina nr 175 = 2C75, David Ja 25-11-2026 21:41): één tik zet een KETEN in gang: krassen weg →
+//   inkleuren → opknappen → laten bewegen (vaste volgorde, elke stap aan of uit). Elke stap is een gewone taak met een gewone versie (voorganger =
+//   het resultaat van de stap ervoor), dus elke tussenstap blijft staan en Opnieuw werkt zoals altijd. Zodra een stap klaar is, start de pod de
+//   volgende op dat resultaat (ketenVerder, vanuit afrond); de filmstap gaat in de stapel (start zodra de server stil is, seintje als hij klaar is,
+//   na "server te vol" één keer vanzelf opnieuw). Valt een stap uit, dan stopt de keten daar: alles ervoor blijft, Opnieuw op die stap gaat verder
+//   met de rest. Eén vingerafdruk bij de tik geldt voor de stappen van die keten (alleen in dit proces, hooguit KETEN_T.vers_ms; na een herstart
+//   vraagt de volgende stap op proef weer om Opnieuw met vingerafdruk). Stop op een stap = de keten stopt. Een stap die niet kon starten wordt een
+//   mislukte taak met Opnieuw (geen stille stilstand); een keten die tussen twee stappen bleef hangen (herstart) hervat de ronde.
+//   Vanuit MemoryLane: /laad met hergebruik: true geeft voor hetzelfde Immich-nummer het bestaande beeld terug (geen dubbel). Naar Immich alleen
+//   op Davids tik (Zet in Immich: foto's gestapeld op het origineel, filmpje los in dezelfde albums, zoals sinds wv3266).
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -151,6 +162,14 @@ const OPRUIM = { vanaf: '2026-12-03T00:00:00+01:00', start_ms: 2 * 60 * 1000, el
 const AUTO = { ms: 12 * 3600 * 1000, tussen_ms: 5 * 60 * 1000 };
 const STAPEL = { max: 5, dag_ms: 24 * 3600 * 1000 };
 const VOL_RE = /server te vol/;
+// wv4104 (2C75): de keten (zie de kop). Volgorde vast; id = stand-id (BEWEGEN_STAND = de filmstap). tijd = gemeten richtwaarde voor alle vier.
+const KETEN = [
+  { id: 'krassen', naam: 'Krassen en vlekken weg' },
+  { id: 'inkleuren', naam: 'Inkleuren' },
+  { id: 'opknappen', naam: 'Opknappen en vergroten' },
+  { id: BEWEGEN_STAND, naam: 'Laat bewegen' },
+];
+const KETEN_T = { vers_ms: 3 * 3600 * 1000, hervat_ms: 60 * 1000, tijd: '± 10–12 min', lijst: 3 };
 const NAAM_BEELD = /^[a-f0-9]{16}\.(jpg|png|webp|mp4)$/, NAAM_TOON = /^[a-f0-9]{16}\.jpg$/, NAAM_REST = /^[a-f0-9]{16}\.(jpg|png|webp|mp4)\.nieuw\.\d{1,10}$/;
 function bewegenModel(m) { if (m === undefined || m === null || m === '') return BEWEGEN.find(function (x) { return x.model === BEWEGEN_VOORKEUR; }) || BEWEGEN[0]; return BEWEGEN.find(function (x) { return x.model === m; }) || null; }
 function schoon(t, max) { return String(t == null ? '' : t).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max); }
@@ -193,11 +212,14 @@ function maak(deps) {
     // wv4092: Opnieuw (instel = wat nodig is om de taak opnieuw te starten; weg zodra hij klaar is), poging (0 = eerste), opnieuw (id van de
     // herhaling), auto (ISO: tot wanneer de pod het zelf opnieuw mag proberen), stapel (groep van de filmstapel)
     // wv4096: reeks (groep van "Maak er 4": het eerste resultaat wordt de bron, de rest versies daarvan)
-    [['instel', 'TEXT'], ['poging', 'INTEGER NOT NULL DEFAULT 0'], ['opnieuw', 'TEXT'], ['auto', 'TEXT'], ['stapel', 'TEXT'], ['reeks', 'TEXT']].forEach(function (c) { if (kt.indexOf(c[0]) < 0) db.exec('ALTER TABLE taak ADD COLUMN ' + c[0] + ' ' + c[1]); });
+    // wv4104: keten (id van de keten) en keten_stap (index in keten.stappen)
+    [['instel', 'TEXT'], ['poging', 'INTEGER NOT NULL DEFAULT 0'], ['opnieuw', 'TEXT'], ['auto', 'TEXT'], ['stapel', 'TEXT'], ['reeks', 'TEXT'], ['keten', 'TEXT'], ['keten_stap', 'INTEGER']].forEach(function (c) { if (kt.indexOf(c[0]) < 0) db.exec('ALTER TABLE taak ADD COLUMN ' + c[0] + ' ' + c[1]); });
     // wv4096: bij een beeld uit tekst de instellingen (model + velden) voor "Nog een" vanuit Bewerken
     if (kol('bron').indexOf('tekst_instel') < 0) db.exec('ALTER TABLE bron ADD COLUMN tekst_instel TEXT');
     db.exec('CREATE TABLE IF NOT EXISTS seintje (groep TEXT PRIMARY KEY, klaar INTEGER NOT NULL, mislukt INTEGER NOT NULL, op TEXT NOT NULL, gezien TEXT)');
     db.exec('CREATE TABLE IF NOT EXISTS recept (id TEXT PRIMARY KEY, naam TEXT NOT NULL, soort TEXT NOT NULL, stand TEXT, opdracht TEXT NOT NULL, gemaakt TEXT NOT NULL)');   // wv4099
+    // wv4104: keten (stappen = JSON-lijst van stand-ids in volgorde; start = de versie waarop stap 1 begon; beurt = de tik, tegen dubbel)
+    db.exec('CREATE TABLE IF NOT EXISTS keten (id TEXT PRIMARY KEY, bron TEXT NOT NULL, start TEXT NOT NULL, stappen TEXT NOT NULL, model TEXT, beweging TEXT, beurt TEXT, gemaakt TEXT NOT NULL, gestopt TEXT, eind TEXT)');
     // na een herstart loopt er niets meer (de motor hield de taak in het geheugen). wv4092: een eerste poging die Opnieuw kan, probeert de pod
     // zelf nog één keer zodra de server vrij is (auto = 12 uur lang); een stapelrij (status 'stapel') blijft gewoon in de stapel.
     const nu0 = iso(), tot0 = iso(klok() + AUTO.ms);
@@ -358,7 +380,8 @@ function maak(deps) {
       vergelijk: t.vergelijk || null,
       // wv4092: Opnieuw, vanzelf opnieuw, stapel
       kan_opnieuw: !!opnieuwInstel(t), auto: !!(t.auto && t.auto > iso() && !t.opnieuw && (t.status === 'mislukt' || t.status === 'onderbroken')), opnieuw: t.opnieuw || null,
-      stapel: t.stapel || null, noot: notaVan(t) };
+      stapel: t.stapel || null, noot: notaVan(t),
+      keten: t.keten || null, keten_stap: t.keten ? Number(t.keten_stap) || 0 : null };   // wv4104
   }
   function bronMet(id) {
     const d = open();
@@ -366,7 +389,8 @@ function maak(deps) {
     if (!b) return null;
     return { bron: { id: b.id, titel: b.titel, herkomst: b.herkomst, gemaakt: b.gemaakt, fav: !!b.fav, immich_bron: !!b.immich },
       versies: d.prepare('SELECT * FROM versie WHERE bron = ? ORDER BY nr').all(id).map(versieUit),
-      taken: d.prepare('SELECT * FROM taak WHERE bron = ? ORDER BY gemaakt DESC LIMIT 10').all(id).map(taakUit) };
+      taken: d.prepare('SELECT * FROM taak WHERE bron = ? ORDER BY gemaakt DESC LIMIT 10').all(id).map(taakUit),
+      ketens: d.prepare('SELECT * FROM keten WHERE bron = ? ORDER BY gemaakt DESC LIMIT ?').all(id, KETEN_T.lijst).map(ketenUit) };   // wv4104
   }
   function versie(id) { return HEX16.test(String(id)) ? open().prepare('SELECT * FROM versie WHERE id = ?').get(id) || null : null; }
   // nieuwe bron + versie 1 (origineel of export uit incognito)
@@ -390,6 +414,8 @@ function maak(deps) {
     let bytes, noot = null, immich = null;
     if (d && typeof d.immich === 'string') {
       if (!UUID_RE.test(d.immich)) return { status: 400, fout: 'onbekende foto in Immich' };
+      // wv4104: vanuit MemoryLane — dezelfde foto nog eens openen = het beeld dat er al is (met al zijn versies), geen tweede kopie
+      if (d.hergebruik === true) { const al = open().prepare("SELECT b.id, (SELECT id FROM versie WHERE bron = b.id AND nr = 1) AS v1 FROM bron b WHERE b.immich = ? ORDER BY b.gemaakt DESC LIMIT 1").get(d.immich); if (al && al.v1) { log('imagine laad bron=' + al.id + ' herkomst=immich al=1'); return { status: 200, bron: al.id, versie: al.v1, al: true }; } }
       const h = await S.immichHaal(d.immich);
       if (h.fout) return { status: h.status || 503, fout: h.fout };
       bytes = h.bytes; noot = h.noot || null; immich = d.immich;
@@ -438,7 +464,7 @@ function maak(deps) {
     // wv4092: instel = dezelfde aanvraag voor Opnieuw (masker en voorbeelden erbij; weg zodra de taak klaar is)
     const instel = JSON.stringify({ soort: 'bewerk', versie: v.id, stand: s.id, velden: zonderPod(d.velden), masker: typeof d.masker === 'string' && d.masker ? d.masker : null,
       refs: Array.isArray(d.refs) ? d.refs.map(String) : [] });
-    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, vergelijk, instel, poging) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, s.id, 'wacht', iso(), groep || null, instel, pogingVan(ex));
+    open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, vergelijk, instel, poging, keten, keten_stap) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, s.id, 'wacht', iso(), groep || null, instel, pogingVan(ex), kId(ex), kStap(ex));
     let vb;
     try { vb = await voorbereid(s, bytes, d, rf.bufs); }   // wv3021: masker en voorbeelden
     catch (e) { vb = { status: 500, fout: 'het beeld kon niet klaargezet worden' }; }
@@ -608,7 +634,7 @@ function maak(deps) {
       if (db.prepare("SELECT COUNT(*) AS n FROM taak WHERE status = 'stapel'").get().n >= STAPEL.max) return { status: 429, fout: 'de stapel is vol (hooguit ' + STAPEL.max + ' filmpjes); wacht tot er een klaar is' };
       const lopend = db.prepare("SELECT stapel FROM taak WHERE stapel IS NOT NULL AND status IN ('stapel','wacht','bezig') ORDER BY gemaakt LIMIT 1").get();
       const sid = hex16(), groep = lopend ? lopend.stapel : hex16();
-      db.prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, instel, poging, stapel) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?)').run(sid, v.bron, v.id, BEWEGEN_STAND, 'stapel', iso(), instel, groep);
+      db.prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, instel, poging, stapel, keten, keten_stap) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(sid, v.bron, v.id, BEWEGEN_STAND, 'stapel', iso(), instel, pogingVan(ex), groep, kId(ex), kStap(ex));
       log('imagine stapel taak=' + sid + ' model=' + bm.model + (eigen ? ' eigen=1' : ''));
       setImmediate(function () { ronde().catch(function () {}); });
       return { status: 200, taak: taakUit(db.prepare('SELECT * FROM taak WHERE id = ?').get(sid)), stapel: true };
@@ -620,7 +646,7 @@ function maak(deps) {
     const id = ex.rij || hex16();
     // wv4092: een stapelrij wordt zelf de taak (status stapel → wacht); anders een nieuwe rij
     if (ex.rij) { if (!open().prepare("UPDATE taak SET status = 'wacht', instel = ? WHERE id = ? AND status = 'stapel'").run(instel, id).changes) return { status: 409, fout: 'deze stapelrij loopt al of is weg' }; }
-    else open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, instel, poging) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, BEWEGEN_STAND, 'wacht', iso(), instel, pogingVan(ex));
+    else open().prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, instel, poging, keten, keten_stap) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, v.bron, v.id, BEWEGEN_STAND, 'wacht', iso(), instel, pogingVan(ex), kId(ex), kStap(ex));
     const terug = function () { if (ex.rij) open().prepare("UPDATE taak SET status = 'stapel' WHERE id = ? AND status = 'wacht'").run(id); else open().prepare('DELETE FROM taak WHERE id = ?').run(id); };
     let m;
     try { m = await S.beeldPijp(['pijp-maat', String(bm.kort_zijde), String(bm.lang_max), String(bm.veelvoud)], bytes); }
@@ -861,7 +887,7 @@ function maak(deps) {
       if (d.prepare("SELECT 1 FROM taak WHERE bron = ? AND status IN ('wacht','bezig','stapel')").get(id)) return { status: 409, fout: 'er loopt nog een bewerking op dit beeld (of het staat in de stapel)' };
       const vs = d.prepare('SELECT id FROM versie WHERE bron = ?').all(id);
       d.exec('BEGIN');
-      try { d.prepare('DELETE FROM versie WHERE bron = ?').run(id); d.prepare('DELETE FROM taak WHERE bron = ?').run(id); d.prepare('DELETE FROM bron WHERE id = ?').run(id); d.exec('COMMIT'); }
+      try { d.prepare('DELETE FROM versie WHERE bron = ?').run(id); d.prepare('DELETE FROM taak WHERE bron = ?').run(id); d.prepare('DELETE FROM keten WHERE bron = ?').run(id); d.prepare('DELETE FROM bron WHERE id = ?').run(id); d.exec('COMMIT'); }
       catch (e) { d.exec('ROLLBACK'); return { status: 500, fout: 'weggooien lukte niet' }; }
       try { fs.rmSync(path.join(BEELDEN, id), { recursive: true, force: true }); vs.forEach(function (x) { fs.rmSync(toonPad(x.id), { force: true }); }); } catch (e) { fout('imagine', new Error('bestanden weghalen mislukt')); }
       log('imagine weg bron=' + id + ' versies=' + vs.length);
@@ -1090,8 +1116,139 @@ function maak(deps) {
     return eigen || null;
   }
 
+  // ── wv4104 (2C75): Oude foto tot leven — keten (zie de kop) ──
+  const ketenVers = new Map();   // keten-id → tijdstip van de vingerafdruk bij de tik (alleen in dit proces)
+  function ctxKeten(id) {
+    return { versOk: function () { const t = ketenVers.get(id); return !!t && klok() - t < KETEN_T.vers_ms; }, versVerbruik: function () {} };
+  }
+  function ketenStappen(k) { try { const l = JSON.parse(k.stappen); return Array.isArray(l) ? l : []; } catch (e) { return []; } }
+  function ketenStapNaam(id) { const k = KETEN.find(function (x) { return x.id === id; }); return k ? k.naam : id; }
+  // De stand van een keten volgt uit zijn taken: klaar (eind), gestopt, bezig (een stap loopt, staat in de stapel, of de volgende komt eraan) of mislukt.
+  function ketenUit(k) {
+    const db = open(), stappen = ketenStappen(k);
+    const ts = db.prepare('SELECT * FROM taak WHERE keten = ? ORDER BY keten_stap DESC, gemaakt DESC, rowid DESC').all(k.id);
+    const t = ts[0] || null;
+    const versies = stappen.map(function (x, i) { const k2 = ts.find(function (y) { return Number(y.keten_stap) === i && y.status === 'klaar' && y.versie; }); return k2 ? k2.versie : null; });
+    let status = 'bezig', reden = null;
+    if (k.eind) status = 'klaar';
+    else if (k.gestopt) status = 'gestopt';
+    else if (!t) status = 'mislukt';
+    else if (['wacht', 'bezig', 'stapel'].indexOf(t.status) >= 0) status = 'bezig';
+    else if (t.status === 'klaar') status = 'bezig';   // tussen twee stappen (de volgende start zo)
+    else { status = 'mislukt'; reden = t.reden || null; }
+    return { id: k.id, bron: k.bron, start: k.start, stappen: stappen.map(function (x) { return { id: x, naam: ketenStapNaam(x) }; }), stap: t ? Number(t.keten_stap) || 0 : 0,
+      status: status, reden: reden, taak: t ? t.id : null, kan_opnieuw: status === 'mislukt' && !!t && !!opnieuwInstel(t), versies: versies, gemaakt: k.gemaakt, eind: k.eind || null };
+  }
+  function ketenStop(id) {
+    ketenVers.delete(id);
+    open().prepare('UPDATE keten SET gestopt = ? WHERE id = ? AND gestopt IS NULL AND eind IS NULL').run(iso(), id);
+  }
+  async function ketenStart(d, ctx, apparaat) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    if (schijf().vol) return { status: 507, fout: 'de bibliotheek van Imagine is vol (5 GB); gooi eerst iets weg' };
+    const beurt = String(d && d.beurt_id || '');
+    if (!/^[A-Za-z0-9-]{8,60}$/.test(beurt)) return { status: 400, fout: 'beurt_id ontbreekt' };
+    const db = open();
+    const al = db.prepare('SELECT * FROM keten WHERE beurt = ?').get(beurt);
+    if (al) return { status: 200, al: true, keten: ketenUit(al) };
+    // zoals bij vergelijken (review Codex wv3021 MOET 1): de vingerafdruk meteen, vóór elke await, verbruiken; hij geldt voor de hele keten
+    const vers = !!ctx.versOk();
+    if (vers) ctx.versVerbruik();
+    const v = versie(d && d.versie);
+    if (!v) return { status: 404, fout: 'dit beeld bestaat niet (meer)' };
+    if (v.ext === 'mp4') return { status: 409, fout: 'dit is al een filmpje; kies een foto' };
+    if (v.vergelijk) return { status: 409, fout: 'kies eerst welke versie je uit de vergelijking bewaart' };
+    const gekozen = d && Array.isArray(d.stappen) ? d.stappen.map(String) : [];
+    if (!gekozen.length || gekozen.some(function (x) { return !KETEN.some(function (k) { return k.id === x; }); }) || new Set(gekozen).size !== gekozen.length) return { status: 400, fout: 'kies minstens één stap' };
+    const stappen = KETEN.filter(function (k) { return gekozen.indexOf(k.id) >= 0; }).map(function (k) { return k.id; });   // altijd de vaste volgorde
+    const bm = stappen.indexOf(BEWEGEN_STAND) >= 0 ? bewegenModel(d.model) : null;
+    if (stappen.indexOf(BEWEGEN_STAND) >= 0 && !bm) return { status: 400, fout: 'onbekende keuze; kies Trouw aan gezichten of Snel' };
+    if (db.prepare("SELECT 1 FROM taak WHERE bron = ? AND keten IS NOT NULL AND status IN ('wacht','bezig','stapel')").get(v.bron)) return { status: 409, fout: 'op dit beeld loopt al een keten; wacht tot die klaar is' };
+    // elke stap moet nu kunnen (anders weet David het meteen, niet na tien minuten)
+    let proef = false;
+    for (const x of stappen) {
+      const flow = x === BEWEGEN_STAND ? bm.flow : stand(x).flow;
+      let f = null;
+      try { f = await S.flowVan(flow); } catch (e) { f = null; }
+      if (!f || !f.klaar) return { status: 409, fout: ketenStapNaam(x) + ' kan nu niet' + (f && f.reden ? ': ' + f.reden : '') };
+      if (f.vers_per_keer) proef = true;
+    }
+    if (proef && !vers) return { status: 403, fout: 'bevestig met je vingerafdruk (één keer voor alle stappen)', vers_nodig: true };
+    const h = S.health();
+    if (h && h.taken_vandaag + stappen.length > GRENS.dag) return { status: 429, fout: 'deze keten telt als ' + stappen.length + ' bewerkingen en dan kom je over de ' + GRENS.dag + ' van vandaag' };
+    if (db.prepare('SELECT 1 FROM keten WHERE beurt = ?').get(beurt)) return { status: 200, al: true, keten: ketenUit(db.prepare('SELECT * FROM keten WHERE beurt = ?').get(beurt)) };   // na de awaits opnieuw
+    const id = hex16();
+    db.prepare('INSERT INTO keten (id, bron, start, stappen, model, beweging, beurt, gemaakt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, v.bron, v.id, JSON.stringify(stappen), bm ? bm.model : null, bm ? schoon(d.beweging, GRENS.opdracht_max) || null : null, beurt, iso());
+    if (vers) ketenVers.set(id, klok());
+    const k = db.prepare('SELECT * FROM keten WHERE id = ?').get(id);
+    let r;
+    try { r = await ketenStap(k, 0, v.id, apparaat); } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
+    if (r.status !== 200) { db.prepare('DELETE FROM keten WHERE id = ?').run(id); ketenVers.delete(id); return r; }   // de eerste stap liep niet: geen keten
+    log('imagine keten start keten=' + id + ' stappen=' + stappen.join(','));
+    return { status: 200, keten: ketenUit(k), taak: r.taak || null };
+  }
+  // Stap i van keten k op versie versieId: een gewone taak (filmstap = in de stapel), met keten + keten_stap.
+  async function ketenStap(k, i, versieId, apparaat) {
+    const x = ketenStappen(k)[i];
+    const ex = { keten: { id: k.id, stap: i } }, beurt = 'keten-' + k.id + '-' + i;
+    if (x === BEWEGEN_STAND) return bewegen({ versie: versieId, model: k.model || '', beweging: k.beweging || '', beurt_id: beurt, stapel: true }, ctxKeten(k.id), apparaat, ex);
+    if (!stand(x)) return { status: 400, fout: 'onbekende stap' };
+    return bewerk({ versie: versieId, stand: x, velden: {}, beurt_id: beurt }, ctxKeten(k.id), apparaat, null, ex);
+  }
+  // Na elke afronding (afrond): was dit een geslaagde ketenstap, dan de volgende op het resultaat; na de laatste is de keten klaar.
+  const ketenBezig = new Set();
+  async function ketenVerder(taakId) {
+    const db = open();
+    const t = db.prepare('SELECT * FROM taak WHERE id = ?').get(taakId);
+    if (!t || !t.keten) return;
+    const k = db.prepare('SELECT * FROM keten WHERE id = ?').get(t.keten);
+    if (!k || k.gestopt || k.eind) return;
+    if (t.status !== 'klaar' || !t.versie) return;   // uitgevallen: de keten staat stil op deze stap (Opnieuw gaat verder)
+    const stappen = ketenStappen(k), i = (Number(t.keten_stap) || 0) + 1;
+    if (i >= stappen.length) {
+      if (db.prepare('UPDATE keten SET eind = ? WHERE id = ? AND eind IS NULL').run(iso(), k.id).changes) log('imagine keten klaar keten=' + k.id + ' stappen=' + stappen.length);
+      ketenVers.delete(k.id);
+      return;
+    }
+    if (ketenBezig.has(k.id) || db.prepare('SELECT 1 FROM taak WHERE keten = ? AND keten_stap >= ?').get(k.id, i)) return;   // al gestart
+    ketenBezig.add(k.id);
+    let r;
+    try { r = await ketenStap(k, i, t.versie, ''); } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
+    finally { ketenBezig.delete(k.id); }
+    if (r.status === 200) { log('imagine keten stap keten=' + k.id + ' stap=' + (i + 1) + '/' + stappen.length); return; }
+    ketenFout(k, i, t.versie, r);
+  }
+  // De volgende stap kwam niet op gang: een mislukte taak met Opnieuw (dezelfde instellingen, in de keten), nooit een stille stilstand.
+  // Rij vol of server bezig = de pod probeert het zelf nog (auto, zoals na een herstart); een vingerafdruk die verlopen is = Opnieuw met vingerafdruk.
+  function ketenFout(k, i, versieId, r) {
+    const x = ketenStappen(k)[i];
+    const instel = x === BEWEGEN_STAND ? JSON.stringify({ soort: 'bewegen', versie: versieId, model: k.model || '', beweging: k.beweging || '' })
+      : JSON.stringify({ soort: 'bewerk', versie: versieId, stand: x, velden: {}, masker: null, refs: [] });
+    const reden = r.status === 403 ? 'deze stap vraagt een vingerafdruk: tik op Opnieuw' : 'kon niet starten: ' + schoon(r.fout || 'onbekend', 160);
+    const auto = [409, 429, 503].indexOf(r.status) >= 0 ? iso(klok() + AUTO.ms) : null;
+    open().prepare("INSERT INTO taak (id, studio, bron, voorganger, stand, status, reden, gemaakt, eind, instel, poging, auto, keten, keten_stap) VALUES (?, NULL, ?, ?, ?, 'mislukt', ?, ?, ?, ?, 0, ?, ?, ?)")
+      .run(hex16(), k.bron, versieId, x, reden, iso(), iso(), instel, auto, k.id, i);
+    log('imagine keten stap niet gestart keten=' + k.id + ' stap=' + (i + 1) + ' status=' + r.status);
+  }
+  // Ronde: een keten waarvan de laatste taak klaar is maar die nog niet af is en geen volgende stap heeft (herstart tussen twee stappen).
+  async function ketenHervat() {
+    const db = open(), grens = iso(klok() - KETEN_T.hervat_ms);
+    const ks = db.prepare('SELECT * FROM keten WHERE eind IS NULL AND gestopt IS NULL ORDER BY gemaakt').all();
+    for (const k of ks) {
+      const t = db.prepare('SELECT * FROM taak WHERE keten = ? ORDER BY keten_stap DESC, gemaakt DESC, rowid DESC LIMIT 1').get(k.id);
+      if (!t || t.status !== 'klaar' || !t.eind || t.eind > grens || afronden.has(t.id) || ketenBezig.has(k.id)) continue;
+      log('imagine keten hervat keten=' + k.id);
+      await ketenVerder(t.id);
+      return true;
+    }
+    return false;
+  }
+
   // ── wv4092: afronden, Opnieuw, vanzelf opnieuw, stapel, seintje, opruimronde (zie de kop bij OPRUIM) ──
   function pogingVan(ex) { return ex && Number.isInteger(ex.poging) && ex.poging > 0 ? ex.poging : 0; }
+  function kId(ex) { return ex && ex.keten && HEX16.test(String(ex.keten.id)) ? ex.keten.id : null; }   // wv4104
+  function kStap(ex) { return kId(ex) && Number.isInteger(ex.keten.stap) ? ex.keten.stap : null; }
   // Eindstand van een taak; klaar = de instellingen zijn niet meer nodig (geen masker of opdracht langer bewaren dan nodig)
   function taakAf(taakId, status, reden, versieId) {
     open().prepare('UPDATE taak SET status = ?, reden = ?, eind = ?, versie = ?, instel = CASE WHEN ? = \'klaar\' THEN NULL ELSE instel END WHERE id = ?')
@@ -1109,6 +1266,7 @@ function maak(deps) {
     } finally {
       afronden.delete(taakId);
       try { stapelAf(taakId); } catch (e) {}
+      setImmediate(function () { ketenVerder(taakId).catch(function () { fout('imagine', new Error('keten: volgende stap mislukt')); }); });   // wv4104
     }
   }
   // Wat Opnieuw start; oude rijen (van vóór wv4092) zonder instel: film = de foto met de standaardkeuze, vaste stand zonder opdracht = lege velden
@@ -1128,7 +1286,7 @@ function maak(deps) {
   async function opnieuwStart(t, ctx, apparaat, beurt) {
     const x = opnieuwInstel(t);
     if (!x) return { status: 409, fout: 'deze taak kan niet opnieuw' };
-    const ex = { poging: (Number(t.poging) || 0) + 1 };
+    const ex = { poging: (Number(t.poging) || 0) + 1, keten: t.keten ? { id: t.keten, stap: Number(t.keten_stap) || 0 } : null };   // wv4104: Opnieuw blijft in de keten
     let r;
     if (x.soort === 'bewegen') r = await bewegen({ versie: x.versie, model: x.model || '', beweging: x.beweging || '', beurt_id: beurt }, ctx, apparaat, ex);
     else if (x.soort === 'nieuw') r = await nieuw({ model: x.model, velden: x.velden || {}, beurt_id: beurt, bij: x.bij || undefined, uitschrijven: x.uitschrijven === true }, ctx, apparaat, Object.assign(ex, { titel: x.titel || null, reeks: x.reeks || null }));
@@ -1147,7 +1305,13 @@ function maak(deps) {
     const t = open().prepare('SELECT * FROM taak WHERE id = ?').get(id);
     if (!t) return { status: 404, fout: 'deze taak bestaat niet (meer)' };
     if (t.opnieuw) { const n = open().prepare('SELECT * FROM taak WHERE id = ?').get(t.opnieuw); return { status: 200, al: true, taak: n ? taakUit(n) : null }; }
-    return opnieuwStart(t, ctx, apparaat, beurt);
+    if (!t.keten) return opnieuwStart(t, ctx, apparaat, beurt);
+    // wv4104: Opnieuw op een ketenstap = Davids tik voor de rest van de keten (zelfde regel als bij de start: één vingerafdruk, meteen verbruikt)
+    const vers = !!ctx.versOk();
+    if (vers) ctx.versVerbruik();
+    const r = await opnieuwStart(t, { versOk: function () { return vers; }, versVerbruik: function () {} }, apparaat, beurt);
+    if (r.status === 200 && !r.al) { open().prepare('UPDATE keten SET gestopt = NULL WHERE id = ? AND eind IS NULL').run(t.keten); if (vers) ketenVers.set(t.keten, klok()); }
+    return r;
   }
   // Context voor wat de pod zelf start: geen vingerafdruk (een flow op proef geeft dan 403; dan blijft het bij de knop Opnieuw)
   const ctxZelf = { versOk: function () { return false; }, versVerbruik: function () {} };
@@ -1169,11 +1333,13 @@ function maak(deps) {
         .find(function (t) { return !(klok() - (autoGeprobeerd.get(t.id) || 0) < AUTO.tussen_ms); });
       if (a) {
         autoGeprobeerd.set(a.id, klok());
-        const r = await opnieuwStart(a, ctxZelf, '', 'auto-' + a.id);
+        const r = await opnieuwStart(a, a.keten ? ctxKeten(a.keten) : ctxZelf, '', 'auto-' + a.id);   // wv4104: binnen de keten geldt de vingerafdruk van de tik
         if (r.status !== 200 && [409, 429, 503, 500].indexOf(r.status) < 0) db.prepare('UPDATE taak SET auto = NULL WHERE id = ?').run(a.id);
         log('imagine auto taak=' + a.id + ' status=' + r.status);
         return;
       }
+      // wv4104: een keten die tussen twee stappen bleef staan (herstart, of de volgende stap kwam niet op gang) gaat verder
+      if (await ketenHervat()) return;
       // 2. de stapel: de oudste rij, als er geen filmpje loopt
       const st = db.prepare("SELECT * FROM taak WHERE status = 'stapel' ORDER BY gemaakt LIMIT 1").get();
       if (st) {
@@ -1190,7 +1356,7 @@ function maak(deps) {
         autoGeprobeerd.set(st.id, klok());
         starten.add(st.id);
         let r;
-        try { r = x ? await bewegen({ versie: x.versie, model: x.model || '', beweging: x.beweging || '', beurt_id: 'stapel-' + st.id }, ctxZelf, '', { rij: st.id }) : { status: 400, fout: 'de stapelrij is onleesbaar' }; }
+        try { r = x ? await bewegen({ versie: x.versie, model: x.model || '', beweging: x.beweging || '', beurt_id: 'stapel-' + st.id }, st.keten ? ctxKeten(st.keten) : ctxZelf, '', { rij: st.id }) : { status: 400, fout: 'de stapelrij is onleesbaar' }; }
         catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
         finally { starten.delete(st.id); }
         if (r.status !== 200) {
@@ -1556,7 +1722,8 @@ function maak(deps) {
     let m;
     if (!post && p === '/app/imagine') {
       const l = lijst();
-      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, seintjes: seintjes(), standen: await standen(), bewegen: await bewegenStand(), recepten: recepten(), tekst: (await standen([TEKST]))[0], teksten: await standen(TEKSTEN), tekst_standaard: TEKST.model, uitbreiden: await uitbStand(), schijf: schijf(), immich: !!im(),   // wv3021: fase 2 = vergelijk en bijsnijden
+      return { status: 200, reden: 'imagine', body: { ok: true, fase: 2, bronnen: l.bronnen, taken: l.taken, seintjes: seintjes(), standen: await standen(), bewegen: await bewegenStand(), recepten: recepten(), tekst: (await standen([TEKST]))[0], teksten: await standen(TEKSTEN), tekst_standaard: TEKST.model, uitbreiden: await uitbStand(), schijf: schijf(), immich: !!im(),
+        keten: { stappen: KETEN.map(function (k) { return { id: k.id, naam: k.naam }; }), tijd: KETEN_T.tijd },   // wv4104   // wv3021: fase 2 = vergelijk en bijsnijden
         incognito: { nog_te_wissen: S.incognito().nog_te_wissen } } };
     }
     if (!post && (m = /^\/app\/imagine\/bron\/([a-f0-9]{16})$/.exec(p))) { const b = bronMet(m[1]); return b ? { status: 200, body: Object.assign({ ok: true }, b) } : { status: 404, body: { ok: false, fout: 'dit beeld bestaat niet (meer)' } }; }
@@ -1568,6 +1735,7 @@ function maak(deps) {
     if (post && p === '/app/imagine/recept') return uit(receptBewaar(d), 'imagine recept');   // wv4099
     if (post && (m = /^\/app\/imagine\/recept\/([a-f0-9]{16})\/weg$/.exec(p))) return uit(receptWeg(m[1]), 'imagine recept weg');
     if (post && p === '/app/imagine/bewegen') return uit(await bewegen(d, ctx, a), 'imagine bewegen');   // wv3266 (niet in incognito)
+    if (post && p === '/app/imagine/keten') return uit(await ketenStart(d, ctx, a), 'imagine keten');   // wv4104 (niet in incognito)
     if (post && p === '/app/imagine/uitbreiden') return uit(await uitbreid(a, d, ctx, false), 'imagine uitbreiden');   // wv3044
     if (!post && (m = /^\/app\/imagine\/uitbreiden\/([a-f0-9]{16})$/.exec(p))) return uit(uitbLees(a, m[1], false), 'imagine uitbreiden lees');
     if (post && (m = /^\/app\/imagine\/uitbreiden\/([a-f0-9]{16})\/weg$/.exec(p))) return uit(uitbStop(a, m[1], false), 'imagine uitbreiden weg');
@@ -1578,6 +1746,7 @@ function maak(deps) {
     if (post && (m = /^\/app\/imagine\/seintje\/([a-f0-9]{16})\/gezien$/.exec(p))) return uit(seintjeGezien(m[1]), 'imagine seintje gezien');   // wv4092
     if (post && (m = /^\/app\/imagine\/stop\/([a-f0-9]{16})$/.exec(p))) {
       const t = open().prepare('SELECT * FROM taak WHERE id = ?').get(m[1]);
+      if (t && t.keten) ketenStop(t.keten);   // wv4104: een stap stoppen = de keten stopt (wat al klaar is blijft)
       if (t && t.status === 'stapel') return uit(stapelStop(t), 'imagine stop stapel');   // wv4092
       if (t && t.auto && !t.opnieuw) { open().prepare('UPDATE taak SET auto = NULL WHERE id = ?').run(t.id); return uit({ status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(t.id)) }, 'imagine stop auto'); }   // wv4092: niet vanzelf opnieuw
       if (!t || !t.studio) return uit({ status: 404, fout: 'deze bewerking loopt niet meer' });
@@ -1619,7 +1788,7 @@ function maak(deps) {
         stapel: d.prepare("SELECT COUNT(*) AS n FROM taak WHERE status = 'stapel'").get().n, auto: d.prepare("SELECT COUNT(*) AS n FROM taak WHERE auto > ?").get(iso()).n };
     } catch (e) { return { aan: true, fout: true }; }
   }
-  return { app: app, info: info, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB, stopTimers: function () { clearInterval(timer); clearTimeout(opruimEerst); clearInterval(opruimTimer); }, _opruim: opruim, _ronde2: ronde, _hangers: hangers, _inc: inc, _ronde: incRonde, _uitb: uitb, _uitbRonde: uitbRonde, _db: function () { return open(); } };
+  return { app: app, info: info, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB, stopTimers: function () { clearInterval(timer); clearTimeout(opruimEerst); clearInterval(opruimTimer); }, _opruim: opruim, _ronde2: ronde, _hangers: hangers, _inc: inc, _ronde: incRonde, _uitb: uitb, _uitbRonde: uitbRonde, _ronde3: ronde, _ketenVers: ketenVers, _db: function () { return open(); } };
 }
 
-module.exports = { OPRUIM: OPRUIM, maak: maak, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB };
+module.exports = { OPRUIM: OPRUIM, KETEN: KETEN, KETEN_T: KETEN_T, maak: maak, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB };
