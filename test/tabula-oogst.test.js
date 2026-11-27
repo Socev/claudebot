@@ -170,6 +170,21 @@ function nepRonde(extra) {
     assert.deepStrictEqual(B.nieuweRegels('a\nb\na\n', 'a\nb\na\na\nc'), ['a', 'c']);
   });
 
+  await toets('bladen.vandaag (wv4240): wat de pod in een overlegblad klaarzette is niet nieuw; wat David erbij typte wel', async () => {
+    const POD = Date.UTC(2026, 10, 27, 7, 0, 0), LATER = Date.UTC(2026, 10, 27, 15, 0, 0);
+    const podBundel = (ms, tekst) => 'S\t' + TICKS(ms) + '\tsocev-pod\tSocev\tsync\nI\t0\t0\ts\t' + esc(tekst) + '\n';
+    const KLAAR = '# Overleg — vr 27 nov 16:00\n## Agenda\n1. Opening\n## Open actiepunten van vorige keer\n- [ ] Iets — Proefpersoon\n## Aantekeningen\n- \n';
+    const batches = [{ id: 1, sheet: 'overleg-20261127-0123abcd', seq: 1, body: podBundel(POD, KLAAR) }, { id: 2, sheet: 'overleg-20261128-0123abcd', seq: 1, body: podBundel(POD, KLAAR) },
+      { id: 3, sheet: 'overleg-20261127-0123abcd', seq: 2, body: bundel(LATER, [['I', KLAAR.length, 'besloten: proef gaat door\n']]) },
+      { id: 4, sheet: '20261127-070000-aaaa', seq: 1, body: bundel(POD, [['I', 0, KLAAR]]) }];   // zelfde tekst door David getypt: wél nieuw
+    const fetch = async (u) => { const url = new URL(u); const since = +url.searchParams.get('since'); return { status: 200, json: async () => ({ batches: batches.filter((x) => x.id > since), more: false, flags: [] }) }; };
+    const L = B.maak({ fetch, basis: 'https://nep' });
+    const per = Object.fromEntries((await L.vandaag('code', '2026-11-27')).bladen.map((x) => [x.id, x.nieuw]));
+    assert.deepStrictEqual(Object.keys(per).sort(), ['20261127-070000-aaaa', 'overleg-20261127-0123abcd'], JSON.stringify(per));
+    assert.deepStrictEqual(per['overleg-20261127-0123abcd'], ['besloten: proef gaat door']);
+    assert.ok(per['20261127-070000-aaaa'].includes('1. Opening'));
+  });
+
   console.log('goed ' + goed + ', fout ' + fouten);
   process.exit(fouten ? 1 : 0);
 })();

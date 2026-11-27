@@ -60,6 +60,8 @@ function aangemaaktVan(id) {
 // wv4239: NL-kalenderdag (JJJJ-MM-DD) van een moment in ms
 const NL_DAG = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' });
 const nlDag = (ms) => NL_DAG.format(new Date(ms));
+// wv4240: bladen die de pod klaarzet (Worker POST /blad, alleen deze reeks)
+const OVERLEG_RE = /^overleg-\d{8}-[0-9a-f]{8}$/;
 // wv4239: regels die in 'nu' staan en niet (zo vaak) in 'toen': nieuw of gewijzigd. Lege regels tellen niet.
 function nieuweRegels(toen, nu) {
   const tel = new Map();
@@ -104,6 +106,7 @@ function maak(o) {
           // wv4239: dagbegin = de tekst vlak vóór de eerste gebeurtenis van een (latere) NL-dag; alleen in het geheugen
           const u = pasToe(blad.tekst, b.body, function (ms, t) { const d = nlDag(ms); if (!blad.dagbegin || d > blad.dagbegin.dag) blad.dagbegin = { dag: d, tekst: t }; });
           blad.tekst = u.tekst; blad.seq = b.seq; if (u.laatst && u.laatst > blad.laatst) blad.laatst = u.laatst;
+          if (b.seq === 1 && OVERLEG_RE.test(b.sheet)) blad.klaargezet = u.tekst;   // wv4240: tekst die de pod klaarzette (overlegblad) is niet door David getypt
         }
         s.bladen.set(b.sheet, blad);
         if (b.id > s.cursor) s.cursor = b.id;
@@ -208,7 +211,9 @@ function maak(o) {
     for (const id of s.bladen.keys()) {
       const b = s.bladen.get(id);
       if (!b.dagbegin || b.dagbegin.dag !== dag || !b.tekst.trim()) continue;
-      const nieuw = nieuweRegels(b.dagbegin.tekst, b.tekst);
+      // wv4240: op de dag dat de pod een overlegblad klaarzette, telt alleen wat David daarna typte (anders komen agenda en actiepunten
+      // als 'nieuw' in de dagoogst terug)
+      const nieuw = nieuweRegels(typeof b.klaargezet === 'string' && b.dagbegin.tekst === '' ? b.klaargezet : b.dagbegin.tekst, b.tekst);
       if (!nieuw.length) continue;
       const f = s.vlaggen.get(id) || { archief: false };
       uit.push({ id: id, titel: titelVan(b.tekst), gesloten: !!f.archief, tekst: b.tekst.slice(0, BLAD_MAX), nieuw: nieuw.slice(0, NIEUW_MAX).map(function (r) { return r.slice(0, 1000); }) });
