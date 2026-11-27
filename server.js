@@ -15124,7 +15124,7 @@ function appPotPrognose(rijen) {
 // ── einde heden en toekomst ──
 
 // ── Naast elkaar (wv4155, besluitenpagina nr 146 = 2C46, David Ja 25-11-2026 22:14) ──
-// Tolgaarde naast Groenhouten per 1000 ingeschreven patiënten, per jaar (de laatste drie jaren met een VIP-export), uit de aantallen van de
+// Tolgaarde naast Groenhouten per 1000 ingeschreven patiënten, per jaar (de laatste drie jaren met een VIP-export, gezocht in vier), uit de aantallen van de
 // VIP-export (fin `declaratie`, verzekeraar 'totaal', alleen de laatste export per entiteit en jaar). Noemer = gemiddeld aantal ingeschreven
 // patiënten per kwartaal uit dezelfde export (fin `patienten`, declaratie_kwartaalgemiddelde; intake.py telt 11115–11118 / kwartalen).
 // VIP geeft per jaar één stand: een jaar dat niet op 31-12 eindigt is lopend ("t/m <datum>") en krijgt geen verschil met het jaar ervoor
@@ -15152,7 +15152,7 @@ function appNaast(codeRijen, patRijen, jaarNu) {
   const codes = APP_HEDEN_CODES, n = {}, tot = {}, info = {};
   (codeRijen || []).forEach(function (x) {
     const jr = Number(x.jaar);
-    if (codes.indexOf(x.entiteit) < 0 || !appIsGetal(jr) || jr < jaarNu - 2 || jr > jaarNu || !/^\d{5}$/.test(String(x.code))) return;
+    if (codes.indexOf(x.entiteit) < 0 || !appIsGetal(jr) || jr < jaarNu - 3 || jr > jaarNu || !/^\d{5}$/.test(String(x.code))) return;
     const k = x.entiteit + ':' + jr;
     if (/^\d{4}-\d{2}-\d{2}$/.test(String(x.tot))) tot[k] = String(x.tot);
     n[k + ':' + x.code] = (n[k + ':' + x.code] || 0) + (appIsGetal(x.aantal) ? x.aantal : 0);
@@ -15164,8 +15164,10 @@ function appNaast(codeRijen, patRijen, jaarNu) {
     if (codes.indexOf(p.entiteit) < 0 || !appIsGetal(p.aantal) || String(p.peildatum).slice(4) !== '-01-01') return;
     if (p.leeftijdsgroep == null) pat[k] = p.aantal; else (lft[k] = lft[k] || {})[String(p.leeftijdsgroep)] = p.aantal;
   });
-  const jaren = [];
-  for (let jr = jaarNu - 2; jr <= jaarNu; jr++) if (codes.some(function (c) { return tot[c + ':' + jr]; })) jaren.push(jr);
+  // de laatste drie jaren MET een export (Codex ZOU 1: rond de jaarwisseling, vóór de eerste export van het nieuwe jaar, blijft het oudste jaar staan)
+  let jaren = [];
+  for (let jr = jaarNu - 3; jr <= jaarNu; jr++) if (codes.some(function (c) { return tot[c + ':' + jr]; })) jaren.push(jr);
+  jaren = jaren.slice(-3);
   if (!jaren.length) return null;
   const kolommen = [];
   jaren.forEach(function (jr) { codes.forEach(function (c) {
@@ -15248,7 +15250,7 @@ async function appPraktijkenVerzamel() {
     // wv4155: Naast elkaar — aantallen per code (laatste export per entiteit en jaar) en patiënten per leeftijdsgroep
     Promise.all([
       appFinSql("SELECT d.entiteit, d.jaar, d.periode_tot AS tot, d.code, p.omschrijving AS oms, p.categorie AS cat, d.aantal FROM declaratie d LEFT JOIN prestatie p ON p.code = d.code"
-        + " JOIN (SELECT entiteit, jaar, MAX(periode_tot) AS m FROM declaratie WHERE verzekeraar='totaal' AND entiteit IN (" + ht + ") AND jaar >= " + (appJaarNu() - 2) + " GROUP BY entiteit, jaar) x"
+        + " JOIN (SELECT entiteit, jaar, MAX(periode_tot) AS m FROM declaratie WHERE verzekeraar='totaal' AND entiteit IN (" + ht + ") AND jaar >= " + (appJaarNu() - 3) + " GROUP BY entiteit, jaar) x"
         + " ON x.entiteit = d.entiteit AND x.jaar = d.jaar AND x.m = d.periode_tot WHERE d.verzekeraar='totaal'"),
       appFinSql("SELECT entiteit, peildatum, leeftijdsgroep, aantal FROM patienten WHERE soort='declaratie_kwartaalgemiddelde' AND entiteit IN (" + ht + ")"),
     ]).catch(function (e) { logError('app-praktijken', e); return null; }),

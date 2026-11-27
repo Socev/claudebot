@@ -29,7 +29,7 @@ for (const e of ['TG', 'GH']) [0, 1, 2].forEach((i) => {
   zet(e, jr, tot, '13004', 'Longfunctiemeting (= spirometrie)', 'mi', i === 0 ? 5 : 9);   // klein: geen verschil
   zet(e, jr, tot, '11115', 'Inschrijving verzekerden tot 65 jaar', 'ion', 7000);
 });
-zet('TG', JAAR - 3, '12-31', '13005', 'ECG', 'mi', 999);   // te oud: valt buiten de drie jaren
+zet('TG', JAAR - 4, '12-31', '13005', 'ECG', 'mi', 999);   // te oud: valt buiten de vier gezochte jaren
 const PATRIJEN = [];
 for (const e of ['TG', 'GH']) [0, 1, 2].forEach((i) => {
   const jr = JAAR - 2 + i, p = PAT[e][i];
@@ -126,11 +126,25 @@ test('naast: datahub-vraag faalt → naast null met één regel, de rest van Jaa
   assert.ok(d.entiteiten.length > 0);
 });
 
-test('naast: de vraag pakt alleen de laatste export per entiteit en jaar, en alleen de laatste drie jaren', async () => {
+test('naast: de vraag pakt alleen de laatste export per entiteit en jaar, en zoekt in de laatste vier jaren', async () => {
   const c = laad();
   await c.v();
   const q = c.sqls.find((s) => /d\.code, p\.omschrijving AS oms/.test(s));
   assert.match(q, /MAX\(periode_tot\)/);
-  assert.match(q, new RegExp('jaar >= ' + (JAAR - 2)));
+  assert.match(q, new RegExp('jaar >= ' + (JAAR - 3)));
   assert.match(q, /verzekeraar='totaal'/);
+});
+
+test('naast: rond de jaarwisseling (nog geen export van dit jaar) blijven de laatste drie jaren MET export staan (Codex ZOU 1)', async () => {
+  const c = laad();
+  const vm2 = require('vm');
+  vm2.runInContext('this.n = appNaast;', c);
+  const rijen = [];
+  for (const jr of [JAAR - 3, JAAR - 2, JAAR - 1]) for (const e of ['TG', 'GH']) rijen.push({ entiteit: e, jaar: jr, tot: jr + '-12-31', code: '13005', oms: 'ECG', cat: 'mi', aantal: 40 });
+  const pat = [];
+  for (const jr of [JAAR - 3, JAAR - 2, JAAR - 1]) for (const e of ['TG', 'GH']) pat.push({ entiteit: e, peildatum: jr + '-01-01', leeftijdsgroep: null, aantal: 1000 });
+  const n = j(c.n(rijen, pat, JAAR));
+  assert.deepStrictEqual(n.jaren, [JAAR - 3, JAAR - 2, JAAR - 1]);
+  rijen.push({ entiteit: 'TG', jaar: JAAR, tot: JAAR + '-02-10', code: '13005', oms: 'ECG', cat: 'mi', aantal: 4 });
+  assert.deepStrictEqual(j(c.n(rijen, pat, JAAR)).jaren, [JAAR - 2, JAAR - 1, JAAR], 'met een export van dit jaar schuift het venster door');
 });
