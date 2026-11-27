@@ -11848,6 +11848,8 @@ function appSeintjeTab(id) {
   const tab = m ? m[1] : l.reden === 'meldingen' ? 'meldingen' : null;
   const cid = tab ? codeIdVanKanaal(tab) : null;   // wv3227: OVIS Code → plek code met de app als focus; onbekend id = geen doel
   if (tab && !cid && tab.indexOf('code-') === 0) return null;
+  const st4173 = /^studio ([a-f0-9]{16})$/.exec(String(l.reden || ''));   // wv4173 (2C84 a): seintje na een lange Studio-taak → Studio, bij dat resultaat
+  if (st4173) return { tab: 'studio', doel: { scherm: 'studio', focus: st4173[1] }, op: l.op };
   const ex = l.doel && Object.hasOwn(APP_SEINTJE_EXTRA_DOEL, String(l.doel)) ? APP_SEINTJE_EXTRA_DOEL[l.doel] : null;   // wv3680
   if (tab && ex && ex.kanaal === tab) return { tab: tab, doel: { scherm: l.doel }, op: l.op };
   return tab ? { tab: cid ? 'code' : tab, doel: cid ? { scherm: 'code', focus: cid } : { scherm: APP_SEINTJE_DOEL[tab] }, op: l.op } : null;
@@ -21697,6 +21699,9 @@ const studio = (function () {
       naKlaar: function (t) { const u = bandjes ? bandjes.naKlaar(t) : null; if (t && t.bron && t.bron.soort === 'bandje' && typeof bandjesKaartStraks === 'function') bandjesKaartStraks(); return u; },   // wv3723: kaart kort na Maak   // wv743: register bijwerken na een bandje
       // wv3272: Foto's → 3D — box-rij bij een netwerkafwijking of een 3D-app die niet stopt; het voorbeeld in Bestanden wissen met de scène
       box: function (kop, regels) { return werkerBoxRij(kop, regels); }, wisBewaard: appStudioWisBewaard,
+      // wv4173 (2C84 a): seintje na een lange Studio-taak — de gewone lege push naar de apparaten die seintjes aan hebben; reden 'studio <taak>'
+      // laat een tik in Studio bij dat resultaat landen (appSeintjeTab). Stille uren en één keer per taak regelt studio.js. Nooit Telegram.
+      seintje: function (taakId) { return /^[a-f0-9]{16}$/.test(String(taakId)) ? appPushAlle('antwoord', 'studio ' + taakId, function (id) { return appPushMag(id); }, { soort: 'antwoord' }) : null; },
       merk: path.join(IMAGINE_DIR, 'incognito-merk.json') });   // wv2984: OVIS Imagine incognito (alleen prompt-id's; herstart-opruiming)
   } catch (e) { logError('studio', e); return null; }
 })();
@@ -21776,6 +21781,13 @@ async function appStudio(req, res, a, s, d, route) {
     if (!appTeller('studio-immich', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens studio-immich');
   }
   if (route === 'GET /app/studio/immich/albums') { res._app.stil = true; const r = await studio.immichAlbums(); return stuur(r, { albums: r.albums }); }
+  // wv4173 (2C84 b/c): nieuwste foto's (eigen tijdlijn) en de 3D-hint bij een heel album; zelfde uurteller als de albums
+  if (route === 'GET /app/studio/immich/nieuwste') {   // (de geschikt-route telt al mee via het voorvoegsel album/ hierboven)
+    if (typeof studio.immichNieuwste !== 'function') return appWeiger(res, 404, 'dit zit niet in deze versie van de pod', 'studio immich ontbreekt');
+    if (!appTeller('studio-immich', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens studio-immich');
+  }
+  if (route === 'GET /app/studio/immich/nieuwste') { res._app.stil = true; const r = await studio.immichNieuwste(); return stuur(r, { fotos: r.fotos }); }
+  if ((m = new RegExp('^GET /app/studio/immich/album/' + UU + '/geschikt$').exec(route))) { res._app.stil = true; const r = await studio.immichGeschikt(m[1]); return stuur(r, { oordeel: r.oordeel, regel: r.regel, n: r.n }); }
   if ((m = new RegExp('^GET /app/studio/immich/album/' + UU + '$').exec(route))) { res._app.stil = true; const r = await studio.immichFotos(m[1]); return stuur(r, { fotos: r.fotos }); }
   m = /^POST \/app\/studio\/taak\/([a-f0-9]{16})\/immich$/.exec(route);
   if (m) { const r = await studio.zetInImmich(m[1], d || {}); if (r.status === 200) res._app.reden = 'studio immich ' + m[1] + (r.al ? ' (al)' : ''); return stuur(r, { taak: r.taak, al: r.al === true }); }
@@ -21793,6 +21805,18 @@ async function appStudio(req, res, a, s, d, route) {
     rs.on('error', function (e) { logError('studio-splat-stroom', e); try { res.destroy(); } catch (x) {} });
     res.on('close', function () { rs.destroy(); });
     return rs.pipe(res);
+  }
+  // wv4173 (2C84 d): vaste lijst "Mijn 3D-scènes" uit de scènemap (los van de taaklijst) en het voorbeeldplaatje uit die map
+  if (route === 'GET /app/studio/splat/lijst') {
+    res._app.stil = true;
+    if (typeof studio.splatLijst !== 'function') return appWeiger(res, 404, 'dit zit niet in deze versie van de pod', 'studio splat lijst ontbreekt');
+    const r = studio.splatLijst(); return stuur(r, { scenes: r.scenes });
+  }
+  if ((m = /^GET \/app\/studio\/splat\/([a-f0-9]{16})\/voorbeeld$/.exec(route))) {
+    res._app.stil = true;
+    if (typeof studio.splatVoorbeeld !== 'function') return appWeiger(res, 404, 'dit zit niet in deze versie van de pod', 'studio splat voorbeeld ontbreekt');
+    if (!appTeller('studio-splat', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens studio-splat');
+    const r = studio.splatVoorbeeld(m[1]); return stuur(r, { mime: r.mime, data: r.data });
   }
   if ((m = /^GET \/app\/studio\/splat\/([a-f0-9]{16})\/kaart$/.exec(route))) { res._app.stil = true; const r = studio.splatKaart(m[1]); return stuur(r, { kaart: r.kaart }); }
   if ((m = /^POST \/app\/studio\/splat\/([a-f0-9]{16})\/verwijder$/.exec(route))) {

@@ -32,6 +32,12 @@
  *   POST /api/stacks  {assetIds: [eigen, origineel]}   stapel van precies twee: de eigen nieuwe foto bovenop + het origineel; alleen als de
  *        eigen foto in DEZE sessie door uploaden() nieuw is gemaakt (status created) en GET /api/assets van het origineel geen stack heeft
  *   PUT  /api/albums/<uuid>/assets  {ids: [eigen]}     precies één id, en alleen die eigen nieuwe foto (zelfde regel)
+ * Studio (wv4173, besluitenpagina nr 184 = 2C84; David Ja 25-11-2026 22:24): de fotokiezer krijgt bovenaan "Nieuwste foto's", zonder dat
+ * David ze eerst in een album zet. Alleen lezen, en alleen Davids eigen gewone tijdlijn (visibility=timeline: niet het archief, niet de
+ * vergrendelde map, geen foto's van partners, geen prullenbak):
+ *   GET  /api/timeline/buckets?order=desc&visibility=timeline                 maanden met foto's, nieuwste eerst (geen albumId)
+ *   GET  /api/timeline/bucket?timeBucket=<datum>&order=desc&visibility=timeline   foto-ids van die maand (geen coördinaten)
+ *   Precies deze queryvorm; elke andere sleutel of waarde (userId, personId, withPartners, isFavorite, withCoordinates …) = geweigerd.
  * Al het andere (DELETE, PUT op een foto, andere PATCH-velden, foto's verplaatsen of uit een album halen, delen, ander pad, andere query, andere
  * body) weigert verzoek() vóór er iets over de lijn gaat. Doorverwijzingen worden niet gevolgd.
  * PRIVACY. Nooit de sleutel, albumnamen of foto-inhoud in logs of fouten; alleen HTTP-status en het soort verzoek.
@@ -128,8 +134,12 @@ function weiger(methode, pad, query, body) {
     if ((m = /^\/api\/assets\/([0-9a-f-]{36})$/.exec(pad)) && u(m[1])) return sleutels.length ? 'query' : null;            // wv2614: gegevens
     if ((m = /^\/api\/assets\/([0-9a-f-]{36})\/original$/.exec(pad)) && u(m[1])) return sleutels.length ? 'query' : null;   // wv2614: origineel lezen
     if ((m = /^\/api\/albums\/([0-9a-f-]{36})$/.exec(pad)) && u(m[1])) return sleutels.length ? 'query' : null;
-    if (pad === '/api/timeline/buckets') return alleen(['albumId', 'order']) && u(q.albumId) && (q.order === undefined || q.order === 'asc' || q.order === 'desc') ? null : 'query';
-    if (pad === '/api/timeline/bucket') return alleen(['albumId', 'timeBucket', 'order', 'withCoordinates']) && u(q.albumId) && typeof q.timeBucket === 'string' && BUCKET_RE.test(q.timeBucket)
+    // wv4173: zonder albumId alleen de eigen tijdlijn, nieuwste eerst, in precies deze vorm (zie de kop)
+    const tijdlijn = q.albumId === undefined && q.order === 'desc' && q.visibility === 'timeline';
+    if (pad === '/api/timeline/buckets') return tijdlijn ? (sleutels.length === 2 ? null : 'query')
+      : alleen(['albumId', 'order']) && u(q.albumId) && (q.order === undefined || q.order === 'asc' || q.order === 'desc') ? null : 'query';
+    if (pad === '/api/timeline/bucket') return tijdlijn ? (sleutels.length === 3 && typeof q.timeBucket === 'string' && BUCKET_RE.test(q.timeBucket) ? null : 'query')
+      : alleen(['albumId', 'timeBucket', 'order', 'withCoordinates']) && u(q.albumId) && typeof q.timeBucket === 'string' && BUCKET_RE.test(q.timeBucket)
       && (q.order === undefined || q.order === 'asc' || q.order === 'desc') && (q.withCoordinates === undefined || q.withCoordinates === 'true') ? null : 'query';
     if ((m = /^\/api\/assets\/([0-9a-f-]{36})\/thumbnail$/.exec(pad)) && u(m[1])) return alleen(['size']) && (q.size === 'thumbnail' || q.size === 'preview') ? null : 'query';
     if ((m = /^\/api\/assets\/([0-9a-f-]{36})\/video\/playback$/.exec(pad)) && u(m[1])) return sleutels.length ? 'query' : null;   // wv2938: video lezen (naar bestand)
@@ -331,6 +341,53 @@ function maak(o) {
     }
     return uit;
   }
+  // wv4173 (Studio): de nieuwste foto's van Davids eigen tijdlijn (geen video's, archief, vergrendelde map of prullenbak), nieuwste eerst.
+  // → [{ id, ratio, dag }], hooguit max (≤ 60); leest hooguit drie maanden. Geen namen, plaatsen of coördinaten.
+  async function nieuwsteFotos(max) {
+    const grens = Math.max(1, Math.min(60, max || 24));
+    const bakken = await verzoek('GET', '/api/timeline/buckets', { order: 'desc', visibility: 'timeline' });
+    const uit = [];
+    let gelezen = 0;
+    for (const b of Array.isArray(bakken) ? bakken : []) {
+      if (uit.length >= grens || gelezen >= 3) break;
+      const tb = b && typeof b.timeBucket === 'string' ? b.timeBucket : null;
+      if (!tb || !BUCKET_RE.test(tb) || !(Number(b.count) > 0)) continue;
+      gelezen++;
+      const r = await verzoek('GET', '/api/timeline/bucket', { timeBucket: tb, order: 'desc', visibility: 'timeline' });
+      const ids = r && Array.isArray(r.id) ? r.id : [];
+      const kol = (k) => (r && Array.isArray(r[k]) ? r[k] : []);
+      const fc = kol('fileCreatedAt'), off = kol('localOffsetHours'), isb = kol('isImage'), tr = kol('isTrashed'), vis = kol('visibility'), rat = kol('ratio');
+      for (let i = 0; i < ids.length && uit.length < grens; i++) {
+        if (!u(ids[i]) || tr[i] === true || isb[i] === false) continue;
+        if (vis.length && vis[i] !== 'timeline') continue;   // dubbel: ook als Immich de query ooit ruimer leest
+        uit.push({ id: ids[i], ratio: Number.isFinite(rat[i]) ? Math.round(rat[i] * 1000) / 1000 : null, dag: plaatselijkeDag(fc[i], off[i]) });
+      }
+    }
+    return uit;
+  }
+  // wv4173 (Studio, hint "geschikt voor 3D?"): opnametijd en plek van de BEELDEN in een album (video's en prullenbak niet), zonder ids.
+  // → [{ ms, lat, lon }] (ms = opnamemoment in UTC; lat/lon null zonder GPS), hooguit max. Zelfde leesweg als albumSpoor (wv2468).
+  async function albumTijdPlek(id, max) {
+    if (!u(id)) throw new Error('immich: ongeldig album');
+    const grens = Math.max(1, Math.min(MAX_SPOOR, max || 1000));
+    const bakken = await verzoek('GET', '/api/timeline/buckets', { albumId: id, order: 'asc' });
+    const uit = [];
+    for (const b of Array.isArray(bakken) ? bakken : []) {
+      if (uit.length >= grens) break;
+      const tb = b && typeof b.timeBucket === 'string' ? b.timeBucket : null;
+      if (!tb || !BUCKET_RE.test(tb)) continue;
+      const r = await verzoek('GET', '/api/timeline/bucket', { albumId: id, timeBucket: tb, order: 'asc', withCoordinates: 'true' });
+      const n = r && Array.isArray(r.id) ? r.id.length : 0;
+      const kol = (k) => (r && Array.isArray(r[k]) ? r[k] : []);
+      const fc = kol('fileCreatedAt'), la = kol('latitude'), lo = kol('longitude'), tr = kol('isTrashed'), isb = kol('isImage');
+      for (let i = 0; i < n && uit.length < grens; i++) {
+        if (tr[i] === true || isb[i] === false) continue;
+        const t = typeof fc[i] === 'string' ? Date.parse(/(Z|[+-]\d{2}:\d{2})$/.test(fc[i]) ? fc[i] : fc[i] + 'Z') : NaN;
+        uit.push({ ms: Number.isFinite(t) ? t : null, lat: geldigGetal(la[i], 90), lon: geldigGetal(lo[i], 180) });
+      }
+    }
+    return uit;
+  }
   // maat 'klein' = thumbnail (± 250 px), 'groot' = preview (± 1440 px). Nooit het origineel.
   async function beeld(assetId, maat) {
     if (!u(assetId)) throw new Error('immich: ongeldige foto');
@@ -430,7 +487,7 @@ function maak(o) {
     }
     return { bytes: n, mime: ct };
   }
-  return { albums, album, maakAlbum, hernoemAlbum, albumFotos, albumSpoor, beeld, verzoek, basis, fotoInfo, origineel, albumsVan, uploaden, stapelen, inAlbum, mijnId, magStapelen, videoNaarBestand };
+  return { albums, album, maakAlbum, hernoemAlbum, albumFotos, albumSpoor, nieuwsteFotos, albumTijdPlek, beeld, verzoek, basis, fotoInfo, origineel, albumsVan, uploaden, stapelen, inAlbum, mijnId, magStapelen, videoNaarBestand };
 }
 
 // Zit er nog metadata (Exif/XMP, met mogelijk de plek of het toestel) in een beeld? Dan delen we het niet naar buiten.

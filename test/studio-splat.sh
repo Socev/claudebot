@@ -324,11 +324,34 @@ const loperTimer = setInterval(lopertik, 30);
   toets('niet geclaimd binnen de grens: mislukt, taakmap weg', t.status === 'mislukt' && /pakte de taak niet op/.test(t.reden) && !fs.readdirSync(TAKEN).some((n) => /^st-/.test(n)), t.reden);
   NL.modus = 'ok';
 
+  // 10b. wv4173 (2C84 d): vaste lijst "Mijn 3D-scènes" uit de scènemap zelf, los van de taaklijst
+  {
+    const li = S.splatLijst();
+    const rA2 = li.scenes.find((x) => x.id === tA.id);
+    toets('lijst: de albumscène staat erin (32 foto\'s, album, voorbeeld, puntjes en maten)', li.status === 200 && rA2 && rA2.fotos === 32 && rA2.bron === 'album' && rA2.voorbeeld === true
+      && rA2.puntjes.licht === 1000000 && rA2.bytes.licht > 0 && rA2.bezig === false, rA2);
+    toets('lijst: nieuwste eerst', li.scenes.every((x, i) => i === 0 || String(li.scenes[i - 1].gemaakt) >= String(x.gemaakt)), li.scenes.map((x) => x.gemaakt));
+    const vb = S.splatVoorbeeld(tA.id);
+    toets('voorbeeld uit de scènemap: jpeg, byte voor byte', vb.status === 200 && vb.mime === 'image/jpeg' && Buffer.from(vb.data, 'base64').equals(fs.readFileSync(path.join(scene, 'voorbeeld.jpg'))), vb.status);
+    // nepmappen: zonder kaart, kaart van een andere taak, koppeling naar een echte scène, geen taak-id als naam
+    const nep1 = path.join(OPSLAG, 'aaaaaaaaaaaaaaaa'), nep2 = path.join(OPSLAG, 'bbbbbbbbbbbbbbbb'), nep3 = path.join(OPSLAG, 'cccccccccccccccc'), nep4 = path.join(OPSLAG, 'david-kamer');
+    fs.mkdirSync(nep1); fs.mkdirSync(nep2); fs.mkdirSync(nep4);
+    fs.writeFileSync(path.join(nep2, 'kaart.json'), JSON.stringify({ taak: tA.id, gemaakt: '2030-01-01T00:00:00Z', fotos: 3 }));
+    fs.copyFileSync(path.join(scene, 'kaart.json'), path.join(nep4, 'kaart.json'));
+    fs.symlinkSync(scene, nep3);
+    const li2 = S.splatLijst().scenes.map((x) => x.id);
+    toets('lijst: geen map zonder geldige kaart van dezelfde taak, geen koppeling, geen vreemde naam', !li2.some((x) => ['aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb', 'cccccccccccccccc', 'david-kamer'].includes(x)), li2);
+    toets('voorbeeld en wissen weigeren een nepmap (404) en laten hem staan', S.splatVoorbeeld('cccccccccccccccc').status === 404 && S.splatWis('cccccccccccccccc').status === 404 && S.splatWis('bbbbbbbbbbbbbbbb').status === 404
+      && fs.existsSync(scene) && fs.existsSync(nep2));
+    fs.rmSync(nep1, { recursive: true }); fs.rmSync(nep2, { recursive: true }); fs.unlinkSync(nep3); fs.rmSync(nep4, { recursive: true });
+  }
+
   // 11. verwijderen
   const w1 = S.splatWis(tA.id);
   toets('verwijder: scènemap weg, voorbeeld in Bestanden gewist, audit', w1.status === 200 && !fs.existsSync(scene) && gewistBewaard.includes(tA.id)
     && /"uitkomst":"scene-gewist"/.test(fs.readFileSync(path.join(DIR, 'audit.jsonl'), 'utf8')) && S.splatKaart(tA.id).status === 404, w1);
   toets('verwijder: onbekend → 404', S.splatWis('0123456789abcdef').status === 404);
+  toets('lijst: gewiste scène is weg', !S.splatLijst().scenes.some((x) => x.id === tA.id));
 
   // 12. opruimronde: ruw.ply na 30 dagen, weesmappen
   const sc2 = path.join(OPSLAG, t.id);
@@ -355,6 +378,23 @@ const loperTimer = setInterval(lopertik, 30);
   NL.modus = 'ok'; klaar(wees4, { ok: false, status: 'gestopt' });
   S._splatRonde();
   toets('daarna bevestigd: slot open, map weg', !S.teller().splat_wacht && !fs.existsSync(wees4));
+
+  // 12b. wv4173 (2C84 d): de taak is vervallen (andere pod-instantie met een lege taaklijst = na 30 dagen of 60 nieuwere taken):
+  // de scène staat nog in de lijst, is te openen en te wissen
+  {
+    const S4 = studioMod.maak({ dir: path.join(W, 'studio4'), bewaar, primair: () => true, sleutel: async () => null, routerUrl: 'http://127.0.0.1:1', comfyUrl: CURL, flowstudioUrl: 'http://127.0.0.1:1',
+      taalmodelUrl: null, immich: () => immich, log: () => {}, fout: (w, e) => fouts.push(w + ': ' + (e && e.message)), splat: SPC, wisBewaard: (id) => { gewistBewaard.push(id); return true; },
+      tempo: { poll: 30, wachtStap: 40, wachtMax: 1500 } });
+    toets('vervallen taak: S4 kent de taak niet', S4.taak(tOk.id) === null || S4.taak(tOk.id) === undefined);
+    const l4 = S4.splatLijst().scenes.map((x) => x.id);
+    toets('vervallen taak: scène staat nog in de lijst', l4.includes(tOk.id), l4);
+    const b4 = S4.splatBestand(tOk.id, 'licht'); if (b4.fd) fs.closeSync(b4.fd);
+    toets('vervallen taak: scène te openen (licht.sog) en voorbeeld te zien', b4.status === 200 && b4.grootte > 0 && S4.splatVoorbeeld(tOk.id).status === 200, b4.status);
+    const w4 = S4.splatWis(tOk.id);
+    toets('vervallen taak: te wissen; daarna weg uit beide lijsten, voorbeeld in Bestanden mee', w4.status === 200 && !fs.existsSync(path.join(OPSLAG, tOk.id)) && !S4.splatLijst().scenes.some((x) => x.id === tOk.id)
+      && !S.splatLijst().scenes.some((x) => x.id === tOk.id) && gewistBewaard.includes(tOk.id), w4);
+    S4.stopTimers();
+  }
 
   // 13. symlink als taakmap van de pod (de app zet st-<id> klaar als koppeling vóór de pod): maakTaakmap weigert
   const id9 = crypto.randomBytes(8).toString('hex');

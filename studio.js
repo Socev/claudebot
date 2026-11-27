@@ -131,7 +131,7 @@ const VOORBEWERKING = ['grijs-niveaus'];
 // maakt een stapel (nieuw bovenop, origineel eronder) als het origineel nog geen stapel heeft, en zet de nieuwe foto in dezelfde albums als
 // het origineel. Bij een upload als bron: alleen in het album dat David kiest. Het origineel wordt nooit gewijzigd of verwijderd (witte
 // lijst in immich.js). Eén keer per taak (taak.immich); in log en audit alleen taak-id en tellingen, nooit albumnamen of asset-ids.
-const IMMICH = { albums_max: 20, fotos_max: 500, upload_max: 25 * 1024 * 1024 };
+const IMMICH = { albums_max: 20, fotos_max: 500, upload_max: 25 * 1024 * 1024, nieuwste: 24 };   // wv4173: nieuwste = rij in de kiezer
 // ── Video (wv3266, OVIS Imagine "Laat bewegen"; plan vault "OVIS Imagine - foto naar bewegend beeld (Fable 5.2, 15-11-2026)" § 3.2 en § Log 17-11) ──
 // Een geheugen-taak met uitvoer 'video' (alleen via imagine.js, niet in incognito, nooit via de Studio-tab): de flow eindigt in SaveImageWebsocket,
 // elk beeld van de clip komt als PNG over de websocket (81 bij Wan, 124 bij MiniMax; gemeten tot 288 MB per clip), de pod maakt er met ffmpeg
@@ -742,6 +742,7 @@ function maak(deps) {
       reden: t.reden || null, gemaakt: t.gemaakt, start: t.start || null, eind: t.eind || null, duur_s: t.duur_s || null, velden: t.velden,
       bestanden: t.bestanden || [], plek_in_rij: t.status === 'wacht' ? st.rij.indexOf(t.id) + 1 : null, meting: t.meting || null,
       bron: t.bron || null, noot: t.noot || null, splat: t.splat || null,   // wv3272: alleen bron, aantallen, maten
+      seintje: t.seintje && t.seintje !== 'stil' ? t.seintje : null,   // wv4173: wanneer het seintje ging (null = geen)
       beeld: t.beeld ? { breed: t.beeld.breed, hoog: t.beeld.hoog, verkleind: t.beeld.verkleind === true, immich: t.beeld.immich || null } : null,   // wv2482, wv2614
       immich: t.immich ? { stapel: t.immich.stapel === true, albums: t.immich.albums || 0, dubbel: t.immich.dubbel === true, link: t.immich.link || null, noot: t.immich.noot || null } : null,   // wv2614
       betaald: t.betaald === true, kosten_credits: t.betaald ? (vb[t.id] ? creditsVan(vb[t.id]) : t.prijs_vooraf || 0) : 0,
@@ -956,6 +957,67 @@ function maak(deps) {
     if (!im) return { status: 409, fout: 'Immich is hier niet gekoppeld' };
     try { const l = await im.albumFotos(albumId, IMMICH.fotos_max); return { status: 200, fotos: l.filter(function (x) { return x.beeld; }).map(function (x) { return { id: x.id, ratio: x.ratio }; }) }; }
     catch (e) { if (e && e.code === 'HTTP' && (e.status === 404 || e.status === 400)) return { status: 404, fout: 'dit album bestaat niet (meer)' }; return immichNiet(e); }
+  }
+  // wv4173 (2C84 c): rij "Nieuwste foto's" bovenaan de kiezer (ook Imagine): Davids eigen tijdlijn, nieuwste eerst, alleen beelden
+  async function immichNieuwste() {
+    const im = immichClient();
+    if (!im || typeof im.nieuwsteFotos !== 'function') return { status: 409, fout: 'Immich is hier niet gekoppeld' };
+    try { const l = await im.nieuwsteFotos(IMMICH.nieuwste); return { status: 200, fotos: l.map(function (x) { return { id: x.id, ratio: x.ratio, dag: x.dag }; }) }; }
+    catch (e) { return immichNiet(e); }
+  }
+  // wv4173 (2C84 b): vóór Maak bij "Heel album" één regel of het album geschikt lijkt voor 3D. ALLEEN EEN HINT: Maak blijft altijd kan.
+  // Een 3D-scène vraagt foto's van één plek kort na elkaar, met overlap. Tijd en plek van de beelden zijn de enige maat die we zonder
+  // de foto's zelf hebben; overlap meten we niet. Drempels (nog niet geijkt: er is nog geen echte scène gemaakt): tijdspanne ≤ 2 uur en
+  // (geen GPS, of 80 % binnen 150 m van het midden) = geschikt; meer dan een dag, of 80 % pas binnen 1 km = waas; daartussen = twijfel.
+  // Video's en de prullenbak tellen niet (zoals bij het rekenen). Geen ids, namen of coördinaten in het antwoord: alleen het oordeel.
+  const HINT = { geschikt_ms: 2 * 3600 * 1000, waas_ms: 24 * 3600 * 1000, geschikt_m: 150, waas_m: 1000, deel: 0.8, gps_min: 0.5 };
+  function afstandM(a, b) {
+    const r = Math.PI / 180, dLa = (b.lat - a.lat) * r, dLo = (b.lon - a.lon) * r;
+    const h = Math.sin(dLa / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLo / 2) ** 2;
+    return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(h)));
+  }
+  function mediaan(l) { const x = l.slice().sort(function (a, b) { return a - b; }); const m = x.length >> 1; return x.length % 2 ? x[m] : (x[m - 1] + x[m]) / 2; }
+  function duurTekst(ms) {
+    const min = Math.round(ms / 60000);
+    if (min < 1) return 'binnen een minuut';
+    if (min < 90) return 'in ' + min + ' minuten';
+    const uur = Math.round(ms / 3600000);
+    if (uur < 36) return 'over ' + uur + ' uur';
+    return 'over ' + Math.round(ms / 86400000) + ' dagen';
+  }
+  function meterTekst(m) { return m < 1000 ? Math.round(m / 10) * 10 + ' m' : (Math.round(m / 100) / 10).toString().replace('.', ',') + ' km'; }
+  function geschiktOordeel(l) {
+    const n = l.length, min = SP ? SP.fotos_min : 2, max = SP ? SP.fotos_max : 32;
+    if (n < min) return { oordeel: 'te-weinig', n: n, regel: 'Dit album heeft minder dan ' + min + ' foto\'s (video\'s tellen niet): dat kan niet.' };
+    const t = l.map(function (x) { return x.ms; }).filter(function (x) { return typeof x === 'number' && isFinite(x); }).sort(function (a, b) { return a - b; });
+    const span = t.length >= 2 ? t[t.length - 1] - t[0] : null;
+    const g = l.filter(function (x) { return x.lat != null && x.lon != null; });
+    let straal = null;
+    if (g.length >= 2 && g.length >= HINT.gps_min * n) {
+      const mid = { lat: mediaan(g.map(function (x) { return x.lat; })), lon: mediaan(g.map(function (x) { return x.lon; })) };
+      const d = g.map(function (x) { return afstandM(mid, x); }).sort(function (a, b) { return a - b; });
+      straal = d[Math.min(d.length - 1, Math.ceil(HINT.deel * d.length) - 1)];
+    }
+    const kies = n > max ? ' Socev kiest er ' + max + ' uit.' : '';
+    if (span == null) return { oordeel: 'onbekend', n: n, regel: n + ' foto\'s, maar zonder opnametijd: niet te zeggen of dit een goede scène wordt.' + kies };
+    const ver = straal != null && straal > HINT.waas_m, dichtbij = straal == null || straal <= HINT.geschikt_m;
+    if (span > HINT.waas_ms || ver) {
+      const waarom = span > HINT.waas_ms ? 'foto\'s ' + duurTekst(span) + ' verspreid' : 'foto\'s op plekken tot ' + meterTekst(straal) + ' uit elkaar';
+      return { oordeel: 'waas', n: n, regel: n + ' ' + waarom + ': dit wordt waarschijnlijk een waas. Beter: één plek, kort na elkaar, van alle kanten.' + kies };
+    }
+    if (span <= HINT.geschikt_ms && dichtbij)
+      return { oordeel: 'geschikt', n: n, regel: n + ' foto\'s ' + duurTekst(span) + (straal != null ? ' op één plek' : '') + ': geschikt voor 3D.' + kies };
+    const waarom = span > HINT.geschikt_ms ? 'genomen ' + duurTekst(span) : 'op plekken tot ' + meterTekst(straal) + ' uit elkaar';
+    return { oordeel: 'twijfel', n: n, regel: n + ' foto\'s ' + waarom + ': kan lukken, maar wordt mogelijk wazig.' + kies };
+  }
+  async function immichGeschikt(albumId) {
+    if (!UUID_RE.test(String(albumId || ''))) return { status: 400, fout: 'onbekend album' };
+    const im = immichClient();
+    if (!im || typeof im.albumTijdPlek !== 'function') return { status: 409, fout: 'Immich is hier niet gekoppeld' };
+    let l;
+    try { l = await im.albumTijdPlek(albumId, IMMICH.fotos_max); }
+    catch (e) { if (e && e.code === 'HTTP' && (e.status === 404 || e.status === 400)) return { status: 404, fout: 'dit album bestaat niet (meer)' }; return immichNiet(e); }
+    return Object.assign({ status: 200 }, geschiktOordeel(Array.isArray(l) ? l : []));
   }
   async function immichMini(id) {
     if (!UUID_RE.test(String(id || ''))) return { status: 400, fout: 'onbekende foto' };
@@ -1257,6 +1319,23 @@ function maak(deps) {
     catch (e) { fout(t.geheim ? 'imagine-incognito' : 'imagine-klaar', new Error('afronden mislukt')); }
   }
 
+  // ── wv4173 (besluitenpagina nr 184 = 2C84 a): seintje als een lange taak klaar of mislukt is ──
+  // Studio slaapt zodra David wegtikt; een 3D-scène kost minuten. Daarom: duurde een eigen Studio-taak (van Maak tot einde) langer dan
+  // een minuut en is hij klaar of mislukt, dan één seintje (de gewone lege push; een tik opent Studio bij dat resultaat). Niet voor een
+  // taak met bron (Bandjes heeft zijn eigen kaart), niet voor Imagine (geheugen-taken: eigen seintje bij de filmstapel), niet na Stop
+  // (David deed dat zelf), niet in de stille uren (23–07: dan alleen het resultaat in Studio). Eén keer per taak: t.seintje = tijd.
+  const SEINTJE_NA_MS = 60 * 1000;
+  function stilleUren() { const u = Number(new Date(klok()).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false })) % 24; return u >= 23 || u < 7; }
+  function seintjeNa(t) {
+    if (typeof deps.seintje !== 'function' || t.geheugen || t.bron || t.seintje) return;
+    if (t.status !== 'klaar' && t.status !== 'mislukt') return;
+    const duur = Date.parse(t.eind) - Date.parse(t.gemaakt);
+    if (!(duur > SEINTJE_NA_MS)) return;
+    if (stilleUren()) { t.seintje = 'stil'; return; }
+    t.seintje = new Date(klok()).toISOString();
+    try { Promise.resolve(deps.seintje(t.id)).catch(function (e) { fout('studio-seintje', e); }); } catch (e) { fout('studio-seintje', e); }
+  }
+
   // ── wachtrij: één tegelijk ──
   function volgende() {
     if (st.bezig || !st.rij.length) return;
@@ -1302,6 +1381,7 @@ function maak(deps) {
         kosten_credits: t.betaald && vb[t.id] ? creditsVan(vb[t.id]) : 0, credits: t.credits == null ? undefined : t.credits,
         proef: !!t.proef, reden: t.status === 'klaar' ? null : String(t.reden || '').slice(0, 160) });
       log('studio taak=' + t.id + ' flow=' + t.flow + ' motor=' + t.motor + ' uitkomst=' + t.status + ' duur_s=' + t.duur_s);
+      seintjeNa(t);   // wv4173 (2C84 a)
       // wv743: los van de afronding, met eigen catch (synchroon gooien én een afgewezen belofte); raakt de finally nooit
       if (t.bron && deps.naKlaar) {
         try { Promise.resolve(deps.naKlaar(taakUit(t))).catch(function (e) { fout('studio-naklaar', e); }); } catch (e) { fout('studio-naklaar', e); }
@@ -2548,6 +2628,40 @@ function maak(deps) {
     return { status: 200, kaart: { taak: k.taak, gemaakt: k.gemaakt, fotos: k.fotos, bron: k.bron, puntjes: k.puntjes,
       bytes: { licht: k.bytes && k.bytes['licht.sog'], vol: k.bytes && k.bytes['vol.sog'] }, duur: k.duur, ruw: splatLib().bestaatL(path.join(sc.dir, 'ruw.ply')) } };
   }
+  // wv4173 (2C84 d): vaste lijst "Mijn 3D-scènes" uit de scènemap zelf, los van de taaklijst (die vervalt na 30 dagen of 60 nieuwere
+  // taken). Alleen mappen met een geldige kaart.json van dezelfde taak (splatScene); nieuwste eerst; geen foto-ids of namen.
+  function splatLijst() {
+    const L = splatLib();
+    if (!L || !SP) return { status: 200, scenes: [] };
+    let namen = [];
+    try { namen = fs.readdirSync(SP.opslag).filter(function (x) { return L.TAAK_RE.test(x); }); } catch (e) { namen = []; }
+    const uit = [];
+    namen.forEach(function (id) {
+      const sc = splatScene(id);
+      if (!sc) return;
+      const k = sc.kaart, b = k.bytes || {};
+      const vb = (function () { try { const x = fs.lstatSync(path.join(sc.dir, 'voorbeeld.jpg')); return x.isFile() && x.size <= 4 * 1024 * 1024; } catch (e) { return false; } })();
+      uit.push({ id: id, gemaakt: typeof k.gemaakt === 'string' ? k.gemaakt : null, fotos: Number(k.fotos) || 0, bron: k.bron === 'album' ? 'album' : 'los',
+        puntjes: k.puntjes && typeof k.puntjes === 'object' ? { ruw: Number(k.puntjes.ruw) || 0, vol: Number(k.puntjes.vol) || 0, licht: Number(k.puntjes.licht) || 0 } : null,
+        bytes: { licht: Number(b['licht.sog']) || 0, vol: Number(b['vol.sog']) || 0 }, voorbeeld: vb, bezig: !!(st.bezig && st.bezig.id === id) });
+    });
+    uit.sort(function (a, b) { return String(b.gemaakt || '').localeCompare(String(a.gemaakt || '')); });
+    return { status: 200, scenes: uit };
+  }
+  // Het voorbeeldplaatje uit de scènemap zelf (het exemplaar in Werkbestanden vervalt na 30 dagen). Alleen een echt bestand, ≤ 4 MB.
+  function splatVoorbeeld(id) {
+    const sc = splatScene(id);
+    if (!sc) return { status: 404, fout: 'deze 3D-scène bestaat niet (meer)' };
+    let fd;
+    try { fd = fs.openSync(path.join(sc.dir, 'voorbeeld.jpg'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
+    catch (e) { return { status: 404, fout: 'deze scène heeft geen voorbeeld' }; }
+    try {
+      const s = fs.fstatSync(fd);
+      if (!s.isFile() || s.size > 4 * 1024 * 1024) return { status: 404, fout: 'deze scène heeft geen voorbeeld' };
+      return { status: 200, mime: 'image/jpeg', data: fs.readFileSync(fd).toString('base64') };
+    } catch (e) { return { status: 404, fout: 'deze scène heeft geen voorbeeld' }; }
+    finally { try { fs.closeSync(fd); } catch (e) {} }
+  }
   // → { status: 200, fd, grootte } (de aanroeper sluit de fd via de stroom) of { status, fout }
   function splatBestand(id, maat) {
     if (maat !== 'licht' && maat !== 'vol') return { status: 404, fout: 'onbekende maat' };
@@ -2677,6 +2791,7 @@ function maak(deps) {
     incognito: function () { return { nog_te_wissen: nogTeWissen(), blok: st.blok, herstart: st.herstartMerk }; },
     beeldPijp: beeldPijp, immichHaal: immichHaal, flowVan: async function (id) { const c = await catalogus(false); const f = c.flows.find(function (x) { return x.id === id; }); return f ? flowUit(f) : null; },
     splatKaart: splatKaart, splatBestand: splatBestand, splatWis: splatWis, _splatRonde: splatRonde,   // wv3272
+    splatLijst: splatLijst, splatVoorbeeld: splatVoorbeeld, immichNieuwste: immichNieuwste, immichGeschikt: immichGeschikt, _geschiktOordeel: geschiktOordeel,   // wv4173
     stopTimers: function () { clearInterval(st.timer); },
     _st: st,
   };
