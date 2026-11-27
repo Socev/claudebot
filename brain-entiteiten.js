@@ -411,6 +411,69 @@ function mailLuikTel(mails, ken, eigen, vanaf) {
   return { mails: n, draden: draden };
 }
 
+// ── wv4236 (besluitenpagina nr 952 = L52, David Ja 25-11-2026 22:19): "Loopt nu" bovenaan een persoon of organisatie ──
+// Koppelen alleen op een vaste sleutel, nooit op gelijkende tekst:
+//  - kaarten: open punten in Voor jou met herkomst.knoop = het register-id (of herkomst.entiteit = de code van een eigen entiteit);
+//  - afspraken: rijen van OVIS Calendar (sb_kalender_tijdlijn, vandaag t/m +14) waarvan een gekoppelde entiteit (event_entity) als pad de
+//    pagina of hoofdpagina van de partij heeft, of haar object_id uit de frontmatter. Alleen soort 'afspraak' (echte agenda's); deadlines
+//    staan al onder Deadlines, roosterdiensten tellen alleen bij een persoon (rol betreft) en worden één regel "ingeroosterd".
+// Gemeten 27-11-2026: 0 van 22 open kaarten draagt zo'n sleutel; afspraken: HAGRO-agenda en Gezin hangen aan HAGRO/PRIVE, Davids eigen en
+// Werk-agenda hebben nog geen koppeling; 25 roosterdiensten aan medewerkers.
+const LOOPT_DAGEN = 14, LOOPT_AFSPRAAK_MAX = 6, LOOPT_KAART_MAX = 5, LOOPT_DIENST_MAX = 10;
+const AGENDA_WOORD = { 'google-david': 'jouw agenda', 'google-werk': 'Werk', 'google-gezin': 'Gezin', 'google-hagro': 'HAGRO' };
+function amsTijd(iso) {
+  const ms = Date.parse(String(iso || ''));
+  if (!Number.isFinite(ms)) return null;
+  const d = new Date(ms);
+  return { dag: d.toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), tijd: d.toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit', hour12: false }) };
+}
+// rijen: tijdlijnrijen (al op venster gevraagd); punten: Voor jou-lijst; o: { id, eigen, persoon, paden: [vaultpad], objectId, vandaag, tot, masker, nu }
+// → { kaarten: [...] | null, afspraken: [...] | null, afspraken_totaal, diensten: { dagen, plek } | null }; null = die bron is nu niet te lezen
+function looptUit(rijen, punten, o) {
+  const masker = typeof o.masker === 'function' ? o.masker : geenMasker;
+  const paden = new Set((o.paden || []).filter(Boolean).map(String));
+  const oid = o.objectId ? String(o.objectId).toLowerCase() : null;
+  const hoort = function (e) { return e && ((e.pad && paden.has(String(e.pad))) || (oid && String(e.object_id || '').toLowerCase() === oid)); };
+  let kaarten = null;
+  if (Array.isArray(punten)) {
+    const nu = typeof o.nu === 'number' ? o.nu : Date.now();
+    kaarten = punten.filter(function (p) {
+      if (!p || p.status !== 'open' || !Number.isInteger(p.id) || p.id <= 0) return false;
+      if (p.toon_vanaf && Date.parse(p.toon_vanaf) > nu) return false;   // wacht nog op zijn vaste moment (wv3967)
+      const h = p.herkomst && typeof p.herkomst === 'object' && !Array.isArray(p.herkomst) ? p.herkomst : {};
+      return (typeof h.knoop === 'string' && h.knoop === o.id) || (o.eigen && typeof h.entiteit === 'string' && h.entiteit === o.id);
+    }).slice(0, LOOPT_KAART_MAX).map(function (p) {
+      return { id: p.id, titel: masker(String(p.titel || '')).slice(0, 120), deadline: /^\d{4}-\d{2}-\d{2}/.test(String(p.deadline || '')) ? String(p.deadline).slice(0, 10) : null };
+    });
+  }
+  let afspraken = null, totaal = 0, diensten = null;
+  if (Array.isArray(rijen)) {
+    const lijst = [], dagen = new Set(); let plek = null;
+    rijen.forEach(function (r0) {
+      const r = r0 && r0.sb_kalender_tijdlijn && !r0.event_id ? r0.sb_kalender_tijdlijn : r0;
+      if (!r || typeof r !== 'object') return;
+      const ents = Array.isArray(r.entiteiten) ? r.entiteiten : [];
+      const mijn = ents.filter(hoort);
+      if (!mijn.length) return;
+      const t = r.hele_dag ? null : amsTijd(r.begin_tijd);
+      const dag = t ? t.dag : (/^\d{4}-\d{2}-\d{2}$/.test(String(r.begin_datum || '')) ? String(r.begin_datum) : null);
+      if (!dag || dag < o.vandaag || dag > o.tot) return;
+      if (r.soort === 'afspraak') {
+        lijst.push({ datum: dag, tijd: t ? t.tijd : null, titel: masker(String(r.titel || '').replace(/\s+/g, ' ').trim()).slice(0, 120) || 'afspraak',
+          agenda: AGENDA_WOORD[r.feed] || null });
+      } else if (r.soort === 'dienst' && o.persoon && mijn.some(function (e) { return e.rol === 'betreft'; })) {
+        dagen.add(dag);
+        const ctx = ents.find(function (e) { return e && e.rol === 'context' && !hoort(e) && e.naam; });
+        if (ctx && !plek) plek = masker(String(ctx.naam)).slice(0, 60);
+      }
+    });
+    lijst.sort(function (a, b) { return (a.datum + (a.tijd || '')).localeCompare(b.datum + (b.tijd || '')); });
+    totaal = lijst.length; afspraken = lijst.slice(0, LOOPT_AFSPRAAK_MAX);
+    if (dagen.size) diensten = { dagen: Array.from(dagen).sort().slice(0, LOOPT_DIENST_MAX), totaal: dagen.size, plek: plek };
+  }
+  return { kaarten: kaarten, afspraken: afspraken, afspraken_totaal: totaal, diensten: diensten };
+}
+
 function maak(o) {
   const rpc = o.rpc, lees = o.lees, vault = o.vault, facturenPad = o.facturenPad || null;
   const bankPad = o.bankPad || null;   // wv3298: privébank (bank-archief transacties.sqlite), alleen lezen
@@ -429,7 +492,11 @@ function maak(o) {
   const kaart = typeof o.kaart === 'function' ? o.kaart : function () { return null; };   // [{p, s, m}] uit de Second Brain-kaart
   let cache = null, priveCache = null;
   const intakePad = o.intakePad || null;   // wv3938: intake.sqlite (alleen lezen)
-  const bekeken = typeof o.bekeken === 'function' ? o.bekeken : function () { return []; };   // wv3938: [{ s: sleutel, t: iso }], nieuwste eerst
+  const bekeken = typeof o.bekeken === 'function' ? o.bekeken : function () { return []; };
+  // wv4236 (L52): Loopt nu — tijdlijn(van, tot) → Promise<[rij]> (OVIS Calendar), voorJou() → Promise<[punt]>; ontbreekt = geen blok
+  const tijdlijn = typeof o.tijdlijn === 'function' ? o.tijdlijn : null;
+  const voorJou = typeof o.voorJou === 'function' ? o.voorJou : null;
+  let tlCache = null;   // wv3938: [{ s: sleutel, t: iso }], nieuwste eerst
   let stukCache = null, kIdx = null;
 
   // Kaart als index: bestaat dit pad, en welk vol pad hoort bij [[naam]] (uniek op bestandsnaam, of op achtervoegsel bij map/naam)
@@ -987,6 +1054,22 @@ function maak(o) {
       dossier: dossierVan(x.pad, pat) } };
   }
 
+  // wv4236 (L52): één tijdlijnvraag per 5 minuten voor alle partijen (venster vandaag t/m +14); elke bron hooguit 4 s, mislukt = null
+  function binnen(pr, ms) { return Promise.race([Promise.resolve(pr), new Promise(function (_, nee) { setTimeout(function () { nee(new Error('te traag')); }, ms); })]); }
+  async function looptVan(k, paden, objectId) {
+    if (!tijdlijn && !voorJou) return undefined;
+    const vandaag = amsDag(nu()), tot = amsDag(nu() + LOOPT_DAGEN * 86400000);
+    let rijen = null, punten = null;
+    if (tijdlijn) {
+      if (tlCache && tlCache.dag === vandaag && nu() - tlCache.op < 300000) rijen = tlCache.rijen;
+      else {
+        try { const r = await binnen(tijdlijn(vandaag, tot), 4000); if (Array.isArray(r)) { rijen = r; tlCache = { dag: vandaag, op: nu(), rijen: r }; } } catch (e) { rijen = null; }
+      }
+    }
+    if (voorJou) { try { const p = await binnen(voorJou(), 4000); punten = Array.isArray(p) ? p : null; } catch (e) { punten = null; } }
+    return looptUit(rijen, punten, { id: k.id, eigen: isEigen(k), persoon: isPersoon(k), paden: paden, objectId: objectId, vandaag: vandaag, tot: tot, masker: masker, nu: nu() });
+  }
+
   // detail op knoop-id, op de sleutel uit de lijst (12 hex) of op de sleutel van een privépersoon
   async function detail(id) {
     const reg = await register();
@@ -1041,6 +1124,7 @@ function maak(o) {
       stukken: stukkenVan(k, reg),   // wv3938 (3C22): nieuwste stukken uit Intake (null = geen intake.sqlite in deze pod)
       gezegd: gezegdVan(k, persoon ? { patronen: pat } : null),   // wv3945 (3C97): gesprekspagina's (+ notulen bij een eigen entiteit)
       mensen: eigen ? mensenVan(k, reg) : undefined,   // wv3945 (3C98): medewerkers in en uit dienst
+      loopt: await looptVan(k, [rel, hoofdpagina && hoofdpagina.pad].filter(Boolean), fmVeld(fm, 'object_id') || null),   // wv4236 (L52): undefined = geen bron in deze pod
       bereik: persoon ? { telefoons: fmOvisLijst(fm, 'telefoons').map(telNl).filter(function (x) { return /^0[0-9]{9,15}$/.test(x); }),
         mailadressen: fmOvisLijst(fm, 'mailadressen').map(function (x) { return x.toLowerCase(); }).filter(function (x) { return /^[^@\s?&"<>]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(x) && x.length <= 120; }),
         whatsapp: fmOvisLijst(fm, 'whatsapp').map(telNl).filter(function (x) { return /^0[0-9]{9,15}$/.test(x); }) } : undefined,   // wv3945: uit de pagina (Contacten via de compiler), naast Google
@@ -1276,4 +1360,4 @@ function maak(o) {
 module.exports = { telNl: telNl, maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, zichtbaar: zichtbaar, groepVan: groepVan,
   naamPatronen: naamPatronen, bevatNaam: bevatNaam, fmAliassen: fmAliassen, registerIndex: registerIndex, bekekenBij: bekekenBij, adresVan: adresVan,
   eersteOnderwerp: eersteOnderwerp, contractEinde: contractEinde, fmOvisLijst: fmOvisLijst,
-  mailKaartLees: mailKaartLees, mailRegisterLees: mailRegisterLees, mailZoekvraag: mailZoekvraag, mailLuikTel: mailLuikTel, eigenToets: eigenToets, adresNorm: adresNorm, domeinNorm: domeinNorm };
+  mailKaartLees: mailKaartLees, mailRegisterLees: mailRegisterLees, mailZoekvraag: mailZoekvraag, mailLuikTel: mailLuikTel, looptUit: looptUit, eigenToets: eigenToets, adresNorm: adresNorm, domeinNorm: domeinNorm };

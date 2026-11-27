@@ -29710,6 +29710,8 @@ function brainEntMaak() {
       bekeken: appEntBekekenLees,   // wv3938 (3C45): laatst geopende partijen
       luik: function (body) { return appAgendaApi(body, { timeoutMs: 14000 }); },   // wv4009 (3C196): mail per partij na de jongste mailkaart (alleen mail_zoeken)
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },   // wv4009: Davids adressen tellen nooit als partij
+      tijdlijn: (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE) ? function (van, tot) { return appSbRpc('sb_kalender_tijdlijn', { p_van: van, p_tot: tot }); } : null,   // wv4236 (L52): Loopt nu — afspraken uit OVIS Calendar
+      voorJou: function () { return appVjPunten(); },   // wv4236 (L52): open kaarten met herkomst.knoop/entiteit (zelfde cache als Voor jou)
       rpc: (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE) ? appSbRpc : null });
   } catch (e) { logError('brain-entiteiten', e); }
   return brainEnt;
