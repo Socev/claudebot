@@ -32756,15 +32756,6 @@ const personeelsscherm = (function () {
         try { await appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' }, 20000); } catch (e) { logError('personeelsscherm-aanvraag', new Error('herkomst niet gezet')); }
         return { id: z.id, bestond: !!z.bestond };
       },
-      // wv4211: een mededeling van het team ligt bij David = één Voor jou-kaart per dag (tik = Apps › OVIS Scherm); dicht als er niets meer ligt
-      voorJou: async function (kaart) { await appSbRpc('mk_voor_jou_zet', { p: kaart }, 20000); appStaat.vjCache = null; },
-      voorJouDicht: async function (sleutel, bewijs) {
-        const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: false }, 20000);
-        const p = ((j && j.punten) || []).find(function (x) { return x && x.sleutel === sleutel && (x.status === 'open' || x.status === 'later'); });
-        if (!p) return false;
-        await appSbRpc('mk_voor_jou_status', { p_sleutel: sleutel, p_van: p.status, p_naar: 'gedaan', p_door: 'agent', p_bewijs: bewijs }, 20000); appStaat.vjCache = null;
-        return true;
-      },
       melding: async function (sleutel, tekst) {
         const r = await berichtIntern({ kanaal: 'machinekamer', bron: 'personeelsscherm', klasse: 'normaal', tekst: tekst, sleutel: sleutel });
         if (!r || r.status !== 200) { const e = berichtFout(r); logError('personeelsscherm-melding', e); throw e; }   // wv3238

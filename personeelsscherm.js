@@ -56,9 +56,6 @@ const D1_SCHEMA = [
   "CREATE TABLE IF NOT EXISTS hartslag_dag (dag TEXT PRIMARY KEY, aantal INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS koppel (code_hash TEXT PRIMARY KEY, poll_hash TEXT NOT NULL, pub TEXT NOT NULL, pub_fp TEXT NOT NULL, gemaakt INTEGER NOT NULL, verloopt INTEGER NOT NULL, pogingen INTEGER NOT NULL DEFAULT 0, gebruikt INTEGER NOT NULL DEFAULT 0, cipher TEXT, land TEXT, ip TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS grens (sleutel TEXT PRIMARY KEY, aantal INTEGER NOT NULL, tot INTEGER NOT NULL)",
-  // wv4211 (L24): de pen bij het team. pen_schrijver alleen door de pod gevuld (Davids keuze + registerrij); pen_inzending = wat iemand op /pen klaarzette
-  "CREATE TABLE IF NOT EXISTS pen_schrijver (mail TEXT PRIMARY KEY, naam TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS pen_inzending (id INTEGER PRIMARY KEY AUTOINCREMENT, mail TEXT NOT NULL, naam TEXT NOT NULL, titel TEXT NOT NULL, datum TEXT NOT NULL, tijd TEXT, op INTEGER NOT NULL, stand TEXT NOT NULL DEFAULT 'nieuw', stand_op INTEGER)",
 ];
 const UUR = 3600000;
 const HOUDBAAR_MS = 36 * UUR;
@@ -449,38 +446,6 @@ const VASTE_BRONNEN = [
   { id: 'wor', naam: 'Welzijn op Recept', uitleg: 'Welzijn op Recept in Leusden' },
 ];
 const APP_LINK = 'https://app.socev.dev/?app=personeelsscherm';
-// ── wv4211 (besluitenpagina nr 924 = L24, David Ja 25-11-2026 met verse vingerafdruk): de pen ook bij het team ──
-// personeel.socev.dev/pen (Worker): een kleine pagina (tekst, datum, eventueel tijd) voor David en wie hij aanwijst. De Worker bewaart alleen
-// (pen_inzending); deze module verwerkt per tik: afzender nu nog toegestaan? zelfde vormregels (mededelingNorm), dan een VOORSTEL in de app
-// (David neemt het over met zijn vingerafdruk; bij een ander dan David één Voor jou-kaart per dag) of, alleen met de eigen registerrij
-// PEN_RIJ die PEN_DIRECT_ZIN bevat én route 'direct' in <dir>/pen.json, rechtstreeks als punt in Komende weken. Wie mag schrijven staat in
-// <dir>/pen.json {schrijvers: [{mail, naam}], route} (machinekamer, na Davids antwoord) en telt alleen met PEN_ZIN in PEN_RIJ; de module
-// zet die lijst in D1 pen_schrijver (de Worker laat alleen hen op /pen toe) en in het Access-beleid (eigen allow-regel naast eigenaar en
-// kastje). Zonder rij: alleen David, en zijn invoer is een voorstel. Noodknop en 'van de tv halen' werken ook voor deze punten.
-const PEN_RIJ = 'personeelsscherm-pen';
-const PEN_ZIN = 'Mededelingen van mensen die David aanwijst';
-const PEN_DIRECT_ZIN = 'rechtstreeks op het scherm, zonder Davids knop per bericht';
-const PEN_SCHRIJVERS_MAX = 10, PEN_PER_TIK = 20, PEN_BEWAAR_MS = 30 * 24 * UUR, PEN_VOORSTEL_MAX = 12;
-const PEN_LINK = 'https://personeel.socev.dev/pen';
-const PEN_MAIL = /^[a-z0-9._%+-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)+$/;
-// gecontroleerde schrijverslijst: geldige adressen (kleine letters), naam ≤ 40 zonder rare tekens, eigenaar eruit, hooguit 10, vaste volgorde
-function penSchrijversNorm(lijst, eigenaar) {
-  const eig = String(eigenaar || '').trim().toLowerCase(), uit = new Map();
-  for (const x of Array.isArray(lijst) ? lijst : []) {
-    const mail = String((x && x.mail) || '').normalize('NFC').trim().toLowerCase(), naam = aanvraagTekst(x && x.naam);
-    if (!PEN_MAIL.test(mail) || mail === eig || uit.has(mail) || !/^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' .-]{0,39}$/.test(naam)) continue;
-    uit.set(mail, { mail, naam });
-  }
-  return [...uit.values()].sort((a, b) => a.mail.localeCompare(b.mail)).slice(0, PEN_SCHRIJVERS_MAX);
-}
-function penKaart(dag, namen) {
-  const wie = namen.length === 1 ? namen[0] : namen.slice(0, -1).join(', ') + ' en ' + namen[namen.length - 1];
-  return { sleutel: 'scherm-pen-' + dag, soort: 'doen', titel: 'Mededeling van het team voor de tv — bekijk', waar: 'overal',
-    waarom: wie + ' zette iets klaar voor het scherm in de personeelskamer. Het staat er pas op als jij het overneemt.',
-    stappen: ['Tik op deze kaart: OVIS Scherm opent; onder Mededelingen staat het voorstel met de naam erbij.',
-      'Goed: tik Zet op het scherm (met je vingerafdruk). Niet goed: tik Laat liggen; de afzender ziet dat op haar of zijn pagina.'],
-    herkomst: { module: 'personeelsscherm', handmatig: 'scherm-pen', dag, doel: { scherm: 'personeelsscherm' } }, volgorde: 40 };
-}
 const QR_PX = 132;
 const MEDISCH_MS = UUR, MEDISCH_OUD_MS = 30 * 24 * UUR, MEDISCH_N = 12, MEDISCH_PER_BLAD = 3, MEDISCH_S = 25, MEDISCH_TEKST_MAX = 220, MEDISCH_BEWAAR = 80;
 const BELANGRIJK_MS = 21 * 24 * UUR, BELANGRIJK_DAVID_MS = 28 * 24 * UUR, BELANGRIJK_N = 6;
@@ -1148,12 +1113,6 @@ function maak(o) {
   // wv4209: eigen rij voor feestdagen en 'mag vanzelf' (naast de basisrij; schermen ook alleen met INFO_ZIN in de basisrij)
   const feestMag = () => toestemming() && rijMag(FEEST_ZIN, VANZELF_RIJ);
   const vanzelfMag = () => toestemming() && infoMag() && rijMag(VANZELF_ZIN, VANZELF_RIJ);
-  // wv4211: de pen bij het team (eigen rij naast de basisrij; rechtstreeks alleen met de extra zin én Davids keuze in pen.json)
-  const penPad = path.join(dir, 'pen.json');
-  function penConfig() { try { const j = JSON.parse(fs.readFileSync(penPad, 'utf8')); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; } catch (e) { return {}; } }
-  const penMag = () => toestemming() && rijMag(PEN_ZIN, PEN_RIJ);
-  function penSchrijvers() { if (!penMag()) return []; const c = config(); return penSchrijversNorm(penConfig().schrijvers, c && c.eigenaar); }
-  const penDirect = () => penMag() && rijMag(PEN_DIRECT_ZIN, PEN_RIJ) && penConfig().route === 'direct' && penSchrijvers().length > 0;
   const vanzelfAan = () => { const v = leesStand().vanzelf; return v && typeof v === 'object' ? v : {}; };
   async function weerVers(s, t) {
     if (s.weer && s.weer_op && t - s.weer_op < WEER_MS) return s.weer;
@@ -1259,12 +1218,10 @@ function maak(o) {
   }
 
   // ── Access ──
-  function appBody(c, token, pen) {
+  function appBody(c, token) {
     const pol = [{ name: 'Eigenaar (Google of code per mail)', decision: 'allow', precedence: 1, include: [{ email: { email: c.eigenaar } }] }];
     if (token) pol.push({ name: 'Alleen het kastje ' + TOKEN_NAAM + ' vanaf het praktijkadres', decision: 'non_identity', precedence: 2,
       include: [{ service_token: { token_id: token.id } }], require: [{ ip: { ip: token.ip + '/32' } }] });
-    // wv4211: wie David aanwees (registerrij personeelsscherm-pen); de Worker laat hen alleen op /pen toe
-    if (Array.isArray(pen) && pen.length) pol.push({ name: 'Mededelingen klaarzetten (' + PEN_RIJ + ')', decision: 'allow', precedence: 3, include: pen.map((x) => ({ email: { email: x.mail } })) });
     return Object.assign({}, c.access_app, { policies: pol });
   }
   // wv3012: een net gemaakt service token is bij Cloudflare niet meteen bekend; PUT geeft dan 400/12130 'service token not found'.
@@ -1272,7 +1229,7 @@ function maak(o) {
   async function zetBeleid(c, token) {
     const pad = '/accounts/' + c.account + '/access/apps/' + c.access_app_id;
     for (let i = 0; ; i++) {
-      try { await cf('PUT', pad, appBody(c, token, penSchrijvers())); return; }
+      try { await cf('PUT', pad, appBody(c, token)); return; }
       catch (e) { if (!token || i >= BELEID_POGINGEN - 1 || !(e.status === 400 && String(e.cfCode) === '12130')) throw e; await slaap(BELEID_WACHT_MS * (i + 1)); }
     }
   }
@@ -1379,9 +1336,7 @@ function maak(o) {
     const t = nu(), vandaag = ymd(t);
     if (b.voorstel != null && b.laat === true) {
       const id = String(b.voorstel); let weg = false;
-      let penId = null;
-      wijzig((s) => { const v = Array.isArray(s.mededeling_voorstellen) ? s.mededeling_voorstellen : []; s.mededeling_voorstellen = v.filter((x) => { const h = x && x.id === id; if (h && x.pen_id) penId = x.pen_id; weg = weg || h; return !h; }); });
-      if (penId) await penStand({ [penId]: 'laat' });   // wv4211: de afzender ziet 'niet geplaatst'
+      wijzig((s) => { const v = Array.isArray(s.mededeling_voorstellen) ? s.mededeling_voorstellen : []; s.mededeling_voorstellen = v.filter((x) => { const h = x && x.id === id; weg = weg || h; return !h; }); });
       return weg ? { status: 200, body: { ok: true, voorstel: id, laat: true } } : { status: 404, body: { ok: false, fout: 'Dit voorstel staat er niet (meer).' } };
     }
     if (mededelingBezig) return { status: 409, body: { ok: false, fout: 'Er wordt net iets op het scherm gezet; probeer het zo opnieuw.' } };
@@ -1390,11 +1345,9 @@ function maak(o) {
       let lijst = eigenPunten().filter((x) => x && echteDatum(x.datum) && x.datum >= vandaag);
       if (b.weg != null) {
         const id = String(b.weg), n = lijst.length;
-        const wegPen = lijst.filter((x) => x.id === id && x.pen_id).map((x) => x.pen_id);
         lijst = lijst.filter((x) => x.id !== id);
         if (lijst.length === n) return { status: 404, body: { ok: false, fout: 'Deze mededeling staat niet (meer) op het scherm.' } };
         puntenSchrijf(lijst);
-        if (wegPen.length) await penStand(Object.fromEntries(wegPen.map((x) => [x, 'weg'])));   // wv4211
         const w = await herbouw(t, 'Weggehaald');
         return w ? { status: 503, body: { ok: false, fout: w } } : { status: 200, body: { ok: true, weg: id } };
       }
@@ -1403,16 +1356,14 @@ function maak(o) {
         vid = String(b.voorstel);
         bron = voorstellenNu(leesStand(), t).find((x) => x.id === vid);
         if (!bron) return { status: 404, body: { ok: false, fout: 'Dit voorstel staat er niet (meer).' } };
-        door = bron.pen_id ? 'pen' : 'socev';   // wv4211: van de penpagina (David zelf of wie hij aanwees)
+        door = 'socev';
       }
       const m = mededelingNorm(bron, vandaag);
       if (m.fout) return { status: 400, body: { ok: false, fout: m.fout } };
       const id = mededelingId(m), al = lijst.some((x) => x.id === id);
       if (!al && lijst.length >= MEDEDELING_MAX) return { status: 409, body: { ok: false, fout: 'Er staan al ' + MEDEDELING_MAX + ' mededelingen klaar; haal er eerst een weg.' } };
-      const pen = door === 'pen' ? { pen_id: bron.pen_id, van: bron.van || null } : {};
-      if (!al) { lijst.push(Object.assign({ id, titel: m.titel, datum: m.datum, tijd: m.tijd, op: t, door }, pen)); lijst.sort((x, y) => (x.datum + (x.tijd || '')).localeCompare(y.datum + (y.tijd || ''))); puntenSchrijf(lijst); }
+      if (!al) { lijst.push({ id, titel: m.titel, datum: m.datum, tijd: m.tijd, op: t, door }); lijst.sort((x, y) => (x.datum + (x.tijd || '')).localeCompare(y.datum + (y.tijd || ''))); puntenSchrijf(lijst); }
       if (vid) wijzig((s) => { s.mededeling_voorstellen = (Array.isArray(s.mededeling_voorstellen) ? s.mededeling_voorstellen : []).filter((x) => x && x.id !== vid); });
-      if (pen.pen_id) await penStand({ [pen.pen_id]: 'scherm' });   // wv4211
       const w = al ? null : await herbouw(t, 'Opgeslagen');
       return w ? { status: 503, body: { ok: false, fout: w, opgeslagen: true } } : { status: 200, body: { ok: true, id, al } };
     } finally { mededelingBezig = false; }
@@ -1422,119 +1373,10 @@ function maak(o) {
     const t = nu(), m = mededelingNorm(b || {}, ymd(t));
     if (m.fout) return { status: 400, j: { ok: false, fout: m.fout } };
     const id = mededelingId(m);
-    wijzig((s) => { const v = voorstellenNu(s, t).filter((x) => x.id !== id), so = v.filter((x) => !x.pen_id);   // wv4211: pen-voorstellen tellen apart
-      s.mededeling_voorstellen = v.filter((x) => x.pen_id).concat(so.slice(-(VOORSTEL_MAX - 1))).concat([{ id, titel: m.titel, datum: m.datum, tijd: m.tijd, op: t }]); });
+    wijzig((s) => { const v = voorstellenNu(s, t).filter((x) => x.id !== id); s.mededeling_voorstellen = v.slice(-(VOORSTEL_MAX - 1)).concat([{ id, titel: m.titel, datum: m.datum, tijd: m.tijd, op: t }]); });
     const d = datumDelen(m.datum);
     return { status: 200, j: { ok: true, id, link: APP_LINK, op_scherm: d.wd + ' ' + d.dg + ' ' + d.mn + ' · ' + (m.tijd || 'hele dag') + ' · ' + m.titel + ' (Praktijk)',
       uitleg: 'Staat als voorstel in Apps › OVIS Scherm; het komt pas op de tv als David het daar met zijn vingerafdruk overneemt.' } };
-  }
-  // ── wv4211: de pen bij het team ──
-  // stand van een inzending terug naar D1 (de afzender ziet hem op /pen). Eerst in de eigen stand (pen_uit), dan D1; mislukt D1, dan de volgende tik.
-  async function penStand(map) {
-    const t = nu();
-    wijzig((x) => { x.pen_uit = Object.assign(x.pen_uit && typeof x.pen_uit === 'object' ? x.pen_uit : {}, map);
-      const g = x.pen_gedaan && typeof x.pen_gedaan === 'object' ? x.pen_gedaan : {}; for (const id of Object.keys(map)) if (g[id]) g[id].st = map[id]; x.pen_gedaan = g; });   // laatste stand telt bij herverwerken
-    try { await penStandUit(t); } catch (e) { fout('personeelsscherm-pen', new Error('stand naar D1 faalde')); }
-  }
-  async function penStandUit(t) {
-    const open = leesStand().pen_uit || {}, ids = Object.keys(open);
-    if (!ids.length) return;
-    await zorgSchema();
-    await d1(ids.map((id) => ({ sql: 'UPDATE pen_inzending SET stand = ?, stand_op = ? WHERE id = ?', params: [String(open[id]).slice(0, 120), t, Number(id)] })));
-    wijzig((x) => { for (const id of ids) if (x.pen_uit && x.pen_uit[id] === open[id]) delete x.pen_uit[id]; });
-  }
-  // schrijverslijst naar D1 (pen_schrijver + stand.pen_route) en Access. Krimpen: eerst D1 (de Worker weigert meteen), dan Access; groeien:
-  // eerst Access, dan D1. Nooit het kastje kwijt: met een gekoppeld kastje het adres uit D1, ontbreekt dat dan niets aan Access.
-  async function penSync(t) {
-    const c = config();
-    if (!c || !c.account || !c.access_app_id || !c.access_app || !c.eigenaar || bezig) return;
-    const lijst = penSchrijvers(), route = penDirect() ? 'direct' : 'david', s = leesStand();
-    const mails = lijst.map((x) => x.mail), oud = Array.isArray(s.pen_mails) ? s.pen_mails : [];
-    const sha = fnv(JSON.stringify([lijst, route]));
-    if (s.pen_sha === sha) return;
-    await zorgSchema();
-    const d1Stap = () => d1([{ sql: 'DELETE FROM pen_schrijver', params: [] }].concat(lijst.map((x) => ({ sql: 'INSERT INTO pen_schrijver (mail, naam) VALUES (?, ?)', params: [x.mail, x.naam] })),
-      [{ sql: "INSERT INTO stand (sleutel, waarde) VALUES ('pen_route', ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde", params: [route] }]));
-    const accessStap = async () => {
-      if (mails.length === oud.length && mails.every((m, i) => m === oud[i])) return;
-      if (s.intrek_open) throw new Error('intrekken loopt nog');
-      let token = null;
-      if (s.token) {
-        const r = await d1([{ sql: "SELECT waarde FROM stand WHERE sleutel = 'kastje_ip'", params: [] }]);
-        const ip = r[0].results[0] ? String(r[0].results[0].waarde) : '';
-        if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) throw new Error('adres van het kastje onbekend');
-        token = { id: s.token.id, ip };
-      }
-      await zetBeleid(c, token);
-    };
-    const krimp = oud.some((m) => !mails.includes(m));
-    if (krimp) { await d1Stap(); await accessStap(); } else { await accessStap(); await d1Stap(); }
-    wijzig((x) => { x.pen_sha = sha; x.pen_mails = mails; x.pen_sync_op = t; });
-  }
-  // nieuwe inzendingen verwerken (hooguit PEN_PER_TIK per tik). Codex ZOU 1: elke inzending krijgt eerst in de eigen stand een uitkomst
-  // (pen_gedaan), zodat een mislukte D1-stap de volgende tik nooit een tweede punt of voorstel maakt; het punt/voorstel heeft een vaste id.
-  async function penVerwerk(t) {
-    if (mededelingBezig) return;   // David zet net zelf iets; de volgende tik
-    mededelingBezig = true;
-    try { await penVerwerkKern(t); } finally { mededelingBezig = false; }
-  }
-  async function penVerwerkKern(t) {
-    await zorgSchema();
-    await penStandUit(t);
-    const vandaag = ymd(t);
-    // verlopen pen-voorstellen (7 dagen of de datum voorbij) uit de lijst; de afzender ziet 'verlopen'
-    const verlopen = {};
-    wijzig((x) => { const v = Array.isArray(x.mededeling_voorstellen) ? x.mededeling_voorstellen : []; const nog = voorstellenNu(x, t);
-      x.mededeling_voorstellen = v.filter((y) => { const blijf = !y || !y.pen_id || nog.includes(y); if (!blijf) verlopen[y.pen_id] = 'verlopen'; return blijf; }); });
-    if (Object.keys(verlopen).length) await penStand(verlopen);
-    const r = await d1([{ sql: "SELECT id, mail, naam, titel, datum, tijd FROM pen_inzending WHERE stand = 'nieuw' ORDER BY id LIMIT ?", params: [PEN_PER_TIK] },
-      { sql: 'DELETE FROM pen_inzending WHERE op < ?', params: [t - PEN_BEWAAR_MS] }]);
-    const rijen = r[0].results;
-    const c = config(), eig = String((c && c.eigenaar) || '').trim().toLowerCase(), schr = penSchrijvers(), direct = penDirect();
-    const s0 = leesStand(), gedaan = s0.pen_gedaan && typeof s0.pen_gedaan === 'object' ? s0.pen_gedaan : {};
-    const uit = {}, namen = [];
-    let lijst = eigenPunten().filter((x) => x && echteDatum(x.datum) && x.datum >= vandaag), punt = false;
-    for (const x of rijen) {
-      const pid = String(x.id);
-      if (gedaan[pid]) { uit[pid] = gedaan[pid].st; continue; }   // al verwerkt, alleen de stand liep achter
-      const mail = String(x.mail || '').toLowerCase(), isEig = !!eig && mail === eig, sw = schr.find((y) => y.mail === mail);
-      let st;
-      if (!isEig && !sw) st = 'geweigerd';
-      else {
-        const m = mededelingNorm(x, vandaag);
-        if (m.fout) st = 'fout:' + m.fout;
-        else if (sw && direct) {
-          const id = mededelingId(m);
-          if (lijst.some((y) => y.id === id)) st = 'scherm';
-          else if (lijst.length >= MEDEDELING_MAX) st = 'fout:Er staan al ' + MEDEDELING_MAX + ' mededelingen op het scherm; probeer het later.';
-          else { lijst.push({ id, titel: m.titel, datum: m.datum, tijd: m.tijd, op: t, door: 'pen', van: sw.naam, pen_id: pid }); punt = true; st = 'scherm'; }
-        } else {
-          const id = mededelingId(m), v = voorstellenNu(leesStand(), t);
-          if (v.some((y) => y.id === id)) st = 'david';
-          else if (v.filter((y) => y.pen_id).length >= PEN_VOORSTEL_MAX) st = 'fout:Er liggen al veel mededelingen bij David; probeer het later.';
-          else {
-            wijzig((y) => { y.mededeling_voorstellen = voorstellenNu(y, t).concat([{ id, titel: m.titel, datum: m.datum, tijd: m.tijd, op: t, van: isEig ? null : sw.naam, pen_id: pid }]); });
-            st = 'david';
-            if (!isEig && !namen.includes(sw.naam)) namen.push(sw.naam);
-          }
-        }
-      }
-      uit[pid] = st;
-      wijzig((y) => { y.pen_gedaan = Object.assign(y.pen_gedaan && typeof y.pen_gedaan === 'object' ? y.pen_gedaan : {}, { [pid]: { st, op: t } }); });
-    }
-    if (punt) { lijst.sort((a, b) => (a.datum + (a.tijd || '')).localeCompare(b.datum + (b.tijd || ''))); puntenSchrijf(lijst); await herbouw(t, 'Mededeling van het team'); }
-    wijzig((y) => { const g = y.pen_gedaan || {}; for (const k of Object.keys(g)) if (!g[k] || t - Number(g[k].op) > PEN_BEWAAR_MS) delete g[k]; y.pen_gedaan = g; });
-    if (Object.keys(uit).length) await penStand(uit);
-    // bij een nieuw voorstel van een ander dan David: één Voor jou-kaart per dag; dicht als er geen pen-voorstel van het team meer ligt
-    const dag = vandaag, s1 = leesStand();
-    if (namen.length && s1.pen_kaart_dag !== dag && typeof o.voorJou === 'function') {
-      try { await o.voorJou(penKaart(dag, namen)); wijzig((y) => { y.pen_kaart_dag = dag; y.pen_kaart = 'scherm-pen-' + dag; }); }
-      catch (e) { fout('personeelsscherm-pen', new Error('kaart zetten mislukt')); }
-    }
-    if (s1.pen_kaart && !voorstellenNu(s1, t).some((y) => y.pen_id && y.van) && typeof o.voorJouDicht === 'function') {
-      try { await o.voorJouDicht(s1.pen_kaart, 'Geen mededeling van het team meer open.'); wijzig((y) => { y.pen_kaart = null; }); }
-      catch (e) { fout('personeelsscherm-pen', new Error('kaart sluiten mislukt')); }
-    }
   }
   // POST vanzelf {bron, aan}: aan = server.js eiste de verse vingerafdruk; uit = meteen, zonder
   async function vanzelfZet(bronRuw, aan) {
@@ -1791,9 +1633,8 @@ function maak(o) {
       voorbeeld_html: s.html || '',
       ...appSchermen(s, nu()),   // wv3020
       // wv4209: Davids mededelingen (komende), open voorstellen van Socev en de keuze 'mag vanzelf' per vaste bron
-      mededelingen: eigenPunten().filter((x) => x && echteDatum(x.datum) && x.datum >= ymd(nu())).map((x) => ({ id: String(x.id || ''), titel: String(x.titel || ''), datum: x.datum, tijd: x.tijd || null, door: x.door === 'socev' ? 'socev' : x.door === 'pen' ? 'pen' : 'david', van: x.door === 'pen' ? x.van || null : null })),
-      voorstellen: voorstellenNu(s, nu()).map((x) => ({ id: x.id, titel: x.titel, datum: x.datum, tijd: x.tijd || null, op: x.op, pen: !!x.pen_id, van: x.van || null })),
-      pen: { link: PEN_LINK, rij: penMag(), direct: penDirect(), schrijvers: penSchrijvers().map((x) => x.naam) },   // wv4211: namen, nooit adressen
+      mededelingen: eigenPunten().filter((x) => x && echteDatum(x.datum) && x.datum >= ymd(nu())).map((x) => ({ id: String(x.id || ''), titel: String(x.titel || ''), datum: x.datum, tijd: x.tijd || null, door: x.door === 'socev' ? 'socev' : 'david' })),
+      voorstellen: voorstellenNu(s, nu()).map((x) => ({ id: x.id, titel: x.titel, datum: x.datum, tijd: x.tijd || null, op: x.op })),
       vanzelf: { rij: vanzelfMag(), feestdagen: feestMag(), bronnen: VASTE_BRONNEN.map((b) => ({ id: b.id, naam: b.naam, uitleg: b.uitleg, aan: !!vanzelfAan()[b.id], sinds: vanzelfAan()[b.id] ? Number(vanzelfAan()[b.id].op) : null })) },
     };
   }
@@ -1836,10 +1677,6 @@ function maak(o) {
     let live;
     try { live = await leesD1(); } catch (e) { fout('personeelsscherm-lees', new Error('D1 lezen faalde')); return { ok: false }; }
     s = wijzig((x) => { x.hartslag = live.hartslag; x.vreemd = live.vreemd; x.laatste_tik = t; });
-    // wv4211: de pen — schrijverslijst/Access bijwerken en nieuwe inzendingen verwerken (fout = log, de volgende tik opnieuw)
-    try { await penSync(t); } catch (e) { fout('personeelsscherm-pen', new Error('schrijvers bijwerken: ' + String(e && e.message).slice(0, 60))); }
-    try { await penVerwerk(t); } catch (e) { fout('personeelsscherm-pen', new Error('inzendingen: ' + String(e && e.message).slice(0, 60))); }
-    s = leesStand();
     // meldingen: nooit vaker dan één keer per voorval of per dag
     if (live.vreemd && live.vreemd.op && s.vreemd_gemeld !== live.vreemd.op) {
       wijzig((x) => { x.vreemd_gemeld = live.vreemd.op; });
@@ -1873,17 +1710,15 @@ function maak(o) {
         bewaard: s.medisch && s.medisch.items ? Object.keys(s.medisch.items).length : 0,
         op_tv: s.inhoud && s.inhoud.medisch ? { nieuws: s.inhoud.medisch.nieuws.length, belangrijk: s.inhoud.medisch.belangrijk.length } : null,
         bronnen: s.medisch && s.medisch.bronnen ? Object.fromEntries(Object.entries(s.medisch.bronnen).map(([k, v]) => [k, { ok: v && v.ok ? iso(v.ok) : null, n: v && Number.isFinite(v.n) ? v.n : 0, fout: v && v.fout ? iso(v.fout) : null }])) : null },
-      pen: { mag: penMag(), direct: penDirect(), schrijvers: penSchrijvers().length, sync: s.pen_sync_op ? iso(s.pen_sync_op) : null, open_bij_david: voorstellenNu(s, nu()).filter((x) => x.pen_id).length },   // wv4211: alleen aantallen
       week: { mag: weekMag(), uit: !!uitLijst()[WEEK_ID], sleutel: s.week ? s.week.sleutel : null, op_tv: s.inhoud && s.inhoud.week ? s.inhoud.week.dagen.length : null },   // wv4149: geen namen
       info_uit: s.info_uit ? Object.keys(s.info_uit).length : 0, aanvragen: (s.aanvragen || []).filter((a) => a && nu() - a.op < AANVRAAG_BEWAAR_MS).length,   // wv3020
       bronnen: s.inhoud ? s.inhoud.bronnen || null : null };   // alleen tellingen, nooit namen
   }
 
-  return { app, tik, info, publiceer, open, koppel, intrek, leeg, leesD1, appStand, verzamel, toestemming, infoSchermen, infoKandidaten, infoZet, aanvraag, medischZet, mededelingZet, voorstel, vanzelfZet, penSync, penVerwerk };
+  return { app, tik, info, publiceer, open, koppel, intrek, leeg, leesD1, appStand, verzamel, toestemming, infoSchermen, infoKandidaten, infoZet, aanvraag, medischZet, mededelingZet, voorstel, vanzelfZet };
 }
 
 module.exports = { maak, bouwHtml, D1_SCHEMA, inWerktijd, inSchermtijd, inhoudVenster, QR_RIJ, QR_ZIN, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
   VANZELF_RIJ, VANZELF_ZIN, FEEST_ZIN, VASTE_BRONNEN, MEDEDELING_DAGEN,   // wv4209
-  PEN_RIJ, PEN_ZIN, PEN_DIRECT_ZIN, PEN_LINK,   // wv4211
   VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, JARIG_ID, WEEK_RIJ, WEEK_ZIN, WEEK_ID, MEDISCH_ZIN, MEDISCH_RIJ, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN, TEAM_ZIN, TEAM_RIJ, VOOR_WIE,
-  _t: { qrMatrix, qrSvg, openbareUrl, paasZondag, feestdagen, feestdag, weekMaandag, weekRooster, weekBeeld, medischTekst, medischItems, medischBijwerken, medischBeeld, voorVan, eigenZin, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, feestPunten, mededelingNorm, vanzelfGeldig, penSchrijversNorm, penKaart, artsenVandaag, jarigen, jarigDag, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };
+  _t: { qrMatrix, qrSvg, openbareUrl, paasZondag, feestdagen, feestdag, weekMaandag, weekRooster, weekBeeld, medischTekst, medischItems, medischBijwerken, medischBeeld, voorVan, eigenZin, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, feestPunten, mededelingNorm, vanzelfGeldig, artsenVandaag, jarigen, jarigDag, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };
