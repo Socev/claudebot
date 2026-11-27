@@ -735,6 +735,90 @@ function dossierstand(o, feiten, reeksen, stukken, nu) {
   return { score, punten, ontbreekt: punten.filter((x) => !x.ok).map((x) => x.tekst + (x.deels ? ` (${x.deels})` : '')) };
 }
 
+// ---------------------------------------------------------------- wv4227 (besluitenpagina nr 939 = L39, David Ja 25-11-2026 22:27): Socev leest Vastgoed
+// Pure functie op het overzicht van GET /app/vastgoed (dus dezelfde cijfers als het scherm). Drie leesopdrachten: kern, tab, zoek.
+// Elke regel krijgt een link naar het tabblad (de app leest o en s uit de hash). Niets schrijven: er bestaat hier geen schrijfopdracht.
+const GESPREK_TABS = ['overzicht', 'waarde', 'bouw', 'grond', 'regels', 'stukken'];
+const GESPREK_MAX_TAB = 150, GESPREK_MAX_ZOEK = 25;
+const GESPREK_BASIS = 'https://app.socev.dev/vastgoed';
+function gesprekLink(basis, sleutel, tab) { return `${basis || GESPREK_BASIS}#o=${encodeURIComponent(sleutel)}&s=${tab}`; }
+function gesprekNorm(t) { return String(t == null ? '' : t).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(); }
+function gesprekBron(b) { const s = String(b || ''); return s.startsWith('dossier: ') ? 'dossier' : s.slice(0, 80) || null; }
+function gesprekFeit(f) { return { veld: f.veld, waarde: f.waarde, peildatum: f.peildatum || null, herkomst: f.herkomst, bron: gesprekBron(f.bron) }; }
+function gesprekObject(ov, sleutel) {
+  const act = (ov.objecten || []).filter((x) => !x.weg_op);
+  if (!sleutel) return null;
+  const s = String(sleutel).toLowerCase().trim();
+  return act.find((x) => x.sleutel === s) || (s === 'huis' ? act.find((x) => x.soort === 'woning') : null)
+    || (/^\d+$/.test(s) ? act.find((x) => x.sleutel === 'box-' + s) : null) || null;
+}
+function gesprekUit(ov, b, basis) {
+  const opdracht = String(b && b.opdracht || '');
+  const fout = (t) => ({ status: 400, body: { ok: false, fout: t } });
+  if (!ov || !ov.ok) return { status: 503, body: { ok: false, fout: 'Vastgoed is nu niet te lezen' } };
+  const act = (ov.objecten || []).filter((x) => !x.weg_op);
+  const links = (o) => Object.fromEntries(GESPREK_TABS.map((t) => [t, gesprekLink(basis, o.sleutel, t)]));
+  const soortNaam = ov.stuk_soorten || STUK_SOORT;
+  if (opdracht === 'kern') {
+    const objecten = act.map((o) => {
+      const woz = (o.reeksen || []).filter((r) => r.reeks === 'woz').slice(-1)[0] || null;
+      const label = (o.feiten || []).filter((f) => /energielabel|energieklasse/i.test(f.veld) || (f.herkomst === 'extern' && f.rubriek === 'bouw' && /^(Geldig tot|Registratiedatum)$/.test(f.veld)))
+        .map(gesprekFeit);
+      const u = { sleutel: o.sleutel, soort: o.soort, naam: o.naam, adres: o.adres || null, link: gesprekLink(basis, o.sleutel, 'overzicht'),
+        dossier_gelezen: o.dossier_op || null, openbaar_opgehaald: o.extern_op || null,
+        dossierstand: o.stand ? { score: o.stand.score, ontbreekt: (o.stand.ontbreekt || []).slice(0, 5) } : null,
+        woz: woz ? { waarde: woz.waarde, peildatum: woz.peildatum, toelichting: woz.toelichting || null, link: gesprekLink(basis, o.sleutel, 'waarde') } : null,
+        energielabel: { feiten: label, link: gesprekLink(basis, o.sleutel, 'bouw') }, tabbladen: links(o) };
+      if (o.soort === 'woning') {
+        u.geld = o.geld_kern ? Object.assign({}, o.geld_kern, { link: gesprekLink(basis, o.sleutel, 'waarde') }) : null;
+        u.indicatie = o.indicatie ? { waarde: o.indicatie.waarde, basis: o.indicatie.basis, basis_datum: o.indicatie.basis_datum, uitleg: o.indicatie.uitleg || null } : null;
+      }
+      if (o.soort === 'garagebox') u.vve = o.vve || null;
+      return u;
+    });
+    return { status: 200, body: { ok: true, opdracht, objecten, geld_stand: ov.geld || null } };
+  }
+  if (opdracht === 'tab') {
+    const o = gesprekObject(ov, b.object);
+    if (!o) return fout('onbekend object; kies uit: ' + act.map((x) => x.sleutel).join(', '));
+    const tab = String(b.tab || '');
+    if (!GESPREK_TABS.includes(tab)) return fout('onbekend tabblad; kies uit: ' + GESPREK_TABS.join(', '));
+    const u = { ok: true, opdracht, object: o.sleutel, naam: o.naam, tab, link: gesprekLink(basis, o.sleutel, tab) };
+    let regels;
+    if (tab === 'stukken') regels = (o.stukken || []).map((s) => ({ naam: s.naam, soort: soortNaam[s.soort] || s.soort, datum: s.datum || null }));
+    else regels = (o.feiten || []).filter((f) => f.rubriek === tab).map(gesprekFeit);
+    if (tab === 'overzicht') u.gebeurtenissen = (o.gebeurtenissen || []).map((g) => ({ datum: g.datum || null, titel: g.titel })).slice(0, 40);
+    if (tab === 'waarde') {
+      const per = {};
+      for (const r of o.reeksen || []) (per[r.reeks] = per[r.reeks] || []).push({ peildatum: r.peildatum, waarde: r.waarde, toelichting: r.toelichting || null });
+      u.reeksen = Object.fromEntries(Object.entries(per).map(([k, l]) => [k, { punten: l.length, laatste: l.slice(-3) }]));
+      u.leningdelen = (o.leningdelen || []).map((d) => ({ naam: d.naam, restschuld: d.restschuld, restschuld_op: d.restschuld_op || null, rente: d.rente_bank ?? d.rente, rentevast_tot: d.rentevast_tot || null, einde: d.einde || null }));
+      if (o.soort === 'woning') { u.geld = o.geld_kern || null; u.indicatie = o.indicatie || null; }
+      if (o.soort === 'garagebox') u.vve = o.vve || null;
+    }
+    u.regels = regels.slice(0, GESPREK_MAX_TAB);
+    if (regels.length > GESPREK_MAX_TAB) u.meer = regels.length - GESPREK_MAX_TAB;
+    return { status: 200, body: u };
+  }
+  if (opdracht === 'zoek') {
+    const woorden = gesprekNorm(b.woorden).split(/[^a-z0-9²]+/).filter((w) => w.length > 1).slice(0, 8);
+    if (!woorden.length) return fout('woorden ontbreken');
+    const past = (t) => { const n = gesprekNorm(t); return woorden.every((w) => n.includes(w)); };
+    const alleen = b.object ? gesprekObject(ov, b.object) : null;
+    if (b.object && !alleen) return fout('onbekend object; kies uit: ' + act.map((x) => x.sleutel).join(', '));
+    const feiten = [], stukken = [], gebeurtenissen = [];
+    for (const o of alleen ? [alleen] : act) {
+      const wie = { object: o.sleutel, naam: o.naam };
+      for (const f of o.feiten || []) if (past(f.veld + ' ' + f.waarde + ' ' + f.rubriek)) feiten.push(Object.assign({}, wie, gesprekFeit(f), { tab: f.rubriek, link: gesprekLink(basis, o.sleutel, f.rubriek) }));
+      for (const s of o.stukken || []) if (past(s.naam + ' ' + (soortNaam[s.soort] || s.soort))) stukken.push(Object.assign({}, wie, { stuk: s.naam, soort: soortNaam[s.soort] || s.soort, datum: s.datum || null, tab: 'stukken', link: gesprekLink(basis, o.sleutel, 'stukken') }));
+      for (const g of o.gebeurtenissen || []) if (past(g.titel)) gebeurtenissen.push(Object.assign({}, wie, { datum: g.datum || null, titel: g.titel, tab: 'overzicht', link: gesprekLink(basis, o.sleutel, 'overzicht') }));
+    }
+    const kap = (l) => ({ n: l.length, lijst: l.slice(0, GESPREK_MAX_ZOEK) });
+    return { status: 200, body: { ok: true, opdracht, woorden, feiten: kap(feiten), stukken: kap(stukken), gebeurtenissen: kap(gebeurtenissen) } };
+  }
+  return fout('onbekende opdracht; kies uit: kern, tab, zoek');
+}
+
 // ---------------------------------------------------------------- module
 function maak(o) {
   const map = o.map, vault = o.vault;
@@ -1124,8 +1208,17 @@ function maak(o) {
         geld: { hypotheek: ok(geld.hypotheek), bank: ok(geld.bank), tibber: ok(geld.tibber) } };
     }, false);
   }
-  return { app, info, leesDossier, ververs, overzicht, wozHerken, wozControle, wozVastleggen, wozVergelijk, wozBezwaar, wozConceptGezet };
+  // wv4227 (L39): Socev in het gewone gesprek. Haalt het overzicht via exact dezelfde weg als GET /app/vastgoed (zelfde cijfers als het
+  // scherm, ook de herlezing van een dossier ouder dan een dag) en kent alleen leesopdrachten; ververs, beelden, woz en dossier zijn hier niet.
+  async function gesprek(b) {
+    const x = b && typeof b === 'object' ? b : {};
+    if (!['kern', 'tab', 'zoek'].includes(String(x.opdracht || ''))) return gesprekUit({ ok: true, objecten: [] }, x);
+    const u = await app({ pad: '/app/vastgoed', methode: 'GET' });
+    if (u.status !== 200) return { status: u.status, body: { ok: false, fout: (u.body && u.body.fout) || 'Vastgoed is nu niet te lezen' } };
+    return gesprekUit(u.body, x);
+  }
+  return { app, info, leesDossier, ververs, overzicht, wozHerken, wozControle, wozVastleggen, wozVergelijk, wozBezwaar, wozConceptGezet, gesprek };
 }
 
 module.exports = { maak, geldKern, leesWoning, leesBox, leesDossierMap, dossierstand, indicatie, soortStuk, euroUit, datumUit, bagSoort, SCHEMA_VERSIE,
-  leesHypotheek, hypotheekReeksen, laatsteStand, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst };
+  leesHypotheek, hypotheekReeksen, laatsteStand, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink };

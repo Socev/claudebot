@@ -30988,6 +30988,19 @@ async function appVastgoed(req, res, a, route, d) {
   if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'vastgoed').slice(0, 80);
   return appStuur(res, u.status, u.body);
 }
+// wv4227 (besluitenpagina nr 939 = L39, David Ja 25-11-2026 22:27): Socev kan Vastgoed lezen in het gewone gesprek (skill vastgoed).
+// Zelfde overzicht en berekening als het scherm; alleen lezen (kern, tab, zoek), met een link naar het tabblad. Opent met de agent-sleutel
+// (Socev, zonder kluis) of API_SECRET; geen nieuwe sleutel. Alleen de bekende velden gaan door (de secret niet). Log zonder inhoud.
+//   POST /smal/vastgoed {secret, opdracht: kern | tab | zoek, object?, tab?, woorden?}
+async function vastgoedSmal(d) {
+  if (!vastgoedApp || typeof vastgoedApp.gesprek !== 'function') return { status: 404, j: { ok: false, fout: 'Vastgoed zit niet in deze versie van de pod' } };
+  const b = {};
+  ['opdracht', 'object', 'tab', 'woorden'].forEach(function (k) { if (d[k] != null) b[k] = String(d[k]).slice(0, 200); });
+  let u;
+  try { u = await vastgoedApp.gesprek(b); }
+  catch (e) { logError('vastgoed', new Error('gesprek faalde')); return { status: 503, j: { ok: false, fout: 'Vastgoed is nu niet te lezen; probeer het zo opnieuw' } }; }   // geen inhoud in de log
+  return { status: u.status, j: u.body };
+}
 function vastgoedInfo() {
   if (!vastgoedApp) return { aan: false };
   try { return vastgoedApp.info(); } catch (e) { return { aan: true, fout: true }; }
@@ -34504,7 +34517,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'personeelsscherm/voorstel': 20, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, pakjes: 30, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20, 'wachter-kaart': 30, 'wachter-correcties': 20 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'personeelsscherm/voorstel': 20, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, pakjes: 30, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, vastgoed: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20, 'wachter-kaart': 30, 'wachter-correcties': 20 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata', 'eindjes', 'eindjes/oordeel', 'wachter-kaart', 'wachter-correcties']);   // wv4153: idem   // wv4124: wachter-kaart idem   // wv4007: eindjes alleen beurtpas of API_SECRET   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -34743,7 +34756,8 @@ async function smalActie(actie, d, wie) {
   }
   if (actie === 'bank') return bankSmal(d);   // wv680: alleen-lezen bankluis (zie bankSmal)
   if (actie === 'mailconcept') return mailconceptSmal(d);   // wv4098: ontvangers en feitenstrook voor een chatconcept (alleen lezen)
-  if (actie === 'beleggen') return beleggenSmal(d);   // wv3756: Socev in het gewone gesprek (stand, dagboekregel); nooit handelen
+  if (actie === 'beleggen') return beleggenSmal(d);
+  if (actie === 'vastgoed') return vastgoedSmal(d);   // wv4227: Socev leest Vastgoed (kern, tab, zoek); nooit schrijven   // wv3756: Socev in het gewone gesprek (stand, dagboekregel); nooit handelen
   if (actie === 'homey') return HOMEY_POD ? HOMEY_POD.homeySmal(d, wie) : (!wie || !wie.mk ? { status: 403, j: { ok: false, fout: 'homey alleen vanuit de machinekamer (API_SECRET)' } } : { status: 404, j: { ok: false, fout: 'homey.js zit niet in deze release' } });   // wv3460: Homey (Athom MCP), alleen API_SECRET (zie homeySmal in homey.js; wv3886)
   if (actie === 'tibber') return tibberSmal(d, wie);   // wv2707: Tibber-uurronde los (opdracht uur), alleen API_SECRET (zie tibberSmal)
   if (actie === 'nmbrs') return nmbrsSmal(d, wie);   // wv2797: Nmbrs (salarisadministratie), alleen API_SECRET (zie nmbrsSmal)

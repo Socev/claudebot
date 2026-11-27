@@ -51,6 +51,7 @@ node --test test/woning-bron.test.js >/dev/null 2>&1 && echo "GROEN test/woning-
 VASTGOED_JS="$VJS" node --test test/vastgoed-kern.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-kern.test.js (2C54: restschuld, overwaarde, rentevast, gebruik box)" || { echo "ROOD  test/vastgoed-kern.test.js"; f=1; }
 # wv4229 (L41): het WOZ-moment (dagtekening, vergelijking, termijn in het deadline-register, concept-bezwaar uit vaste velden)
 VASTGOED_JS="$VJS" node --test test/vastgoed-woz-moment.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-woz-moment.test.js (L41: WOZ-moment)" || { echo "ROOD  test/vastgoed-woz-moment.test.js"; f=1; }
+VASTGOED_JS="$VJS" node --test test/vastgoed-gesprek.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-gesprek.test.js (L39: Socev leest Vastgoed)" || { echo "ROOD  test/vastgoed-gesprek.test.js"; f=1; }
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 python3 -I test/vastgoed-laag.py "$OPY" "$T" | tail -1; python3 -I test/vastgoed-laag.py "$OPY" "$T" >/dev/null 2>&1 || { echo "ROOD  test/vastgoed-laag.py"; f=1; }
 
