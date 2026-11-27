@@ -13659,6 +13659,79 @@ async function berichtVjKnoplink(res, d) {
   res._log.ok = !!r.ok;
   berichtStuur(res, r.ok ? 200 : 400, r);
 }
+// ── wv4232 (besluitenpagina nr 948 = L48, David Ja 25-11-2026 22:18): antwoorden zonder openklappen, en de afloop terug op de kaart ──
+// (1) snel: voor de eerste APP_VJ_SNEL_MAX open besluiten in de lijst de knopstand (dezelfde vorm als knop in het detail), zodat de app
+// Ja / Nee / Anders meteen onder de vraag zet. Niet bij een gevoelige vraag (vingerafdruk), Stop (doorbouw-mededeling), knopstap,
+// steekwoorden, regels of wachterknoppen: die blijven openklappen. De druk zelf loopt via POST /app/voor-jou/knop zoals altijd (tekst_id).
+// (2) afloop: na een knopdruk één regel met wat er gebeurde (vj-afloop.js), en het antwoord of rapport daarbij niet ook los in Te lezen.
+const APP_VJ_SNEL_MAX = 10;
+const APP_VJ_AFLOOP_MS = 7 * 24 * 3600 * 1000;
+const VJA = (function () { try { return require(typeof __dirname === 'string' ? path.join(__dirname, 'vj-afloop.js') : './vj-afloop.js'); } catch (e) { logError('vj-afloop', e); return null; } })();
+async function appVjSnel(lijst, afMap) {
+  const uit = {};
+  let n = 0;
+  for (const p of lijst) {
+    if (n >= APP_VJ_SNEL_MAX) break;
+    if (!p || p.soort !== 'besluit' || p.status !== 'open') continue;
+    n++;
+    try {
+      if (appVjVraagRegels(p) || await appSwSetVoor(p)) continue;
+      let wk = null;
+      try { wk = typeof wachterKaarten !== 'undefined' && wachterKaarten ? wachterKaarten.detail(p) : null; } catch (e) { wk = null; }
+      if (wk || vjKnoplinkVoor(p)) continue;
+      const k = await appVjKnopVormDb(p, appVjKnopStand(p, await appVjRegisterVraag(p), afMap));
+      if (!k.kan || k.gevoelig || k.stop) continue;
+      const jn = appVjJaNee((Array.isArray(p.stappen) ? p.stappen : []).slice(0, 12).map(appVjStap));
+      uit[p.id] = { knop: k, ja: jn && jn.ja ? jn.ja : undefined };
+    } catch (e) { logError('vj-snel', e); }
+  }
+  return uit;
+}
+// De beurt die Davids knopdruk verwerkte (eigen kaartvraag of de gekoppelde chatvraag); een zelf-vrijgave (wv4196) heeft geen echte job.
+function appVjKnopJob(p, v, afMap) {
+  const ks = appVjKaartSleutel(p), sl = [ks.job + ':' + ks.hash], g = appVjGekoppeld(p, afMap);
+  if (g) sl.push(g);
+  for (const k of sl) { const x = v && v[k] && v[k].antwoord; if (x && APP_JOB_RE.test(String(x.job || ''))) return x.job; }
+  return null;
+}
+async function appVjAfloopAlle(punten, nu, afMap) {
+  const uit = { per: {}, jobs: new Set() };
+  if (!VJA) return uit;
+  const kaarten = (punten || []).filter(function (p) { return p && p.status === 'gedaan' && p.gesloten_door === 'david' && nu - (Date.parse(p.gesloten_op || '') || 0) < APP_VJ_AFLOOP_MS; });
+  if (!kaarten.length) return uit;
+  let rijen = [];
+  try { const wv = await appWerkvoorraad(); rijen = (wv && wv.items) || []; } catch (e) { logError('vj-afloop', e); }
+  let v = {};
+  try { v = appVragen(); } catch (e) { v = {}; }
+  const perJob = {}, perKlus = {};
+  for (const k of ['hoofd', 'machinekamer']) {
+    try {
+      const r = await appGeschiedenisRuw(k, appMoetLog);
+      if (r.fout) throw r.fout;
+      r.items.forEach(function (x) {
+        if (!x || !APP_JOB_RE.test(String(x.job_id || ''))) return;
+        const it = Object.assign({ kanaal: k }, x);
+        perJob[x.job_id] = it;
+        if (x.soort === 'socev' && APP_JOB_RE.test(String(x.agent_job || ''))) perKlus[x.agent_job] = it;
+      });
+    } catch (e) { logError('vj-afloop', e); }
+  }
+  const zin = function (t) { const u = AGENTS_AF ? AGENTS_AF.uitkomstUitRapport(t) : null; return u ? appSleutelMasker(appVjGewoon(u.zin)) : null; };
+  const status = function (j) { return jobs[j] ? jobs[j].status : null; };
+  kaarten.forEach(function (p) {
+    const o = { rijen: rijen, knopJob: appVjKnopJob(p, v, afMap), log: function (j, klus) { return klus ? perKlus[j] : perJob[j]; }, zin: zin, jobStatus: status };
+    try {
+      const x = VJA.afloop(p, o);
+      if (x) uit.per[p.id] = x;
+      VJA.kaartJobs(p, o).forEach(function (j) { uit.jobs.add(j); });
+    } catch (e) { logError('vj-afloop', e); }
+  });
+  return uit;
+}
+// Wat de app van een afloop krijgt (geen open/t: die zijn voor de pod)
+function appVjAfloopVorm(x) {
+  return x ? { stand: x.stand, tekst: appKort(x.tekst, 160), kanaal: x.kanaal === 'hoofd' || x.kanaal === 'machinekamer' ? x.kanaal : null, job_id: x.kanaal && x.job_id ? x.job_id : null } : undefined;
+}
 async function appVoorJouRoute(req, res, a, kanaal) {
   res._app.stil = true;   // de app leest bij openen van Vandaag en op Ververs
   let punten;
@@ -13683,7 +13756,14 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   let vr = {};
   try { vr = appVragen(); } catch (e) { vr = {}; }
   const af = await appVjAfgeleid(punten, nu);   // wv1018: vóór de lijst (beantwoord leest de afgeleide koppeling ook)
-  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), appVjDoel(p, a), { bundel: vjMoment && vjMoment.isMk(p.herkomst) ? 'machinekamer' : undefined, terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map), auto: p.soort === 'besluit' && typeof telVoorstelKort === 'function' ? telVoorstelKort(p.id) : undefined }); });   // wv1706: module + doel; wv3771: klaargezet in de auto (alleen weergave)
+  // wv4232 (L48): knopstand voor de eerste besluiten in de lijst (alleen op het kanaal: de huidige app) en de afloop na een knopdruk
+  let snel = {}, afl = { per: {}, jobs: new Set() };
+  if (kanaal) {
+    try { snel = await appVjSnel(zichtbaar, af.map); } catch (e) { logError('vj-snel', e); snel = {}; }
+    try { afl = await appVjAfloopAlle(eigen, nu, af.map); } catch (e) { logError('vj-afloop', e); }
+  }
+  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), appVjDoel(p, a), { bundel: vjMoment && vjMoment.isMk(p.herkomst) ? 'machinekamer' : undefined, terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map), auto: p.soort === 'besluit' && typeof telVoorstelKort === 'function' ? telVoorstelKort(p.id) : undefined,   // wv1706: module + doel; wv3771: klaargezet in de auto (alleen weergave)
+    snel: snel[p.id], afloop: appVjAfloopVorm(afl.per[p.id]) }); });   // wv4232
   // wv3100 (David 14-11 23:28, "inbox zero"): wat David vandaag zelf afhandelde (Gedaan, Niet meer nodig, Ja / Nee / Anders op de kaart) en
   // niet meer in de lijst staat, voor de ingeklapte regel "Afgehandeld vandaag" onderaan Voor jou. De app haalt beantwoorde en net gekozen
   // punten zelf uit de lijst; dit is alleen de terugvindplek. Geen lijst van de ronde of een agent (gesloten_door david), hooguit 30.
@@ -13692,9 +13772,11 @@ async function appVoorJouRoute(req, res, a, kanaal) {
     const g = Date.parse(p.gesloten_op || '');
     // wv4197: ook een kaart die Socev zelf dichtzette omdat de controle het zag ("Gezien: …")
     const zelf = p.gesloten_door === 'david' || (p.gesloten_door === 'beheer' && p.status === 'gedaan' && /^Gezien: /.test(String(p.bewijs || '')));
-    return (p.status === 'gedaan' || p.status === 'vervallen') && zelf && Number.isFinite(g) && appYmd(g) === vandaag && !inLijst.has(p.id);
+    // wv4232 (L48): ook een eerder beantwoorde kaart zolang de afloop nog loopt, of als hij vandaag klaar kwam
+    const x = afl.per[p.id], afloopNu = !!x && (x.open === true || (Number.isFinite(Date.parse(x.t || '')) && appYmd(Date.parse(x.t)) === vandaag));
+    return (p.status === 'gedaan' || p.status === 'vervallen') && zelf && Number.isFinite(g) && (appYmd(g) === vandaag || (p.gesloten_door === 'david' && afloopNu)) && !inLijst.has(p.id);
   }).sort(function (x, y) { return String(y.gesloten_op).localeCompare(String(x.gesloten_op)); }).slice(0, 30)
-    .map(function (p) { return { id: p.id, titel: appKort(p.titel, 120), status: p.status, t: p.gesloten_op, beantwoord: appVjBeantwoordKort(p, vr, af.map) }; });
+    .map(function (p) { return { id: p.id, titel: appKort(p.titel, 120), status: p.status, t: p.gesloten_op, beantwoord: appVjBeantwoordKort(p, vr, af.map), afloop: appVjAfloopVorm(afl.per[p.id]) }; });
   // wv4194 (3C17): Doe jij het — zolang Socevs beurt loopt staat de kaart hier als "Socev doet het" (status socev; oude app toont het woord)
   if (VJU) eigen.forEach(function (p) {
     if (inLijst.has(p.id) || (p.status !== 'open' && p.status !== 'later')) return;
@@ -13726,7 +13808,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   // wv2245: Te lezen; een fout hier raakt Moet iets en de kaarten niet (te_lezen.fout, lege lijst). Zonder module: geen veld (oude stand).
   let teLezen;
   if (teLezenMod) {
-    try { teLezen = await appTeLezen(a, moet, nu); } catch (e) { logError('te-lezen', e); teLezen = { punten: [], meer: 0, ongezien: 0, nieuw: 0, afgevinkt: [], bewaard: null, fout: 'Te lezen is nu niet te lezen', gezien_bekend: false }; }
+    try { teLezen = await appTeLezen(a, moet, nu, afl.jobs); } catch (e) { logError('te-lezen', e); teLezen = { punten: [], meer: 0, ongezien: 0, nieuw: 0, afgevinkt: [], bewaard: null, fout: 'Te lezen is nu niet te lezen', gezien_bekend: false }; }
     teLezen.punten.forEach(function (p) { sleutels.push(p.sleutel); });
   }
   appMoetGezienOpruim(punten, nu, vandaag);
@@ -13943,13 +14025,13 @@ async function appTeLezenPer() {
   return per;
 }
 // Voor GET /app/voor-jou/kanaal. moet = de punten van Moet iets (die tonen we hier niet nog eens).
-async function appTeLezen(a, moet, nu) {
+async function appTeLezen(a, moet, nu, aanKaart) {   // wv4232: aanKaart = jobs die als afloop aan een kaart hangen
   const per = await appTeLezenPer();
   const klussen = {};   // wv3967: machinekamer-klusrapporten niet meer in Te lezen (mkKlussen false), dus geen herkomst nodig
   const g = appGezienDavid();
   const moetJobs = new Set((moet || []).map(function (m) { return m.job_id; }));
   const uit = teLezenMod.uit({ per: per, klussen: klussen, staat: appTeLezenStaat(), tabs: g ? g.tabs : {}, inBeeld: g ? g.punten : {},
-    vraag: appTeLezenVraag, moet: moetJobs, nu: nu, mkKlussen: false, momentSinds: vjMoment ? vjMoment.laatsteMoment(nu) : null,   // wv3967
+    vraag: appTeLezenVraag, moet: moetJobs, nu: nu, aanKaart: aanKaart instanceof Set ? aanKaart : undefined, mkKlussen: false, momentSinds: vjMoment ? vjMoment.laatsteMoment(nu) : null,   // wv3967
     slotVan: function (job) { const e = agentsReg && Object.prototype.hasOwnProperty.call(agentsReg, job) ? agentsReg[job] : null; return e && e.slot ? e.slot : null; } });   // wv4175 (3C75)
   // gezien-david.json onleesbaar: dan geen tabtijden, dus antwoorden die David misschien al zag; zeg dat (de app toont geen getal)
   return Object.assign(uit, { fout: klussen === null ? 'de rapporten van je klussen zijn nu niet te lezen' : null, gezien_bekend: !!g });
@@ -22714,9 +22796,13 @@ async function telOwSloten(res, t, naam, teller, max) {
 }
 async function telTeLezenPunten() {
   const nu = Date.now();
-  let moet = [];
-  try { const punten = await appVjPunten(); moet = (await appMoetIets(punten, nu, await appVjAfgeleid(punten, nu))) || []; } catch (e) { logError('tel-telezen', e); moet = []; }
-  const tl = await appTeLezen(null, moet, nu);
+  let moet = [], aanKaart;
+  try {
+    const punten = await appVjPunten(), af = await appVjAfgeleid(punten, nu);
+    moet = (await appMoetIets(punten, nu, af)) || [];
+    try { aanKaart = (await appVjAfloopAlle(punten, nu, af.map)).jobs; } catch (e) { aanKaart = undefined; }   // wv4232: zoals Te lezen in de app
+  } catch (e) { logError('tel-telezen', e); moet = []; }
+  const tl = await appTeLezen(null, moet, nu, aanKaart);
   return (tl && Array.isArray(tl.punten) ? tl.punten : []).filter(function (p) { return p && TEL_SLEUTEL_TL_RE.test(String(p.sleutel)); });
 }
 function telTeLezenTitel(p) {
