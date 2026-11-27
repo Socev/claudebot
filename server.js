@@ -31806,7 +31806,7 @@ const strateegApp = (function () {
     const S = require(p);
     return S.maak({ dbPad: STRATEEG_DB, kind: S.forkKind(path.dirname(STRATEEG_DB)),
       haal: async function (url, soort) { const r = await H.veiligHaal(url, { ua: soort === 'ls' ? BELEGGEN_KOERS_UA : BELEGGEN_UA }, 'application/json, text/plain;q=0.9, */*;q=0.5'); return r.body; },
-      boxRij: function (t) { return ovisBoxRij(t); },
+      boxRij: function (t) { return ovisBoxRij(strateegBoxTekst(t)); },   // wv4357: strateeg.js geeft een kale zin; zonder kop belandde die midden in de box
       hartslag: function (n, b) { return appSbRpc('mk_hartslag_stempel', { p_component: 'strateeg-dag', p_gemeten_rijen: n, p_bevindingen: b }); },
       log: function (o) { schrijfLog(nu() + ' strateeg ' + velden(o)); } });
   } catch (e) { logError('strateeg', new Error('laden faalde')); return null; }
@@ -31846,10 +31846,55 @@ const ideeenApp = (function () {
       log: function (o) { schrijfLog(nu() + ' strateeg ' + velden(o)); } });
   } catch (e) { logError('strateeg-ideeen', new Error('laden faalde')); return null; }
 })();
-let strateegBezig = false;
+let strateegBezig = false, strateegBezigSinds = 0;
+// wv4357: waarschuwing bij een stille Strateeg-klok. 26-11 lag de klok 11:01–17:26 stil: de hele pod was weg (Olares-uitval, SIGTERM 11:20:36,
+// start 17:25:15); niets in de Strateeg zelf. Toch moet zo'n stilte zichtbaar worden: op een beursdag tussen 09:15 en 22:00 met stand aan of
+// pauze, geen kwartier afgerond in 45 min (gerekend vanaf 09:00) of de bezig-vlag langer dan 10 min vast → één logregel en één box-rij per dag
+// (meta-sleutel klokwacht_dag in strateeg.sqlite; overleeft een herstart). Geen bericht aan David, geen herstel: alleen zichtbaar maken.
+const STRATEEG_STIL_MS = 45 * 60000, STRATEEG_VAST_MS = 10 * 60000;
+function strateegBoxTekst(t) {   // kale zin → box-rij met kop; een tekst die al met een kop begint blijft gelijk
+  t = String(t || '');
+  if (/^\n?## \[/.test(t)) return t.charAt(0) === '\n' ? t : '\n' + t;
+  return '\n## [direct] ' + new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16) + ' — ' + t.split('\n')[0].slice(0, 300) +
+    '\n- status: open\n- van: pod strateeg.js (automatisch)\n';
+}
+function strateegKlokOordeel(i) {   // puur. i = { nuMs, min (minuut van de dag, NL), beursdag, stand, laatsteTik (ms|null), bezigSinds (ms|0) }
+  if (!i.beursdag || i.min < 9 * 60 + 15 || i.min >= 22 * 60) return null;
+  if (i.stand !== 'aan' && i.stand !== 'pauze') return null;   // wacht/klaar: er hoort geen kwartier te lopen
+  if (i.bezigSinds && i.nuMs - i.bezigSinds > STRATEEG_VAST_MS) return { soort: 'vast', minuten: Math.round((i.nuMs - i.bezigSinds) / 60000) };
+  const ref = Math.max(i.laatsteTik || 0, i.nuMs - (i.min - 9 * 60) * 60000);   // laatste kwartier, maar nooit vóór 09:00 vandaag
+  if (i.nuMs - ref > STRATEEG_STIL_MS) return { soort: 'stil', minuten: Math.round((i.nuMs - ref) / 60000), sinds: ref };
+  return null;
+}
+function strateegKlokWacht() {
+  if (!strateegApp || !SERVER_ECHT || !rolPrimair()) return null;
+  try {
+    const nuMs = Date.now(), k = new Date(nuMs).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }), dag = k.slice(0, 10);
+    const S = require(path.join(__dirname, 'strateeg.js')), wd = new Date(dag + 'T12:00:00Z').getUTCDay();
+    const beursdag = wd !== 0 && wd !== 6 && Object.values(S.REGELS.beurzen).some(function (b) { return !(b.gesloten || []).includes(dag); });   // zelfde regel als strateeg.js beursdag()
+    const inf = strateegApp.info();
+    if (!inf || inf.fout) return null;
+    const o = strateegKlokOordeel({ nuMs: nuMs, min: Number(k.slice(11, 13)) * 60 + Number(k.slice(14, 16)), beursdag: beursdag, stand: inf.stand,
+      laatsteTik: inf.laatste_tik || null, bezigSinds: strateegBezig ? strateegBezigSinds : 0 });
+    if (!o || strateegApp._M.get('klokwacht_dag') === dag) return o;
+    strateegApp._M.zet('klokwacht_dag', dag);
+    const hhmm = function (ms) { return new Date(ms).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(11, 16); };
+    const herstart = inf.laatste_tik && inf.laatste_tik < APP_PROCES_START;
+    schrijfLog(nu() + ' strateeg ' + velden({ stap: 'klokwacht', soort: o.soort, minuten: o.minuten, herstart: herstart ? 1 : 0 }));
+    const wat = o.soort === 'vast'
+      ? 'Strateeg-klok hangt: de minuuttik is al ' + o.minuten + ' min bezig (normaal hooguit ± 2 min)'
+      : 'Strateeg-klok stil: geen kwartier afgerond sinds ' + hhmm(o.sinds) + ' (' + o.minuten + ' min)';
+    ovisBoxRij('\n## [direct] ' + k.slice(0, 16) + ' — ' + wat + ' #beleggen-strateeg\n- status: open\n- van: pod server.js (wv4357; hooguit 1×/dag)\n' +
+      '- gemeten: stand ' + inf.stand + ', tikken vandaag ' + inf.tikken_vandaag + ', podproces sinds ' + hhmm(APP_PROCES_START) +
+      (herstart ? ' (de pod herstartte ná de laatste tik: eerst kijken of de pod of Olares weg was, bin/api.log supervisor-regels)' : '') + '\n' +
+      '- gevolg als er niets gebeurt: de proefboeken (fictief geld) slaan kwartierbeslissingen en Ideeën-rondes over; de proefmaand meet dan minder.\n' +
+      '- voorstel: tabel tik in strateeg.sqlite en api.log (strateeg-regels, rol, supervisor) rond de laatste tik nakijken; niets herstarten zonder oorzaak.\n');
+    return o;
+  } catch (e) { logError('strateeg-klokwacht', new Error('controle faalde')); return null; }
+}
 async function strateegTik() {
   if (!strateegApp || !SERVER_ECHT || !rolPrimair() || strateegBezig) return;
-  strateegBezig = true;
+  strateegBezig = true; strateegBezigSinds = Date.now();
   let uit = null;
   try { uit = await strateegApp.tik(); }
   catch (e) { logError('strateeg', new Error('tik faalde')); }   // geen inhoud in de log
@@ -31860,7 +31905,7 @@ async function strateegTik() {
   catch (e) { logError('strateeg-ideeen', new Error('tik faalde')); }
   finally { strateegBezig = false; }
 }
-if (strateegApp && SERVER_ECHT) { setInterval(function () { strateegTik(); }, 60000).unref(); }
+if (strateegApp && SERVER_ECHT) { setInterval(function () { strateegKlokWacht(); strateegTik(); }, 60000).unref(); }   // wv4357: eerst de klokwacht (ziet ook een vastzittende vlag)
 // wv3756 (besluitenpagina nr 908 = L08, David Ja 21-11 13:18): Socev kan erbij in het gewone gesprek (skill beleggen). Zelfde databank en
 // berekening als het scherm; alleen lezen en een dagboekregel (vaultpagina Dagboek via vault-veilig, zoals de app). Socev draait als gebruiker
 // socev zonder kluis: deze route vraagt alleen de agent-sleutel, geen nieuwe sleutel. Alleen de bekende velden gaan door (de secret niet).

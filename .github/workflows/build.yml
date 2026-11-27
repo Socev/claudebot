@@ -648,6 +648,10 @@ jobs:
       - name: "strateeg-ideeen (wv4012, boek Ideeën)"
         if: ${{ !cancelled() }}
         run: node --test test/strateeg-ideeen.test.js
+      # wv4357: klokwacht van de Strateeg (stille klok > 45 min of vlag > 10 min vast op een beursdag → één logregel + box-rij per dag) en kop om de kale box-zin.
+      - name: "strateeg-klokwacht (wv4357)"
+        if: ${{ !cancelled() }}
+        run: node --test test/strateeg-klokwacht.test.js
       # wv4121: seintje zegt het soort (vraag, antwoord, machinekamer, storing), zonder inhoud — keuze, lijst per apparaat, elke verzendplek geeft een soort.
       - name: "seintje-soort (wv4121, 3C16)"
         if: ${{ !cancelled() }}
