@@ -117,7 +117,7 @@ def db():
         ingang text not null, term text not null, herkomst text, poort text, poort_reden text, uitkomst text, cache integer default 0);
       create table if not exists aanroep(id integer primary key, zoek_id integer not null, tijd text not null, bron text not null,
         soort text not null, host text, naar_buiten text, status text, ms integer);
-      create table if not exists cache(sleutel text primary key, tijd text not null, json text not null);
+      create table if not exists cache(sleutel text primary key, tijd text not null, json text not null, zoek_id integer);
       create index if not exists aanroep_zoek on aanroep(zoek_id);
       create table if not exists instelling(sleutel text primary key, json text not null, tijd text);
       create table if not exists lijkend(variant text primary key, domein text not null, fuzzer text, a text, mx text, ns text, eerst text, laatst text);
@@ -128,6 +128,8 @@ def db():
         c.execute('alter table zoekvraag add column graaf text')
     if 'sleutel' not in kol:
         c.execute('alter table zoekvraag add column sleutel text')   # wv4156 (2C94 c): welk bewaard antwoord bij deze zoekvraag hoort
+    if 'zoek_id' not in [r[1] for r in c.execute('pragma table_info(cache)')]:
+        c.execute('alter table cache add column zoek_id integer')   # wv4156 (review MOET 1): welke zoekvraag dit antwoord ophaalde (wat ging waarheen)
     nu = datetime.datetime.now(datetime.timezone.utc)
     c.execute('delete from cache where tijd < ?', ((nu - datetime.timedelta(days=CACHE_DAGEN)).isoformat(),))
     oud = (nu - datetime.timedelta(days=LOG_DAGEN)).isoformat()
@@ -3675,8 +3677,8 @@ def zoek(v):
         met_juridisch(kaarten)
         graaf = ctx.graaf() if pt['niveau'] != 'niets' and ingang not in ('bestand', 'voetafdruk') and not (ingang == 'mail' and pt['niveau'] != 'alles') else None
         if cachebaar and pt['niveau'] == 'alles' and not NEP and any(l['soort'] == 'extern' and l['status'] in ('200', '204') for l in ctx.log):
-            c.execute('insert or replace into cache(sleutel, tijd, json) values (?,?,?)',
-                      (sleutel, nu_iso(), json.dumps({'kaarten': cachevorm(kaarten), 'kern': kern, 'graaf': graaf}, ensure_ascii=False)))
+            c.execute('insert or replace into cache(sleutel, tijd, json, zoek_id) values (?,?,?,?)',
+                      (sleutel, nu_iso(), json.dumps({'kaarten': cachevorm(kaarten), 'kern': kern, 'graaf': graaf}, ensure_ascii=False), zid))
     kaarten = zonder_intern(kaarten)
     if pt['niveau'] != 'alles':
         kaarten.insert(0, kaartje('Poort', 'OVIS OSINT-poort', let='Deze zoekvraag ging niet naar openbare bronnen (%s).' % pt['reden']))
@@ -3769,17 +3771,20 @@ def in_het_kort(ingang, kern, kaarten, nu=None):
     for k in kaarten:
         t = str(k.get('let') or '').strip()
         if t and t not in let:
-            let.append(t[:300])
+            let.append(t)   # review ZOU 1: volledig, niet afgekapt
         if k.get('titel') == 'Wat wij er zelf van weten (Facturen)' and dict(k.get('velden') or []).get('Nieuw IBAN'):
             t = 'Facturen: dit is een nieuw IBAN; eerst nabellen op een nummer dat je al kende.'
             if t not in let:
                 let.append(t)
-    return {'feiten': f[:5], 'let': let[:10]}
+    return {'feiten': f[:5], 'let': let}
 
 
 def bewaard(zid, sl=None):
     """Het bewaarde antwoord van één zoekvraag uit het logboek (wv4156, 2C94 c): uit de cache, zonder nieuwe zoekvraag en zonder aanroep
-    naar buiten. Niet (meer) bewaard (30 dagen, poort dicht, mailkop, bestand) = ok False met reden; dan zoekt David opnieuw."""
+    naar buiten. Niet (meer) bewaard (30 dagen, poort dicht, mailkop, bestand) = ok False met reden; dan zoekt David opnieuw.
+    Review MOET 1: de cache houdt per zoekterm het nieuwste antwoord (Opnieuw ophalen vervangt het). Bewust: een tik toont dat nieuwste antwoord,
+    met zijn eigen datum (bewaard_op) en het logboek van de zoekvraag die het ophaalde (cache.zoek_id), zodat antwoord en wat-ging-waarheen bij
+    elkaar horen; geen kopie per zoekvraag (opslag)."""
     SLEUTELS.clear()
     if isinstance(sl, dict):
         SLEUTELS.update({k: sl[k] for k in SLEUTEL_ENV if isinstance(sl.get(k), str)})
@@ -3793,16 +3798,17 @@ def bewaard(zid, sl=None):
                 'ingang': z['ingang'], 'term': z['term']}
     sleutel = z['sleutel'] or hashlib.sha256(('%s|%s|%s|%s|%s|%s' % (VERSIE, z['ingang'], z['term'].lower(), z['poort'], z['wie'] == 'david',
                                                                      ''.join(k for k in sorted(SLEUTEL_ENV) if sleutel_er(k)))).encode()).hexdigest()
-    rij = c.execute('select tijd, json from cache where sleutel = ?', (sleutel,)).fetchone()
+    rij = c.execute('select tijd, json, zoek_id from cache where sleutel = ?', (sleutel,)).fetchone()
     if not rij:
         return {'ok': False, 'fout': 'niet bewaard', 'reden': 'dit antwoord is niet meer bewaard', 'ingang': z['ingang'], 'term': z['term']}
     u = json.loads(rij['json'])
     kaarten = zonder_intern(herstel_google(Ctx('niets', False, z['wie']), u.get('kaarten') or []))   # Google-foto nooit uit de cache, en hier niet opnieuw ophalen
-    a = [dict(r) for r in c.execute('select bron, soort, host, naar_buiten, status, ms from aanroep where zoek_id = ? order by id', (z['id'],))]
+    van = rij['zoek_id'] or z['id']
+    a = [dict(r) for r in c.execute('select bron, soort, host, naar_buiten, status, ms from aanroep where zoek_id = ? order by id', (van,))]
     if z['poort'] != 'alles':
         kaarten.insert(0, kaartje('Poort', 'OVIS OSINT-poort', let='Deze zoekvraag ging niet naar openbare bronnen (%s).' % z['poort_reden']))
     return {'ok': True, 'id': z['id'], 'ingang': z['ingang'], 'term': z['term'], 'doel': z['doel'], 'doel_tekst': z['doel_tekst'], 'wie': z['wie'],
-            'poort': {'niveau': z['poort'], 'reden': z['poort_reden']}, 'cache': True, 'bewaard': True, 'bewaard_op': rij['tijd'], 'kaarten': kaarten,
+            'poort': {'niveau': z['poort'], 'reden': z['poort_reden']}, 'cache': True, 'bewaard': True, 'bewaard_op': rij['tijd'], 'bewaard_van': van, 'kaarten': kaarten,
             'kern': u.get('kern') or {}, 'extern': sum(1 for r in a if r['soort'] == 'extern' and r['status'] != 'poort dicht'), 'logboek': a,
             'versie': VERSIE, 'graaf': u.get('graaf'), 'kort': in_het_kort(z['ingang'], u.get('kern'), kaarten)}
 

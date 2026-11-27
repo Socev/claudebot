@@ -11,6 +11,7 @@ export OSINT_DB="$T/db/osint.sqlite" OSINT_NEP_NET=1 OSINT_WEBHOOKS="$T/webhooks
 export API_SECRET=toets SUPABASE_RPC_CONTACTEN=toets N8N_WEBHOOK_AGENDA_API=toets PORT=9
 mkdir -p "$T/vault" "$T/tools"
 PY="${OSINT_PY:-$PWD/osint.py}"
+export PYTHONDONTWRITEBYTECODE=1   # geen __pycache__ in de werkboom (wv3930)
 F=0
 python3 - "$PY" <<'PYEOF' || F=1
 import datetime, importlib.util, json, sqlite3, sys, os
@@ -28,7 +29,8 @@ if callable(kort):
         {'titel': 'Wat wij er zelf van weten (Facturen)', 'velden': [('Betaalt', '23 × incasso'), ('Eerste / laatste', '2019-03-01 / 2026-11-01'), ('Nieuw IBAN', 'ja, let op')]},
         {'titel': 'Website', 'velden': [('Domein', 'voorbeeld-leverancier.example')]},
         {'titel': 'Faillissementen', 'velden': [], 'let': 'Verzonnen: een bekendmaking noemt deze naam.'},
-        {'titel': 'Dubbel', 'velden': [], 'let': 'Verzonnen: een bekendmaking noemt deze naam.'}]
+        {'titel': 'Dubbel', 'velden': [], 'let': 'Verzonnen: een bekendmaking noemt deze naam.'},
+        {'titel': 'Lang', 'velden': [], 'let': 'L' * 500}]
     kern = {'naam': 'Voorbeeld Leverancier B.V.', 'rechtsvorm': 'Besloten vennootschap', 'kvk': '99999999', 'geregistreerd': '2012-06-01', 'facturen_aantal': 23}
     k = kort('bedrijf', kern, kaarten, nu)
     f = k['feiten']
@@ -39,6 +41,7 @@ if callable(kort):
     eis('23 betalingen in Facturen sinds 2019' in f and 'opgericht 01-01-2001' not in f, 'bedrijf: betalingen sinds 2019 gaan vóór de oprichting (max 5)  %r' % f)
     eis(k['let'][0].startswith('Dit bedrijf heeft een non-mailing') and k['let'].count('Verzonnen: een bekendmaking noemt deze naam.') == 1, 'let-op: alle kaartjes, ontdubbeld, in volgorde')
     eis(any('nieuw IBAN' in x for x in k['let']), 'let-op: nieuw IBAN uit Facturen')
+    eis('L' * 500 in k['let'], 'let-op: volledig, niet afgekapt (review ZOU 1)')
     alles = json.dumps(k, ensure_ascii=False).lower()
     eis(not any(w in alles for w in ('score', 'stoplicht', 'betrouwbaar', 'geen faillissement', 'veilig')), 'geen cijfer, stoplicht of oordeel')
     k = kort('bedrijf', {'geregistreerd': '2026-11-06'}, [{'titel': 'Wat wij er zelf van weten (Facturen)', 'klein': 'Geen betalingen gevonden in Facturen.', 'velden': []}], nu)
@@ -74,6 +77,13 @@ if callable(bew) and sl:
     eis(not any(k.get('titel') == 'Google Street View' or '_gsv' in k for k in b['kaarten']), 'bewaard: Google-foto niet uit de cache en niet opnieuw opgehaald')
     nx = c.execute("select count(*) from aanroep where zoek_id = ? and soort = 'extern' and status != 'poort dicht'", (r['id'],)).fetchone()[0]
     eis(b['kort']['let'] == ['Verzonnen let-op.'] and b['extern'] == nx and 'Proefbron' in [x['bron'] for x in b['logboek']], 'bewaard: kort, extern en wat-ging-waarheen van die zoekvraag')
+    # review MOET 1: na Opnieuw ophalen (nieuwe zoekvraag vult de cache) toont de oude regel het nieuwste antwoord met het logboek van die nieuwe zoekvraag
+    r2 = o.zoek({'ingang': 'bedrijf', 'term': '99999999', 'wie': 'david', 'beelden': True, 'vers': True})
+    c.execute("insert into aanroep(zoek_id, tijd, bron, soort, host, naar_buiten, status, ms) values (?,?,?,?,?,?,?,?)", (r2['id'], 'x', 'Proefbron-nieuw', 'extern', 'proef.example', '99999999', '200', 5))
+    c.execute('update cache set tijd = ?, zoek_id = ?, json = ? where sleutel = ?', ('2026-11-27T10:00:00+00:00', r2['id'], json.dumps(dict(u, kern={'naam': 'Nieuwer B.V.'})), sl)); c.commit()
+    b = bew(str(r['id']))
+    eis(b.get('ok') and b['kern'].get('naam') == 'Nieuwer B.V.' and b['bewaard_op'].startswith('2026-11-27T10') and b['bewaard_van'] == r2['id']
+        and 'Proefbron-nieuw' in [x['bron'] for x in b['logboek']] and 'Proefbron' not in [x['bron'] for x in b['logboek']], 'bewaard na verversen: nieuwste antwoord met zijn eigen datum en logboek')
     c.execute('update zoekvraag set sleutel = null where id = ?', (r['id'],)); c.commit()
     eis(bew(str(r['id'])).get('ok'), 'bewaard: oudere zoekvraag zonder sleutel vindt het antwoord ook')
     c.execute('delete from cache'); c.commit()
