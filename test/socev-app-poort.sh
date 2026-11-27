@@ -135,6 +135,7 @@ const FIN_MODEL = ['basis', 'laag', 'hoog'].map((s, i) => ({ entiteit: 'GH', ver
 const POT_SUBSIDIE = [{ jaar: 2026, n: 9, totaal: 1234.4, bron: 'Proefvoorstel.pdf, tabel X', bron2: 'Proefvoorstel.pdf, tabel X' }];
 const potStaat = { batch: [], kapot: false };
 const FIN_DECL = [{ entiteit: 'TG', jaar: 2025, tot: '2025-12-31', toegezegd: 1446958.2 }, { entiteit: 'TG', jaar: 2026, tot: '2026-08-12', toegezegd: 1028939.4 }];
+const FIN_TARIEF = [];   // wv4216: geen tarievenlijst → TG houdt 'geen prognose (geen model)'; de berekening zelf: test/praktijken-berekend.test.js
 const FIN_BRON = [[2, 'VIP-export 03. Overzicht gedeclareerde prestaties 2025 (Groenhouten)', '2025-12-31'], [3, 'VIP-export oudere 2026 (Tolgaarde)', '2026-05-31'], [4, 'VIP-export 03. Overzicht gedeclareerde prestaties 2024 (Tolgaarde)', '2024-12-31'],
   [5, 'VIP-export 03. Overzicht gedeclareerde prestaties 2025 (Tolgaarde)', '2025-12-31'], [6, 'VIP-export 03. Overzicht gedeclareerde prestaties 2026 (Tolgaarde)', '2026-08-12'],
   [7, 'Jaarrekening 2020 Tolgaarde'], [8, 'Jaarrekening 2021 Tolgaarde'], [9, 'Jaarrekening 2022 Tolgaarde'], [11, 'Jaarrekening 2023 Tolgaarde'], [14, 'Jaarrekening 2024 Tolgaarde'], [18, 'Jaarrekening 2025 Tolgaarde'],
@@ -281,7 +282,7 @@ async function nepFetch(url, opt) {
     if (finStaat.kapot) return antw(500, { success: false, errors: [{ message: 'kapot' }] });
     if (finStaat.halfKapot) return antw(200, { success: false, errors: [{ message: 'D1_ERROR: quota' }], result: [] });
     if (!/\/d1\/database\/ffcb09ad-fc50-4c83-aa7b-ad6409b44e03\/query$/.test(url)) return antw(404, { success: false });
-    const res = /COALESCE\(p\.categorie/.test(q) ? FIN_CAT : / FROM model_run /.test(q) ? FIN_RUN : /versie LIKE 'model-%'/.test(q) ? FIN_MODEL : / FROM reeks /.test(q) ? FIN_REEKS : / FROM patienten /.test(q) ? FIN_PAT : / FROM declaratie /.test(q) ? FIN_DECL : / FROM bron /.test(q) ? FIN_BRON : null;
+    const res = /COALESCE\(p\.categorie/.test(q) ? FIN_CAT : / FROM model_run /.test(q) ? FIN_RUN : /versie LIKE 'model-%'/.test(q) ? FIN_MODEL : / FROM reeks /.test(q) ? FIN_REEKS : / FROM patienten /.test(q) ? FIN_PAT : / FROM declaratie /.test(q) ? FIN_DECL : / FROM bron /.test(q) ? FIN_BRON : / FROM tarief /.test(q) ? FIN_TARIEF : null;
     return res ? antw(200, { success: true, result: [{ results: res, success: true }] }) : antw(400, { success: false, errors: [{ message: 'onbekende query' }] });
   }
   if (url === SB + '/rest/v1/rpc/zd_gemeente') {   // wv3081: zorgdata per gemeente
@@ -4554,8 +4555,8 @@ async function bewijs(o) {
       const j = r.j || {}, E = {};
       (j.entiteiten || []).forEach((e) => { E[e.code] = e; });
       toets('20 200, vijf entiteiten in vaste volgorde, geen fouten', r.status === 200 && (j.entiteiten || []).map((e) => e.code).join() === 'TG,GH,POT,KM,HOLD' && j.fouten.length === 0 && j.vaste_plek === false && !!j.bijgewerkt, JSON.stringify(j).slice(0, 300));
-      // wv4155: 9 = 7 + de twee vragen van Naast elkaar (aantallen per code, patiënten per leeftijdsgroep)
-      toets('20 alleen vaste SELECTs naar D1 fin, zonder parameters, met het pod-token', finStaat.sql.length === 9 && finStaat.sql.every((x) => /^SELECT /.test(x.q) && !/;|--|INSERT|UPDATE|DELETE|DROP/i.test(x.q) && Array.isArray(x.params) && x.params.length === 0) && finStaat.auth.every((x) => x === 'Bearer nep-cf'), JSON.stringify(finStaat.sql.map((x) => x.q.slice(0, 50))));
+      // wv4155: 9 = 7 + de twee vragen van Naast elkaar (aantallen per code, patiënten per leeftijdsgroep); wv4216: 10 = + de tarieven (berekend)
+      toets('20 alleen vaste SELECTs naar D1 fin, zonder parameters, met het pod-token', finStaat.sql.length === 10 && finStaat.sql.every((x) => /^SELECT /.test(x.q) && !/;|--|INSERT|UPDATE|DELETE|DROP/i.test(x.q) && Array.isArray(x.params) && x.params.length === 0) && finStaat.auth.every((x) => x === 'Bearer nep-cf'), JSON.stringify(finStaat.sql.map((x) => x.q.slice(0, 50))));
       const qR = finStaat.sql.find((x) => / FROM reeks /.test(x.q)).q;
       toets("20 reeks: alleen versie='jaarrekening', maat IS NULL (geen modeluitkomst, geen winstdeel per maat), alleen de vijf entiteiten", /versie='jaarrekening' AND maat IS NULL/.test(qR) && /entiteit IN \('TG','GH','POT','KM','HOLD'\)/.test(qR) && !/PHBV|SLOEL/.test(qR), qR);
       toets('20 patiënten: alleen totalen (leeftijdsgroep IS NULL), declaraties: verzekeraar totaal', finStaat.sql.some((x) => / FROM patienten /.test(x.q) && /leeftijdsgroep IS NULL/.test(x.q)) && finStaat.sql.some((x) => / FROM declaratie /.test(x.q) && /verzekeraar='totaal'/.test(x.q)));
@@ -4647,7 +4648,7 @@ async function bewijs(o) {
       zdStaat.kapot = false; const nZ = finStaat.sql.length;
       H.appStaat.praktijken.data.op = Date.now() - 3 * 60000;
       r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
-      toets('20 M4 met een fout hooguit 2 min bewaard: Ververs leest opnieuw en de sector is terug', r.status === 200 && finStaat.sql.length === nZ + 9 && r.j.fouten.length === 0 && r.j.entiteiten[0].sector, finStaat.sql.length - nZ);
+      toets('20 M4 met een fout hooguit 2 min bewaard: Ververs leest opnieuw en de sector is terug', r.status === 200 && finStaat.sql.length === nZ + 10 && r.j.fouten.length === 0 && r.j.entiteiten[0].sector, finStaat.sql.length - nZ);
       H.appStaat.praktijken = null;
     }
 

@@ -15956,6 +15956,175 @@ function appNaast(codeRijen, patRijen, jaarNu) {
     uitleg: 'Per 1000 ingeschreven patiënten (gemiddeld per kwartaal) uit de VIP-export. Een jaar dat niet tot 31 december loopt is nog niet af: dat cijfer is lager omdat het jaar korter is, niet omdat er minder gebeurt, en krijgt geen verschil met het jaar ervoor. Alleen reguliere consulten en visites (geen passanten). Een PMA-export komt hier later naast, nooit opgeteld.' };
 }
 // ── einde Naast elkaar ──
+// ── Berekend: eigen volume × tarief van volgend jaar (wv4216, besluitenpagina nr 928 = L28, David Ja 25-11-2026 22:14) ──
+// "Wil je in PMA zien wat Tolgaarde in 2027 oplevert met het nieuwe tarief?" Tolgaarde heeft geen model; dit is een SOM, geen prognose:
+// aantallen per prestatiecode × het gecontracteerde tarief per 1-1 van het doeljaar (fin `tarief`). Alles uit de VIP-export (fin `declaratie`,
+// verzekeraar 'totaal', laatste export per jaar); PMA en VIP worden nooit opgeteld, dus de aantallen komen uit één bron.
+// - Aantallen: verrichtingen = het laatste hele VIP-jaar (twaalf maanden); inschrijving 11115–11118 = de laatste patiëntenstand per
+//   leeftijdsgroep × 4 kwartalen; andere inschrijf- en modulecodes = aantal in dat jaar × (patiënten nu / patiënten toen). Een code die pas
+//   in het lopende jaar verschijnt telt mee, omgerekend naar een heel jaar (gemarkeerd).
+// - Tarief doeljaar: een eigen contract van de praktijk (zk_module_contract, entiteit = praktijk) wint; anders de Zilveren Kruis-lijst
+//   (zk_gecontracteerd, één regel zonder niveau). De lijst telt alleen als de praktijk nu ook dat lijsttarief krijgt (gemeten 27-11-2026: TG
+//   gedeclareerd 2026 = lijst 2026 op de cent, behalve modules met een eigen contract, bv. POH-GGZ 4,06 tegen 5,41). Geen tarief, meer
+//   niveaus of een eigen contract zonder doeljaarregel: de code staat met naam en reden onder "zonder tarief" en telt mee op het tarief van nu.
+// - Groei vorig jaar → lopend jaar: lopend jaar omgerekend naar een heel jaar (verrichtingen per dag, inschrijving en modules op de
+//   patiëntenstand); gesplitst in tarief (Σ aantal × (prijs nu − prijs toen)), werk (Σ (aantal nu − aantal toen) × prijs toen) en nieuwe
+//   codes. De drie delen tellen precies op tot het verschil.
+const APP_BEREKEND = ['TG'];   // praktijken zonder model die de berekende lijn krijgen
+const APP_BER_LEEFTIJD = { '11115': '<65', '11116': '65-75', '11117': '75-85', '11118': '85+' };
+const APP_BER_PERPAT = ['ion', 'module'];   // per ingeschreven patiënt (per kwartaal of per jaar), niet per verrichting
+const APP_BER_MARGE = 0.01;   // gedeclareerde prijs ≠ lijsttarief bij meer dan 1 % verschil = eigen contract
+const appBerDag = function (ymd) { const t = Date.parse(String(ymd) + 'T00:00:00Z'); return isFinite(t) ? t : null; };
+function appBerOmreken(tot) {   // lopend jaar t/m tot → factoren naar een heel jaar
+  const jr = Number(String(tot).slice(0, 4)), a = appBerDag(jr + '-01-01'), b = appBerDag(tot), e = appBerDag((jr + 1) + '-01-01');
+  if (a == null || b == null || b < a) return null;
+  const dagen = Math.round((b - a) / 864e5) + 1, jaarDagen = Math.round((e - a) / 864e5);
+  const kw = [1, 4, 7, 10].filter(function (m) { return String(tot) >= jr + '-' + (m < 10 ? '0' : '') + m + '-01'; }).length;
+  return { dagen: dagen, jaar_dagen: jaarDagen, kwartalen: kw, dag: jaarDagen / dagen, kwartaal: kw ? 4 / kw : null };
+}
+// tarief van een code op een peildag: eigen contract van de praktijk, anders de lijst (alleen één regel zonder niveau)
+function appBerTarief(tar, code, ent, dag) {
+  const geldig = function (t) { return t.code === code && String(t.geldig_van) <= dag && (t.geldig_tot == null || String(t.geldig_tot) >= dag) && appIsGetal(t.tarief); };
+  const eigen = tar.filter(function (t) { return geldig(t) && t.soort === 'zk_module_contract' && t.entiteit === ent; })
+    .sort(function (a, b) { return String(b.geldig_van).localeCompare(String(a.geldig_van)); });
+  if (eigen.length) return { tarief: eigen[0].tarief, bron: 'contract' };
+  const lijst = tar.filter(function (t) { return geldig(t) && t.soort === 'zk_gecontracteerd' && t.entiteit == null; });
+  if (!lijst.length) return null;
+  const zonder = lijst.filter(function (t) { return !t.niveau; });
+  if (zonder.length === 1) return { tarief: zonder[0].tarief, bron: 'lijst' };
+  return { niveaus: lijst.map(function (t) { return t.niveau || '—'; }).sort() };
+}
+// groei van jaar `van` (heel) naar `naar`: tarief + werk + nieuwe codes = verschil (precies). om = null: `naar` is heel; anders omrekenen naar
+// een heel jaar (verrichtingen per dag; inschrijving en modules: aantal toen × patiënten nu / patiënten toen, nieuwe per kwartaal).
+function appBerGroei(per, tot, pat, info, van, naar, om) {
+  const perpat = function (c) { return APP_BER_PERPAT.indexOf((info[c] || {}).cat) >= 0; };
+  const pv = pat[van] && pat[van].tot > 0 ? pat[van].tot : null, pn = pat[naar] && pat[naar].tot > 0 ? pat[naar].tot : null;
+  const jaarAantal = function (c) {
+    const l = per[naar][c], b = per[van][c];
+    if (!l) return 0;
+    if (!om) return l.n;
+    if (perpat(c)) return b && pv && pn ? b.n * pn / pv : om.kwartaal ? l.n * om.kwartaal : null;
+    return l.n * om.dag;
+  };
+  let rVan = 0, rNaar = 0, tarief = 0, werk = 0, nieuw = 0;
+  const nieuwNamen = [], mist = [];
+  Object.keys(per[van]).concat(Object.keys(per[naar])).filter(function (c, i, a) { return a.indexOf(c) === i; }).forEach(function (c) {
+    const b = per[van][c], l = per[naar][c], nj = jaarAantal(c);
+    if (nj == null || (b && b.p == null) || (l && l.p == null)) { mist.push(c); return; }   // geen prijs of niet om te rekenen: buiten beide jaren
+    if (b) { rVan += b.n * b.p; werk += (nj - b.n) * b.p; if (l) { tarief += nj * (l.p - b.p); rNaar += nj * l.p; } }
+    else { nieuw += nj * l.p; rNaar += nj * l.p; nieuwNamen.push(appNaastLabel((info[c] || {}).oms, c)); }
+  });
+  return { van: van, naar: naar, tot: tot[naar], heel: !om || tot[naar].slice(5) === '12-31', dagen: om ? om.dagen : null, kwartalen: om ? om.kwartalen : null,
+    bedrag_van: appRondEuro(rVan), bedrag_naar: appRondEuro(rNaar), verschil: appRondEuro(rNaar - rVan), pct: appPct(rNaar, rVan),
+    tarief: appRondEuro(tarief), werk: appRondEuro(werk), nieuw: appRondEuro(nieuw), nieuw_codes: nieuwNamen.slice(0, 8), buiten: mist.length, soort: 'berekend' };
+}
+// rijen: { entiteit, jaar, tot, code, oms, cat, aantal, gedeclareerd } (laatste export per jaar); tar: tariefregels; patRijen als bij Naast
+function appBerekend(code, rijen, tar, patRijen, jaarNu) {
+  const def = APP_PRAKTIJKEN.find(function (d) { return d.code === code; });
+  const naam = def ? def.naam : code;
+  const per = {}, tot = {}, info = {};
+  (rijen || []).forEach(function (x) {
+    const jr = Number(x.jaar);
+    if (x.entiteit !== code || !appIsGetal(jr) || !/^\d{5}$/.test(String(x.code)) || !/^\d{4}-\d{2}-\d{2}$/.test(String(x.tot))) return;
+    tot[jr] = String(x.tot);
+    if (!appIsGetal(x.aantal) || x.aantal <= 0) return;
+    const r = (per[jr] = per[jr] || {})[x.code] = { n: x.aantal, p: appIsGetal(x.gedeclareerd) ? x.gedeclareerd / x.aantal : null };
+    if (r.p != null && r.p <= 0) r.p = null;
+    info[x.code] = { oms: x.oms, cat: String(x.cat || '') };
+  });
+  // doeljaar = het laatste jaar met een tarievenlijst per 1-1, niet vóór dit jaar
+  const lijstJaren = (tar || []).filter(function (t) { return t.soort === 'zk_gecontracteerd' && /^\d{4}-01-01$/.test(String(t.geldig_van)); })
+    .map(function (t) { return Number(String(t.geldig_van).slice(0, 4)); }).filter(function (j) { return j >= jaarNu; });
+  if (!lijstJaren.length) return { code: code, naam: naam, geen: 'geen berekening (geen tarievenlijst voor ' + jaarNu + ' of later in de datahub)' };
+  const doel = Math.max.apply(null, lijstJaren), doelDag = doel + '-01-01';
+  const heleJaren = Object.keys(tot).map(Number).filter(function (j) { return tot[j].slice(5) === '12-31' && j < doel && per[j]; });
+  if (!heleJaren.length) return { code: code, naam: naam, geen: 'geen berekening (geen heel jaar in de VIP-export)' };
+  const basis = Math.max.apply(null, heleJaren);
+  const lopendJr = per[basis + 1] && tot[basis + 1] ? basis + 1 : null;   // het jaar erna (lopend of heel)
+  const om = lopendJr ? (tot[lopendJr].slice(5) === '12-31' ? { dag: 1, kwartaal: 1, dagen: null, kwartalen: 4 } : appBerOmreken(tot[lopendJr])) : null;
+  // patiënten: gemiddeld per kwartaal (declaratie_kwartaalgemiddelde), per jaar en leeftijdsgroep
+  const pat = {};
+  (patRijen || []).forEach(function (p) {
+    const jr = Number(String(p.peildatum || '').slice(0, 4));
+    if (p.entiteit !== code || !appIsGetal(p.aantal) || String(p.peildatum).slice(4) !== '-01-01') return;
+    (pat[jr] = pat[jr] || {})[p.leeftijdsgroep == null ? 'tot' : String(p.leeftijdsgroep)] = p.aantal;
+  });
+  const patJaar = Object.keys(pat).map(Number).filter(function (j) { return pat[j].tot > 0 && j <= doel; });
+  const laatst = patJaar.length ? Math.max.apply(null, patJaar) : null;
+  const perpat = function (c) { return APP_BER_PERPAT.indexOf((info[c] || {}).cat) >= 0; };
+  // ── 1. het doeljaar ──
+  const regels = [];
+  const codes = Object.keys(per[basis]).concat(lopendJr ? Object.keys(per[lopendJr]).filter(function (c) { return !per[basis][c]; }) : []);
+  codes.forEach(function (c) {
+    const b = per[basis][c], l = lopendJr ? per[lopendJr][c] : null;
+    let n = null, herkomst = null;
+    if (b) {
+      if (perpat(c) && laatst != null && laatst !== basis && pat[laatst] && pat[basis] && pat[basis].tot > 0) {
+        const g = APP_BER_LEEFTIJD[c];
+        if (g && appIsGetal(pat[laatst][g])) { n = pat[laatst][g] * 4; herkomst = 'patiënten ' + laatst; }
+        else { n = b.n * pat[laatst].tot / pat[basis].tot; herkomst = 'patiënten ' + laatst; }
+      } else { n = b.n; herkomst = String(basis); }
+    } else if (l && om) {
+      n = perpat(c) ? (om.kwartaal ? l.n * om.kwartaal : null) : l.n * om.dag;
+      herkomst = 'nieuw in ' + lopendJr + ', omgerekend';
+    }
+    if (!appIsGetal(n) || n <= 0) return;
+    const pNu = l && l.p != null ? l.p : b && b.p != null ? b.p : null;
+    if (pNu == null) {   // aantal zonder bedrag: niet stil weglaten
+      regels.push({ code: c, naam: appNaastLabel((info[c] || {}).oms, c), cat: (info[c] || {}).cat || null, aantal: Math.round(n * 10) / 10, herkomst: herkomst,
+        tarief_nu: null, tarief_doel: null, nu: 0, doel: null, reden: 'geen bedrag in de VIP-export' });
+      return;
+    }
+    const t = appBerTarief(tar || [], c, code, doelDag);
+    let tDoel = null, reden = null;
+    if (!t) reden = 'niet op de tarievenlijst ' + doel;
+    else if (t.niveaus) reden = 'lijst ' + doel + ' kent meer niveaus (' + t.niveaus.join(', ') + ')';
+    else if (t.bron === 'contract') tDoel = t.tarief;
+    else {
+      const lijstNu = appBerTarief(tar || [], c, code, (lopendJr || basis) + '-01-01');
+      if (l && l.p != null && lijstNu && lijstNu.tarief != null && Math.abs(l.p / lijstNu.tarief - 1) > APP_BER_MARGE) {
+        reden = 'eigen contract (nu ' + (Math.round(l.p * 100) / 100).toFixed(2).replace('.', ',') + ', lijst ' + lijstNu.tarief.toFixed(2).replace('.', ',') + '); tarief ' + doel + ' niet in de datahub';
+      } else tDoel = t.tarief;
+    }
+    regels.push({ code: c, naam: appNaastLabel((info[c] || {}).oms, c), cat: (info[c] || {}).cat || null, aantal: Math.round(n * 10) / 10, herkomst: herkomst,
+      tarief_nu: Math.round(pNu * 100) / 100, tarief_doel: tDoel, nu: n * pNu, doel: tDoel != null ? n * tDoel : null, reden: reden });
+  });
+  if (!regels.length) return { code: code, naam: naam, geen: 'geen berekening (geen aantallen in de VIP-export)' };
+  const som = function (lijst, k) { return lijst.reduce(function (s, r) { return s + r[k]; }, 0); };
+  const met = regels.filter(function (r) { return r.doel != null; }), zonder = regels.filter(function (r) { return r.doel == null; });
+  const metDoel = som(met, 'doel'), metNu = som(met, 'nu'), zonderNu = som(zonder, 'nu');
+  regels.sort(function (a, b) { return (b.doel != null ? b.doel : b.nu) - (a.doel != null ? a.doel : a.nu); });
+  // ── 2. groei: de twee laatste hele jaren, en het hele jaar → het lopende jaar (voorlopig) ──
+  const groei = [];
+  if (per[basis - 1] && tot[basis - 1] && tot[basis - 1].slice(5) === '12-31') groei.push(appBerGroei(per, tot, pat, info, basis - 1, basis, null));
+  if (lopendJr && om) groei.push(appBerGroei(per, tot, pat, info, basis, lopendJr, om));
+  const groeiLopend = groei.filter(function (g) { return g && g.naar === lopendJr; })[0] || null;
+  // ── 3. lijn: gedeclareerd (hele VIP-jaren) → lopend jaar omgerekend → doeljaar berekend ──
+  const x = [], werkelijk = [], berekend = [];
+  const heel = Object.keys(tot).map(Number).filter(function (j) { return tot[j].slice(5) === '12-31' && per[j]; }).sort();
+  heel.filter(function (j) { return j >= doel - 5; }).forEach(function (j) {
+    x.push(String(j)); werkelijk.push(appRondEuro(som(Object.keys(per[j]).map(function (c) { return per[j][c]; }).filter(function (r) { return r.p != null; }).map(function (r) { return { v: r.n * r.p }; }), 'v')));
+    berekend.push(j === basis ? werkelijk[werkelijk.length - 1] : null);
+  });
+  if (groeiLopend && !groeiLopend.heel && x.indexOf(String(lopendJr)) < 0) { x.push(String(lopendJr)); werkelijk.push(null); berekend.push(groeiLopend.bedrag_naar); }
+  if (x.indexOf(String(doel)) < 0) { x.push(String(doel)); werkelijk.push(null); berekend.push(appRondEuro(metDoel + zonderNu)); }
+  const grafiek = x.length >= 2 ? { soort: 'lijn', titel: 'Gedeclareerd ' + naam + ': werkelijk → berekend ' + doel, eenheid: '€', x: x,
+    reeksen: [{ naam: 'Werkelijk (VIP, hele jaren)', waarden: werkelijk }, { naam: 'Berekend', stippel: true, waarden: berekend }],
+    bron: appKort('werkelijk: VIP-export, gedeclareerd per heel jaar; berekend: ' + (groeiLopend && !groeiLopend.heel ? lopendJr + ' t/m ' + appDagMaand(groeiLopend.tot) + ' omgerekend naar een heel jaar, ' : '') + doel + ' = aantallen × tarief per 1-1-' + doel, 200) } : null;
+  const patTekst = laatst != null && laatst !== basis ? '; inschrijving en modules op de patiëntenstand ' + laatst + ' (' + Math.round(pat[laatst].tot).toLocaleString('nl-NL') + ' gemiddeld per kwartaal)' : '';
+  return { code: code, naam: naam, soort: 'berekend', berekend: {
+    doel: doel, basis: basis, patienten_jaar: laatst !== basis ? laatst : null, patienten: laatst != null ? Math.round(pat[laatst].tot) : null,
+    totaal: appRondEuro(metDoel + zonderNu), op_nu: appRondEuro(metNu + zonderNu),
+    met_tarief: { codes: met.length, doel: appRondEuro(metDoel), nu: appRondEuro(metNu), pct: appPct(metDoel, metNu) },
+    zonder_tarief: { codes: zonder.length, nu: appRondEuro(zonderNu), lijst: zonder.map(function (r) { return { code: r.code, naam: r.naam, bedrag: appRondEuro(r.nu), reden: r.reden }; }) },
+    regels: regels.map(function (r) { return { code: r.code, naam: r.naam, aantal: r.aantal, herkomst: r.herkomst, tarief_nu: r.tarief_nu, tarief_doel: r.tarief_doel,
+      bedrag: appRondEuro(r.doel != null ? r.doel : r.nu), op_doel: r.doel != null }; }),
+    groei: groei.filter(Boolean), grafiek: grafiek,
+    label: 'berekend, geen model',
+    bron: 'fin-datahub: aantallen uit de VIP-export (verrichtingen heel ' + basis + patTekst + ') × gecontracteerd tarief per 1-1-' + doel + ' (Zilveren Kruis-tarievenlijst ' + doel + ', alleen waar ' + naam + ' nu ook het lijsttarief krijgt)',
+    uitleg: 'Een som, geen voorspelling: hetzelfde werk als in ' + basis + ' maal het tarief van ' + doel + '. Meer of minder werk, nieuwe afspraken en andere verzekeraars zitten er niet in. Codes zonder bekend tarief ' + doel + ' tellen mee op het tarief van nu en staan hieronder met naam. Gedeclareerd is wat Promedico naar de verzekeraars stuurde; de omzet in de jaarrekening bevat meer.' } };
+}
+// ── einde Berekend ──
 
 async function appPraktijkenVerzamel() {
   let zdFout = false;
@@ -15995,11 +16164,15 @@ async function appPraktijkenVerzamel() {
       .then(function (r) { return r[0].results; }, function (e) { logError('app-praktijken', e); return null; }),
     // wv4155: Naast elkaar — aantallen per code (laatste export per entiteit en jaar) en patiënten per leeftijdsgroep
     Promise.all([
-      appFinSql("SELECT d.entiteit, d.jaar, d.periode_tot AS tot, d.code, p.omschrijving AS oms, p.categorie AS cat, d.aantal FROM declaratie d LEFT JOIN prestatie p ON p.code = d.code"
+      appFinSql("SELECT d.entiteit, d.jaar, d.periode_tot AS tot, d.code, p.omschrijving AS oms, p.categorie AS cat, d.aantal, d.gedeclareerd FROM declaratie d LEFT JOIN prestatie p ON p.code = d.code"
         + " JOIN (SELECT entiteit, jaar, MAX(periode_tot) AS m FROM declaratie WHERE verzekeraar='totaal' AND entiteit IN (" + ht + ") AND jaar >= " + (appJaarNu() - 3) + " GROUP BY entiteit, jaar) x"
         + " ON x.entiteit = d.entiteit AND x.jaar = d.jaar AND x.m = d.periode_tot WHERE d.verzekeraar='totaal'"),
       appFinSql("SELECT entiteit, peildatum, leeftijdsgroep, aantal FROM patienten WHERE soort='declaratie_kwartaalgemiddelde' AND entiteit IN (" + ht + ")"),
     ]).catch(function (e) { logError('app-praktijken', e); return null; }),
+    // wv4216: tarieven voor de berekende lijn (lijst + eigen contracten van de praktijken zonder model)
+    appFinSql("SELECT code, soort, entiteit, geldig_van, geldig_tot, tarief, niveau FROM tarief WHERE soort IN ('zk_gecontracteerd','zk_module_contract')"
+      + " AND (entiteit IS NULL OR entiteit IN (" + APP_BEREKEND.map(function (c) { return "'" + c + "'"; }).join(',') + "))")
+      .catch(function (e) { logError('app-praktijken', e); return null; }),
   ]);
   const jaarNu = appJaarNu();
   let pmaRijen = null;
@@ -16048,6 +16221,15 @@ async function appPraktijkenVerzamel() {
   const patPer = {};
   APP_HEDEN_CODES.forEach(function (c) { patPer[c] = appPatJaren(APP_PRAKTIJKEN.find(function (d) { return d.code === c; }), f); });
   const toekomst = extra[1] ? appToekomst(extra[1][0], extra[1][1], reeksPer, patPer) : [];
+  // wv4216: praktijk zonder model → berekende lijn (eigen volume × tarief van het doeljaar); mislukt = de oude regel blijft
+  APP_BEREKEND.forEach(function (c) {
+    if (!extra[3] || !extra[4]) { fouten.push('de berekening met het nieuwe tarief is nu niet te lezen'); return; }
+    let b = null;
+    try { b = appBerekend(c, extra[3][0], extra[4], extra[3][1], jaarNu); } catch (e) { logError('app-praktijken', new Error('berekend faalde')); return; }
+    if (!b || b.soort !== 'berekend') return;   // niets te rekenen: de bestaande regel ("geen model") blijft
+    const i = toekomst.findIndex(function (t) { return t.code === c; });
+    if (i >= 0) toekomst[i] = b; else toekomst.push(b);
+  });
   let naast = null;
   try { naast = extra[3] ? appNaast(extra[3][0], extra[3][1], jaarNu) : null; } catch (e) { logError('app-praktijken', new Error('naast elkaar faalde')); naast = null; }
   if (naast) naast.namen = APP_HEDEN_CODES.reduce(function (o, c) { const d = APP_PRAKTIJKEN.find(function (x) { return x.code === c; }); o[c] = d ? d.naam : c; return o; }, {});
