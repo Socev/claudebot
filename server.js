@@ -32981,6 +32981,22 @@ async function tabulaCode() {
   return tabulaCodeCache.w;
 }
 function tabulaWacht(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+// wv4237 (besluit L55, David Ja 25-11): '?? vraag' in Tabula. Zoeken op betekenis in de eigen index (vaultzoek, alleen lezen); hooguit 16
+// brokken, een pagina die er niet meer is valt weg (lstat, geen symlink), elke tekst door de vaste maskers (sleutels + BSN) vóór het model.
+// Kiezen, omhullen, de modelvraag en de bronregel staan in tabula-loket.js (kiesBronnen/metBronnen). Geen inhoud in log of /health.
+async function tabulaZoek(vraag) {
+  if (typeof vaultzoek === 'undefined' || !vaultzoek) return null;
+  const r = await vaultzoek.rauw(vraag, 16);
+  const uit = [];
+  for (const x of (r && Array.isArray(r.rijen) ? r.rijen : [])) {
+    const pad = String(x.pad || '');
+    if (!pad || pad.startsWith('/') || pad.split('/').indexOf('..') >= 0) continue;
+    try { if (!fs.lstatSync(path.join(VAULT, pad)).isFile()) continue; } catch (e) { continue; }
+    uit.push({ pad: pad, kop: appSleutelMasker(appBsnMasker(String(x.kop || ''))), tekst: appSleutelMasker(appBsnMasker(String(x.tekst || ''))),
+      score: Number(x.score) || 0, via: x.via });
+  }
+  return uit;
+}
 // brain: aanleveren bij OVIS Intake en de router meteen laten kijken; daarna een eerlijke zin over de plek (± 50 s wachten, nooit een verzonnen pad)
 async function tabulaBrain(x) {
   const T = require(path.join(__dirname, 'tabula-loket.js'));
@@ -33022,7 +33038,7 @@ const tabulaLoket = (function () {
     return require(p).maak({ dir: TABULA_DIR, basis: SERVER_ECHT ? null : process.env.TABULA_TOETS_BASIS, apiBasis: SERVER_ECHT ? null : process.env.TABULA_TOETS_API,
       fetch: function (u, opt) { return fetch(u, opt); }, WebSocket: globalThis.WebSocket, code: tabulaCode,
       sleutel: SERVER_ECHT || !process.env.TABULA_TOETS_SLEUTEL ? pdfSleutel : function () { return Promise.resolve(process.env.TABULA_TOETS_SLEUTEL); }, sdk: pdfSdk,
-      steekPad: path.join(VAULT, '00_Systeem', 'Steekwoordenlijst.md'), brain: tabulaBrain, primair: rolPrimair,
+      steekPad: path.join(VAULT, '00_Systeem', 'Steekwoordenlijst.md'), brain: tabulaBrain, zoek: tabulaZoek, primair: rolPrimair,
       log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: function (waar, e) { if (e) logError(waar, e); } });
   } catch (e) { logError('tabula-loket', e); return null; }
 })();
