@@ -31930,7 +31930,21 @@ async function appPma(req, res, a, route, d) {
   try { u = pmaApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
   catch (e) { logError('pma', new Error('route faalde')); return appWeiger(res, 503, 'PMA is nu niet te lezen; probeer het zo opnieuw', 'pma fout'); }   // geen inhoud in de log
   if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'pma').slice(0, 80);
+  if (route === 'POST /app/pma/inlees' && u.status === 200 && u.body && u.body.brief) pmaBriefMeld(u.body.brief).catch(function () { logError('pma-brief', new Error('loket mislukt')); });   // wv4220
   return appStuur(res, u.status, u.body);
+}
+// wv4220 (besluitenpagina nr 932 = L32, David Ja 25-11-2026): de brief na een inlezing (pma.js brief: vijf regels op praktijkniveau, zonder
+// taalmodel) als één regel in het redactie-loket: eerstvolgende ochtend- of avondbericht op de telefoon en Nieuw in je Apps, met een link die
+// PMA › Overzicht op die praktijk en dat kwartaal opent. Eén regel per praktijk (onderwerp brief-<tg|gh>): een nieuwe inlezing werkt hem bij.
+// Bewust geen Voor jou-kaart (Voor jou = wat op David wacht; kort houden, David 22-11). Ontwerp + Codex-ontwerpreview: mk-scripts/wv4220/ontwerp.md.
+function pmaBriefTekst(b) {
+  return 'Na het inlezen van ' + b.naam + (b.data_tot ? ' (cijfers t/m ' + pmaDatumNl(b.data_tot) + ')' : '') + ': ' + b.regels.map(function (r) { return r.tekst; }).join(' ');
+}
+async function pmaBriefMeld(b, opt) {
+  const o = opt || {};
+  if (!b || !/^[A-Z]{2}$/.test(String(b.praktijk)) || !Array.isArray(b.regels) || !b.regels.length) return null;
+  return (o.meld || loketMeld)({ app: 'pma', onderwerp: 'brief-' + b.praktijk.toLowerCase(), laan: 'editie', editie: 'eerstvolgende', datum: (o.ams || ovisAms()).datum,
+    tekst: pmaBriefTekst(b), link: 'https://app.socev.dev' + b.link, doel: { scherm: 'pma' } });
 }
 function pmaInfo() {
   if (!pmaApp) return { aan: false };

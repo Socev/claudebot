@@ -35,4 +35,6 @@ node --test test/pma-chat-server.test.js 2>&1 | grep -E "^# (pass|fail)"; node -
 grep -qF "if (kanaal === 'hoofd' && upload) { try { pmaChat = pmaChatIn(upload); }" server.js || { echo "ROOD  server.js: PMA-ZIP in het hoofdkanaal wordt niet gecontroleerd (wv4212)"; f=1; }
 node --test test/pma-export.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-export.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-export.test.js (wv4219: exportherinnering, kwartaalkaart en ochtendregel)"; f=1; }
 grep -qF "{ naam: 'pma-export', start_na: [6, 30]" server.js || { echo "ROOD  server.js: nachtketenstap pma-export ontbreekt (wv4219)"; f=1; }
+node --test test/pma-brief.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-brief.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-brief.test.js (wv4220: brief na inlezen, loketregel)"; f=1; }
+grep -qF "if (route === 'POST /app/pma/inlees' && u.status === 200 && u.body && u.body.brief) pmaBriefMeld(u.body.brief)" server.js || { echo "ROOD  server.js: brief na inlezen gaat niet naar het loket (wv4220)"; f=1; }
 exit $f

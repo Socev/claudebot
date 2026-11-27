@@ -22,7 +22,8 @@ const INHOUD = ['laan', 'tekst', 'aantal', 'datum'];
 const META = ['editie', 'vervalt', 'doel', 'taalmodel', 'buffer', 'link'];
 // wv3955: een editie-regel mag een link naar zijn scherm in de app meegeven; alleen de app zelf (?app=…), de editie zet hem als ([open](…))
 // achter de regel (het ochtendbericht maakt daar een Open-knop van); het paneel Nieuw in je Apps gebruikt doel, niet de link
-const LINK_RE = /^https:\/\/app\.socev\.dev\/\?app=[a-z0-9-]{2,40}(?:&[a-z]{2,20}=[a-z0-9-]{1,40}){0,3}$/;
+// wv4220: ook het eigen PMA-scherm met een plek (/pma#overzicht/tg/2026-k3); de app opent die via pmaLinkPad (telefoon hier, pc eigen venster)
+const LINK_RE = /^https:\/\/app\.socev\.dev\/(?:\?app=[a-z0-9-]{2,40}(?:&[a-z]{2,20}=[a-z0-9-]{1,40}){0,3}|pma#[a-z]{1,20}(?:\/[a-z]{2}(?:\/\d{4}(?:-(?:k[1-4]|\d{2}|w\d{2}))?)?)?)$/;
 
 function leeg() { return { versie: 1, regels: {}, instel: {}, schaduw: {}, edities: {} }; }
 function normaal(s) {

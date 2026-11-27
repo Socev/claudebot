@@ -845,7 +845,10 @@ function maak(o) {
     }
     if (u.al) { try { fs.unlinkSync(zp); fs.unlinkSync(jp); } catch (e) { /* weg */ } return { body: { ok: true, al: true }, reden: 'pma inlees al' }; }
     try { fs.unlinkSync(zp); fs.unlinkSync(jp); } catch (e) { /* weg */ }
-    return { body: { ok: true, id: u.id, terug: !!u.terug }, reden: u.terug ? 'pma inlees terug' : 'pma inlees' };
+    // wv4220 (L32): de brief van vijf regels over de nieuwe stand van deze praktijk; mislukt hij, dan blijft de inlezing gewoon geslaagd
+    let br = null;
+    try { br = brief((overzicht().praktijken || []).find((x) => x.code === ex.praktijk)); } catch (e) { br = null; }
+    return { body: { ok: true, id: u.id, terug: !!u.terug, brief: br }, reden: u.terug ? 'pma inlees terug' : 'pma inlees' };
   }
 
   // Opnieuw opbouwen uit bron/ (intrekken, terugzetten, of DM7-herbouw): alles van de praktijk weg, actieve exports oplopend op datum.
@@ -1527,4 +1530,84 @@ function exportHerinnering(o) {
   return uit;
 }
 
-module.exports = { isoWeek, ROLGROEP, waarnemerDagen, dpId, maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht, exportHerinnering, kwartaalVan };
+// ── wv4220 (besluitenpagina nr 932 = L32, David Ja 25-11-2026): de brief na een inlezing. Puur: krijgt het praktijkobject uit overzicht()
+// (hetzelfde dat het PMA-scherm krijgt) en rekent met de regels van het scherm (socev-app src/pma/pmaTekst.ts: periodes, dekking, somBakken,
+// patientenTussen, per1000), zodat elk getal in de brief in PMA › Overzicht terug te vinden is. Alleen aantallen op praktijkniveau; nooit per
+// patiënt of per medewerker. Ontwerp + Codex-ontwerpreview: mk-scripts/wv4220/ontwerp.md.
+//   K = nieuwste kwartaal dat helemaal gedekt is (= de startperiode van het scherm); geen = het nieuwste met data ("deels").
+//   V = het kwartaal ervoor; vergelijken alleen als K en V allebei helemaal gedekt zijn.
+const BRIEF_MI_MIN = 10, BRIEF_MI_DREMPEL = 0.5;
+function bMaandDagen(m) { const [j, mm] = m.split('-').map(Number); return new Date(Date.UTC(j, mm, 0)).getUTCDate(); }
+function bKwMaanden(kw) { const j = kw.slice(0, 4), q = Number(kw.slice(6)); return [1, 2, 3].map((i) => j + '-' + String((q - 1) * 3 + i).padStart(2, '0')); }
+function bKwVan(m) { const [j, mm] = m.split('-').map(Number); return j + '-K' + (Math.floor((mm - 1) / 3) + 1); }
+function bKwVorig(kw) { const j = Number(kw.slice(0, 4)), q = Number(kw.slice(6)); return q === 1 ? (j - 1) + '-K4' : j + '-K' + (q - 1); }
+function bDekking(p, maanden) {
+  let heel = true, iets = false;
+  for (const m of maanden) { const x = p.maanden.find((y) => y.maand === m); if (!x || !x.dagen_gedekt) { heel = false; continue; } iets = true; if (x.dagen_gedekt < x.dagen) heel = false; }
+  return heel ? 'heel' : iets ? 'deels' : 'niets';
+}
+function bSom(p, maanden) {
+  const u = { groepen: {}, sub: {}, n: 0, voorlopig: 0 };
+  for (const x of p.maanden) {
+    if (!maanden.includes(x.maand)) continue;
+    for (const [g, v] of Object.entries(x.groepen || {})) { const t = u.groepen[g] || (u.groepen[g] = { n: 0, cent: 0 }); t.n += v.n; t.cent += v.cent; if (g !== 'niet-gedeclareerd') u.n += v.n; }
+    for (const [k, v] of Object.entries(x.sub || {})) u.sub[k] = (u.sub[k] || 0) + v;
+    u.voorlopig += x.voorlopig || 0;
+  }
+  return u;
+}
+function bPatienten(p, maanden) {
+  const van = maanden[0] + '-01', l = maanden[maanden.length - 1], tot = l + '-' + String(bMaandDagen(l)).padStart(2, '0');
+  const getal = (xs) => xs.map((k) => k.patienten).filter((n) => typeof n === 'number');
+  const ks = p.kwartalen.filter((k) => k.peildatum >= van && k.peildatum <= tot);
+  if (ks.length) { const g = getal(ks); return g.length ? g.reduce((a, n) => a + n, 0) / g.length : null; }
+  const voor = getal(p.kwartalen.filter((k) => k.peildatum <= van));
+  return voor.length ? voor[voor.length - 1] : null;
+}
+const bPer1000 = (n, pat) => (pat ? n / pat * 1000 : null);
+function bNl(x, d) { const v = Math.round(x * Math.pow(10, d)) / Math.pow(10, d); const [h, f] = Math.abs(v).toFixed(d).split('.'); return (v < 0 ? '−' : '') + h.replace(/\B(?=(\d{3})+(?!\d))/g, '.') + (f && Number(f) ? ',' + f.replace(/0+$/, '') : ''); }
+function bPct(nu, toen) { if (nu == null || !toen) return null; const v = (nu / toen - 1) * 100; return (v > 0 ? '+' : v < 0 ? '−' : '±') + bNl(Math.abs(v), 1) + ' %'; }
+const bKwTekst = (kw) => 'K' + kw.slice(6) + ' ' + kw.slice(0, 4);
+function brief(p, opt) {
+  const o = opt || {};
+  if (!p || !Array.isArray(p.maanden) || !Array.isArray(p.kwartalen)) return null;
+  const kws = [...new Set(p.maanden.filter((m) => m.dagen_gedekt > 0).map((m) => bKwVan(m.maand)))].sort().reverse();
+  if (!kws.length) return null;
+  const K = kws.find((k) => bDekking(p, bKwMaanden(k)) === 'heel') || kws[0];
+  const kHeel = bDekking(p, bKwMaanden(K)) === 'heel', V = bKwVorig(K), vHeel = kHeel && bDekking(p, bKwMaanden(V)) === 'heel';
+  const s = bSom(p, bKwMaanden(K)), t = vHeel ? bSom(p, bKwMaanden(V)) : null;
+  const pat = bPatienten(p, bKwMaanden(K)), patV = t ? bPatienten(p, bKwMaanden(V)) : null;
+  const pr = String(p.code || '').toLowerCase(), kl = K.toLowerCase();
+  const link = '/pma#overzicht/' + pr + '/' + kl, linkV = '/pma#overzicht/' + pr;
+  const kt = bKwTekst(K) + (kHeel ? '' : ' (nog niet helemaal ingelezen)'), vt = 'vorig kwartaal';
+  const regels = [];
+  // 1. verrichtingen per 1000
+  const v1 = bPer1000(s.n, pat), v1v = t ? bPer1000(t.n, patV) : null;
+  regels.push({ id: 'per1000', link, tekst: v1 == null ? 'Verrichtingen ' + kt + ': ' + bNl(s.n, 0) + ' (geen patiëntenaantal bekend, dus geen per 1000).'
+    : 'Verrichtingen ' + kt + ': ' + bNl(v1, 0) + ' per 1000 patiënten' + (v1v != null ? ' (' + vt + ' ' + bNl(v1v, 0) + '; ' + bPct(v1, v1v) + ')' : '') + '.' });
+  // 2. aandeel lange consulten
+  const cons = (x) => (x.sub['consult:kort'] || 0) + (x.sub['consult:middel'] || 0) + (x.sub['consult:lang'] || 0);
+  const c = cons(s), lang = c ? (s.sub['consult:lang'] || 0) / c * 100 : null, cv = t ? cons(t) : 0, langV = cv ? (t.sub['consult:lang'] || 0) / cv * 100 : null;
+  regels.push({ id: 'lang', link, tekst: lang == null ? 'Consulten van 20 minuten en langer: geen consulten in ' + kt + '.'
+    : 'Consulten van 20 minuten en langer: ' + bNl(lang, 1) + ' % van ' + bNl(c, 0) + ' consulten' + (langV != null ? ' (' + vt + ' ' + bNl(langV, 1) + ' %; ' + (lang - langV >= 0 ? '+' : '−') + bNl(Math.abs(lang - langV), 1) + ' procentpunt)' : '') + '.' });
+  // 3. ECG's per 1000
+  const ecg = s.sub['mi:ECG'] || 0, e1 = bPer1000(ecg, pat), e1v = t ? bPer1000(t.sub['mi:ECG'] || 0, patV) : null;
+  regels.push({ id: 'ecg', link, tekst: 'ECG\'s: ' + bNl(ecg, 0) + (e1 != null ? ', ' + bNl(e1, 1) + ' per 1000' : '') + (e1v != null ? ' (' + vt + ' ' + bNl(e1v, 1) + ')' : '') + '.' });
+  // 4. M&I: grootste stijger en daler per soort (per 1000), alleen soorten met genoeg aantallen
+  if (!t || pat == null || patV == null) regels.push({ id: 'mi', link, tekst: 'M&I: ' + bNl((s.groepen.mi || {}).n || 0, 0) + ' verrichtingen; ' + (t ? 'geen patiëntenaantal om te vergelijken' : 'het kwartaal ervoor is niet helemaal ingelezen, dus geen stijger of daler') + '.' });
+  else {
+    const soorten = new Set([...Object.keys(s.sub), ...Object.keys(t.sub)].filter((k) => k.startsWith('mi:')));
+    const d = [...soorten].map((k) => ({ naam: k.slice(3), nu: s.sub[k] || 0, toen: t.sub[k] || 0 })).filter((x) => Math.max(x.nu, x.toen) >= BRIEF_MI_MIN)
+      .map((x) => Object.assign(x, { delta: bPer1000(x.nu, pat) - bPer1000(x.toen, patV) })).sort((a, b) => b.delta - a.delta || (a.naam < b.naam ? -1 : 1));
+    const op = d.length && d[0].delta >= BRIEF_MI_DREMPEL ? d[0] : null, af = d.length && d[d.length - 1].delta <= -BRIEF_MI_DREMPEL ? d[d.length - 1] : null;
+    const zin = (x) => x.naam + ' ' + bNl(x.toen, 0) + ' → ' + bNl(x.nu, 0) + ' (' + (x.delta >= 0 ? '+' : '−') + bNl(Math.abs(x.delta), 1) + ' per 1000)';
+    regels.push({ id: 'mi', link, tekst: !op && !af ? 'M&I: geen soort veranderde wezenlijk tegenover ' + vt + '.' : 'M&I tegenover ' + vt + ': ' + [op ? 'meeste groei ' + zin(op) : null, af ? 'grootste daling ' + zin(af) : null].filter(Boolean).join('; ') + '.' });
+  }
+  // 5. nog niet gefactureerd (alle ingelezen dagen, zoals Valt op)
+  const vl = Number(p.voorlopig) || 0, oud = (p.valt_op && p.valt_op.voorlopig_oud && p.valt_op.voorlopig_oud.n) || 0;
+  regels.push({ id: 'factuur', link: linkV, tekst: !vl ? 'Nog niet gefactureerd: niets; alles in de ingelezen dagen heeft een factuurdatum.'
+    : 'Nog niet gefactureerd: ' + bNl(vl, 0) + (vl === 1 ? ' regel' : ' regels') + (oud ? ', waarvan ' + bNl(oud, 0) + ' bij de export al meer dan twee maanden oud' : '') + '.' });
+  return { praktijk: p.code, naam: p.naam, kwartaal: K, heel: kHeel, vergeleken: !!t, data_tot: p.data_tot || null, link, regels, gemaakt: o.vandaag || null };
+}
+
+module.exports = { isoWeek, ROLGROEP, waarnemerDagen, dpId, maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht, exportHerinnering, kwartaalVan, brief };
