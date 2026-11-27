@@ -25716,6 +25716,40 @@ function mailmanIntakeDraden(postvak, draden) {
   for (const t of draden.slice(0, 500)) if (q.get(String(postvak), String(t))) uit.add(t);
   return uit;
 }
+// wv4326 (Intake-poort, verband V2): kreeg een stuk van dit afzenderadres in de laatste 180 dagen een plek (kennis, facturen of systeem),
+// en koos David voor dit adres nooit "Niet bewaren"? Alle bronnen (ook Outlook en doktersmaten tellen als bekend). Alleen lezen.
+// → true | false; null zonder intake.sqlite (MailMan telt dat als verband: het oude gedrag).
+const MAILMAN_POORT_DAGEN = 180;
+function mailmanIntakeAfzender(postvak, adres) {
+  const a = String(adres || '').trim().toLowerCase();
+  if (!a || a.indexOf('@') < 1) return false;
+  const idb = mailmanIntakeOpen();
+  if (!idb) return null;
+  const geen = idb.prepare("SELECT 1 FROM stuk s JOIN live_stuk l ON l.stuk_id = s.stuk_id WHERE lower(json_extract(s.meta, '$.van')) = ? AND l.keuze LIKE 'geen%' AND l.keuze_door LIKE 'app:%' LIMIT 1").get(a);
+  if (geen) return false;
+  const van = new Date(Date.now() - MAILMAN_POORT_DAGEN * 86400000).toISOString();
+  return !!idb.prepare("SELECT 1 FROM stuk s WHERE lower(json_extract(s.meta, '$.van')) = ? AND s.aangemaakt >= ? AND EXISTS (SELECT 1 FROM uitvoering u WHERE u.stuk_id = s.stuk_id AND u.lens IN ('kennis', 'facturen', 'systeem')) LIMIT 1").get(a, van);
+}
+// wv4326 (Intake-poort, verband V3): mailadressen uit Davids contacten (secondbrain.contacten.emails_plat), elk uur ververst op de
+// achtergrond; tot de eerste lezing null (MailMan telt dat als verband). Alleen adressen, in het geheugen, nooit op schijf of in een log.
+const MAILMAN_CONTACT_MS = 60 * 60 * 1000;
+const mailmanContact = { set: null, op: 0, bezig: false, fout: null };
+function mailmanContactVers() {
+  if (mailmanContact.bezig || Date.now() - mailmanContact.op < (mailmanContact.set ? MAILMAN_CONTACT_MS : 5 * 60 * 1000)) return;
+  mailmanContact.bezig = true; mailmanContact.op = Date.now();
+  Promise.resolve().then(async function () {
+    const r = await sbBeheerQuery("select distinct lower(trim(e)) as e from secondbrain.contacten c, unnest(c.emails_plat) e where e like '%@%'", { ua: 'socev-mailman-poort/1', ms: 30000 });
+    if (!r) throw new Error('geen databanktoegang');
+    const t = await r.text();
+    if (!r.ok) throw new Error('databank ' + r.status);
+    const j = t ? JSON.parse(t) : [];
+    if (!Array.isArray(j) || !j.length) throw new Error('contacten leeg');
+    mailmanContact.set = new Set(j.map(function (x) { return String((x && x.e) || ''); }).filter(Boolean));
+    mailmanContact.fout = null;
+  }).catch(function (e) { mailmanContact.fout = String((e && e.message) || e).slice(0, 120); logError('mailman-poort-contacten', e); })
+    .finally(function () { mailmanContact.bezig = false; });
+}
+function mailmanContactAdressen() { mailmanContactVers(); return mailmanContact.set; }
 // wv2033 (MailMan B8): welke van deze Gmail-id's staan in Intake (stuk.bron_id = Gmail-id)? = het bewijs dat een route verwerkt is.
 // Alleen lezen; zonder intake.sqlite een lege Set (dan blijft een route open).
 function mailmanIntakeBerichten(postvak, ids) {
@@ -25800,7 +25834,8 @@ const mailman = (function () {
   try {
     return require(p).maak({ dir: MAILMAN_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
-      intakeDraden: mailmanIntakeDraden, intakeBerichten: mailmanIntakeBerichten, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt, factuurStap: mailmanFactuurStap, factuurGeen: mailmanFactuurGeen,
+      intakeDraden: mailmanIntakeDraden, intakeBerichten: mailmanIntakeBerichten, intakeAfzender: mailmanIntakeAfzender, contactAdressen: mailmanContactAdressen,   // wv4326
+      primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt, factuurStap: mailmanFactuurStap, factuurGeen: mailmanFactuurGeen,
       // wv3092: concepten van Socev in Gmail (mailvoorwerk.js) voor CONCEPT_KLAAR; pas bij een ronde aangeroepen (mailVoorwerk staat verderop)
       // wv4105: ook de concepten die Socev op een Gmail-label (Socev/Antwoord) in de draad zette; gmailOpdracht staat verderop (TDZ bij een vroege ronde: try)
       conceptKlaar: function (pv) {

@@ -131,7 +131,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-2.12';   // wv3318: proefweek vanzelf weg voor de derde keer aangescherpt (storing/hersteld, mislukt/niet geplaatst, wijziging met ingangsdatum, export/download, tegoed/cadeaukaart/punten, kosten/tarief, kenteken/gegevens, berichten van mensen via een platform; geldoverboekdiensten en school-app als afzender) en opnieuw gestart (zou_versie 4); wv2968: proefweek vanzelf weg opnieuw aangescherpt (verificatie, storing/schijf, budget/proefperiode, onderhoud, aanvraag, locatie, FW/RE, persoonlijk adres op bedrijfsdomein, beleggen/betaaldiensten/gemeente) en opnieuw gestart (zou_versie 3); wv3092: CONCEPT_KLAAR (concept van Socev in de draad; eraf als het concept weg is), achter labelset2.ids.CONCEPT_KLAAR; wv2469: proefweek vanzelf weg aangescherpt (betaal-/termijnwoorden, bank/overheid/loon/kluis-afzenders, persoonlijke adressen nooit) en opnieuw gestart (zou_versie 2); wv2548: Doktersmaten gelijk met privé achter config.json gedeeld_gelijk (tekst, Jev, labelset 2, live; nooit uitgangen/afgedaan/zaken/overstap); wv2455: proefweek 'vanzelf weg' (schaduw: zaak.zou_weg, tabel wegzet_afzender, Nooit per afzender), teller jij_open, voorwerkbron voor mailvoorwerk.js; wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
+const VERSIE = 'mailman-2.13';   // wv4326: Intake-poort (config.json intake_poort; mail van Jev zonder verband → OVERIG); wv3318: proefweek vanzelf weg voor de derde keer aangescherpt (storing/hersteld, mislukt/niet geplaatst, wijziging met ingangsdatum, export/download, tegoed/cadeaukaart/punten, kosten/tarief, kenteken/gegevens, berichten van mensen via een platform; geldoverboekdiensten en school-app als afzender) en opnieuw gestart (zou_versie 4); wv2968: proefweek vanzelf weg opnieuw aangescherpt (verificatie, storing/schijf, budget/proefperiode, onderhoud, aanvraag, locatie, FW/RE, persoonlijk adres op bedrijfsdomein, beleggen/betaaldiensten/gemeente) en opnieuw gestart (zou_versie 3); wv3092: CONCEPT_KLAAR (concept van Socev in de draad; eraf als het concept weg is), achter labelset2.ids.CONCEPT_KLAAR; wv2469: proefweek vanzelf weg aangescherpt (betaal-/termijnwoorden, bank/overheid/loon/kluis-afzenders, persoonlijke adressen nooit) en opnieuw gestart (zou_versie 2); wv2548: Doktersmaten gelijk met privé achter config.json gedeeld_gelijk (tekst, Jev, labelset 2, live; nooit uitgangen/afgedaan/zaken/overstap); wv2455: proefweek 'vanzelf weg' (schaduw: zaak.zou_weg, tabel wegzet_afzender, Nooit per afzender), teller jij_open, voorwerkbron voor mailvoorwerk.js; wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -504,6 +504,13 @@ function verkoopOordeel(pdfs) {
   return l.length > 0 && l.every(function (x) { return x && !x.fout && !x.overgeslagen && x.vacshing === true && x.shingrix === true; });
 }
 
+// wv4326 Intake-poort: geldt alleen voor een besluit van Jev (of Twijfel omdat Jev niet mocht), nooit voor factuur, regel, draad of _AI_
+function poortGeldt(stroom, reden) {
+  const r = String(reden || '');
+  if (stroom === 'intake') return r === 'score' || r.startsWith('hard_');
+  if (stroom === 'twijfel') return !r.endsWith('_zonder_bijlage');
+  return false;
+}
 /*
  * Stap 0–3 (O.3), zonder Jev. instel = { factuur_alias, eigen: [adressen], altijd: {factuur_alias, ai_label, draad, praktijk_factuur},
  * regels: [{id, stap, volgorde, voorwaarden, stroom, actief, versie}], draadBekend: bool }
@@ -802,7 +809,7 @@ function zouWeg(x) {
 }
 
 const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, eersteRegel, regelStroom, jevVragen,
-  jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
+  jevState, leesJev, besluitJev, poortGeldt, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
   labelset2Lees, conceptLabelId, CONCEPT_LABEL, CONCEPT_POGINGEN, toetsRegelLabels, labelPlan2, alleenBetalen, ecobankMelding, DRAAD_LABELS, ERF_LABELS, DRAAD_SOORTEN, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
   authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL,
   laagBericht, laagDraad, LAAG_VERSIE, LAGEN, LAAG_REDENEN, FACTUUR_FASEN, zouWeg, VANZELF_REDENEN, VANZELF_NIET_RE, VANZELF_VERSIE, VANZELF_NIET_AFZENDER_RE, VANZELF_VRIJ_RE, persoonAdres };
@@ -928,7 +935,8 @@ function maak(o) {
     ['besluit', 'terug_tijd TEXT'], ['besluit', 'terug_poging INTEGER NOT NULL DEFAULT 0'],
     ['zaak', 'zou_weg TEXT'], ['zaak', 'zou_reden TEXT'], ['zaak', 'zou_versie INTEGER'],   // wv2469
     ['verkoop', 'vorige TEXT'], ['besluit', 'juist_door TEXT'],
-    ['correctie', 'adres TEXT'], ['correctie', 'bron TEXT']]) {   // wv4133 (3C137): bron 'intake' = Davids keuze in Intake (adres = afzenderadres); NULL = label in Gmail   // wv3077: juist_door 'mail-app' = Naar Facturen/Brain uit de Mail-App (elke mail)
+    ['correctie', 'adres TEXT'], ['correctie', 'bron TEXT'], ['besluit', 'poort TEXT']]) {   // wv4326: Intake-poort (zie poortToets)
+      // wv4133 (3C137): bron 'intake' = Davids keuze in Intake (adres = afzenderadres); NULL = label in Gmail   // wv3077: juist_door 'mail-app' = Naar Facturen/Brain uit de Mail-App (elke mail)
    // wv2911: status vóór 'weg_david';    // wv2455 proefweek vanzelf weg   // wv2259 terug bij Geen factuur   // wv2218 zaakregister: laatste volledige inboxlijst, laatste berekening
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
@@ -943,6 +951,47 @@ function maak(o) {
     try { const r = f(); db.exec('COMMIT'); return r; } catch (e) { try { db.exec('ROLLBACK'); } catch (x) { /* al dicht */ } throw e; }
   }
   function config() { try { const j = JSON.parse(fs.readFileSync(CONFIG, 'utf8')); return isObj(j) ? j : {}; } catch (e) { return {}; } }
+  /*
+   * INTAKE-POORT (wv4326, 27-11-2026; David: "niet meer zo dat alle mail verwerkt wordt … is dit potentieel relevant voor iets wat we al
+   * kennen? Zo ja, pak het op"; bouwplan vault 01_Ontwikkeling/Regie - Davids takenlijst los van Socev … (Fable 5.2, 27-11-2026) § 3).
+   * Alleen waar Jev (of het ontbreken van Jev) besliste: stroom intake met reden score/hard_*, en stroom twijfel (niet *_zonder_bijlage).
+   * Nooit: _AI_ (markering), draad, Davids regels, factuur, Davids eigen label INTAKE (die lopen buiten besluitRegels/besluitJev om).
+   * Verband = V1 draad bekend, V2 afzender kreeg in Intake al eens een plek en David koos nooit "Niet bewaren" (o.intakeAfzender),
+   * V3 afzender in de contacten (o.contactAdressen). Zonder verband en stand 'aan': stroom info, reden geen_verband (OVERIG in Gmail,
+   * de mail blijft gewoon staan; label _AI_ haalt hem alsnog binnen). Een bron die niet te lezen is telt als verband (oude gedrag).
+   * Schakelaar config.json intake_poort["<postvak>"] = uit | schaduw | aan (per ronde gelezen; terugrol = uit, zonder uitrol).
+   * besluit.poort: 'v1'|'v2'|'v3' (verband), 'fout' (bron onleesbaar), 'schaduw:<stroom>:<reden>' of 'tegen:<stroom>:<reden>'.
+   */
+  function poortStand(pv) {
+    const c = config(), t = isObj(c.intake_poort) ? c.intake_poort[pv] : null;
+    return t === 'aan' || t === 'schaduw' ? t : 'uit';
+  }
+  function poortToets(p, m, stroom, reden, draadBekend) {
+    const stand = poortStand(p.id);
+    if (stand === 'uit') return null;
+    if (!poortGeldt(stroom, reden)) return null;
+    if (draadBekend) return { poort: 'v1' };
+    const adres = String(m.van_adres || '').trim().toLowerCase();
+    let fout = false;
+    try {
+      const a = o.intakeAfzender ? o.intakeAfzender(p.id, adres) : null;
+      if (a === true) return { poort: 'v2' };
+      if (a !== false) fout = true;
+    } catch (e) { fout = true; fout_('mailman-poort-afzender', e); }
+    try {
+      const c = o.contactAdressen ? o.contactAdressen() : null;
+      if (c && c.has(adres)) return { poort: 'v3' };
+      if (!c) fout = true;
+    } catch (e) { fout = true; fout_('mailman-poort-contacten', e); }
+    if (fout) return { poort: 'fout' };
+    const was = stroom + ':' + String(reden || '').slice(0, 40);
+    return stand === 'aan' ? { stroom: 'info', reden: 'geen_verband', poort: 'tegen:' + was } : { poort: 'schaduw:' + was };
+  }
+  function fout_(w, e) { try { fout(w, e); } catch (x) { /* logboek kapot: poort gaat door */ } }
+  function poortTelling(pv, dag) {
+    const r = db.prepare("SELECT COALESCE(sum(poort LIKE 'tegen:%'), 0) tegen, COALESCE(sum(poort LIKE 'schaduw:%'), 0) schaduw, COALESCE(sum(poort IN ('v1', 'v2', 'v3')), 0) verband, COALESCE(sum(poort = 'fout'), 0) fout FROM besluit WHERE postvak = ? AND besloten >= ?").get(pv, dag);
+    return { stand: poortStand(pv), tegen_7d: r.tegen, schaduw_7d: r.schaduw, verband_7d: r.verband, fout_7d: r.fout };
+  }
   function wijzig(wat, sleutel, oud, nieuw, door) {
     db.prepare('INSERT INTO wijziging (tijd, wat, sleutel, oud, nieuw, door) VALUES (?, ?, ?, ?, ?, ?)').run(iso(), wat, String(sleutel), oud == null ? null : JSON.stringify(oud), nieuw == null ? null : JSON.stringify(nieuw), door || null);
   }
@@ -1188,6 +1237,8 @@ function maak(o) {
         let stroom = b.stroom, status = 'klaar', reden = b.reden;
         if (b.stap === 'buiten') stroom = null;
         else if (b.stap === 'jev' && !magJev) { stroom = 'twijfel'; reden = pt.tegenhouden ? 'marker' : (zorg ? 'zorgmail' : 'jev_uit'); }
+        let poort = null;   // wv4326 Intake-poort
+        if (b.stap === 'jev' && !magJev && !vkJev.ok) { const pr = poortToets(p, m, stroom, reden, instel.draadBekend); if (pr) { poort = pr.poort; if (pr.stroom) { stroom = pr.stroom; reden = pr.reden; } } }
         if (magJev) status = 'wacht_jev';
         // B7-V (wv1997): het regelbesluit hierboven blijft staan als de gewone stappen (geen VERKOOP, 24 uur of 3 mislukte toetsen). Een al
         // afgehandelde kandidaat komt hier niet meer (oud klaar). kand staat hierboven (wv2548).
@@ -1218,6 +1269,7 @@ function maak(o) {
             stap, reden, regel_id, regel_versie, stroom, marker, marker_soorten, labels_plan, stand, status, versie, aangemaakt, besloten, inhaal)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(...rij, inhaal ? 1 : 0);
         }
+        db.prepare('UPDATE besluit SET poort = ? WHERE postvak = ? AND gmail_id = ?').run(poort, p.id, m.id);   // wv4326
         if (magJev) jev.push({ gmail_id: m.id, body: { model: 'typesafe/jev', input: { state: jevState(m, platte), questions: q } } });
       });
     });
@@ -1241,11 +1293,17 @@ function maak(o) {
         if (!j) { tel.fout++; db.prepare('UPDATE besluit SET jev_pogingen = jev_pogingen + 1 WHERE id = ?').run(b.id); continue; }
         const m = mailUitRij(b);
         let stroom = b.stroom, score = null, reden = b.reden;
-        if (b.stap === 'jev') { const u = besluitJev(vr, j.ruw, m, { in: p.drempel_in, uit: p.drempel_uit }); stroom = u.stroom; score = u.score; reden = u.reden; }
+        let poort = null;
+        if (b.stap === 'jev') {
+          const u = besluitJev(vr, j.ruw, m, { in: p.drempel_in, uit: p.drempel_uit }); stroom = u.stroom; score = u.score; reden = u.reden;
+          // wv4326 Intake-poort: draad bekend = Jev was niet aan de beurt geweest (besluitRegels), dus hier altijd false
+          const pr = poortToets(p, m, stroom, reden, false);
+          if (pr) { poort = pr.poort; if (pr.stroom) { stroom = pr.stroom; reden = pr.reden; } }
+        }
         else { score = besluitJev(vr, j.ruw, m, { in: p.drempel_in, uit: p.drempel_uit }).score; }
         const plan = labelPlan(stroom, j.ruw, m, instel);
-        db.prepare(`UPDATE besluit SET stroom = ?, score = ?, reden = ?, jev = ?, jev_tokens = ?, botsing = ?, labels_plan = ?, status = 'klaar', besloten = ? WHERE id = ?`)
-          .run(stroom, score, reden, JSON.stringify(Object.assign({ m: j.model }, j.ruw)), j.tokens, botsing(b.stap, j.ruw), JSON.stringify(plan), iso(), b.id);
+        db.prepare(`UPDATE besluit SET stroom = ?, score = ?, reden = ?, jev = ?, jev_tokens = ?, botsing = ?, labels_plan = ?, status = 'klaar', besloten = ?, poort = ? WHERE id = ?`)
+          .run(stroom, score, reden, JSON.stringify(Object.assign({ m: j.model }, j.ruw)), j.tokens, botsing(b.stap, j.ruw), JSON.stringify(plan), iso(), poort, b.id);
         tel.besloten++; tel.tokens += j.tokens || 0;
       }
       db.prepare('UPDATE ronde SET jev = jev + ?, jev_fout = jev_fout + ? WHERE id = ?').run(tel.antwoorden, tel.fout, r.id);
@@ -3544,6 +3602,7 @@ function maak(o) {
         afgedaan: p.gedeeld ? undefined : afgedaanStand(p, dag),   // wv2189: alleen tellingen
         concept_klaar: p.id === 'gmail:david' && !p.gedeeld ? conceptStand(p, dag) : undefined,   // wv3092: alleen tellingen
         zaken: p.gedeeld ? undefined : zakenStand(p),   // wv2218: alleen tellingen
+        intake_poort: poortTelling(p.id, new Date(n - 7 * 86400000).toISOString()),   // wv4326
         routes_24u: db.prepare('SELECT count(*) n FROM route WHERE postvak = ? AND aangemaakt >= ?').get(p.id, dag).n,
         correcties_24u: db.prepare('SELECT count(*) n FROM correctie WHERE postvak = ? AND tijd >= ?').get(p.id, dag).n,
         verkoop: p.id === VERKOOP_POSTVAK ? Object.assign({ door: !!p.verkoop_door, archief: !!p.verkoop_archief, toegestaan: verkoopMag(p).ok }, verkoopTellers(p.id, dag)) : undefined };   // wv1997: alleen tellingen
