@@ -68,6 +68,7 @@ const W = fs.mkdtempSync(path.join(os.tmpdir(), 'aix-toets-'));
   const lw = await A.kaarten();
   toets('2 kaarten: uitwerking_tekens uit de lijst, geen uitwerking', lw.ok && lw.kaarten[0].uitwerking_tekens === 1234 && lw.kaarten[0].uitwerking === undefined, lw.kaarten);
   toets('2 de vaste routes zijn toegestaan', [['GET', '/api/ik'], ['GET', '/api/nieuw?sinds=2026-10-23T00%3A00%3A00Z'], ['POST', '/api/kaart/12/reactie'], ['POST', '/api/beheer/aanvraag/' + 'a'.repeat(32) + '/afwijzen'], ['POST', '/api/beheer/agent/appie/schors']].every((x) => X.toegestaan(x[0], x[1])));
+  toets('2 wv4030: POST /api/reactie/<id>/beantwoord mag; andere methode, pad of wissen niet', X.toegestaan('POST', '/api/reactie/77/beantwoord') && !X.toegestaan('GET', '/api/reactie/77/beantwoord') && !X.toegestaan('POST', '/api/reactie/x/beantwoord') && !X.toegestaan('DELETE', '/api/reactie/77') && !X.toegestaan('PATCH', '/api/reactie/77'));
   antw = () => ({ status: 200, body: { ok: true, naam: 'socev', rol: 'beheer', status: 'actief', sleutel_id: 'x'.repeat(32) } });
   let r = await A.ik();
   toets('2 ik: ondertekend (drie koppen), geen omleiding, geen sleutel in de koppen', r.ok && r.naam === 'socev' && net[0].redirect === 'manual' && /^aix=\(/.test(net[0].h['Signature-Input']) && /^aix=:/.test(net[0].h.Signature) &&

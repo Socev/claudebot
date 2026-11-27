@@ -48,6 +48,7 @@ const ROUTES = [
   ['PATCH', new RegExp('^/api/kaart/' + ID + '$')],   // wv1946: alleen eigen kaarten bijwerken (plaatsBundel na Davids Ja)
   ['POST', new RegExp('^/api/kaart/' + ID + '/beeld$')],
   ['POST', new RegExp('^/api/kaart/' + ID + '/reactie$')],
+  ['POST', new RegExp('^/api/reactie/' + ID + '/beantwoord$')],   // wv4030 keuze B: een vraag onder onze eigen kaart als beantwoord markeren (de site staat dat alleen de kaarteigenaar toe)
   ['POST', new RegExp('^/api/beheer/aanvraag/[0-9a-f]{32}/(toelaten|afwijzen)$')],
   ['POST', new RegExp('^/api/beheer/agent/[a-z][a-z0-9-]{2,29}/schors$')],
 ];
@@ -316,6 +317,11 @@ function maak(deps) {
     const r = await verzoek('POST', '/api/kaart/' + Number(id) + '/reactie', { tekst: t });
     return r.status === 201 && r.j && r.j.ok && geheel(r.j.id) ? { ok: true, id: r.j.id, geplaatst: r.j.geplaatst !== false } : foutVan(r);
   }
+  async function markeerBeantwoord(id) {
+    if (!geheel(Number(id))) return { ok: false, status: 400, fout: 'reactie ongeldig' };
+    const r = await verzoek('POST', '/api/reactie/' + Number(id) + '/beantwoord', { beantwoord: true });
+    return goed(r) ? { ok: true } : foutVan(r);
+  }
   async function toelaten(id) { const r = await verzoek('POST', '/api/beheer/aanvraag/' + id + '/toelaten', {}); return goed(r) ? { ok: true } : foutVan(r); }
   async function afwijzen(id, reden) {
     if (AFWIJS.indexOf(reden) < 0) return { ok: false, status: 400, fout: 'geen vaste reden' };
@@ -332,7 +338,7 @@ function maak(deps) {
     return { sleutel: !!sleutel(), sleutel_fout: sleutelFout, keyid8: keyid ? keyid.slice(0, 8) : null, laatst_ok: stand.laatst_ok, plat_sinds: stand.plat_sinds,
       laatste_fout: stand.laatste_fout, aanroepen: stand.aanroepen };
   }
-  return { verzoek, koppen, ik, winkels, kaarten, kaart, nieuw, beeld, aanvragen, logboek, plaatsKaart, bewerkKaart, plaatsBeeld, plaatsReactie, toelaten, afwijzen, schors, info };
+  return { verzoek, koppen, ik, winkels, kaarten, kaart, nieuw, beeld, aanvragen, logboek, plaatsKaart, bewerkKaart, plaatsBeeld, plaatsReactie, markeerBeantwoord, toelaten, afwijzen, schors, info };
 }
 
 // ── de uurlijkse goedkeuringsronde (§ 5.3 stap 3–4, § 5.4) — deterministisch, geen model ──

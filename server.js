@@ -27765,7 +27765,7 @@ const ideeen = (function () {
   } catch (e) { logError('ideeen', e); return null; }
 })();
 ['ideeen', 'ideeen-plaatje'].forEach(function (k) { if (!appStaat.tellers[k]) appStaat.tellers[k] = []; });
-const aixRonde = { bezig: false, laatste: null, week: null, voorstel: null, box: null };
+const aixRonde = { bezig: false, laatste: null, week: null, voorstel: null, box: null, antwoord: null };
 // tikken alleen in de echte pod (of een proef met AIX_RONDE=1); typeof: het blok draait ook los in de toetsen (vm zonder SERVER_ECHT)
 const AIX_TIKKEN = !!(aix && ideeen && ((typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) || process.env.AIX_RONDE === '1'));
 function aixStaatPad() { return path.join(IDEEEN_DIR, 'ronde.json'); }
@@ -27807,6 +27807,17 @@ async function aixUurRonde() {
     try { b = await ideeen.zorgBundelKaart(); } catch (e) { logError('aix-bundel', e); b = { fout: String(e && e.message || e).slice(0, 120) }; }
     // geen nieuwe hangende plaatsing laten staan: na een herstart nakijken (alleen als er iets hangt; nakijk doet dan zelf niets)
     try { if (u.ok) await ideeen.nakijk(); } catch (e) { logError('aix-nakijk', e); }
+    // wv4030 keuze B (bouwplan AIX § 25): Socev beantwoordt vragen onder zijn eigen kaarten zelf, alleen met registerrij aix-keuze-b op aan
+    // (ideeen.js leest het toestemmingenregister; uit = niets, ook geen model), overdag 08–22 Nederlandse tijd.
+    try {
+      const uur = Number(new Date().toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false }));
+      if (u.ok && ideeen.antwoordRonde && uur >= 8 && uur < 22) {
+        const ab = await ideeen.antwoordRonde();
+        aixRonde.antwoord = { op: ab.op, aan: ab.aan, vragen: ab.vragen, geplaatst: ab.geplaatst, concept: ab.concept, overgeslagen: ab.overgeslagen, onzeker: ab.onzeker, model: ab.model, fout: ab.fout };
+        if (ab.aan && (ab.vragen || ab.fout)) schrijfLog(nu() + ' aix-antwoord ' + velden(aixRonde.antwoord));
+        if (ab.onzeker) logError('aix-antwoord', new Error(ab.onzeker + ' antwoord(en) onzeker geplaatst; niet opnieuw (antwoorden.jsonl)'));
+      }
+    } catch (e) { logError('aix-antwoord', e); }
     // niet gelukt (plat of blijvend geweigerd): sinds wanneer, en na meer dan een dag één box-rij per periode (in ronde.json, overleeft een herstart)
     const rs = aixStaatLees();
     if (u.ok) { if (rs.niet_ok_sinds) { delete rs.niet_ok_sinds; aixStaatSchrijf(rs); } }
@@ -27886,7 +27897,7 @@ if (AIX_TIKKEN) {
 }
 function ideeenInfo() {
   if (!ideeen) return { aan: false };
-  try { return Object.assign(ideeen.health(), { ronde: aixRonde.laatste, week: aixRonde.week, voorstel: aixRonde.voorstel }); } catch (e) { return { aan: true, fout: true }; }
+  try { return Object.assign(ideeen.health(), { ronde: aixRonde.laatste, week: aixRonde.week, voorstel: aixRonde.voorstel, antwoord: aixRonde.antwoord }); } catch (e) { return { aan: true, fout: true }; }
 }
 function aixInfo() {
   if (!aix) return { aan: false };
