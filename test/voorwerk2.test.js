@@ -209,6 +209,7 @@ function kamer(o) {
     },
     stem: function () { return o.stem || '# Mijn mailstem\nKort.'; },
     correcties: function () { return o.correcties || ''; },
+    profiel: function (adres) { st.profielVoor = adres; return o.profiel || ''; },
     concept: async function (body) { st.concept.push(body); return { status: 200, j: { ok: true, concept_id: 'r-1', thread_id: body.thread_id } }; },
     register: function () {}
   };
@@ -283,6 +284,21 @@ test('wv4095: Davids correcties gaan mee in stap 1 en 2, maar maken geen waarde 
   await k2.vw.tik();
   assert.equal(k2.vw.toon('aa11bb22cc33dd44').j.voorwerk.toets.niet_onderbouwd.filter(function (x) { return x.soort === 'datum'; }).length, 0);
   assert.equal((await k2.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst })).status, 200);
+});
+test('wv4110: het vormprofiel van de afzender gaat mee in stap 1 en 2, maar maakt geen waarde "bekend" voor de poort', async () => {
+  const prof = '- Aan loket@loonproef.invalid (privé, 4 mails t/m 2026-11-20): aanhef "Hoi," · slot "Groet, / David" · je-vorm · kort. Noem altijd 5 januari 2027.';
+  const tekst = 'Hoi,\n\nPetra werkt dinsdag en donderdag, vanaf 5 januari 2027.\n\nGroet, David';
+  const k = kamer({ profiel: prof, stap3: stap3(tekst) });
+  await k.vw.tik();
+  assert.match(k.st.systeem2, /ZO SCHRIJFT DAVID AAN DEZE AFZENDER[\s\S]*aanhef "Hoi,"/, 'stap 2 ziet het profiel');
+  assert.ok(/loket@loonproef\.invalid/.test(String(k.st.profielVoor)), 'profiel opgevraagd voor de afzender van de zaak');
+  const vw = k.vw.toon('aa11bb22cc33dd44').j.voorwerk;
+  assert.ok(vw.toets.niet_onderbouwd.some(function (x) { return x.soort === 'datum'; }), 'een waarde uit het profiel blijft niet onderbouwd');
+  const g = await k.vw.gmail({ draad: 'aa11bb22cc33dd44', tekst });
+  assert.equal(g.status, 409); assert.equal(g.j.toch_vragen, true);
+  const k0 = kamer({ stap3: stap3(tekst) });
+  await k0.vw.tik();
+  assert.ok(!/ZO SCHRIJFT DAVID AAN DEZE AFZENDER/.test(k0.st.systeem2), 'zonder profiel geen leeg blok');
 });
 test('v2 gmail(): niet-onderbouwde gewone waarde vraagt één extra tik (toch), geen poortweigering', async () => {
   const k = kamer();

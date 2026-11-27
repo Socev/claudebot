@@ -26224,6 +26224,23 @@ async function mailconceptDoktersmaten(d, draad) {
   if (reden === 'onbekend' || reden === 'niet_bereikt') logError('mailconcept-doktersmaten', new Error(reden + ' ' + (r ? r.status : '-')));
   return { status: 200, j: { ok: true, gemaakt: false, reden: reden, regel: zin[reden] + plak } };
 }
+// wv4110 (besluitenpagina nr 500 = 3C200): "zo schrijft David aan deze persoon". profiel.py (skill mijn-mailstem) schrijft elke nacht
+// (nachtketen-stap mailstem-profiel) een register per adres met alleen vaste vormen; hier alleen lezen (gecachet op mtime), tekst per adres.
+const MAILSTEM_PROFIELEN = '/opt/data/mailstem/profielen.json';
+let mailStemProfielCache = { mtime: -1, adressen: {} };
+function mailStemProfiel(adres) {
+  const m = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/.exec(String(adres || '').toLowerCase());
+  if (!m) return '';
+  try {
+    const st = fs.statSync(MAILSTEM_PROFIELEN);
+    if (st.mtimeMs !== mailStemProfielCache.mtime) {
+      const j = JSON.parse(fs.readFileSync(MAILSTEM_PROFIELEN, 'utf8').slice(0, 4e6));
+      mailStemProfielCache = { mtime: st.mtimeMs, adressen: j && typeof j.adressen === 'object' && j.adressen ? j.adressen : {} };
+    }
+  } catch (e) { return ''; }
+  const p = mailStemProfielCache.adressen[m[0]];
+  return p && typeof p.tekst === 'string' ? p.tekst : '';
+}
 const mailVoorwerk = (function () {
   const p = path.join(__dirname, 'mailvoorwerk.js');
   if (!fs.existsSync(p) || !mailman || typeof mailman.voorwerkBron !== 'function') return null;
@@ -26236,6 +26253,7 @@ const mailVoorwerk = (function () {
       stem: mailStemGids,
       gesprek: mailGesprekLees,   // wv4098 (nr 348): aan, cc en afzendadres uit de hele draad
       correcties: function () { return String(VV().lees(path.join(VAULT, '00_Systeem', 'Mailstem - correcties van David.md'), 'utf8', { max: 262144 }) || ''); },   // nr 318, wv4095: alleen de prompt, niet de poort
+      profiel: mailStemProfiel,   // wv4110 (nr 500): vormprofiel per adres; alleen de prompt
       concept: function (body) { return potVzConcept(body); },
       register: function (regel) { return potVzRegister(regel); },
       bewaar: function (d) { return conceptLeer ? conceptLeer.bewaar(d) : null; },   // wv4107 (nr 406): concepttekst 30 d op de pod
@@ -28191,6 +28209,42 @@ function takeoutWachterRonde(ctx) {
     k.on('close', function (code, sig) { af(code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code); });
   });
 }
+// ── Mailstem-profiel (wv4110) ──
+// wv4110 (besluitenpagina nr 500 = 3C200): vormprofiel per adres uit Davids verzonden mail van de laatste 2 dagen → register + blok
+// "Zo schrijft David aan deze persoon" op de persoonspagina (profiel.py in de skill mijn-mailstem; regels en waarom daar). Kindproces met
+// harde grens; schakelaar = bestand /opt/data/mailstem/uit (het script antwoordt dan al_gedaan). Een fout meldt de keten (meldtZelf false).
+const MAILSTEM_PROFIEL_SCRIPT = '/opt/data/AI_SecondBrain/.claude/skills/mijn-mailstem/profiel.py';
+const MAILSTEM_PROFIEL_MAX_S = 420;
+function mailStemProfielRonde(ctx) {
+  return new Promise(function (resolve) {
+    if (!fs.existsSync(MAILSTEM_PROFIEL_SCRIPT)) return resolve({ ok: true, al_gedaan: true, detail: { niet_aanwezig: true } });
+    const t0 = Date.now();
+    let klaar = false, k, uit = '', vangnet = null;
+    const groep = function (sig) { try { process.kill(-k.pid, sig); } catch (e) { try { k.kill(sig); } catch (e2) {} } };
+    try {
+      k = spawn('timeout', ['-k', '15', String(MAILSTEM_PROFIEL_MAX_S), 'python3', '-I', MAILSTEM_PROFIEL_SCRIPT, 'nacht'], { cwd: '/tmp', env: process.env, stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+    } catch (e) { return resolve({ ok: false, reden: 'start: ' + String(e && e.message || e).slice(0, 80) }); }
+    if (k.pid && ctx && typeof ctx.opSpawn === 'function') { try { ctx.opSpawn(k.pid); } catch (e) {} }
+    vangnet = setTimeout(function () { groep('SIGKILL'); }, (MAILSTEM_PROFIEL_MAX_S + 45) * 1000);
+    k.stdout.setEncoding('utf8');
+    k.stdout.on('data', function (c) { uit = (uit + c).slice(-20000); });
+    const af = function (code, fout) {
+      if (klaar) return; klaar = true; clearTimeout(vangnet);
+      let j = null;
+      try { j = JSON.parse(uit.trim().split('\n').pop()); } catch (e) {}
+      const d = { ms: Date.now() - t0 };
+      if (j && typeof j === 'object') {
+        ['adressen', 'profielen', 'overlap', 'luikfout', 'paginas_gewijzigd', 'zonder_pagina'].forEach(function (x) { if (typeof j[x] === 'number') d[x] = j[x]; });
+        if (j.al_gedaan) return resolve({ ok: true, al_gedaan: true, detail: { schakelaar: 'uit' } });
+        if (Array.isArray(j.fouten) && j.fouten.length) d.fout = String(j.fouten.join('; ')).slice(0, 160);
+      }
+      if (code === 0) return resolve({ ok: true, detail: d });
+      resolve({ ok: false, reden: fout ? 'start: ' + fout : (code === 124 || code === 137) ? 'tijdslimiet ' + MAILSTEM_PROFIEL_MAX_S + ' s' : 'exit ' + code + (d.fout ? ' (' + d.fout.slice(0, 80) + ')' : ''), detail: d });
+    };
+    k.on('error', function (e) { af(127, String(e && e.message || e).slice(0, 80)); });
+    k.on('close', function (code, sig) { af(code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code); });
+  });
+}
 // ── Nachtketen (wv1868, SB2 fase 3d; ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase 3 intake, nachtketen en schrijvers (ontwerp
 // 28-10-2026).md" § 4; logica en waarom in nachtketen.js) ──
 // Elke minuut (echte pod, rol primair, vlag aan). Stappen in volgorde; elke stap gebruikt hetzelfde object en dezelfde stempel als zijn oude
@@ -28361,6 +28415,8 @@ const nachtketen = (function () {
       // wv3304: Takeout-wachter (klaar-mail + Drive → controlelijst voor de NAS, stand.json lezen, Drive-ruimte); kindproces met eigen harde
       // grens (300 s); vóór de NAS-run van 05:30. Een fout meldt alleen de keten (box-rij), meldingen per export zet het script zelf.
       { naam: 'takeout-wachter', start_na: [4, 40], limiet_min: 6, pogingen: 2, meldtZelf: false, doe: function (ctx) { return takeoutWachterRonde(ctx); } },
+      // wv4110 (nr 500): blokje "Zo schrijft David aan deze persoon" op de persoonspagina's + register voor alle schrijvers; kindproces 420 s
+      { naam: 'mailstem-profiel', start_na: [4, 45], limiet_min: 9, pogingen: 2, meldtZelf: false, doe: function (ctx) { return mailStemProfielRonde(ctx); } },
       { naam: 'sb2-feitenlijst', start_na: [5, 0], na: ['bibliothecaris'], limiet_min: 7, pogingen: 2, meldtZelf: true,
         voorwaarde: nachtN8nVoorwaarde([NACHT_N8N.rawInput, NACHT_N8N.teams, NACHT_N8N.whatsapp], [6, 40], true), doe: nachtDagStap(sb2Feitenlijst) },
       { naam: 'sb2-zoekindex', na: ['sb2-feitenlijst'], limiet_min: 15, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekindex) },
