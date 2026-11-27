@@ -167,10 +167,10 @@ zet('10_Zakelijk/Proefpraktijk/Medewerkers/Ilse Proef.md', ['# Ilse Proef', '', 
   toets('server: dispatch POST /app/zoek-snel/uitzoeken', /route === 'POST \/app\/zoek-snel\/uitzoeken'\) return typeof appZoekSnelUitzoeken === 'function'/.test(S));
   toets('server: glijdroute + teller', /APP_GLIJD_ROUTES\.add\('POST \/app\/zoek-snel\/uitzoeken'\)/.test(S) && /'zoek-snel-uitzoeken': \[\]/.test(S));
   toets('server: alleen na soort geen, zelfde apparaat, ≤ 10 min', /r\.j\.soort !== 'geen'/.test(S) && /appZoekSnelUitzoeken[\s\S]{0,1500}e\.apparaat !== a\.id \|\| Date\.now\(\) - e\.t > ZOEK_SNEL_HERHAAL_MS/.test(S));
-  toets('server: /agent aanvaardt intern_stil alleen zonder smalle sleutel en met vast label', /if \(smal \|\| d\.intern_stil !== 'zoek-snel-uitzoek' \|\| !\/\^\[0-9a-f\]\{12\}\$\/\.test\(String\(d\.intern_ref \|\| ''\)\) \|\| label !== 'socev: Zoek het uit'\)/.test(S));
-  toets('server: /agent intern + uitrolwacht = 503', /internStil = 'zoek-snel-uitzoek'/.test(S) && /intern-ongeldig[\s\S]{0,400}uitrolWacht\(\)\.wacht/.test(S));
-  toets('server: processAgent stil voor zoektocht (nooit sendReport)', /const stil = zoekUit \|\| agentStil\(entry\.label, r, r\.files\)/.test(S) && /if \(zoekUit\) \{ zoekUitAfloop\(jobId, entry, r, base\); r\.files = \[\]; \}/.test(S));
-  toets('server: wees-afloop ook stil', /const stil = zoekUit \|\| agentStil\(a\.label, r, files\)/.test(S));
+  toets('server: /agent aanvaardt intern_stil alleen zonder smalle sleutel en met vast label', /STIL_LABEL = \{ 'zoek-snel-uitzoek': 'socev: Zoek het uit', 'wachter-voorwerk': 'socev: Wachter voorwerk' \}/.test(S) && /if \(smal \|\| !Object\.hasOwn\(STIL_LABEL, String\(d\.intern_stil\)\) \|\| !\/\^\[0-9a-f\]\{12\}\$\/\.test\(String\(d\.intern_ref \|\| ''\)\) \|\| label !== STIL_LABEL\[d\.intern_stil\]\)/.test(S));
+  toets('server: /agent intern + uitrolwacht = 503', /internStil = String\(d\.intern_stil\)/.test(S) && /intern-ongeldig[\s\S]{0,400}uitrolWacht\(\)\.wacht/.test(S));
+  toets('server: processAgent stil voor zoektocht (nooit sendReport)', /const stil = zoekUit \|\| wkVoorwerk \|\| agentStil\(entry\.label, r, r\.files\)/.test(S) && /if \(zoekUit\) \{ zoekUitAfloop\(jobId, entry, r, base\); r\.files = \[\]; \}/.test(S));
+  toets('server: wees-afloop ook stil', /const stil = zoekUit \|\| wkVoorwerk \|\| agentStil\(a\.label, r, files\)/.test(S));
   toets('server: kwetsbaar zolang de zoektocht loopt', /if \(a\.intern_stil && \(a\.status === 'pending' \|\| a\.status === 'running'\)\) return 'stil-zoektocht'/.test(S));
   toets('server: knop aangesloten', S.indexOf('zoekSnelUitzoek.knop(p.sleutel, keuze)') > S.indexOf('zoekSnelLeer.knop(p.sleutel, keuze, d.toelichting)'));
   toets('server: kaart alleen door het sleutelmasker', /zetKaart: async function \(k\) \{\s*const m = function \(t\) \{ return appSleutelMasker\(String\(t\)\); \}/.test(S) && !/zetKaart[\s\S]{0,300}appBsnMasker/.test(S));

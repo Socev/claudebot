@@ -3875,8 +3875,10 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     // wv3821: een zoektocht van Zoek snel ("Zoek het uit") rondt altijd stil af; de pod leest zijn bestand en zet zelf de kaart
     const zoekUit = !!(entry && entry.intern_stil === 'zoek-snel-uitzoek');
     if (zoekUit) { zoekUitAfloop(jobId, entry, r, base); r.files = []; }
+    const wkVoorwerk = !!(entry && entry.intern_stil === 'wachter-voorwerk');   // wv4189: stil, de pod zet de uitkomst op de wachterkaart
+    if (wkVoorwerk) { wkVoorwerkAfloop(jobId, entry, r, base); r.files = []; }
     const volledigeUitvoer = (typeof r.output === 'string') ? r.output : '';
-    const stil = zoekUit || agentStil(entry.label, r, r.files);   // wv3248: geslaagde machinekamer:-agent met exact NIETS en geen bestanden
+    const stil = zoekUit || wkVoorwerk || agentStil(entry.label, r, r.files);   // wv3248: geslaagde machinekamer:-agent met exact NIETS en geen bestanden
     appRapport = stil ? null : (volledigeUitvoer || (r.error ? 'Mislukt: ' + String(r.error) : ''));
     j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
     jobEindLog(jobId, j, ws);
@@ -4055,7 +4057,9 @@ function weesAfleveren(id) {
   // wv3248: behalve de stille afloop (geslaagd, exact NIETS, machinekamer:, geen bestanden); agentStil gooit niet.
   const zoekUit = a.intern_stil === 'zoek-snel-uitzoek';   // wv3821: Zoek het uit, ook na een herstart nooit naar n8n
   if (zoekUit) { zoekUitAfloop(id, a, r, path.join(IO, id)); files = []; r.files = []; }
-  const stil = zoekUit || agentStil(a.label, r, files);
+  const wkVoorwerk = a.intern_stil === 'wachter-voorwerk';   // wv4189
+  if (wkVoorwerk) { wkVoorwerkAfloop(id, a, r, path.join(IO, id)); files = []; r.files = []; }
+  const stil = zoekUit || wkVoorwerk || agentStil(a.label, r, files);
   if (stil) agentStilAf(a, id); else sendReport(a, r);
   try { autoNaAfloop(id, { ok: r.ok, output: r.output }, a.label); } catch (err) { logError('wees-auto', err); }
   try { appBewaarAgent(id, a, outdir, stil ? null : r.output, r.ok, false); } catch (err) { logError('wees-appbewaar', err); }
@@ -5313,7 +5317,9 @@ function handleRequest(req, res) {
       // en tijdens een uitrolwacht start hij niet (Codex r1 MOET 2/3, r3 MOET 1, r5 MOET 1; mk-scripts/wv3821/ontwerp.md).
       let internStil = null, internRef = null;
       if (d.intern_stil != null || d.intern_ref != null) {
-        if (smal || d.intern_stil !== 'zoek-snel-uitzoek' || !/^[0-9a-f]{12}$/.test(String(d.intern_ref || '')) || label !== 'socev: Zoek het uit') {
+        // wv4189 (3C160): tweede vaste stille soort — voorwerk van een nachtwachter (wachter-kaarten.js), eigen vast label
+        const STIL_LABEL = { 'zoek-snel-uitzoek': 'socev: Zoek het uit', 'wachter-voorwerk': 'socev: Wachter voorwerk' };
+        if (smal || !Object.hasOwn(STIL_LABEL, String(d.intern_stil)) || !/^[0-9a-f]{12}$/.test(String(d.intern_ref || '')) || label !== STIL_LABEL[d.intern_stil]) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ ok: false, error: 'intern-ongeldig' }));
         }
@@ -5321,7 +5327,7 @@ function handleRequest(req, res) {
           res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '600' });
           return res.end(JSON.stringify({ ok: false, error: 'uitrol-wacht' }));
         }
-        internStil = 'zoek-snel-uitzoek'; internRef = String(d.intern_ref);
+        internStil = String(d.intern_stil); internRef = String(d.intern_ref);
       }
       // wv3227: een OVIS Code-sessienaam hoort alleen bij een app-beurt; een agent met die chat_id wordt geweigerd (nooit stil smal ernaast)
       if (/^ovis-code-/i.test(d.chat_id != null ? String(d.chat_id) : '')) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: false, error: 'ovis-code-alleen-app' })); }
@@ -14491,6 +14497,10 @@ async function appVoorJouKeuze(req, res, a, d) {
 // en secondbrain.personeel_state (via personeel_state_zet). Kaart 06:52 (na open-eindjes), ronde elke 10 min. Niets wordt verstuurd.
 const WK_MOD = (function () { try { return require(path.join(__dirname, 'wachter-kaarten.js')); } catch (e) { logError('wachter-kaarten', e); return null; } })();
 const WK_DIR = process.env.WK_DIR || '/opt/data/wachter-kaarten';
+// wv4189: voorwerk aan/uit zonder uitrol: WK_DIR/voorwerk-stand.json {"aan": false} = uit (ontbreekt = aan); model vast Sonnet
+const WK_VOORWERK_AAN = true;
+const WK_VOORWERK_MODEL = process.env.WK_VOORWERK_MODEL || 'claude-sonnet-5-5';
+function wkVoorwerkAan() { try { const j = JSON.parse(fs.readFileSync(path.join(WK_DIR, 'voorwerk-stand.json'), 'utf8')); return !(j && j.aan === false); } catch (e) { return !(e && e.code !== 'ENOENT'); } }
 const WK_SESSIE = { 'actie-bewaker': 'actie', 'correspondentie-wachter': 'correspondentie', 'agenda-wachter': 'agenda', 'personeels-wachter': 'personeel' };
 const WK_TABEL = { actie: { n8n: process.env.WK_ACTIE_TABEL || 'vNAY2dVRpSx1l3Ri', sleutel: 'actie_id' },
   correspondentie: { n8n: process.env.WK_CORR_TABEL || 'pnX6vvg2iv256HAB', sleutel: 'thread_id' },
@@ -14538,14 +14548,71 @@ const wachterKaarten = WK_MOD ? WK_MOD.maak({
     return rijen.some(function (r) { return r && r.bron === bron; });
   },
   rpc: function (naam, args) { return appSbRpc(naam, args).then(function (j) { appStaat.vjCache = null; return j; }); },
-  log: function (o) { schrijfLog(nu() + ' wachter-kaarten ' + JSON.stringify(o).slice(0, 400)); }
+  log: function (o) { schrijfLog(nu() + ' wachter-kaarten ' + JSON.stringify(o).slice(0, 400)); },
+  // wv4189 (3C160): voorwerk — stille agent (vast label, Sonnet, intern_stil), en de vaste controles van zijn uitvoer (wachter-voorwerk.js)
+  startAgent: WK_VOORWERK_AAN ? function (prompt, ref) {
+    return new Promise(function (klaar) {
+      if (!SECRET) return klaar({ ok: false, status: 0 });
+      try { if (uitrolWacht().wacht) return klaar({ ok: false, status: 503 }); } catch (e) { return klaar({ ok: false, status: 503 }); }
+      const body = JSON.stringify({ secret: SECRET, prompt: prompt, label: 'socev: Wachter voorwerk', model: WK_VOORWERK_MODEL, effort: 'medium', max_minuten: 30,
+        intern_stil: 'wachter-voorwerk', intern_ref: ref });
+      const r = http.request({ host: '127.0.0.1', port: PORT, method: 'POST', path: '/agent', timeout: 15000,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, function (res) {
+        let t = '';
+        res.on('data', function (x) { if (t.length < 4096) t += x; });
+        res.on('end', function () { let j = null; try { j = JSON.parse(t); } catch (e) { j = null; } klaar(res.statusCode === 200 && j && j.ok ? { ok: true, job_id: j.job_id } : { ok: false, status: res.statusCode }); });
+      });
+      r.on('timeout', function () { r.destroy(new Error('timeout')); });
+      r.on('error', function () { klaar({ ok: false, status: 0 }); });
+      r.end(body);
+    });
+  } : null,
+  agentStand: function (job) {
+    const a = typeof agentsReg === 'object' && agentsReg ? agentsReg[job] : null;
+    if (!a) return null;
+    if (a.status === 'pending' || a.status === 'running') return 'loopt';
+    return a.ok === true ? 'klaar' : a.ok === false ? 'mislukt' : (a.ended ? 'klaar' : 'loopt');
+  },
+  grondwet: function () { return typeof autoGrondwet === 'function' ? autoGrondwet() : null; },
+  winkel: function (url) {   // winkel-lezen.py (één GET, alleen lezen), kale omgeving zoals Shopper; null bij een fout
+    return new Promise(function (klaar) {
+      require('child_process').execFile('python3', ['-I', path.join(__dirname, 'winkel-lezen.py'), url], { timeout: 45000, maxBuffer: 256 * 1024,
+        env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: '/tmp' } }, function (e, uit) {
+        try { klaar(JSON.parse(String(uit || '').trim().split('\n')[0])); } catch (x) { klaar(null); }
+      });
+    });
+  },
+  agenda: async function (van, tot) {   // gooit bij een onleesbare agenda: dan geen momenten op de kaart
+    const j = await appAgendaApi({ actie: 'agenda', start: van, end: tot });
+    if (!j || !Array.isArray(j.events)) throw new Error('agenda zonder events');
+    if (j.fouten && (Array.isArray(j.fouten) ? j.fouten.length : true)) throw new Error('niet alle agenda\'s te lezen');
+    return j.events.filter(function (e) { return e && e.status !== 'cancelled'; }).map(function (e) { return { start: e.start, einde: e.einde }; });
+  },
+  conceptNa: function (draad, sinds) { return typeof gmailOpdrachtConceptNa === 'function' ? gmailOpdrachtConceptNa(draad, sinds) : false; },
+  masker: function (t) { return typeof appSleutelMasker === 'function' ? appSleutelMasker(String(t)) : String(t); }
 }) : null;
+// wv4189: afloop van een voorwerk-agent (processAgent en de wees-afloop), vóór de jobmap wordt opgeruimd. Leest voorwerk.json (jobmap of
+// OUTDIR, ≤ 20 kB), leegt OUTDIR (niets naar app-bestanden) en geeft de inhoud aan wachter-kaarten.js. Gooit nooit; nooit n8n of chat.
+function wkVoorwerkAfloop(jobId, entry, r, base) {
+  let inhoud = null;
+  for (const f of [path.join(base, 'out', 'voorwerk.json'), path.join(base, 'voorwerk.json')]) {
+    try { const st = fs.lstatSync(f); if (st.isFile() && st.size <= 20000) { inhoud = fs.readFileSync(f, 'utf8'); break; } } catch (e) {}
+  }
+  try { fs.rmSync(path.join(base, 'out'), { recursive: true, force: true }); fs.mkdirSync(path.join(base, 'out'), { recursive: true }); } catch (e) {}
+  let m = null;
+  try { m = wachterKaarten; } catch (e) { m = null; }   // vroeg in het laden (wees-ronde) kan de const nog niet bestaan
+  if (!m || typeof m.voorwerkAfloop !== 'function') { logError('wachter-voorwerk', new Error('afloop zonder module (job ' + jobId + ')')); return; }
+  m.voorwerkAfloop(entry && entry.intern_ref, { ok: !!(r && r.ok), inhoud: inhoud }).then(function (u) {
+    schrijfLog(nu() + ' wachter-voorwerk afloop ' + velden({ job: jobId, status: u.status || u.reden, regels: u.regels }));
+  }, function (e) { logError('wachter-voorwerk', e); });
+}
 function wachterKaartenInfo() { try { return wachterKaarten ? wachterKaarten.info() : { aan: false }; } catch (e) { return { aan: false, fout: true }; } }
 let wkBezig = false, wkRondeOp = 0;
 async function wachterKaartenTik() {
   if (!wachterKaarten || wkBezig || !rolPrimair()) return;
   wkBezig = true;
   try {
+    if (wkVoorwerkAan()) { try { await wachterKaarten.voorwerkStap(); } catch (e) { logError('wachter-voorwerk', e); } }   // wv4189
     try { await wachterKaarten.kaartStap(); } catch (e) { logError('wachter-kaarten-kaart', e); }
     if (Date.now() - wkRondeOp >= WK_MOD.RONDE_MS) { wkRondeOp = Date.now(); try { await wachterKaarten.ronde(); } catch (e) { logError('wachter-kaarten-ronde', e); } }
   } finally { wkBezig = false; }

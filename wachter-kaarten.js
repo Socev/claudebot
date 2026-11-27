@@ -21,6 +21,14 @@
  * Puur waar het kan; alle tabellen, databank, klok en bestand via io (test/wachter-kaarten.sh draait het met nepdata).
  */
 const crypto = require('crypto');
+// wv4189 (3C160): voorwerk bij de eerste melding — toets, opdracht en uitvoercontrole in wachter-voorwerk.js; hier opslag, start en kaart
+const VW = (function () { try { return require('./wachter-voorwerk.js'); } catch (e) { return null; } })();
+const VW_PER_NACHT = 3;       // nieuwe voorwerk-opdrachten per nacht, alle wachters samen
+const VW_LOPEND = 2;          // tegelijk lopende voorwerk-agents
+const VW_START_TOT = '06:10'; // daarna start er niets meer (agent max 30 min, kaart 06:52)
+const VW_POGINGEN = 40;       // mislukte starts (geen plek) vóór 'verlopen'
+const VW_KWIJT_MS = 2 * 3600000;
+const VW_BEWAAR_DAGEN = 400;  // één keer per klus: het register blijft ruim een jaar
 
 const WACHTERS = ['actie', 'correspondentie', 'agenda', 'personeel'];
 const NAAM = { actie: 'Actie-Bewaker', correspondentie: 'Mail', agenda: 'Agenda', personeel: 'Personeel' };
@@ -103,7 +111,9 @@ function toets(wachter, items, vandaag) {
     }
     if (knoppen.every(function (x) { return x.effect === 'rust'; })) return f('minstens één knop die de zaak sluit (niet alleen rust)');
     gezien[rij] = true;
-    goed.push({ wachter: wachter, rij: rij, vraag: vraag, waarom: waarom, concept: concept || null, knoppen: knoppen, dag: vandaag });
+    const ing = { wachter: wachter, rij: rij, vraag: vraag, waarom: waarom, concept: concept || null, knoppen: knoppen, dag: vandaag };
+    if (it.voorwerk != null) Object.defineProperty(ing, 'voorwerk_vraag', { value: it.voorwerk, enumerable: false });   // wv4189: niet in staat.json
+    goed.push(ing);
   });
   if (goed.length > PER_NACHT) { goed.splice(PER_NACHT).forEach(function (g) { fouten.push({ rij: g.rij, fout: 'meer dan ' + PER_NACHT + ' per nacht' }); }); }
   return { goed: goed, fouten: fouten };
@@ -119,8 +129,12 @@ function rijData(wachter, rij, knop, vandaag, merk) {
 }
 function isOpen(wachter, rij) { return !!rij && OPEN[wachter].indexOf(String(rij.status || '')) >= 0; }
 
-function kaartVoor(g, rij, dag) {
+function kaartVoor(g, rij, dag, vw) {
   const stappen = [];
+  if (vw && vw.status === 'klaar' && Array.isArray(vw.regels) && vw.regels.length) {   // wv4189: de eerste stap staat alvast klaar
+    stappen.push('Alvast klaargezet: ' + vw.regels[0]);
+    vw.regels.slice(1, 6).forEach(function (r) { stappen.push(r); });
+  }
   if (g.concept) stappen.push(('Herinnering om te kopiëren: `' + g.concept + '`').slice(0, 400));
   if (g.wachter === 'correspondentie' && rij && /^[0-9a-f]{10,24}$/.test(String(rij.thread_id || '')) && !/doktersmaten/i.test(String(rij.bron || '')))
     stappen.push('De mailwisseling: https://mail.google.com/mail/u/0/#all/' + rij.thread_id);
@@ -154,9 +168,31 @@ function rangschik(lijst) {
  * }
  */
 function maak(io) {
-  function staat() { const s = io.lees(); return s && typeof s === 'object' && s.ingangen && typeof s.ingangen === 'object' ? s : { ingangen: {}, kaartdag: null }; }
+  function staat() {
+    const s = io.lees(), t = s && typeof s === 'object' && s.ingangen && typeof s.ingangen === 'object' ? s : { ingangen: {}, kaartdag: null };
+    if (!t.voorwerk || typeof t.voorwerk !== 'object') t.voorwerk = {};
+    return t;
+  }
+  // wv4189: alle schrijvers van staat.json één voor één (zet via de route, de tik, de afloop van een agent): geen verloren schrijfactie
+  let slot = Promise.resolve();
+  function metSlot(fn) { const p = slot.then(fn, fn); slot = p.then(function () {}, function () {}); return p; }
 
-  async function zet(wachter, items) {
+  // wv4189: de voorwerkvraag bij een melding → { uitkomst: 'komt'|'al eerder'|'vol'|'te laat'|'uit' } of { fout }
+  function voorwerkVraag(s, wachter, g, r, vv, vandaag) {
+    if (!VW || !io.startAgent) return { uitkomst: 'uit' };
+    const t = VW.toetsVraag(wachter, vv, r);
+    if (t.fout) return { fout: t.fout };
+    const k = sleutelVan(wachter, g.rij);
+    if (s.voorwerk[k]) return { uitkomst: 'al eerder' };
+    if (io.klok() >= VW_START_TOT) return { uitkomst: 'te laat' };
+    if (Object.keys(s.voorwerk).filter(function (x) { return s.voorwerk[x].dag === vandaag; }).length >= VW_PER_NACHT) return { uitkomst: 'vol' };
+    s.voorwerk[k] = { status: 'wacht', wachter: wachter, rij: g.rij, soort: t.soort, wat: t.wat, draad: t.draad, vraag: g.vraag, waarom: g.waarom,
+      dag: vandaag, gezet_op: io.nu(), pogingen: 0 };
+    return { uitkomst: 'komt', soort: t.soort };
+  }
+
+  async function zet(wachter, items) { return metSlot(function () { return zetBinnen(wachter, items); }); }
+  async function zetBinnen(wachter, items) {
     const vandaag = io.datum();
     const t = toets(wachter, items, vandaag);
     const uit = { ok: true, gezet: [], al_kaart: [], fouten: t.fouten };
@@ -168,15 +204,18 @@ function maak(io) {
       if (!isOpen(wachter, r)) { uit.fouten.push({ rij: g.rij, fout: 'rij staat niet open (status ' + schoon(r.status, 20) + ')' }); continue; }
       const k = sleutelVan(wachter, g.rij), oud = s.ingangen[k];
       if (oud && (oud.status === 'kaart' || (oud.tik && oud.tik.stap !== 'klaar'))) { uit.al_kaart.push(g.rij); continue; }
+      const vv = g.voorwerk_vraag;
       s.ingangen[k] = Object.assign(g, { status: 'klaar', gezet_op: io.nu() });
       uit.gezet.push(g.rij);
+      if (vv != null) (uit.voorwerk = uit.voorwerk || []).push(Object.assign({ rij: g.rij }, voorwerkVraag(s, wachter, g, r, vv, vandaag)));
     }
     io.schrijf(s);
     io.log({ stap: 'zet', wachter: wachter, gezet: uit.gezet.length, al_kaart: uit.al_kaart.length, fouten: uit.fouten.length });
     return uit;
   }
 
-  async function kaartStap(dwing) {
+  async function kaartStap(dwing) { return metSlot(function () { return kaartStapBinnen(dwing); }); }
+  async function kaartStapBinnen(dwing) {
     const vandaag = io.datum();
     const s = staat();
     if (!dwing && (s.kaartdag === vandaag || io.klok() < KAART_UUR)) return { al_gedaan: s.kaartdag === vandaag, te_vroeg: s.kaartdag !== vandaag };
@@ -192,23 +231,29 @@ function maak(io) {
       if ((g.wachter === 'actie' || g.wachter === 'correspondentie')) {
         let l = false;
         try { l = await io.inLijstje(g.wachter, g.rij, vandaag); } catch (e) { l = false; }
-        if (l) { g.status = 'overgeslagen'; g.reden = 'staat vandaag in het actielijstje (heeft daar knoppen)'; uit.in_lijstje++; continue; }
+        const vk = s.voorwerk[k];
+        if (l && !(vk && vk.status === 'klaar')) { g.status = 'overgeslagen'; g.reden = 'staat vandaag in het actielijstje (heeft daar knoppen)'; uit.in_lijstje++; continue; }
       }
       kand.push({ k: k, g: g, r: r, uiterlijk: r.uiterlijk ? String(r.uiterlijk).slice(0, 10) : null, dag: g.dag });
     }
     const keus = rangschik(kand);
     for (const c of keus.slice(0, PER_OCHTEND)) {
-      const kaart = kaartVoor(c.g, c.r, vandaag);
+      const vk = s.voorwerk[c.k];
+      const kaart = kaartVoor(c.g, c.r, vandaag, vk);
+      if (vk && vk.status === 'loopt') io.log({ stap: 'voorwerk-te-laat', wachter: c.g.wachter, soort: vk.soort });
       try {
         const z = await io.rpc('mk_voor_jou_zet', { p: kaart });
         if (!z || !z.sleutel) throw new Error('geen sleutel terug');
         c.g.status = 'kaart'; c.g.kaart = kaart.sleutel; c.g.kaart_op = io.nu(); uit.kaarten++;
+        if (vk && vk.status === 'klaar') { vk.op_kaart = kaart.sleutel; uit.met_voorwerk = (uit.met_voorwerk || 0) + 1; }
       } catch (e) { uit.fouten++; io.log({ stap: 'kaart-fout', wachter: c.g.wachter, fout: String(e && e.message || e).slice(0, 120) }); }
     }
     uit.door = Math.max(0, keus.length - PER_OCHTEND);
     // wissen na 30 dagen (alleen afgehandelde ingangen)
     const grens = io.nu() - WIS_DAGEN * 86400000;
     Object.keys(s.ingangen).forEach(function (k) { const g = s.ingangen[k]; if (g.status !== 'kaart' && g.status !== 'klaar' && (g.getikt_op || g.kaart_op || g.gezet_op || 0) < grens) delete s.ingangen[k]; });
+    const vgrens = io.nu() - VW_BEWAAR_DAGEN * 86400000;
+    Object.keys(s.voorwerk).forEach(function (k) { if ((s.voorwerk[k].gezet_op || 0) < vgrens) delete s.voorwerk[k]; });
     s.kaartdag = vandaag;
     io.schrijf(s);
     io.log(Object.assign({ stap: 'kaart' }, uit));
@@ -263,7 +308,8 @@ function maak(io) {
   }
 
   // tik vanuit de app: punt = de kaart zoals mk_voor_jou_lijst hem geeft
-  async function tik(punt, keuze) {
+  async function tik(punt, keuze) { return metSlot(function () { return tikBinnen(punt, keuze); }); }
+  async function tikBinnen(punt, keuze) {
     const s = staat(), f = punt && ingangVoorKaart(s, punt.sleutel);
     if (!f) return { ok: false, status: 404, fout: 'deze kaart heeft geen wachterknoppen (meer)' };
     const g = f.g;
@@ -281,7 +327,8 @@ function maak(io) {
   }
 
   // elke 10 min: hervatten, algemene knoppen doorgeven, kaarten van dichte rijen sluiten
-  async function ronde() {
+  async function ronde() { return metSlot(rondeBinnen); }
+  async function rondeBinnen() {
     const s = staat();
     const open = Object.keys(s.ingangen).filter(function (k) { const g = s.ingangen[k]; return g.status === 'kaart' || (g.tik && g.tik.stap !== 'klaar'); });
     if (!open.length) return { niets: true };
@@ -327,12 +374,66 @@ function maak(io) {
     return uit;
   }
 
-  function info() {
-    const s = staat(), tel = {};
-    Object.keys(s.ingangen).forEach(function (k) { const g = s.ingangen[k]; tel[g.status] = (tel[g.status] || 0) + 1; });
-    return { aan: true, kaartdag: s.kaartdag || null, ingangen: tel };
+  // wv4189: elke minuut (primaire kant): lopende agents nakijken, hooguit één wachtende opdracht starten
+  async function voorwerkStap() { return metSlot(voorwerkStapBinnen); }
+  async function voorwerkStapBinnen() {
+    const s = staat(), vandaag = io.datum(), klok = io.klok(), uit = { gestart: 0, verlopen: 0, kwijt: 0 };
+    const ks = Object.keys(s.voorwerk);
+    let lopend = 0, veranderd = false;
+    for (const k of ks) {
+      const v = s.voorwerk[k];
+      if (v.status !== 'loopt') continue;
+      const st = io.agentStand ? io.agentStand(v.job) : null;
+      if ((st === null || st === 'klaar' || st === 'mislukt') && io.nu() - (v.gestart_op || 0) > VW_KWIJT_MS) { v.status = 'mislukt'; v.reden = 'agent zonder afloop'; uit.kwijt++; veranderd = true; continue; }
+      lopend++;
+    }
+    const wacht = ks.filter(function (k) { return s.voorwerk[k].status === 'wacht'; }).sort(function (a, b) { return s.voorwerk[a].gezet_op - s.voorwerk[b].gezet_op; });
+    for (const k of wacht) {
+      const v = s.voorwerk[k];
+      if (v.dag !== vandaag || klok >= VW_START_TOT || v.pogingen >= VW_POGINGEN) { v.status = 'verlopen'; uit.verlopen++; veranderd = true; continue; }
+      if (lopend >= VW_LOPEND || uit.gestart || !VW || !io.startAgent) continue;
+      const gw = io.grondwet ? io.grondwet() : null;
+      if (!gw) { v.pogingen++; veranderd = true; continue; }
+      const ref = crypto.randomBytes(6).toString('hex');
+      v.pogingen++; veranderd = true;
+      let z = null;
+      try { z = await io.startAgent(VW.opdracht(v, gw), ref); } catch (e) { z = null; }
+      if (z && z.ok && z.job_id) { v.status = 'loopt'; v.ref = ref; v.job = z.job_id; v.gestart_op = io.nu(); uit.gestart++; lopend++; }
+    }
+    if (veranderd) io.schrijf(s);
+    if (uit.gestart || uit.verlopen || uit.kwijt) io.log(Object.assign({ stap: 'voorwerk' }, uit));
+    return uit;
   }
-  return { zet: zet, kaartStap: kaartStap, tik: tik, ronde: ronde, detail: detail, info: info };
+  // afloop van een voorwerk-agent (processAgent of de wees-afloop): ref uit het register, inhoud = voorwerk.json (of null)
+  async function voorwerkAfloop(ref, a) {
+    if (!/^[0-9a-f]{12}$/.test(String(ref || ''))) return { ok: false, reden: 'ref' };
+    // de controle (winkelpagina's, agenda) buiten het slot; daarna opslaan onder het slot
+    const s0 = staat(), k = Object.keys(s0.voorwerk).find(function (x) { return s0.voorwerk[x].ref === ref; });
+    if (!k) return { ok: false, reden: 'onbekend' };
+    const v0 = s0.voorwerk[k];
+    if (v0.status !== 'loopt') return { ok: false, reden: 'al ' + v0.status };
+    let u;
+    try {
+      u = await VW.uitkomst(Object.assign({}, v0, { gestart_iso: new Date(v0.gestart_op || io.nu()).toISOString() }), a && a.inhoud,
+        { winkel: io.winkel, agenda: io.agenda, conceptNa: io.conceptNa, masker: io.masker, vandaag: io.datum() });
+    } catch (e) { u = { status: 'mislukt', regels: [], reden: String(e && e.message || e).slice(0, 120) }; }
+    return metSlot(function () {
+      const s = staat(), v = s.voorwerk[k];
+      if (!v || v.ref !== ref || v.status !== 'loopt') return { ok: false, reden: 'intussen ' + (v ? v.status : 'weg') };
+      v.status = u.status; v.regels = u.regels; v.reden = u.reden || undefined; v.klaar_op = io.nu(); v.agent_ok = !!(a && a.ok);
+      io.schrijf(s);
+      io.log({ stap: 'voorwerk-afloop', wachter: v.wachter, soort: v.soort, status: v.status, regels: (v.regels || []).length, reden: v.reden ? String(v.reden).slice(0, 80) : undefined });
+      return { ok: true, status: v.status, regels: (v.regels || []).length };
+    });
+  }
+
+  function info() {
+    const s = staat(), tel = {}, vw = {};
+    Object.keys(s.ingangen).forEach(function (k) { const g = s.ingangen[k]; tel[g.status] = (tel[g.status] || 0) + 1; });
+    Object.keys(s.voorwerk).forEach(function (k) { const v = s.voorwerk[k]; vw[v.status] = (vw[v.status] || 0) + 1; });
+    return { aan: true, kaartdag: s.kaartdag || null, ingangen: tel, voorwerk: vw };
+  }
+  return { zet: zet, kaartStap: kaartStap, tik: tik, ronde: ronde, detail: detail, info: info, voorwerkStap: voorwerkStap, voorwerkAfloop: voorwerkAfloop };
 }
 
 module.exports = { maak: maak, toets: toets, knopVan: knopVan, rijData: rijData, kaartVoor: kaartVoor, rangschik: rangschik, sleutelVoor: sleutelVoor,
