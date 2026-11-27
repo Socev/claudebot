@@ -23,7 +23,10 @@
  * Zichzelf opruimen + jarige (wv4141, 25-11-2026, Davids Ja op 2C55): per kop telt alleen het scherm uit de nieuwste set (oud = 'vervangen',
  * in de app weer aan te zetten via stand.info_naast); een punt kan een eigen einddatum (tot) hebben, op de kaart en de tv, daarna weg (zonder
  * het veld blijven kaart-hash en schermId gelijk); felicitatiepagina (voornaam; maandag ook het weekend; JARIG_ID aan/uit); Komende weken
- * komt na elke twee pagina's terug (klokscript); stipjes in plaats van "Info k/n". Deze module:
+ * komt na elke twee pagina's terug (klokscript); stipjes in plaats van "Info k/n".
+ * Schermtijd + QR (wv4208, 27-11-2026, Davids Ja op nr 925 = L25 en nr 921 = L21): werkdagen 07:00–18:30 het gewone scherm, daarbuiten zwart met
+ * klok (pod stuurt 18:30–06:45 een rust-envelop zonder inhoud; het gewone scherm schakelt op de wandklok); QR-code naar het artikel naast elk
+ * medisch bericht en bij een infoscherm met bron_url, op de tv alleen met de eigen registerrij personeelsscherm-qr (QR_ZIN). Deze module:
  *  - bouwt het scherm (één HTML-bestand, alles inline) en zet het als ondertekende envelop (Ed25519 over de exacte bytes) in D1 `personeel`;
  *    de Worker (socev-app personeel/worker.ts) geeft hem door, het kastje controleert de handtekening en het volgnr (geen terugrol);
  *    elke 6 uur opnieuw getekend, houdbaar 36 uur; de noodknop tekent meteen een zwarte envelop met een hoger volgnr;
@@ -78,6 +81,16 @@ function amsDelen(ms) {
 }
 // werktijd: ma–vr 07:30–18:00 (Amsterdam)
 function inWerktijd(ms) { const a = amsDelen(ms); const m = a.uur * 60 + a.min; return a.dag >= 0 && a.dag <= 4 && m >= 450 && m < 1080; }
+// wv4208 (besluitenpagina nr 925 = L25, David Ja 25-11-2026): schermtijd. Op werkdagen (ma–vr, geen landelijke feestdag) van 07:00 tot 18:30 het
+// gewone scherm; daarbuiten zwart met klok. Gemeten 27-11: het kastje haalt dag en nacht, ook in het weekend, elke 2 min het volle scherm op
+// (± 705 hartslagen per dag); of de tv zelf aan staat meldt het kastje niet. De pod stuurt buiten SCHERM_VOORAF–SCHERM_TOT een envelop zonder
+// inhoud (rust); het gewone scherm wordt al om 06:45 gestuurd en schakelt zelf op de wandklok van het kastje (Europe/Amsterdam) om 07:00 aan
+// en om 18:30 uit, zodat de wissel op de minuut klopt (de tik loopt elke 5 min, het kastje haalt elke 2 min).
+const SCHERM_VAN = 7 * 60, SCHERM_TOT = 18 * 60 + 30, SCHERM_VOORAF = 6 * 60 + 45;
+function schermDag(a) { return a.dag >= 0 && a.dag <= 4 && !feestdag(a.datum); }
+function inSchermtijd(ms) { const a = amsDelen(ms), m = a.uur * 60 + a.min; return schermDag(a) && m >= SCHERM_VAN && m < SCHERM_TOT; }
+function inhoudVenster(ms) { const a = amsDelen(ms), m = a.uur * 60 + a.min; return schermDag(a) && m >= SCHERM_VOORAF && m < SCHERM_TOT; }
+const RUST_TEKST = 'Het scherm staat aan op werkdagen van 07:00 tot 18:30.';
 
 // ── het scherm (fase 1, wv3005) ──
 // Vast doek van 1920×1080 in px (zo klopt ook het voorbeeld in de app, die het doek zelf schaalt en geen script draait); op het kastje
@@ -100,13 +113,17 @@ function icoon(soort, groot) {
 }
 // wv3020: toon = welk paneel zonder script zichtbaar is (0 = Komende weken, k = infoscherm k; voor het voorbeeld per scherm in de app);
 // een infoscherm met lab (alleen voorbeeld) toont die tekst in plaats van "Info k/n".
-function bouwHtml({ gemaakt, houdbaar_tot, leeg, logoSvg, inhoud, toon }) {
+function bouwHtml({ gemaakt, houdbaar_tot, leeg, rust, logoSvg, inhoud, toon }) {
   const csp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; connect-src 'none'";
-  const klokScript = `(function(){var T=${Number(houdbaar_tot)};var D=['zondag','maandag','dinsdag','woensdag','donderdag','vrijdag','zaterdag'],M=['januari','februari','maart','april','mei','juni','juli','augustus','september','oktober','november','december'];
+  // wv4208: feestdagen van dit en volgend jaar voor de schermtijd op de wandklok van het kastje
+  const fj = amsDelen(Number(gemaakt) || 0).datum.slice(0, 4), feest = JSON.stringify([...feestdagen(Number(fj)).keys(), ...feestdagen(Number(fj) + 1).keys()]);
+  const klokScript = `(function(){var T=${Number(houdbaar_tot)},F=${feest};var D=['zondag','maandag','dinsdag','woensdag','donderdag','vrijdag','zaterdag'],M=['januari','februari','maart','april','mei','juni','juli','augustus','september','oktober','november','december'];
 function z(n){return(n<10?'0':'')+n}function s(){var e=document.getElementById('doek');if(e){var f=Math.min(innerWidth/1920,innerHeight/1080);e.style.transform='scale('+f+')';}}s();addEventListener('resize',s);
 function p(){var A=document.getElementById('agenda');A=A&&A.parentNode&&A.parentNode.parentNode;if(!A||A.getAttribute('data-pas')||!A.clientHeight)return;var T=A.querySelectorAll('.tt'),i,g;for(i=0;i<T.length;i++){g=44;while(T[i].scrollHeight>T[i].clientHeight+1&&g>30){g-=2;T[i].style.fontSize=g+'px';}}g=44;while(A.scrollHeight>A.clientHeight+1&&g>26){g-=2;for(i=0;i<T.length;i++){if((parseFloat(T[i].style.fontSize)||44)>g)T[i].style.fontSize=g+'px';}}A.setAttribute('data-pas','1');}
 function t(){var n=new Date();var k=document.getElementById('klok'),w=document.getElementById('wd'),d=document.getElementById('dag');if(k)k.textContent=z(n.getHours())+':'+z(n.getMinutes());if(w)w.textContent=D[n.getDay()];if(d)d.textContent=n.getDate()+' '+M[n.getMonth()];
 if(n.getTime()>T){document.body.className='oud';}
+var mm=n.getHours()*60+n.getMinutes(),wg=n.getDay(),ds=n.getFullYear()+'-'+z(n.getMonth()+1)+'-'+z(n.getDate()),R=wg<1||wg>5||mm<${SCHERM_VAN}||mm>=${SCHERM_TOT}||F.indexOf(ds)>=0,b=document.body;if(b&&b.classList)b.classList.toggle('rust',R);
+var rk=document.getElementById('rklok'),rd=document.getElementById('rdag');if(rk)rk.textContent=z(n.getHours())+':'+z(n.getMinutes());if(rd)rd.textContent=D[n.getDay()]+' '+n.getDate()+' '+M[n.getMonth()];
 var P=document.querySelectorAll('.paneel');if(P.length>1){var V=[],L=[],S=0,i,j,a=null;for(i=0;i<P.length;i++){var x=+P[i].getAttribute('data-tot')||0;if(x&&n.getTime()>x){P[i].classList.remove('aan');continue;}V.push(P[i]);}
 function r(e){var u=+e.getAttribute('data-s')||20;L.push([e,S,u]);S+=u;}for(i=0,j=0;i<V.length;i++){if(j===2){r(V[0]);j=0;}r(V[i]);if(i>0)j++;}
 var q=Math.floor(n.getTime()/1000)%S,c=Math.floor(n.getTime()/1000/S);for(i=0;i<L.length;i++){if(q>=L[i][1]&&q<L[i][1]+L[i][2])a=L[i][0];}
@@ -116,7 +133,18 @@ for(i=0;i<V.length;i++){V[i].classList.toggle('aan',V[i]===a);var B=V[i].querySe
 <style>*{cursor:none!important}html,body{margin:0;height:100%;background:#000;color:#444;font-family:'Liberation Sans',Arial,Helvetica,sans-serif;overflow:hidden}#doek{position:relative;width:1920px;height:1080px;transform-origin:0 0;background:#000}#klok{position:absolute;right:38px;bottom:38px;font-size:46px}#dag,#wd{display:none}</style></head>
 <body data-soort="leeg" data-gemaakt="${Number(gemaakt)}"><div id="doek"><div id="klok"></div><div id="wd"></div><div id="dag"></div></div><script>${klokScript}</script></body></html>`;
   }
+  // wv4208: buiten schermtijd zwart met een gedimde klok (en dag), plus één regel waarom het scherm zwart is; geen inhoud in het bestand
+  const rustBlok = (kl, dg) => `<div id="rust"><div id="rklok">${esc(kl || '')}</div><div id="rdag">${esc(dg || '')}</div><div class="rt">${RUST_TEKST}</div></div>`;
+  const rustCss = '#rust{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;background:#000;color:#5a5a5a;z-index:9}#rklok{font-size:220px;line-height:1;letter-spacing:-4px}#rdag{font-size:54px;margin-top:24px;color:#4a4a4a}#rust .rt{font-size:28px;margin-top:60px;color:#3a3a3a}';
+  if (rust) {
+    const ri = inhoud || {};
+    return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta http-equiv="refresh" content="60"><title>OVIS Scherm</title>
+<style>*{cursor:none!important}html,body{margin:0;height:100%;background:#000;font-family:'Liberation Sans',Arial,Helvetica,sans-serif;overflow:hidden}#doek{position:relative;width:1920px;height:1080px;transform-origin:0 0;background:#000}${rustCss}#rust{display:flex}</style></head>
+<body data-soort="rust" data-gemaakt="${Number(gemaakt)}"><div id="doek">${rustBlok(ri.klok_tekst, ri.wd_tekst && ri.dag_tekst ? ri.wd_tekst + ' ' + ri.dag_tekst : '')}</div><script>${klokScript}</script></body></html>`;
+  }
   const i = inhoud || {};
+  // wv4208 (nr 921 = L21): QR-code naar het artikel bij de bron; alleen als i.qr (registerrij personeelsscherm-qr op de tv, altijd in het app-voorbeeld)
+  const qrBij = (url, dom) => { const u = i.qr ? openbareUrl(url, dom) : ''; const svg = u ? qrSvg(u, QR_PX) : ''; return svg ? `<div class="qrv">${svg}<span>Lees verder</span></div>` : ''; };
   const logo = logoSvg ? `<img class="logo" alt="Huisartsenpraktijk Tolgaarde" src="data:image/svg+xml;base64,${Buffer.from(logoSvg).toString('base64')}">` : '<div class="merk"><i></i>Huisartsenpraktijk Tolgaarde</div>';
   const w = i.weer;
   const weerHtml = w && Number.isFinite(w.temp) ? `<div class="blok weer-blok"><div class="weer">${icoon(w.soort, true)}<div class="t">${esc(Math.round(w.temp))}°</div><div class="o">${esc(w.tekst || '')}${Number.isFinite(w.max) ? `<br><span class="zacht">max ${esc(Math.round(w.max))}° · min ${esc(Math.round(w.min))}°</span>` : ''}</div></div>`
@@ -169,8 +197,9 @@ for(i=0;i<V.length;i++){V[i].classList.toggle('aan',V[i]===a);var B=V[i].querySe
     return `<section class="paneel med${zicht === plek ? ' aan' : ''}" data-s="${MEDISCH_S}"><div class="ph"><h1>${kop}</h1><div class="lab">${lab}${bladen.length > 1 ? ` · ${bladen.length} pagina's` : ''}</div></div>`
       + (bladen.length ? bladen.map((bl, b) => `<div class="blad${b === 0 ? ' aan' : ''}">${bl.map((x) => {
         const br = (MEDISCH_BRONNEN.find((y) => y.id === x.bron) || { naam: '' }).naam;
-        return `<div class="mb"><div class="mm"><span class="chip a">${esc(br)}</span><span>${esc(mdDatum(x.ms))}</span>${Number.isFinite(x.tot) ? `<span class="mtot">blijft staan tot ${esc(mdDatum(x.tot))}</span>` : ''}</div>`
-          + `<div class="mk">${esc(x.kop)}</div>${x.tekst ? `<div class="mt">${esc(x.tekst)}</div>` : ''}</div>`;
+        const q = qrBij(x.url, medischDomein(x.bron));
+        return `<div class="mb${q ? ' mq' : ''}"><div class="mi"><div class="mm"><span class="chip a">${esc(br)}</span><span>${esc(mdDatum(x.ms))}</span>${Number.isFinite(x.tot) ? `<span class="mtot">blijft staan tot ${esc(mdDatum(x.tot))}</span>` : ''}</div>`
+          + `<div class="mk">${esc(x.kop)}</div>${x.tekst ? `<div class="mt">${esc(x.tekst)}</div>` : ''}</div>${q}</div>`;
       }).join('')}</div>`).join('') : `<div class="niets">${leegTekst}</div>`)
       + `<div class="voet">${voet}</div></section>`;
   };
@@ -182,7 +211,7 @@ for(i=0;i<V.length;i++){V[i].classList.toggle('aan',V[i]===a);var B=V[i].querySe
   const infoHtml = jarigHtml + weekHtml + nieuwsHtml + medHtml + info.map((sc, k) => `<section class="paneel info${zicht === k + 1 + plek ? ' aan' : ''}" data-s="${INFO_S}" data-tot="${Date.parse(plusDag(sc.tot, 1) + 'T00:00:00+01:00')}"><div class="ph"><h1>${esc(sc.kop)}</h1><div class="lab">${sc.lab ? esc(sc.lab) : Array.isArray(sc.stip) ? stip(sc.stip[0], sc.stip[1]) : stip(k, info.length)}</div></div>`
     + (sc.intro ? `<p class="intro">${esc(sc.intro)}</p>` : '')
     + `<div class="punten">${sc.punten.map((x) => `<div class="punt"><div class="pt">${esc(x.titel)}</div>${x.tekst ? `<div class="px">${esc(x.tekst)}</div>` : ''}${x.tot ? `<div class="ptot">t/m ${esc(ptDatum(x.tot))}</div>` : ''}</div>`).join('')}</div>`
-    + `<div class="voet">Bron: ${esc(sc.bron)}</div></section>`).join('');
+    + (() => { const q = sc.bron_url ? qrBij(sc.bron_url, null) : ''; return q ? `<div class="voet vq"><span>Bron: ${esc(sc.bron)}</span>${q}</div>` : `<div class="voet">Bron: ${esc(sc.bron)}</div>`; })() + '</section>').join('');
   return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta http-equiv="refresh" content="60"><title>OVIS Scherm</title>
 <style>
 *{box-sizing:border-box;cursor:none!important}
@@ -229,13 +258,16 @@ html,body{margin:0;height:100%;background:#fff;color:#5B5C60;font-family:'Libera
 .k1 .wn{font-size:34px;gap:2px 32px}.k2 .wn{font-size:30px;gap:2px 28px}.k3 .wn{font-size:27px;gap:0 24px}.k2 .wr,.k3 .wr{min-height:110px;padding-top:8px;padding-bottom:8px}
 .wn em{font-style:normal;font-weight:normal;color:#88898C;font-size:.75em}.wn .leeg{font-weight:normal;color:#88898C;font-size:32px}.an{max-width:100%;overflow-wrap:anywhere}
 .wc{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}.wc .chip{font-size:19px;padding:3px 10px}
+.qrv{flex:none;display:flex;flex-direction:column;align-items:center;gap:4px;margin-left:24px}.qrv .qr{display:block}.qrv span{font-size:20px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#88898C}
+.mb.mq{display:flex;align-items:center}.mi{flex:1;min-width:0}.voet.vq{display:flex;align-items:flex-end;justify-content:space-between}
+${rustCss}body.rust,body.rust #doek{background:#000}body.rust #rust{display:flex}body.rust .rail,body.rust .podium{visibility:hidden}
 .oud-tekst{display:none;font-size:44px;color:#3E3F42}body.oud .podium>*,body.oud .weer-blok,body.oud .blok{display:none}body.oud .podium .oud-tekst{display:block}
 </style></head>
 <body data-soort="scherm" data-gemaakt="${Number(gemaakt)}" data-houdbaar="${Number(houdbaar_tot)}">
 <div id="doek"><div class="rail">${logo}<div><div id="wd">${esc(i.wd_tekst || '')}</div><div id="dag">${esc(i.dag_tekst || '')}</div><div id="klok">${esc(i.klok_tekst || '')}</div></div>
 ${weerHtml}${persBlok('Artsen vandaag', i.artsen, 'Geen rooster bekend', 5)}${persBlok('Jarig deze week', i.jarig, 'Niemand jarig deze week', Math.max(2, 6 - Math.min(5, (i.artsen || []).length)))}</div>
 <div class="podium"><section class="paneel${zicht === 0 ? ' aan' : ''}" data-s="${INFO_HOOFD_S}"><div class="ph"><h1 id="agenda">Komende weken</h1><div class="lab">Agenda</div></div>${agHtml}
-<div class="voet">Bijgewerkt ${esc(amsTekst(gemaakt))}</div></section>${infoHtml}<p class="oud-tekst">Dit scherm wordt bijgewerkt.</p></div></div>
+<div class="voet">Bijgewerkt ${esc(amsTekst(gemaakt))}</div></section>${infoHtml}<p class="oud-tekst">Dit scherm wordt bijgewerkt.</p></div>${rustBlok('', '')}</div>
 <script>${klokScript}</script></body></html>`;
 }
 
@@ -372,7 +404,14 @@ function nieuwsGeldig(n, t) {
 const MEDISCH_ZIN = 'Medisch nieuws: berichten van NHG, LHV en RIVM uit hun openbare nieuwsfeeds (alleen kop';
 // eigen registerrij (kort genoeg om op Davids kaart helemaal te passen: de app toont per stap 400 tekens); alleen geldig naast personeelsscherm-vast
 const MEDISCH_RIJ = 'personeelsscherm-medisch';
-const MEDISCH_BRONNEN = [{ id: 'nhg', naam: 'NHG', vast: true }, { id: 'lhv', naam: 'LHV', vast: true }, { id: 'rivm', naam: 'RIVM', vast: false, alleenZorg: true }];
+const MEDISCH_BRONNEN = [{ id: 'nhg', naam: 'NHG', vast: true, domein: 'nhg.org' }, { id: 'lhv', naam: 'LHV', vast: true, domein: 'lhv.nl' }, { id: 'rivm', naam: 'RIVM', vast: false, alleenZorg: true, domein: 'rivm.nl' }];
+// wv4208: de QR-code van een medisch bericht wijst alleen naar de eigen site van die bron (domein; ook www.)
+const medischDomein = (id) => { const b = MEDISCH_BRONNEN.find((x) => x.id === id); return b ? [b.domein] : []; };
+// wv4208 (nr 921 = L21): QR-code naast een medisch bericht en bij een infoscherm met een openbare bron, op de tv alleen met een EIGEN registerrij
+// (patroon medisch/week); daarvoor alleen in het app-voorbeeld. QR_PX = breedte op het doek (1920×1080; ± 15 cm op een tv van 55 inch).
+const QR_RIJ = 'personeelsscherm-qr';
+const QR_ZIN = 'QR-code naar het artikel: naast een medisch bericht (NHG, LHV, RIVM) en bij een infoscherm met een openbare bron';
+const QR_PX = 132;
 const MEDISCH_MS = UUR, MEDISCH_OUD_MS = 30 * 24 * UUR, MEDISCH_N = 12, MEDISCH_PER_BLAD = 3, MEDISCH_S = 25, MEDISCH_TEKST_MAX = 220, MEDISCH_BEWAAR = 80;
 const BELANGRIJK_MS = 21 * 24 * UUR, BELANGRIJK_DAVID_MS = 28 * 24 * UUR, BELANGRIJK_N = 6;
 const MEDISCH_ID = crypto.createHash('sha256').update('medisch:nieuws').digest('hex').slice(0, 16);
@@ -417,7 +456,8 @@ function medischItems(xml, bron, t) {
     if (bron.alleenZorg && !ZORG_REGEL.test(kop + ' ' + tekst)) continue;
     const sl = [it.guid, it.link, it.title].map((x) => (typeof x === 'string' ? schoonTekst(x) : '')).find((x) => x) || kop;
     const id = crypto.createHash('sha256').update(bron.id + ':' + sl.slice(0, 500)).digest('hex').slice(0, 16);
-    if (!uit.some((x) => x.id === id || x.kop === kop)) uit.push({ id, bron: bron.id, kop, tekst, ms });
+    const url = typeof it.link === 'string' ? openbareUrl(it.link, [bron.domein]) : '';   // wv4208: alleen de artikellink, nooit de guid (?p=…)
+    if (!uit.some((x) => x.id === id || x.kop === kop)) uit.push(Object.assign({ id, bron: bron.id, kop, tekst, ms }, url ? { url } : {}));
   }
   return uit;
 }
@@ -429,8 +469,8 @@ function medischBijwerken(st, bronId, items, t) {
   for (const x of Array.isArray(items) ? items : []) {
     const oud = m[x.id];
     const regel = !!bron && bron.vast && BELANGRIJK_REGEL.test(x.kop + ' ' + x.tekst);
-    if (oud) { Object.assign(oud, { kop: x.kop, tekst: x.tekst, ms: x.ms }); if (!oud.door && !oud.los && regel) { oud.vast_tot = x.ms + BELANGRIJK_MS; oud.door = 'regel'; } }
-    else m[x.id] = { bron: x.bron, kop: x.kop, tekst: x.tekst, ms: x.ms, gezien: t, vast_tot: regel ? x.ms + BELANGRIJK_MS : null, door: regel ? 'regel' : null, los: false };
+    if (oud) { Object.assign(oud, { kop: x.kop, tekst: x.tekst, ms: x.ms }); if (x.url) oud.url = x.url; else delete oud.url; if (!oud.door && !oud.los && regel) { oud.vast_tot = x.ms + BELANGRIJK_MS; oud.door = 'regel'; } }
+    else m[x.id] = Object.assign({ bron: x.bron, kop: x.kop, tekst: x.tekst, ms: x.ms, gezien: t, vast_tot: regel ? x.ms + BELANGRIJK_MS : null, door: regel ? 'regel' : null, los: false }, x.url ? { url: x.url } : {});
   }
   const ids = Object.keys(m).filter((id) => { const x = m[id]; return x && Number.isFinite(x.ms) && (t - x.ms <= MEDISCH_OUD_MS || (x.vast_tot && x.vast_tot > t)); })
     .sort((a, b) => (Number(m[b].vast_tot > t) - Number(m[a].vast_tot > t)) || m[b].ms - m[a].ms).slice(0, MEDISCH_BEWAAR);
@@ -445,7 +485,7 @@ function medischBeeld(st, t) {
     .sort((a, b) => (Number(b.door === 'david') - Number(a.door === 'david')) || b.ms - a.ms).slice(0, BELANGRIJK_N);
   const vastIds = new Set(vast.map((x) => x.id));
   const nieuws = alle.filter((x) => !vastIds.has(x.id) && t - x.ms <= MEDISCH_OUD_MS).sort((a, b) => b.ms - a.ms).slice(0, MEDISCH_N);
-  const kaal = (x, metTot) => Object.assign({ bron: x.bron, kop: x.kop, tekst: x.tekst || '', ms: x.ms }, metTot ? { tot: x.vast_tot } : {});
+  const kaal = (x, metTot) => Object.assign({ bron: x.bron, kop: x.kop, tekst: x.tekst || '', ms: x.ms }, metTot ? { tot: x.vast_tot } : {}, typeof x.url === 'string' && x.url ? { url: x.url } : {});
   return { nieuws: nieuws.map((x) => kaal(x, false)), belangrijk: vast.map((x) => kaal(x, true)) };
 }
 function ymd(ms) { return amsDelen(ms).datum; }
@@ -553,6 +593,109 @@ function artsenVandaag(rijen, vandaag, meds, vol) {
 }
 // ── wv4149: week en feestdagen ──
 // Pasen (anonieme Gregoriaanse rekenregel, Meeus/Jones/Butcher) → JJJJ-MM-DD
+// ── QR-code (wv4208, 27-11-2026, besluitenpagina nr 921 = L21) ──
+// Eigen kleine maker, zodat de module bij fs, path en crypto blijft: bytemodus, foutcorrectie M (± 15 %), versie 1–10 (tot 213 tekens; een
+// bronadres is hier ≤ QR_URL_MAX), beste masker volgens de vier strafregels van ISO/IEC 18004. Opbouw zoals de bekende openbare
+// referentie (Nayuki, MIT). Uitvoer: een inline <svg> (de CSP van het scherm laat geen externe beelden toe; svg is gewoon opmaak).
+const QR_ECC_M = [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26];   // ecc-codewoorden per blok, versie 1–10
+const QR_BLOK_M = [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5];            // aantal blokken, versie 1–10
+function qrRuw(v) { let r = (16 * v + 128) * v + 64; if (v >= 2) { const n = Math.floor(v / 7) + 2; r -= (25 * n - 10) * n - 55; if (v >= 7) r -= 36; } return r; }
+const qrData = (v) => Math.floor(qrRuw(v) / 8) - QR_ECC_M[v] * QR_BLOK_M[v];
+function qrMul(x, y) { let z = 0; for (let i = 7; i >= 0; i--) { z = (z << 1) ^ ((z >>> 7) * 0x11d); z ^= ((y >>> i) & 1) * x; } return z & 0xff; }
+function qrDeler(n) { const r = new Array(n).fill(0); r[n - 1] = 1; let root = 1; for (let i = 0; i < n; i++) { for (let j = 0; j < n; j++) { r[j] = qrMul(r[j], root); if (j + 1 < n) r[j] ^= r[j + 1]; } root = qrMul(root, 0x02); } return r; }
+function qrRest(data, deler) { const r = deler.map(() => 0); for (const b of data) { const f = b ^ r.shift(); r.push(0); deler.forEach((c, i) => { r[i] ^= qrMul(c, f); }); } return r; }
+// tekst → matrix (array van rijen, true = donker) of null als hij niet past
+function qrMatrix(tekst) {
+  const bytes = [...Buffer.from(String(tekst), 'utf8')];
+  let v = 0;
+  for (let k = 1; k <= 10; k++) if (4 + (k < 10 ? 8 : 16) + bytes.length * 8 <= qrData(k) * 8) { v = k; break; }
+  if (!v) return null;
+  const bits = [], zet = (w, n) => { for (let i = n - 1; i >= 0; i--) bits.push((w >>> i) & 1); };
+  zet(4, 4); zet(bytes.length, v < 10 ? 8 : 16); bytes.forEach((b) => zet(b, 8));
+  const cap = qrData(v) * 8;
+  zet(0, Math.min(4, cap - bits.length)); zet(0, (8 - bits.length % 8) % 8);
+  for (let p = 0xec; bits.length < cap; p ^= 0xec ^ 0x11) zet(p, 8);
+  const data = []; for (let i = 0; i < bits.length; i += 8) data.push(bits.slice(i, i + 8).reduce((a, b) => (a << 1) | b, 0));
+  // blokken + foutcorrectie, verweven
+  const nb = QR_BLOK_M[v], ecl = QR_ECC_M[v], raw = Math.floor(qrRuw(v) / 8), kort = nb - raw % nb, kortLen = Math.floor(raw / nb), del = qrDeler(ecl), blokken = [];
+  for (let i = 0, k = 0; i < nb; i++) { const d = data.slice(k, k + kortLen - ecl + (i < kort ? 0 : 1)); k += d.length; const e = qrRest(d, del); if (i < kort) d.push(0); blokken.push(d.concat(e)); }
+  const cw = []; for (let i = 0; i < blokken[0].length; i++) blokken.forEach((b, j) => { if (i !== kortLen - ecl || j >= kort) cw.push(b[i]); });
+  const n = v * 4 + 17, M = Array.from({ length: n }, () => new Array(n).fill(false)), F = Array.from({ length: n }, () => new Array(n).fill(false));
+  const f = (x, y, d) => { M[y][x] = d; F[y][x] = true; };
+  for (let i = 0; i < n; i++) { f(6, i, i % 2 === 0); f(i, 6, i % 2 === 0); }
+  const zoeker = (x, y) => { for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) { const d = Math.max(Math.abs(dx), Math.abs(dy)), xx = x + dx, yy = y + dy; if (xx >= 0 && xx < n && yy >= 0 && yy < n) f(xx, yy, d !== 2 && d !== 4); } };
+  zoeker(3, 3); zoeker(n - 4, 3); zoeker(3, n - 4);
+  if (v > 1) {
+    const na = Math.floor(v / 7) + 2, stap = Math.floor((v * 8 + na * 3 + 5) / (na * 4 - 4)) * 2, pos = [6];
+    for (let p = n - 7; pos.length < na; p -= stap) pos.splice(1, 0, p);
+    for (let i = 0; i < na; i++) for (let j = 0; j < na; j++) {
+      if ((i === 0 && j === 0) || (i === 0 && j === na - 1) || (i === na - 1 && j === 0)) continue;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) f(pos[i] + dx, pos[j] + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+    }
+  }
+  const formaat = (masker) => {
+    const d = (0 << 3) | masker; let r = d; for (let i = 0; i < 10; i++) r = (r << 1) ^ ((r >>> 9) * 0x537);
+    const b = ((d << 10) | r) ^ 0x5412, bit = (i) => ((b >>> i) & 1) === 1;
+    for (let i = 0; i <= 5; i++) f(8, i, bit(i));
+    f(8, 7, bit(6)); f(8, 8, bit(7)); f(7, 8, bit(8));
+    for (let i = 9; i < 15; i++) f(14 - i, 8, bit(i));
+    for (let i = 0; i < 8; i++) f(n - 1 - i, 8, bit(i));
+    for (let i = 8; i < 15; i++) f(8, n - 15 + i, bit(i));
+    f(8, n - 8, true);
+  };
+  formaat(0);
+  if (v >= 7) { let r = v; for (let i = 0; i < 12; i++) r = (r << 1) ^ ((r >>> 11) * 0x1f25); const b = (v << 12) | r;
+    for (let i = 0; i < 18; i++) { const d = ((b >>> i) & 1) === 1, a = n - 11 + i % 3, c = Math.floor(i / 3); f(a, c, d); f(c, a, d); } }
+  let i = 0;
+  for (let rechts = n - 1; rechts >= 1; rechts -= 2) {
+    if (rechts === 6) rechts = 5;
+    for (let vert = 0; vert < n; vert++) for (let j = 0; j < 2; j++) {
+      const x = rechts - j, y = ((rechts + 1) & 2) === 0 ? n - 1 - vert : vert;
+      if (!F[y][x] && i < cw.length * 8) { M[y][x] = ((cw[i >>> 3] >>> (7 - (i & 7))) & 1) === 1; i++; }
+    }
+  }
+  const MASKER = [(x, y) => (x + y) % 2 === 0, (x, y) => y % 2 === 0, (x) => x % 3 === 0, (x, y) => (x + y) % 3 === 0, (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0,
+    (x, y) => (x * y) % 2 + (x * y) % 3 === 0, (x, y) => ((x * y) % 2 + (x * y) % 3) % 2 === 0, (x, y) => ((x + y) % 2 + (x * y) % 3) % 2 === 0];
+  const maskeer = (m) => { for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (!F[y][x] && MASKER[m](x, y)) M[y][x] = !M[y][x]; };
+  const straf = () => {
+    let s = 0, donker = 0;
+    const lijn = (get) => { for (let a = 0; a < n; a++) { let run = 1; for (let b = 1; b <= n; b++) { if (b < n && get(a, b) === get(a, b - 1)) run++; else { if (run >= 5) s += run - 2; run = 1; } }
+      const rij = Array.from({ length: n }, (_, b) => (get(a, b) ? 1 : 0)).join('');
+      for (const p of ['10111010000', '00001011101']) { let k = rij.indexOf(p); while (k >= 0) { s += 40; k = rij.indexOf(p, k + 1); } } } };
+    lijn((a, b) => M[a][b]); lijn((a, b) => M[b][a]);
+    for (let y = 0; y < n - 1; y++) for (let x = 0; x < n - 1; x++) { const c = M[y][x]; if (c === M[y][x + 1] && c === M[y + 1][x] && c === M[y + 1][x + 1]) s += 3; }
+    for (const r of M) for (const c of r) if (c) donker++;
+    return s + (Math.ceil(Math.abs(donker * 20 - n * n * 10) / (n * n)) - 1) * 10;
+  };
+  let beste = 0, laagst = Infinity;
+  for (let m = 0; m < 8; m++) { maskeer(m); formaat(m); const p = straf(); if (p < laagst) { laagst = p; beste = m; } maskeer(m); }
+  maskeer(beste); formaat(beste);
+  return M;
+}
+// matrix → <svg> met 4 modules witte rand; px = breedte op het doek van 1920×1080
+function qrSvg(tekst, px) {
+  const M = qrMatrix(tekst); if (!M) return '';
+  const n = M.length, w = n + 8; let d = '';
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (M[y][x]) d += 'M' + (x + 4) + ' ' + (y + 4) + 'h1v1h-1z';
+  return `<svg class="qr" width="${Number(px)}" height="${Number(px)}" viewBox="0 0 ${w} ${w}" shape-rendering="crispEdges" aria-hidden="true"><rect width="${w}" height="${w}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+}
+// openbaar bronadres voor een QR-code: alleen https, geen inlog/poort/IP/socev.dev, zonder #-deel en zonder volg- of reclameparameters;
+// domeinen (optioneel) = de host moet daarop eindigen (medisch: de eigen site van de bron). '' = geen code.
+const QR_URL_MAX = 200;
+const VOLG_PARAM = /^(utm_[a-z0-9_]*|fbclid|gclid|gbraid|wbraid|dclid|msclkid|yclid|igshid|twclid|mc_cid|mc_eid|_hsenc|_hsmi|mkt_tok|_ga|_gl|oly_[a-z_]+|vero_[a-z_]+|s_cid|cmpid|campaign|ref|ref_src)$/i;
+function openbareUrl(ruw, domeinen) {
+  const s = schoonTekst(ruw);
+  if (!s || s.length > 500 || !/^https:\/\//i.test(s)) return '';
+  let u; try { u = new URL(s); } catch (e) { return ''; }
+  const h = u.hostname.toLowerCase();
+  if (u.protocol !== 'https:' || u.username || u.password || u.port || !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(h) || /^[\d.]+$/.test(h) || /(^|\.)socev\.dev$|(^|\.)local$|(^|\.)internal$/.test(h)) return '';
+  if (Array.isArray(domeinen) && !domeinen.some((d) => h === d || h.endsWith('.' + d))) return '';
+  u.hash = '';
+  for (const k of [...u.searchParams.keys()]) if (VOLG_PARAM.test(k)) u.searchParams.delete(k);
+  if (!u.searchParams.toString()) u.search = '';
+  const uit = u.toString();
+  return uit.length <= QR_URL_MAX && /^[\x21-\x7e]+$/.test(uit) ? uit : '';
+}
 function paasZondag(j) {
   const a = j % 19, b = Math.floor(j / 100), c = j % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
   const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
@@ -628,12 +771,15 @@ function infoNorm(sc) {
   if (!punten.length || punten.length > 4 || punten.some((x) => !x.titel || x.titel.length > 50 || x.tekst.length > 130)) return null;
   if (!echteDatum(tot)) return null;
   if (INFO_WEG.test([kop, intro, bron].concat(...punten.map((x) => [x.titel, x.tekst])).join(' '))) return null;
+  // wv4208: openbaar bronadres voor de QR-code (alleen als het veld er staat; zonder veld blijven kaarttekst, hash en id gelijk). Moet al in
+  // de schone vorm staan (openbareUrl verandert niets): dan staat op Davids kaart precies het adres dat in de code komt.
+  if (sc.bron_url != null && sc.bron_url !== '') { const u = String(sc.bron_url); if (openbareUrl(u, null) !== u) return null; return { kop, intro, punten, bron, tot, bron_url: u }; }
   return { kop, intro, punten, bron, tot };
 }
 // de stap op Davids kaart: de volledige schermtekst, letterlijk
 function stapTekst(sc, van) {
   return 'Infoscherm «' + sc.kop + '» van ' + datumNl(van) + ' tot en met ' + datumNl(sc.tot) + ': ' + (sc.intro ? sc.intro + ' ' : '') +
-    sc.punten.map((x) => x.titel + (x.tekst ? ': ' + x.tekst : '') + (x.tot ? ' (tot en met ' + datumNl(x.tot) + ')' : '')).join(' | ') + ' (bron: ' + sc.bron + ')';
+    sc.punten.map((x) => x.titel + (x.tekst ? ': ' + x.tekst : '') + (x.tot ? ' (tot en met ' + datumNl(x.tot) + ')' : '')).join(' | ') + ' (bron: ' + sc.bron + (sc.bron_url ? '; QR-code naar ' + sc.bron_url : '') + ')';
 }
 // zelfde vingerafdruk als server.js appVjInhoudHash (wv3010) en toestemming.py inhoud_hash
 function kaartHash(k) {
@@ -666,7 +812,7 @@ function setGeldig(set, vragen) {
 }
 // wv3020: vaste id per goedgekeurd scherm (set-sleutel + letterlijke inhoud): aan/uit in de app hangt eraan; een gewijzigde tekst = ander id
 function schermId(sleutel, sc) {
-  return crypto.createHash('sha256').update(JSON.stringify([String(sleutel), sc.kop, sc.intro, sc.punten, sc.bron, sc.tot])).digest('hex').slice(0, 16);
+  return crypto.createHash('sha256').update(JSON.stringify([String(sleutel), sc.kop, sc.intro, sc.punten, sc.bron, sc.tot].concat(sc.bron_url ? [sc.bron_url] : []))).digest('hex').slice(0, 16);
 }
 // ── extra pagina aanvragen (wv3020) ──
 // David typt in de app "Nieuwe pagina over …"; de pod zet één werkvoorraadrij (herkomst david) met deze vaste opdracht en zijn woorden
@@ -861,6 +1007,7 @@ function maak(o) {
   // ── weekpagina (wv4149) ──
   // op de tv alleen met de eigen rij (naast de basisrij), niet uitgezet in de app, en volle namen nooit zonder de zin in de basisrij
   const weekMag = () => toestemming() && rijMag(WEEK_ZIN, WEEK_RIJ);
+  const qrMag = () => toestemming() && rijMag(QR_ZIN, QR_RIJ);   // wv4208: eigen rij, alleen naast de basisrij
   function weekOpTv(s, t) {
     if (!weekMag() || uitLijst()[WEEK_ID]) return null;
     if (s && s.week && s.week.vol && !volleNaamMag()) return null;
@@ -905,6 +1052,7 @@ function maak(o) {
     // wv3154: wat er nu op de tv zou staan (voor de vergelijking: nieuw bericht, verlopen, zin erbij/weg = nieuwe envelop)
     inhoud.medisch = medischOpTv(leesStand(), t);
     inhoud.medisch_tv = aan && medischMag();
+    inhoud.qr_tv = aan && qrMag();   // wv4208: rij erbij/weg = nieuwe envelop
     inhoud.bronnen.medisch = inhoud.medisch ? inhoud.medisch.nieuws.length + inhoud.medisch.belangrijk.length : 0;
     // wv4149: weekrooster bewaard zodra de basisrij aan is (proef in de app); tijdlijn mislukt = het oude alleen als het dezelfde week is.
     // Zonder basisrij geen namen in de stand. inhoud.week = alleen wat op de tv mag (verandering = nieuwe envelop).
@@ -934,16 +1082,18 @@ function maak(o) {
     const jarig_dag = aan && Array.isArray(i.jarig_dag) && i.jarig_dag.length && !uitLijst()[JARIG_ID] ? i.jarig_dag : null;
     // wv4149: weekpagina bij elke publicatie opnieuw tegen rij, zin, uit-knop en de week van nu (nooit uit een oude stand doorgeschoven)
     const week = aan ? weekOpTv(s, t) : null;
-    return Object.assign({}, i, { artsen: aan ? artsen : null, jarig: aan ? i.jarig : null, jarig_dag, week, info, nieuws, medisch,
+    return Object.assign({}, i, { artsen: aan ? artsen : null, jarig: aan ? i.jarig : null, jarig_dag, week, info, nieuws, medisch, qr: aan && qrMag(),   // wv4208
       wd_tekst: d.wdl, dag_tekst: d.dg + ' ' + d.mnl, klok_tekst: String(a.uur).padStart(2, '0') + ':' + String(a.min).padStart(2, '0') });
   }
   function inhoudSha(i) { const c = Object.assign({}, i || {}); delete c.bronnen; return crypto.createHash('sha256').update(JSON.stringify(c)).digest('hex'); }
 
   // ── envelop ──
+  // wv4208: buiten het inhoudvenster (werkdag 06:45–18:30) een rust-envelop: zwart met klok, zonder inhoud (geen namen 's nachts in het bestand)
   function envelop(s, t, leeg) {
     const volgnr = Math.max(Number(s.volgnr || 0) + 1, t);
+    const rust = !leeg && !inhoudVenster(t);
     const doc = { v: 1, soort: 'scherm', volgnr, gemaakt: t, houdbaar_tot: t + HOUDBAAR_MS, leeg: !!leeg,
-      html: bouwHtml({ gemaakt: t, houdbaar_tot: t + HOUDBAAR_MS, leeg: !!leeg, logoSvg: leeg ? null : logoSvg(), inhoud: leeg ? null : schermInhoud(s, t) }),
+      html: bouwHtml({ gemaakt: t, houdbaar_tot: t + HOUDBAAR_MS, leeg: !!leeg, rust, logoSvg: leeg || rust ? null : logoSvg(), inhoud: leeg ? null : schermInhoud(s, t) }),
       instellingen: { ophaal_s: 120 }, code: null };
     const bytes = Buffer.from(JSON.stringify(doc), 'utf8');
     return { doc, bytes };
@@ -956,11 +1106,12 @@ function maak(o) {
     const aan = leeg === undefined ? !!s.leeg : !!leeg;
     const { doc, bytes } = envelop(s, t, aan);
     if (bytes.length > 900 * 1024) throw new Error('scherm te groot');
+    const rust = !aan && !inhoudVenster(t);   // wv4208
     const sig = crypto.sign(null, bytes, k);
     await d1([{ sql: 'INSERT INTO envelop (id, volgnr, bytes, sig, op) VALUES (1, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET volgnr = excluded.volgnr, bytes = excluded.bytes, sig = excluded.sig, op = excluded.op WHERE excluded.volgnr > envelop.volgnr',
       params: [doc.volgnr, bytes.toString('base64'), sig.toString('base64'), t] }]);
     // wv3020: een knop in de app en de tik kunnen tegelijk publiceren; D1 houdt het hoogste volgnr, de stand ook
-    wijzig((x) => { if (Number(x.volgnr || 0) > doc.volgnr) return; x.volgnr = doc.volgnr; x.gemaakt = t; x.houdbaar_tot = doc.houdbaar_tot; x.leeg = aan; x.html = doc.html; x.fout = null; x.inhoud_sha = inhoudSha(s.inhoud); });
+    wijzig((x) => { if (Number(x.volgnr || 0) > doc.volgnr) return; x.volgnr = doc.volgnr; x.gemaakt = t; x.houdbaar_tot = doc.houdbaar_tot; x.leeg = aan; x.rust = rust; x.html = doc.html; x.fout = null; x.inhoud_sha = inhoudSha(s.inhoud); });
     return doc;
   }
 
@@ -1106,7 +1257,7 @@ function maak(o) {
       const m = s.medisch && s.medisch.items ? s.medisch.items : {};
       const lijstVan = (sel) => Object.keys(m).map((id) => Object.assign({ id }, m[id])).filter(sel).sort((a, c) => c.ms - a.ms).slice(0, 20)
         .map((x) => ({ id: x.id, bron: (MEDISCH_BRONNEN.find((y) => y.id === x.bron) || { naam: '' }).naam, kop: x.kop, ms: x.ms, vast: Number.isFinite(x.vast_tot) && x.vast_tot > t, tot: Number.isFinite(x.vast_tot) && x.vast_tot > t ? x.vast_tot : null, door: x.door || null }));
-      const vb = (md, toon) => bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [], jarig_dag: null, nieuws: null, medisch: md }), toon });
+      const vb = (md, toon) => bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [], jarig_dag: null, nieuws: null, medisch: md, qr: true }), toon });   // wv4208: QR in het voorbeeld (proef tot de rij er is)
       lijst.push({ id: MEDISCH_ID, soort: 'info', titel: 'Medisch nieuws', looptijd_s: MEDISCH_S, van: null, tot: null, proef: !mag, aan: opT.nieuws.length > 0, uit: !!u[MEDISCH_ID],
         html: vb({ nieuws: b.nieuws, belangrijk: null, leeg_tonen: true }, 1),
         berichten: lijstVan((x) => !(Number.isFinite(x.vast_tot) && x.vast_tot > t) && t - x.ms <= MEDISCH_OUD_MS) });
@@ -1120,7 +1271,7 @@ function maak(o) {
       const verv = !!x.vervangen && k < 0 && !u[x.id];
       const sc = Object.assign({}, x, { punten: x.punten.filter((y) => !y.tot || y.tot >= vandaag) }, k >= 0 ? { stip: [k, opTv.length] } : { lab: u[x.id] ? 'Staat uit' : verv ? 'Vervangen' : 'Wacht op een plek' });
       lijst.push({ id: x.id, soort: 'info', titel: verv ? x.kop + ' · vervangen door nieuwer' : x.kop, looptijd_s: INFO_S, van: x.set, tot: x.tot, aan: k >= 0, uit: !!u[x.id] || verv, vervangen: verv,
-        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [sc], jarig_dag: null, nieuws: null, medisch: null }), toon: 1 }) });
+        html: bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [sc], jarig_dag: null, nieuws: null, medisch: null, qr: true }), toon: 1 }) });
     }
     let sets = [], vr = {};
     try { const j = JSON.parse(infoBestand() || '{}'); sets = Array.isArray(j.sets) ? j.sets : []; vr = JSON.parse(fs.readFileSync(vragenPad, 'utf8')); } catch (e) { /* stand blijft wacht */ }
@@ -1268,6 +1419,7 @@ function maak(o) {
         koppel_open_tot: live ? live.koppel_open_tot : (s.koppel_open_tot || null),
         codes: live ? live.codes : [],
         leeg: !!s.leeg,
+        rust: !!s.rust, schermtijd: 'werkdagen 07:00–18:30',   // wv4208: nu zwart met klok (buiten schermtijd)
         scherm: s.volgnr ? { volgnr: s.volgnr, gemaakt: s.gemaakt, houdbaar_tot: s.houdbaar_tot } : null,
         token: s.token ? { aangemaakt: s.token.aangemaakt, verloopt: s.token.verloopt, ip_eis: !!s.token.ip_eis } : null,
         fout: ffout || s.fout || (s.intrek_open ? 'Intrekken is nog niet helemaal klaar; ik probeer het opnieuw.' : null),
@@ -1299,11 +1451,15 @@ function maak(o) {
     if (!s.inhoud_op || t - s.inhoud_op >= INHOUD_MS || ymd(s.inhoud_op) !== ymd(t) || (s.inhoud && s.inhoud.persoonsvakken) !== toestemming()
       || !!(s.inhoud && s.inhoud.volle_naam) !== (toestemming() && volleNaamMag()) || s.info_sha !== infoBestandSha(ymd(t))   // wv3015: rij of vrijgave gewijzigd = meteen
       || (toestemming() && nieuwsActief() && !nieuwsBinnenKwartier(s, t)) || (!!(s.inhoud && s.inhoud.nieuws) && !(toestemming() && nieuwsActief()))
-      || (toestemming() && !medischBinnenUur(s, t)) || !!(s.inhoud && s.inhoud.medisch_tv) !== (toestemming() && medischMag())) {   // wv3154: elk uur; zin erbij/weg = meteen   // wv3023: nieuws elk kwartier; zin weg of uit = meteen
+      || (toestemming() && !medischBinnenUur(s, t)) || !!(s.inhoud && s.inhoud.medisch_tv) !== (toestemming() && medischMag())
+      || !!(s.inhoud && s.inhoud.qr_tv) !== (toestemming() && qrMag())) {   // wv4208: QR-rij erbij/weg = meteen   // wv3154: elk uur; zin erbij/weg = meteen   // wv3023: nieuws elk kwartier; zin weg of uit = meteen
       try { const i = await verzamel(t); nieuw = inhoudSha(i) !== s.inhoud_sha; } catch (e) { fout('personeelsscherm-inhoud', new Error(String(e && e.message).slice(0, 80))); }
       s = leesStand();
     }
-    if (nieuw || !s.gemaakt || t - s.gemaakt > OPNIEUW_MS || !s.houdbaar_tot) {
+    // wv4208: schermtijd — wissel tussen rust en gewoon = nieuwe envelop; in de rust geeft nieuwe inhoud geen nieuwe (zelfde zwarte) envelop
+    const rustNu = !s.leeg && !inhoudVenster(t);
+    if (nieuw && rustNu && s.rust) nieuw = false;
+    if (nieuw || !s.gemaakt || t - s.gemaakt > OPNIEUW_MS || !s.houdbaar_tot || !!s.rust !== rustNu) {
       try { await publiceer(); } catch (e) { wijzig((x) => { x.fout = 'Het scherm kon niet worden bijgewerkt.'; }); fout('personeelsscherm-publiceer', new Error(String(e && e.message).slice(0, 80))); }
     }
     let live;
@@ -1350,6 +1506,6 @@ function maak(o) {
   return { app, tik, info, publiceer, open, koppel, intrek, leeg, leesD1, appStand, verzamel, toestemming, infoSchermen, infoKandidaten, infoZet, aanvraag, medischZet };
 }
 
-module.exports = { maak, bouwHtml, D1_SCHEMA, inWerktijd, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
+module.exports = { maak, bouwHtml, D1_SCHEMA, inWerktijd, inSchermtijd, inhoudVenster, QR_RIJ, QR_ZIN, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
   VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, JARIG_ID, WEEK_RIJ, WEEK_ZIN, WEEK_ID, MEDISCH_ZIN, MEDISCH_RIJ, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN,
-  _t: { paasZondag, feestdagen, feestdag, weekMaandag, weekRooster, weekBeeld, medischTekst, medischItems, medischBijwerken, medischBeeld, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, artsenVandaag, jarigen, jarigDag, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };
+  _t: { qrMatrix, qrSvg, openbareUrl, paasZondag, feestdagen, feestdag, weekMaandag, weekRooster, weekBeeld, medischTekst, medischItems, medischBijwerken, medischBeeld, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, artsenVandaag, jarigen, jarigDag, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };

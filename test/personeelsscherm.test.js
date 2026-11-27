@@ -461,10 +461,12 @@ test('fase 2 tik: vrijgave of Ja verschijnt bij de volgende tik (niet pas na 30 
   fs.writeFileSync(f.vragenPad, JSON.stringify(jaVoor(SET)));
   t += 5 * 60000; f.zet(t); await f.m.tik();
   assert.match(html(f.D), /Proefinfo twee/);
-  t = Date.parse('2026-11-17T23:30:00Z'); f.zet(t); await f.m.tik();   // 18-11 00:30 in Amsterdam
+  t = Date.parse('2026-11-17T23:30:00Z'); f.zet(t); await f.m.tik();   // 18-11 00:30 in Amsterdam: wv4208 buiten schermtijd = zwart, wel verzameld
+  assert.match(html(f.D), /data-soort="rust"/); assert.doesNotMatch(html(f.D), /Proefinfo/);
+  assert.strictEqual(f.m.info().vakken.info, 1);
+  t = Date.parse('2026-11-18T05:50:00Z'); f.zet(t); await f.m.tik();   // 06:50: het gewone scherm gaat vooraf mee
   const h = html(f.D);
   assert.match(h, /Proefinfo een/); assert.doesNotMatch(h, /Proefinfo twee/);
-  assert.strictEqual(f.m.info().vakken.info, 1);
 });
 
 test('fase 2 rotatie: het script wisselt op de wandklok (30 s hoofdscherm, 20 s per infoscherm) en slaat verlopen panelen over', () => {
@@ -1328,4 +1330,141 @@ test('wv4149 feestdag als label, meer dan zes namen = +n, lege week = uitlegrege
   // esc: een naam met opmaak komt als tekst op het scherm
   const x = PS.bouwHtml({ gemaakt: t, houdbaar_tot: t + 1, leeg: false, inhoud: { agenda: [], week: Object.assign({}, w, { dagen: w.dagen.map((d) => Object.assign({}, d, { artsen: [{ naam: '<b>x</b>', wanneer: 'hele dag' }] })) }) } });
   assert.doesNotMatch(x, /<b>x<\/b>/);
+});
+
+// ── wv4208: schermtijd (nr 925 = L25) en QR-code "lees verder" (nr 921 = L21); verzonnen gegevens ──
+const ams = (s) => Date.parse(s + '+01:00');   // Amsterdamse wintertijd
+test('wv4208 schermtijd: werkdag 07:00–18:30, envelop met inhoud vanaf 06:45; weekend en feestdag rust', () => {
+  assert.strictEqual(PS.inSchermtijd(ams('2026-11-16T06:59:00')), false);
+  assert.strictEqual(PS.inSchermtijd(ams('2026-11-16T07:00:00')), true);
+  assert.strictEqual(PS.inSchermtijd(ams('2026-11-16T18:29:00')), true);
+  assert.strictEqual(PS.inSchermtijd(ams('2026-11-16T18:30:00')), false);
+  assert.strictEqual(PS.inSchermtijd(ams('2026-11-21T10:00:00')), false, 'zaterdag');
+  assert.strictEqual(PS.inSchermtijd(ams('2026-12-25T10:00:00')), false, 'Eerste Kerstdag (vrijdag)');
+  assert.strictEqual(PS.inSchermtijd(Date.parse('2027-06-14T10:00:00+02:00')), true, 'zomertijd');
+  assert.strictEqual(PS.inSchermtijd(Date.parse('2027-06-14T18:31:00+02:00')), false);
+  assert.strictEqual(PS.inhoudVenster(ams('2026-11-16T06:44:00')), false);
+  assert.strictEqual(PS.inhoudVenster(ams('2026-11-16T06:45:00')), true);
+  assert.strictEqual(PS.inhoudVenster(ams('2026-11-16T18:30:00')), false);
+});
+// het klokscript van een envelop op een nagespeelde wandklok: zit body op 'rust'?
+function rustOp(doc, ms) {
+  const vm = require('vm');
+  const scr = /<script>([\s\S]*?)<\/script>/.exec(doc)[1];
+  const cls = new Set(), tekst = {};
+  const el = (id) => (id === 'rklok' || id === 'rdag' ? { set textContent(v) { tekst[id] = v; } } : null);
+  const ctx = { document: { getElementById: el, querySelectorAll: () => [], body: { classList: { toggle: (c, on) => (on ? cls.add(c) : cls.delete(c)) } } }, innerWidth: 1920, innerHeight: 1080, addEventListener() {}, setInterval() {},
+    Date: class extends Date { constructor(...a) { super(...(a.length ? a : [ms])); } } };
+  vm.runInNewContext(scr, ctx);
+  return { rust: cls.has('rust'), tekst };
+}
+test('wv4208 tik: 18:31 en 06:40 zwart met klok zonder inhoud; 06:50 gewoon scherm dat op de wandklok tot 07:00 zwart blijft; rust = geen herpublicatie bij nieuwe inhoud', async () => {
+  const f = fase1({ aan: true });
+  f.zet(ams('2026-11-16T10:00:00')); await f.m.tik();
+  let h = html(f.D);
+  assert.match(h, /data-soort="scherm"/); assert.match(h, /HAGRO-vergadering/);
+  assert.match(h, /<div id="rust">/, 'het gewone scherm heeft zijn eigen zwarte laag');
+  // 18:31: rust-envelop, nergens agenda of namen
+  f.zet(ams('2026-11-16T18:31:00')); await f.m.tik();
+  h = html(f.D);
+  assert.match(h, /data-soort="rust"/); assert.match(h, /<div id="rklok">18:31<\/div>/); assert.match(h, /werkdagen van 07:00 tot 18:30/);
+  assert.doesNotMatch(h, /HAGRO-vergadering|Wietske|Waarnemer|Komende weken|class="rail"/);
+  const v1 = JSON.parse(fs.readFileSync(path.join(f.dir, 'stand.json'), 'utf8')).volgnr;
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(f.dir, 'stand.json'), 'utf8')).rust, true);
+  // nieuwe inhoud in de nacht (30 min later opnieuw verzameld) = geen nieuwe zwarte envelop
+  f.zet(ams('2026-11-16T22:00:00')); await f.m.tik();
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(f.dir, 'stand.json'), 'utf8')).volgnr, v1, 'geen herpublicatie in de rust');
+  f.zet(ams('2026-11-17T06:40:00')); await f.m.tik();
+  assert.match(html(f.D), /data-soort="rust"/, '06:40 nog rust (na 6 uur opnieuw getekend)');
+  // 06:50: gewoon scherm met inhoud; op de wandklok 06:59 zwart, 07:00 gewoon, 18:29 gewoon, 18:30 zwart, zaterdag zwart
+  f.zet(ams('2026-11-17T06:50:00')); await f.m.tik();
+  h = html(f.D);
+  assert.match(h, /data-soort="scherm"/); assert.match(h, /HAGRO-vergadering/);
+  assert.strictEqual(rustOp(h, ams('2026-11-17T06:59:00')).rust, true);
+  assert.strictEqual(rustOp(h, ams('2026-11-17T07:00:00')).rust, false);
+  assert.strictEqual(rustOp(h, ams('2026-11-17T18:29:00')).rust, false);
+  assert.strictEqual(rustOp(h, ams('2026-11-17T18:30:00')).rust, true);
+  assert.strictEqual(rustOp(h, ams('2026-11-21T10:00:00')).rust, true, 'zaterdag');
+  assert.strictEqual(rustOp(h, ams('2026-12-25T10:00:00')).rust, true, 'feestdag');
+  assert.strictEqual(rustOp(h, ams('2026-11-17T06:59:00')).tekst.rklok, '06:59');
+  // noodknop gaat altijd voor
+  await f.m.app({ methode: 'POST', pad: '/app/personeelsscherm/leeg', body: { aan: true } });
+  assert.match(html(f.D), /data-soort="leeg"/);
+  f.zet(ams('2026-11-17T19:00:00')); await f.m.tik();
+  assert.match(html(f.D), /data-soort="leeg"/, 'leeg blijft leeg, ook buiten schermtijd');
+});
+
+// QR: verzonnen artikels op de echte domeinen van de bronnen (alleen de link telt, niet de guid)
+const QR_TEKST = ['QR-code naar het artikel: naast een medisch bericht (NHG, LHV, RIVM) en bij een infoscherm met een openbare bron een kleine QR-code naar dat artikel bij de bron zelf.'];
+function qrRss(items) {
+  return '<?xml version="1.0"?><rss version="2.0"><channel><title>Proef</title>' + items.map((it) => '<item><title>' + it.titel + '</title>'
+    + (it.link === null ? '' : '<link>' + it.link + '</link>') + '<pubDate>' + rfc(it.ms) + '</pubDate><guid isPermaLink="false">https://www.nhg.org/?post_type=news&amp;p=' + it.ms + '</guid>'
+    + '<description>Eerste proefzin. Tweede proefzin.</description></item>').join('') + '</channel></rss>';
+}
+test('wv4208 openbareUrl: alleen https, eigen domein, zonder #, volg- en reclamecodes; geen inlog, poort, IP of socev.dev', () => {
+  const U = PS._t.openbareUrl;
+  assert.strictEqual(U('https://www.nhg.org/actueel/proef/', ['nhg.org']), 'https://www.nhg.org/actueel/proef/');
+  assert.strictEqual(U('https://nhg.org/actueel/proef/?utm_source=rss&utm_medium=rss#reacties', ['nhg.org']), 'https://nhg.org/actueel/proef/');
+  assert.strictEqual(U('https://www.rivm.nl/nieuws/proef?pagina=2&fbclid=abc', ['rivm.nl']), 'https://www.rivm.nl/nieuws/proef?pagina=2');
+  assert.strictEqual(U('http://www.nhg.org/actueel/proef/', ['nhg.org']), '', 'geen http');
+  assert.strictEqual(U('https://www.nhg.org.voorbeeld.invalid/x', ['nhg.org']), '', 'ander domein');
+  assert.strictEqual(U('https://nepnhg.org/x', ['nhg.org']), '', 'ander domein dat op de naam lijkt');
+  assert.strictEqual(U('https://iemand:geheim@www.nhg.org/x', ['nhg.org']), '');
+  assert.strictEqual(U('https://www.nhg.org:8443/x', ['nhg.org']), '');
+  assert.strictEqual(U('https://192.0.2.7/x', null), '');
+  assert.strictEqual(U('https://personeel.socev.dev/x', null), '');
+  assert.strictEqual(U('https://www.welzijnoprecept.nl/proef', null), 'https://www.welzijnoprecept.nl/proef');
+  assert.strictEqual(U('https://voorbeeld.nl/' + 'a'.repeat(250), null), '', 'te lang voor een kleine code');
+  assert.strictEqual(U('javascript:alert(1)', null), '');
+});
+test('wv4208 QR: link per medisch bericht bewaard; op de tv alleen met rij personeelsscherm-qr, in het app-voorbeeld altijd; code = het artikel', async () => {
+  const items = [{ titel: 'Proefbericht met link', ms: MT0 - 3600000, link: 'https://www.nhg.org/actueel/verzonnen-proefbericht/?utm_source=rss' },
+    { titel: 'Proefbericht met vreemde link', ms: MT0 - 2 * 3600000, link: 'https://voorbeeld.invalid/x' }, { titel: 'Proefbericht zonder link', ms: MT0 - 3 * 3600000, link: null }];
+  const it = PS._t.medischItems(qrRss(items), PS.MEDISCH_BRONNEN[0], MT0);
+  assert.deepStrictEqual(it.map((x) => x.url || null), ['https://www.nhg.org/actueel/verzonnen-proefbericht/', null, null], 'alleen de eigen link, zonder volgcode; nooit de guid');
+  const f = medOpzet();
+  f.feeds.nhg = () => qrRss(items);
+  await f.m.tik();
+  const st = JSON.parse(fs.readFileSync(path.join(f.dir, 'stand.json'), 'utf8'));
+  assert.strictEqual(Object.values(st.medisch.items).filter((x) => x.url).length, 1);
+  let p = medPaneel(html(f.D), 'Medisch nieuws');
+  assert.ok(p, 'medisch paneel op de tv'); assert.doesNotMatch(p, /class="qr"/, 'zonder QR-rij geen code op de tv');
+  const app = await f.m.app({ methode: 'GET', pad: '/app/personeelsscherm' });
+  const vb = app.body.schermen.find((x) => x.id === PS.MEDISCH_ID).html;
+  assert.strictEqual((vb.match(/class="qr"/g) || []).length, 1, 'app-voorbeeld: precies één code (alleen het bericht met link)');
+  // rij erbij → volgende tik meteen op de tv
+  const reg = path.join(f.vault, 'register.json'), r = JSON.parse(fs.readFileSync(reg, 'utf8'));
+  r.rijen.push({ id: PS.QR_RIJ, status: 'aan', tekst: QR_TEKST }); fs.writeFileSync(reg, JSON.stringify(r));
+  f.zet(MT0 + 5 * 60000); await f.m.tik();
+  p = medPaneel(html(f.D), 'Medisch nieuws');
+  assert.strictEqual((p.match(/class="qr"/g) || []).length, 1, 'met de rij: code op de tv');
+  assert.match(p, /<div class="mb mq">[\s\S]*?Proefbericht met link[\s\S]*?Lees verder/);
+  assert.doesNotMatch(html(f.D), /verzonnen-proefbericht/, 'het adres staat niet als tekst op het scherm, alleen in de code');
+  // de code is het artikel: matrix uit de svg == matrix van de link
+  const svg = /<svg class="qr"[\s\S]*?<\/svg>/.exec(p)[0];
+  assert.strictEqual(svg, PS._t.qrSvg('https://www.nhg.org/actueel/verzonnen-proefbericht/', 132));
+  // kruisproeven: rij uit, zin weg, basisrij weg
+  for (const [w, mut] of [['uit', (x) => { x.status = 'uit'; }], ['zin weg', (x) => { x.tekst = ['Iets anders.']; }]]) {
+    const r2 = JSON.parse(JSON.stringify(r)); mut(r2.rijen.find((x) => x.id === PS.QR_RIJ)); fs.writeFileSync(reg, JSON.stringify(r2));
+    await f.m.publiceer();
+    assert.doesNotMatch(html(f.D), /class="qr"/, w);
+  }
+  fs.writeFileSync(reg, JSON.stringify({ rijen: r.rijen.filter((x) => x.id !== 'personeelsscherm-vast') }));
+  await f.m.publiceer();
+  assert.doesNotMatch(html(f.D), /class="qr"/, 'zonder basisrij niets');
+});
+test('wv4208 infoscherm met openbare bron: bron_url op Davids kaart en in de code; zonder veld kaart, hash en id gelijk; vuil adres = set ongeldig', () => {
+  const sc = SET.schermen[0];
+  const zonder = PS._t.setKaart(SET);
+  const met = PS._t.setKaart(Object.assign({}, SET, { schermen: [Object.assign({}, sc, { bron_url: 'https://www.welzijnoprecept.nl/proef' })].concat(SET.schermen.slice(1)) }));
+  assert.ok(met && zonder);
+  assert.strictEqual(met.kaart.stappen[0], zonder.kaart.stappen[0].replace(/\)$/, '; QR-code naar https://www.welzijnoprecept.nl/proef)'));
+  assert.notStrictEqual(PS._t.schermId('wv9001', met.schermen[0]), PS._t.schermId('wv9001', zonder.schermen[0]));
+  assert.strictEqual(PS._t.schermId('wv9001', PS._t.infoNorm(sc)), PS._t.schermId('wv9001', zonder.schermen[0]), 'zonder veld gelijk');
+  for (const vuil of ['https://www.welzijnoprecept.nl/proef?utm_source=x', 'http://www.welzijnoprecept.nl/proef', 'https://personeel.socev.dev/a', 'geen adres'])
+    assert.strictEqual(PS._t.infoNorm(Object.assign({}, sc, { bron_url: vuil })), null, vuil);
+  const h = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 3600000, leeg: false, inhoud: { agenda: [], qr: true, info: [Object.assign({ set: SET.set }, met.schermen[0])] } });
+  assert.match(h, /<div class="voet vq"><span>Bron: [^<]+<\/span><div class="qrv"><svg class="qr"/);
+  const h2 = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 3600000, leeg: false, inhoud: { agenda: [], qr: false, info: [Object.assign({ set: SET.set }, met.schermen[0])] } });
+  assert.doesNotMatch(h2, /class="qr"/, 'zonder qr-vlag (geen rij) geen code');
 });
