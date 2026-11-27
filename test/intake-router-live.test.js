@@ -1340,7 +1340,7 @@ test('wv4367: geld (IBAN of geldspoor) en de AI-tekstcontrole blijven een vraag,
 });
 
 test('wv4367: draad volgen — een later stuk zonder label uit een _AI_-draad gaat naar de plek van het vorige stuk; een andere draad niet', async () => {
-  const E = nkOmgeving([ONB, ONB, ONB], { nakijken: true, ai_zelf: true });
+  const E = nkOmgeving([ONB, ONB, ONB, ONB], { nakijken: true, ai_zelf: true });
   const a = E.mail('a@ander.example', 'Een', { meta: { labels: ['_AI_'], thread_id: 't-1' }, tekst: IBAN_TEKST }); await E.r.ronde();
   assert.equal(E.ls(a).staat, 'twijfel');
   assert.equal((await E.r.appKeuze({ stuk_id: a, keuze: 'bestemming', lens: 'kennis', entiteit: 'GH' }, 'app:proef')).status, 200);
@@ -1348,6 +1348,11 @@ test('wv4367: draad volgen — een later stuk zonder label uit een _AI_-draad ga
   assert.equal(E.ls(b).staat, 'klaar'); assert.equal(E.sam(b).entiteit, 'GH'); assert.equal(E.sam(b).ai_label, 'draad'); assert.equal(nb(E, b).voorstel_uit, 'draad');
   await E.volgende(); const c = E.mail('a@ander.example', 'Ander', { meta: { labels: ['INTAKE'], thread_id: 't-2' } }); await E.r.ronde();
   assert.equal(E.ls(c).staat, 'twijfel');
+  // review ZOU 1: ook na 60 stukken zonder label in dezelfde draad volgt Intake hem nog
+  for (let i = 0; i < 60; i++) E.zet({ status: 'verwijderd', op: '2026-10-28T19:59:10Z', meta: { van: 'a@ander.example', onderwerp: 'Re: Een', thread_id: 't-1', labels: ['INTAKE'] } });
+  await E.volgende(); const e = E.zet({ op: '2026-10-28T19:59:30Z', meta: { van: 'a@ander.example', van_naam: 'Proef', onderwerp: 'Re: Een (laat)', aan: ['david@voorbeeld.example'], labels: ['INTAKE'], thread_id: 't-1' },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('a@ander.example', 'Re: Een (laat)', GEWOON) }] }); await E.r.ronde();
+  assert.equal(E.ls(e).staat, 'klaar'); assert.equal(E.sam(e).ai_label, 'draad');
   const ov = await E.r.appOverzicht(50);
   assert.equal(ov.nakijken.find((x) => x.stuk_id === b).zin, 'Onduidelijk stuk.');
   E.r.sluit();

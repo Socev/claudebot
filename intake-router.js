@@ -1317,9 +1317,12 @@ function maak(o) {
     if (!tid || String(s.bron).indexOf('gmail:') !== 0) return { ai, plek };
     const rows = db.prepare("SELECT s.stuk_id, s.meta, s.aangemaakt FROM stuk s WHERE s.bron = ? AND s.stuk_id <> ? AND json_extract(s.meta, '$.thread_id') = ? " +
       'AND s.versie = (SELECT MAX(versie) FROM stuk WHERE stuk_id = s.stuk_id) ORDER BY s.aangemaakt DESC, s.stuk_id DESC LIMIT 50').all(s.bron, s.stuk_id, tid);
+    // review ZOU 1: het label over de hele draad (niet alleen de laatste 50); LIKE is alleen een voorfilter, aiLabel beslist
+    if (!ai) for (const x of db.prepare("SELECT s.meta FROM stuk s WHERE s.bron = ? AND s.stuk_id <> ? AND json_extract(s.meta, '$.thread_id') = ? AND s.meta LIKE '%AI%'").all(s.bron, s.stuk_id, tid)) {
+      if (aiLabel(safeJson(x.meta) || {})) { ai = 'draad'; break; }
+    }
+    if (!ai) return { ai, plek };
     for (const x of rows) {
-      const m = safeJson(x.meta) || {};
-      if (!ai && aiLabel(m)) ai = 'draad';
       if (plek || !(x.aangemaakt <= s.aangemaakt)) continue;
       const ls = db.prepare('SELECT versie, staat, keuze FROM live_stuk WHERE stuk_id = ?').get(x.stuk_id);
       if (!ls) continue;
