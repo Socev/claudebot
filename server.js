@@ -30161,7 +30161,7 @@ async function appPersoneelsscherm(req, res, a, route, d, s) {
   }
   // wv4209: een mededeling op het scherm zetten (eigen tekst of een voorstel van Socev overnemen) en een bron op 'mag vanzelf' zetten = Davids knop:
   // verse vingerafdruk. Weghalen, een voorstel laten liggen en 'mag vanzelf' uitzetten niet (haalt alleen weg).
-  if ((wat === 'mededeling' && d && d.weg == null && d.laat !== true) || (wat === 'vanzelf' && d && d.aan === true)) {
+  if ((wat === 'mededeling' && !(d && (d.weg != null || (d.voorstel != null && d.laat === true)))) || (wat === 'vanzelf' && d && d.aan === true)) {   // Codex MOET 1: laat alleen mét voorstel
     if (!appTeller('personeelsscherm-sleutel', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens personeelsscherm-sleutel');
     if (!appVersOk(a, s)) { res._app.reden = 'personeelsscherm ' + wat + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
     s.vers_tot = 0;

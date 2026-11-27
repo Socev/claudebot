@@ -33,9 +33,13 @@ echo "$M" | grep -qF "{ nhg: 'https://www.nhg.org/feed/?post_type=news', lhv: 'h
   && echo "$M" | grep -qF "redirect: 'error'" && echo "$M" | grep -qF "if (n > 2 * 1024 * 1024) throw new Error('medisch te groot')" \
   || { echo "ROOD  server.js: medisch nieuws niet alleen van de vaste feeds, of met doorsturing / zonder groottegrens"; f=1; }
 # wv4209: mededeling op het scherm / voorstel overnemen en 'mag vanzelf' aan alleen met verse vingerafdruk; Socev-voorstel via de smalle route
-echo "$B" | grep -qF "if ((wat === 'mededeling' && d && d.weg == null && d.laat !== true) || (wat === 'vanzelf' && d && d.aan === true)) {" \
-  && echo "$B" | grep -A2 -F "if ((wat === 'mededeling' && d && d.weg == null" | grep -qF "if (!appVersOk(a, s))" || { echo "ROOD  server.js: mededeling/vanzelf zonder verse vingerafdruk"; f=1; }
+echo "$B" | grep -qF "if ((wat === 'mededeling' && !(d && (d.weg != null || (d.voorstel != null && d.laat === true)))) || (wat === 'vanzelf' && d && d.aan === true)) {" \
+  && echo "$B" | grep -A2 -F "if ((wat === 'mededeling' && !(d && (d.weg" | grep -qF "if (!appVersOk(a, s))" || { echo "ROOD  server.js: mededeling/vanzelf zonder verse vingerafdruk"; f=1; }
 grep -qF "return personeelsscherm.voorstel({ titel: d.titel, datum: d.datum, tijd: d.tijd });" server.js && grep -qF "'personeelsscherm/voorstel': 20" server.js || { echo "ROOD  server.js: /smal/personeelsscherm/voorstel ontbreekt"; f=1; }
+# wv4209 Codex MOET 1: de vingerafdrukvoorwaarde zelf uitgerekend — alleen weghalen en een voorstel laten liggen gaan zonder
+node -e "const s=require('fs').readFileSync('server.js','utf8'); const m=/if \\(\\((wat === 'mededeling' && .*?)\\) \\{   \\/\\/ Codex MOET 1/.exec(s); if(!m) process.exit(1);
+const f=new Function('wat','d','return (('+m[1]+');'); const g=[[{titel:'x',datum:'d',laat:true},true],[{titel:'x',datum:'d'},true],[{voorstel:'a'},true],[{voorstel:'a',laat:true},false],[{weg:'a'},false],[{laat:true},true],[null,true]];
+process.exit(g.every(([d,v])=>f('mededeling',d)===v)&&f('vanzelf',{aan:true})===true&&f('vanzelf',{aan:false})===false?0:1)" || { echo "ROOD  server.js: vingerafdrukvoorwaarde mededeling/vanzelf klopt niet"; f=1; }
 [ $f = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS"
 node --test test/personeelsscherm.test.js 2>&1 | tail -n 12 | grep -E "^# (pass|fail)"; node --test test/personeelsscherm.test.js >/dev/null 2>&1 || { echo "ROOD  test/personeelsscherm.test.js"; f=1; }
 exit $f
