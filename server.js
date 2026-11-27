@@ -6394,7 +6394,7 @@ const APP_UITDAGING_MS = 2 * 60 * 1000;
 const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
 const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // vaste plek: wie bezig is, houdt over de dagdeelgrens heen 5 min glijdend (wv488; was fase 4: 5 min glijdend)
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
-const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/rij/terug', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
+const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/meldingen/waarom', 'POST /app/knop', 'POST /app/rij/terug', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/broedstoof/knop', 'POST /app/agents/rij', 'POST /app/harvester/broedstoof', 'POST /app/harvester/weg', 'POST /app/harvester/terug', 'POST /app/harvester/bron-nieuw',
   'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/harvester/regel', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
@@ -9037,7 +9037,7 @@ function appUploadSamenvoegen(dir, n, st, bid, klaar) {
   ws.once('open', volgende);
 }
 
-async function appBeurt(req, res, reg, a, s, d) {
+async function appBeurt(req, res, reg, a, s, d, opt) {   // opt (wv4129): { conceptHouden } voor een bericht dat niet uit het chatvak komt
   const kanaal = String(d.kanaal || '');
   if (!APP_KANALEN[kanaal]) return appWeiger(res, 400, 'onbekend kanaal', 'kanaal');
   const bid = String(d.beurt_id || '');
@@ -9165,7 +9165,7 @@ async function appBeurt(req, res, reg, a, s, d) {
   ids[bh] = { job: st.job_id, t: Date.now() };
   try { appSchrijfJson(APP_BEURTEN, ids); } catch (e) { logError('app-beurten', e); }
   res._app.reden = 'beurt ' + kanaal + ' ' + st.job_id + (namen.length ? ' + ' + namen.length + ' bestand(en)' : '') + (inRij ? ' (in de rij)' : '') + (antwOp ? ' (antwoord op ' + antwOp.x.job_id + ')' : '');
-  appConceptWeg(a.id, kanaal);   // wv159: verstuurd = geen concept meer
+  if (!(opt && opt.conceptHouden)) appConceptWeg(a.id, kanaal);   // wv159: verstuurd = geen concept meer (wv4129: niet bij Waarom?, dat komt niet uit het chatvak)
   appStuur(res, 200, { ok: true, job_id: st.job_id, bestanden: namen, in_rij: inRij });
 }
 
@@ -11366,6 +11366,7 @@ const APP_PUSH = path.join(APP_DATA, 'push.json');                    // per app
 const APP_MELD_GEZIEN = path.join(APP_DATA, 'meldingen-gezien.json'); // per apparaat: tot wanneer Meldingen gezien is
 const APP_MELD_TABEL = process.env.APP_MELD_TABEL || 'LIclFLTGAaaJOx1w';     // n8n Data Table ochtend_buffer
 const APP_STILTE_TABEL = process.env.APP_STILTE_TABEL || 'MF6DKIGzWVT8FAdy'; // n8n Data Table stilte_state
+const APP_STILTELOG_TABEL = process.env.APP_STILTELOG_TABEL || 'e6Agcx8S6rzfXXNc'; // n8n Data Table stiltelog (stil/hersteld per stroom; wv4129)
 const APP_WACHTER_URL = process.env.APP_WACHTER_URL || 'https://socev-wachter.d-schaap.workers.dev/stand';
 const APP_MELD_DAGEN = 14;
 // wv446 (David 12-10: "blijft er eentje als storing staan, maar dan wel met de opmerking dat er eigenlijk niets mee moet"):
@@ -11570,8 +11571,10 @@ async function appHerstelKaal(wfId, naExecutie) {
 async function appMeldingenVerzamel() {
   const fouten = [];
   const grens = Date.now() - APP_MELD_DAGEN * 86400000;
-  let rijen = [], stilte = null, buiten = null;
+  let rijen = [], stilte = null, buiten = null, stilLog = null;
   await Promise.all([
+    // wv4129 (nr 414 = 3C114): stil/hersteld per stroom, voor "wat lag stil en kwam terug"; onleesbaar = geen haperingen (geen fout bovenaan)
+    appN8nRijen(APP_STILTELOG_TABEL, null, 400).then(function (r) { stilLog = r; }, function (e) { logError('app-meldingen', e); }),
     appN8nRijen(APP_MELD_TABEL, { type: 'or', filters: [{ columnName: 'bron', condition: 'eq', value: 'foutmelder' }, { columnName: 'bron', condition: 'eq', value: 'stiltewachter' }] }, 300)
       .then(function (r) { rijen = r.filter(function (x) { return Date.parse(x.createdAt) >= grens; }); },
         function (e) { logError('app-meldingen', e); fouten.push('storingen en stiltemeldingen zijn nu niet te lezen'); }),
@@ -11665,6 +11668,8 @@ async function appMeldingenVerzamel() {
     const bewaakt = stilte.filter(function (s) { return s.bewaken !== 'nee'; });
     aanvoer = { bewaakt: bewaakt.length, stil: bewaakt.filter(function (s) { return s.status === 'stil'; }).map(function (s) { return appWfNaam(s.naam); }),
       onbekend: bewaakt.filter(function (s) { return s.status !== 'stil' && s.status !== 'gezond'; }).map(function (s) { return appWfNaam(s.naam); }) };
+    // wv4129 (nr 414 = 3C114): per stroom de laatste aanvoer en wat de afgelopen 14 dagen stil lag en terugkwam
+    if (typeof appMeldStromen === 'function') { aanvoer.stromen = appMeldStromen(bewaakt, stilLog, grens, Date.now()); aanvoer.haperingen_leesbaar = !!stilLog; }
   }
   let extern = null;
   if (buiten && typeof buiten === 'object') {
@@ -11678,8 +11683,11 @@ async function appMeldingenVerzamel() {
   // kaarten die (nog) misgaan en een melding in de buffer hebben: daarop geeft het meldingen-seintje een tik
   const getoond = items.slice(0, 100);   // kaarten uit dezelfde lijst als de items (Fable wv446 #4)
   const kaarten = getoond.filter(function (x) { return x.kaart && x.herstel.stand !== 'weer-goed'; }).map(function (x) { return x.kaart; });
+  // wv4129 (nr 334 = 3C34): welke workflow/stroom achter een kaart zit, voor de knop Waarom? (niet naar de app)
+  const herkomst = {};
+  getoond.forEach(function (x) { const h = x._wf ? 'workflow ' + x._wf : x._pijplijn ? 'stroom ' + x._pijplijn : null; if (h) herkomst[appMeldRef(x)] = h; });
   getoond.forEach(function (x) { delete x._wf; delete x._pijplijn; });
-  return { items: getoond, voorvallen: voorvallen, stand: { aanvoer: aanvoer, extern: extern }, max_rij: maxRij, kaarten: kaarten, gelezen: !!rijen.length || !fouten.length, fouten: fouten, op: Date.now() };
+  return { items: getoond, voorvallen: voorvallen, stand: { aanvoer: aanvoer, extern: extern }, max_rij: maxRij, kaarten: kaarten, herkomst: herkomst, gelezen: !!rijen.length || !fouten.length, fouten: fouten, op: Date.now() };
 }
 /* meld-gevolg:begin */
 // wv4120: Gevolg voor jou + Ingehaald op elke kaart (niet op geweigerde verzoeken). Puur op de tabel en wat er al op de kaart staat.
@@ -11723,6 +11731,102 @@ function appMeldVoorvallen(rijen, items) {
   } catch (e) { logError('app-meldingen', e); return []; }
 }
 /* meld-gevolg:einde */
+/* meld-waarom:begin */
+// wv4129 (besluitenpagina nr 334 = 3C34, David Ja 25-11-2026 22:00): knop "Waarom?" op een storingskaart. De pod zoekt de kaart zelf op
+// (de app stuurt alleen de ref) en zet hem als gewoon bericht van David in de machinekamer (zelfde weg als POST /app/beurt: rij, grens,
+// noodstop), met de vraag oorzaak / gevolg / ingehaald. Zelfde kaart binnen 10 min = hetzelfde beurt_id, dus geen tweede beurt (ook niet
+// vanaf een ander apparaat); daarna mag het opnieuw. Alleen in het geheugen: na een herstart kan één tik binnen die 10 min nog een beurt starten.
+const APP_MELD_WAAROM_MS = 10 * 60 * 1000;
+function appMeldWaaromKaart() { return (appStaat.meldWaarom = appStaat.meldWaarom || {}); }
+function appMeldWaaromOp(ref, nu) {
+  const w = appMeldWaaromKaart()[ref];
+  return w && nu - w.t < APP_MELD_WAAROM_MS ? new Date(w.t).toISOString() : null;
+}
+// beurt_id voor deze tik: binnen het venster dat van de eerste tik, anders een nieuw (en het venster begint opnieuw)
+function appMeldWaaromBeurtId(ref, nu) {
+  const k = appMeldWaaromKaart();
+  Object.keys(k).forEach(function (r) { if (!(nu - k[r].t < APP_MELD_WAAROM_MS)) delete k[r]; });
+  if (k[ref]) return { bid: k[ref].bid, al: true };
+  k[ref] = { t: nu, bid: 'waarom-' + appSha(ref + '|' + nu).slice(0, 24) };
+  return { bid: k[ref].bid, al: false };
+}
+function appMeldAbs(iso) {
+  const t = Date.parse(iso || '');
+  if (!isFinite(t)) return '?';
+  try {
+    const d = new Date(t);
+    return d.toLocaleDateString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', year: 'numeric' }).replace(/\//g, '-') + ' ' +
+      d.toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' });
+  } catch (e) { return String(iso).slice(0, 16); }
+}
+// Het bericht in de machinekamer: de vraag bovenaan, daaronder alles wat de kaart weet (geen sleutels of links: techniek is al geschoond).
+function appMeldWaaromTekst(x, herkomst, voorval) {
+  const r = function (s, max) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, max || 400); };
+  const soort = x.soort === 'stil' ? 'aanvoer stilgevallen' : 'storing';
+  const o = x.onderzoek || null;
+  const sd = !o ? 'nog niets uitgezocht'
+    : o.oorzaak ? 'oorzaak: ' + r(o.oorzaak) + (o.gevolg ? ' · gevolg: ' + r(o.gevolg) : '') + (o.afloop ? ' · afloop: ' + r(o.afloop) : '') + (o.zelfde_als ? ' (zelfde storing als ' + r(o.zelfde_als, 40) + ')' : '')
+      : o.uitkomst === 'zelfde' ? 'zelfde storing als ' + r(o.zelfde_als || 'eerder', 40) + ', niet opnieuw uitgezocht'
+        : o.uitkomst === 'plafond' ? 'niet uitgezocht (dagmaximum onderzoeken bereikt)' : 'niet uitgezocht (lukte niet op tijd)';
+  const regels = [
+    'Waarom? (knop op een kaart in Meldingen)',
+    'Zoek uit: (1) wat de oorzaak is, (2) wat ik ervan merk of merkte, (3) of het is ingehaald, en zo niet: of dat nog moet en kan. Antwoord kort en in gewone taal.',
+    '',
+    'Kaart: ' + r(x.titel, 160) + ' (' + soort + ')',
+    herkomst ? 'Automatisering: ' + r(herkomst, 80) : null,
+    x.techniek ? 'Stap, fout en runnummer: ' + r(x.techniek, 500) : null,
+    'Wanneer: ' + (x.aantal > 1 && x.eerste && x.eerste !== x.wanneer ? appMeldAbs(x.eerste) + ' t/m ' + appMeldAbs(x.wanneer) + ', ' + x.aantal + '× gemeld' : appMeldAbs(x.wanneer)),
+    x.uitleg ? 'Uitleg op de kaart: ' + r(x.uitleg) : null,
+    x.herstel && x.herstel.tekst ? 'Sindsdien: ' + r(x.herstel.tekst) : null,
+    x.gevolg && x.gevolg.tekst ? 'Gevolg voor jou (kaart): ' + r(x.gevolg.tekst) : null,
+    x.ingehaald && x.ingehaald.tekst ? 'Ingehaald (kaart): ' + r(x.ingehaald.tekst) : null,
+    x.soort === 'storing' ? 'Storingsdienst: ' + sd : null,
+    voorval ? 'Voorval: ' + appMeldAbs(voorval.van) + ' t/m ' + appMeldAbs(voorval.tot) + ', ' + voorval.verschillend + ' storingen' + (voorval.oorzaak ? '; oorzaak: ' + r(voorval.oorzaak) : '') : null,
+    'Kaart-ref: ' + r(appMeldRef(x), 40),
+  ];
+  return regels.filter(function (l) { return l !== null; }).join('\n');
+}
+async function appMeldingenWaarom(req, res, reg, a, s, d) {
+  const ref = String(d.ref || '');
+  if (!/^[a-z0-9-]{4,40}$/.test(ref)) return appWeiger(res, 400, 'ongeldige melding', 'meldingen waarom');
+  let m;
+  try { m = await appMeldingen(); } catch (e) { logError('app-meldingen', e); return appWeiger(res, 503, 'meldingen zijn nu niet te lezen', 'meldingen fout'); }
+  const x = appMeldMetSeintjes(m.items).find(function (y) { return appMeldRef(y).slice(0, 40) === ref && y.soort !== 'geweigerd'; }) || null;
+  if (!x) return appWeiger(res, 404, 'die melding staat er niet meer', 'meldingen waarom onbekend');
+  const vv = x.voorval ? (m.voorvallen || []).find(function (v) { return v.id === x.voorval; }) || null : null;
+  const b = appMeldWaaromBeurtId(ref, Date.now());   // na de laatste await: twee tikken tegelijk krijgen hetzelfde beurt_id
+  res._app.reden = 'waarom ' + ref + (b.al ? ' (al gevraagd)' : '');
+  return appBeurt(req, res, reg, a, s, { kanaal: 'machinekamer', beurt_id: b.bid, tekst: appMeldWaaromTekst(x, (m.herkomst || {})[appMeldRef(x)] || null, vv) }, { conceptHouden: true });
+}
+// wv4129 (besluitenpagina nr 414 = 3C114): per bewaakte stroom de laatste aanvoer (stilte_state.laatste_executie) en de haperingen
+// van de afgelopen 14 dagen uit stiltelog (stil → hersteld, per pijplijn_id op tijd gekoppeld; dubbele "stil" na elkaar = één).
+// Een hapering telt als hij in het venster nog liep of eindigde; "tot" null = nog stil. Alleen lezen.
+function appMeldStromen(bewaakt, log, grens, nu) {
+  const per = {};
+  (log || []).map(function (x) { return { id: String(x.pijplijn_id || ''), g: x.gebeurtenis, t: Date.parse(x.tijdstip || x.createdAt), u: Number(x.effectieve_uren) }; })
+    .filter(function (x) { return x.id && isFinite(x.t) && (x.g === 'stil' || x.g === 'hersteld'); })
+    .sort(function (p, q) { return p.t - q.t; })
+    .forEach(function (x) {
+      const l = per[x.id] = per[x.id] || [];
+      const open = l.length && l[l.length - 1].tot === null ? l[l.length - 1] : null;
+      if (x.g === 'stil') { if (!open) l.push({ van: x.t, tot: null, uren: isFinite(x.u) && x.u > 0 ? x.u : null }); }
+      else if (open) open.tot = x.t;
+      else l.push({ van: null, tot: x.t, uren: null });   // stil van vóór het logboek
+    });
+  const iso = function (t) { return t === null ? null : new Date(t).toISOString(); };
+  return (bewaakt || []).map(function (s) {
+    const h = (per[String(s.pijplijn_id || '')] || []).filter(function (e) { return (e.tot === null ? nu : e.tot) >= grens; })
+      .sort(function (p, q) { return (q.van || q.tot) - (p.van || p.tot); }).slice(0, 10)
+      .map(function (e) { return { van: iso(e.van), tot: iso(e.tot), uren: e.uren }; });   // van/tot = wanneer de Stiltewachter het zag (uurronde); uren = al zo lang niets bij de melding
+    return { naam: appWfNaam(s.naam), status: s.status === 'stil' || s.status === 'gezond' ? s.status : 'onbekend',
+      laatste: s.laatste_executie && isFinite(Date.parse(s.laatste_executie)) ? new Date(Date.parse(s.laatste_executie)).toISOString() : null,
+      drempel_uren: Number(s.drempel_uren) || null, raakt_david: s.raakt_david === 'ja', haperingen: h };
+  }).sort(function (p, q) {
+    const r = function (x) { return x.status === 'stil' ? 0 : x.status === 'onbekend' ? 1 : 2; };
+    return r(p) - r(q) || p.naam.localeCompare(q.naam, 'nl');
+  });
+}
+/* meld-waarom:einde */
 // Eén verversing tegelijk, 60 s bewaard (meerdere apparaten en de seintjes-tik delen hem).
 function appMeldingen() {
   const c = appStaat.meld;
@@ -11807,6 +11911,7 @@ async function appMeldingenRoute(req, res, a) {
     y.ref = appMeldRef(x).slice(0, 40);
     const e = appMeldAfIs(x, af) ? af[appMeldRef(x)] : null;
     y.afgehandeld = e ? e.op : null;
+    if (typeof appMeldWaaromOp === 'function') y.waarom = appMeldWaaromOp(appMeldRef(x), Date.now());   // wv4129: Waarom? al gevraagd (10 min)
     return y;
   }), stand: m.stand, voorvallen: m.voorvallen || [],
     fouten: m.fouten, bijgewerkt: new Date(m.op).toISOString(), gezien: gezien, nieuw_na: new Date(grens).toISOString(),
@@ -17203,6 +17308,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/meldingen') return appMeldingenRoute(req, res, a);
         if (route === 'POST /app/meldingen/gezien') return appMeldingenGezien(req, res, a, d);
         if (route === 'POST /app/meldingen/af') return appMeldingenAf(req, res, a, d);   // wv446
+        if (route === 'POST /app/meldingen/waarom') return appMeldingenWaarom(req, res, reg, a, s, d);   // wv4129 (nr 334 = 3C34)
         if (route === 'GET /app/nieuw') return appNieuwRoute(req, res, a);
         if (route === 'GET /app/telegram-bezig') return appTelegramBezigRoute(req, res);   // wv292
         if (route === 'POST /app/gezien') return appNieuwGezien(req, res, a, d);
