@@ -461,6 +461,22 @@ function werkdagenVan(i) {
 
 function nuIso() { return new Date().toISOString(); }
 const groepVan = (codes, code, type) => (type === 'O' ? 'niet-gedeclareerd' : (codes.get(code) || {}).groep || 'nog-in-te-delen');
+// wv4213 (L27, David 25-11-2026 Ja): ISO-week van een dag ('2026-W14'; de week hoort bij het jaar van zijn donderdag) en de rolgroep voor de
+// weekdagstrook: artsen altijd samen (David 15-11-2026), assistente, POH-S en POH-GGZ apart, de rest 'ander'; geen koppeling of geen rol op die dag = 'los'.
+function isoWeek(iso) {
+  const don = plusDag(iso, 3 - WEEKDAG(iso)), j = don.slice(0, 4);
+  return j + '-W' + String(Math.floor(Math.round((Date.parse(don + 'T12:00:00Z') - Date.parse(j + '-01-01T12:00:00Z')) / 864e5) / 7) + 1).padStart(2, '0');
+}
+const ROLGROEP = (rol) => (!rol ? 'los' : ARTS_ROLLEN.includes(rol) ? 'arts' : rol === 'assistente' || rol === 'poh-s' || rol === 'poh-ggz' ? rol : 'ander');
+// Eén regelgroep bij de tellers van een registreerder optellen (per maand en per week dezelfde indeling)
+function regTel(x, codes, code, type, n) {
+  const g = groepVan(codes, code, type), sub = (codes.get(code) || {}).subgroep;
+  x.totaal += n;
+  if (g === 'consult' && (sub === 'kort' || sub === 'middel' || sub === 'lang')) x[sub] += n;
+  else if (g === 'visite' && (sub === 'kort' || sub === 'lang')) x['visite_' + sub] += n;
+  else if (g === 'mi') x.mi += n; else if (g === 'poh-ggz') x.poh += n; else x.overig += n;
+}
+const regNul = () => ({ kort: 0, middel: 0, lang: 0, visite_kort: 0, visite_lang: 0, mi: 0, poh: 0, overig: 0, totaal: 0 });
 const klein = (n) => (n > 0 && n < KLEIN ? '< 5' : n);
 // Controleer ↔ Inlezen vergelijken zonder de fin-datahub-cijfers (die kunnen tussendoor ververst zijn)
 const vergelijkbaar = (sv) => JSON.stringify(Object.assign({}, sv, { kwartalen: (sv.kwartalen || []).map((k) => ({ peildatum: k.peildatum, regels: k.regels, patienten: k.patienten, stand: k.stand })) }));
@@ -858,6 +874,49 @@ function maak(o) {
     return { voorlopig_oud: { n: oud.reduce((a, r) => a + r.n, 0), per: oud }, nultarief: { n: nul.reduce((a, r) => a + r.n, 0), per: nul }, meer_tarieven: meer, te_koppelen: koppel };
   }
 
+  // wv4213 (L27, David 25-11-2026 Ja): PMA per week en het patroon per weekdag. Zet p.weken (zelfde vorm als een maand, sleutel week =
+  // ISO-week, van = maandag; per registreerder bewust niet: per week vooral te kleine aantallen en 100 kB extra), en bij elke maand én week: wd[rolgroep] = verrichtingen ma–vr, wd_open = gedekte
+  // werkdagen zonder feestdag per weekdag (de deler voor 'gemiddeld per dag'), weekend = verrichtingen op za/zo. Verrichtingen = alles
+  // behalve niet-gedeclareerd, zoals het maandtotaal. Een week over een maandgrens telt in beide maanden alleen zijn eigen dagen; de week
+  // zelf heeft alle zeven. Alleen aantallen per week, weekdag en rolgroep; nooit per patiënt.
+  function weekEnDag(db, codes, p, mnd, gedekt) {
+    const naarP = new Map(db.prepare('SELECT naam, persoon FROM registreerder WHERE praktijk = ? AND bevestigd IS NOT NULL AND persoon IS NOT NULL AND negeer IS NULL').all(p.code).map((r) => [r.naam, r.persoon]));
+    const rollenVan = new Map();
+    for (const r of db.prepare('SELECT persoon, rol, van, tot FROM rol_periode WHERE praktijk = ? ORDER BY van, id').all(p.code)) { if (!rollenVan.has(r.persoon)) rollenVan.set(r.persoon, []); rollenVan.get(r.persoon).push(r); }
+    const groepCache = new Map();
+    const groepOp = (naam, dag) => {
+      const k = naam + '\u0001' + dag; if (groepCache.has(k)) return groepCache.get(k);
+      const pid = naarP.get(naam); let rol = null;
+      for (const r of (pid != null && rollenVan.get(pid)) || []) if (r.van <= dag && (!r.tot || r.tot >= dag)) rol = r.rol;
+      const g = ROLGROEP(rol); groepCache.set(k, g); return g;
+    };
+    const feest = new Set();
+    for (const j of new Set([...gedekt].map((d) => Number(d.slice(0, 4))))) for (const f of feestdagen(j)) feest.add(f);
+    const metWd = (x) => { if (!x.wd) { x.wd = {}; x.wd_open = [0, 0, 0, 0, 0]; x.weekend = 0; } return x; };
+    const weken = new Map();
+    const wk = (d) => { const k = isoWeek(d); if (!weken.has(k)) weken.set(k, metWd({ week: k, van: maandagVan(d), groepen: {}, sub: {}, subc: {}, voorlopig: 0, dagen: 7, dagen_gedekt: 0, kalender: '' })); return weken.get(k); };
+    for (const r of db.prepare('SELECT dag, registreerder AS naam, code, type, COUNT(*) AS n, SUM(tarief_cent) AS c, SUM(voorlopig) AS v FROM regel WHERE praktijk = ? GROUP BY dag, naam, code, type').iterate(p.code)) {
+      const x = wk(r.dag), g = groepVan(codes, r.code, r.type);
+      const gg = x.groepen[g] || (x.groepen[g] = { n: 0, cent: 0 }); gg.n += r.n; gg.cent += r.c;
+      const sub = r.type === 'O' ? null : (codes.get(r.code) || {}).subgroep;
+      if (sub && (g === 'consult' || g === 'visite' || g === 'mi' || g === 'poh-ggz')) { const sk = g + ':' + sub; x.sub[sk] = (x.sub[sk] || 0) + r.n; x.subc[sk] = (x.subc[sk] || 0) + r.c; }
+      x.voorlopig += r.v;
+      if (g === 'niet-gedeclareerd') continue;
+      const wd = WEEKDAG(r.dag);
+      for (const t of [x, metWd(mnd(r.dag.slice(0, 7)))]) {
+        if (wd > 4) { t.weekend += r.n; continue; }
+        const rg = groepOp(r.naam, r.dag); (t.wd[rg] || (t.wd[rg] = [0, 0, 0, 0, 0]))[wd] += r.n;
+      }
+    }
+    for (const d of gedekt) {
+      const x = wk(d), w = WEEKDAG(d); x.dagen_gedekt++;
+      if (w < 5 && !feest.has(d)) { x.wd_open[w]++; metWd(mnd(d.slice(0, 7))).wd_open[w]++; }
+    }
+    for (const x of weken.values()) { let k = ''; for (let i = 0; i < 7; i++) k += gedekt.has(plusDag(x.van, i)) ? '1' : '0'; x.kalender = k; }
+    for (const x of p.maanden) metWd(x);
+    p.weken = [...weken.values()].sort((a, b) => (a.van < b.van ? -1 : 1));
+  }
+
   function overzicht() {
     return metDb((db) => {
       const leeg = { ok: true, groepen: GROEPEN.map((g) => ({ id: g, naam: GROEP_NAAM[g] })), praktijken: [], exports: [], nog_in_te_delen: [], wacht: wachtLijst(), ontbreekt: [] };
@@ -952,16 +1011,13 @@ function maak(o) {
         const regs = new Map();
         for (const r of db.prepare('SELECT substr(dag, 1, 7) AS m, registreerder AS naam, code, type, COUNT(*) AS n FROM regel WHERE praktijk = ? GROUP BY m, naam, code, type').iterate(p.code)) {
           if (!regs.has(r.naam)) regs.set(r.naam, new Map());
-          const per = regs.get(r.naam); if (!per.has(r.m)) per.set(r.m, { kort: 0, middel: 0, lang: 0, visite_kort: 0, visite_lang: 0, mi: 0, poh: 0, overig: 0, totaal: 0 });
-          const x = per.get(r.m), g = groepVan(codes, r.code, r.type), sub = (codes.get(r.code) || {}).subgroep;
-          x.totaal += r.n;
-          if (g === 'consult' && (sub === 'kort' || sub === 'middel' || sub === 'lang')) x[sub] += r.n;
-          else if (g === 'visite' && (sub === 'kort' || sub === 'lang')) x['visite_' + sub] += r.n;
-          else if (g === 'mi') x.mi += r.n; else if (g === 'poh-ggz') x.poh += r.n; else x.overig += r.n;
+          const per = regs.get(r.naam); if (!per.has(r.m)) per.set(r.m, regNul());
+          regTel(per.get(r.m), codes, r.code, r.type, r.n);
         }
         const soort = new Map(db.prepare('SELECT naam, soort FROM registreerder WHERE praktijk = ?').all(p.code).map((r) => [r.naam, r.soort]));
         p.registreerders = [...regs.entries()].sort((a, b) => a[0].localeCompare(b[0], 'nl')).map(([naam, per]) => ({ naam, soort: soort.get(naam) || 'persoon',
           maanden: [...per.entries()].sort().map(([m, x]) => Object.assign({ maand: m }, x)) }));
+        weekEnDag(db, codes, p, mnd, gedekt);   // wv4213 (L27)
         p.voorlopig = db.prepare('SELECT COUNT(*) AS n FROM regel WHERE praktijk = ? AND voorlopig = 1').get(p.code).n;
         // wv4148 (2C50, David 25-11-2026 Ja): datastand bovenaan en blok "Valt op". Alleen tellingen per code en maand, nooit per patiënt.
         const db0 = db.prepare('SELECT MIN(dag) AS a, MAX(dag) AS b FROM dagbron WHERE praktijk = ?').get(p.code);
@@ -1304,4 +1360,4 @@ function maak(o) {
   return { app, info, herbouw, jaarBedragen, chatControleer, _plan: plan, _pseudo: pseudo };   // wv4212: chatControleer
 }
 
-module.exports = { maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht };
+module.exports = { isoWeek, ROLGROEP, maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht };

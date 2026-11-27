@@ -375,3 +375,52 @@ test('wv3111: een naam negeren — geen voorstel, niet in de werkdagen, terug te
   // de lijst rollen kent de praktijkmanager (geen arts)
   assert.deepStrictEqual(g().rollen.find((x) => x.id === 'praktijkmanager'), { id: 'praktijkmanager', naam: 'Praktijkmanager', arts: false });
 });
+
+// wv4213 (L27, David 25-11-2026 Ja): PMA per week en het patroon per weekdag — met de hand geteld op exportPersoneel (sep–okt 2026):
+// A. Proefsen ma/di/do 9, B. Verzonnen wo 6, Q. Artsma ma–vr 4, Waarnemer2 vr 1 (niet gekoppeld = los). 1 sep 2026 is een dinsdag.
+test('wv4213 ISO-week: jaargrens en week 53', () => {
+  assert.deepStrictEqual(['2025-12-29', '2026-01-01', '2026-01-04', '2026-01-05', '2026-12-31', '2027-01-03', '2027-01-04', '2021-01-03'].map(P.isoWeek),
+    ['2026-W01', '2026-W01', '2026-W01', '2026-W02', '2026-W53', '2026-W53', '2027-W01', '2020-W53']);
+  assert.deepStrictEqual(['huisarts-praktijkhouder', 'waarnemer', 'aios', 'assistente', 'poh-s', 'poh-ggz', 'praktijkmanager', 'stagiair', null].map(P.ROLGROEP),
+    ['arts', 'arts', 'arts', 'assistente', 'poh-s', 'poh-ggz', 'ander', 'ander', 'los']);
+});
+test('wv4213 weken tellen op tot de maanden; weekdag per rolgroep; open dagen zonder feestdag', () => {
+  const m = P.maak({ map: tmp(), personeel: () => NEP });
+  lees(m, exportPersoneel());
+  const post = (pad, body) => m.app({ methode: 'POST', pad: '/app/pma/' + pad, body });
+  const b = m.app({ methode: 'GET', pad: '/app/pma/personeel' }).body;
+  for (const n of ['A. Proefsen', 'Q. Artsma']) { const v = b.registreerders.find((x) => x.naam === n).voorstel; assert.strictEqual(post('koppel', { praktijk: 'TG', naam: n, nieuw: v.nieuw, rollen: v.rollen }).status, 200); }
+  assert.strictEqual(post('koppel', { praktijk: 'TG', naam: 'B. Verzonnen', nieuw: { naam: 'Bram Verzonnen', nmbrs: NEP.medewerkers[1].id, dienst: 'pot' }, rollen: [{ rol: 'poh-ggz', van: '2025-01-01' }] }).status, 200);
+  const p = m.app({ methode: 'GET', pad: '/app/pma' }).body.praktijken.find((x) => x.code === 'TG');
+  const ver = (x) => Object.entries(x.groepen).filter(([g]) => g !== 'niet-gedeclareerd').reduce((a, [, v]) => a + v.n, 0);
+  // weken: 31-8 t/m 1-11 = W36..W44; alle groepen samen gelijk aan de maanden
+  assert.deepStrictEqual(p.weken.map((w) => w.week), ['2026-W36', '2026-W37', '2026-W38', '2026-W39', '2026-W40', '2026-W41', '2026-W42', '2026-W43', '2026-W44']);
+  const som = (xs) => { const u = {}; for (const x of xs) for (const [g, v] of Object.entries(x.groepen)) { u[g] = u[g] || { n: 0, cent: 0 }; u[g].n += v.n; u[g].cent += v.cent; } return u; };
+  assert.deepStrictEqual(som(p.weken), som(p.maanden));
+  const w36 = p.weken[0];
+  assert.deepStrictEqual([w36.van, w36.dagen, w36.dagen_gedekt, w36.kalender, ver(w36)], ['2026-08-31', 7, 6, '0111111', (9 + 4) + (6 + 4) + (9 + 4) + (4 + 1)]);
+  assert.deepStrictEqual(w36.wd, { assistente: [0, 9, 0, 9, 0], arts: [0, 4, 4, 4, 4], 'poh-ggz': [0, 0, 6, 0, 0], los: [0, 0, 0, 0, 1] });
+  assert.deepStrictEqual(w36.wd_open, [0, 1, 1, 1, 1]);
+  // september: ma 4×, di 5×, wo 5×, do 4×, vr 4×
+  const sep = p.maanden.find((x) => x.maand === '2026-09');
+  assert.deepStrictEqual(sep.wd, { assistente: [36, 45, 0, 36, 0], arts: [16, 20, 20, 16, 16], 'poh-ggz': [0, 0, 30, 0, 0], los: [0, 0, 0, 0, 4] });
+  assert.deepStrictEqual([sep.wd_open, sep.weekend], [[4, 5, 5, 4, 4], 0]);
+  // elke maand en week: weekdagen + weekend = verrichtingen
+  for (const x of p.maanden.concat(p.weken)) assert.strictEqual(Object.values(x.wd).reduce((a, r) => a + r.reduce((q, n) => q + n, 0), 0) + x.weekend, ver(x), x.maand || x.week);
+  // W44 = 26-10 t/m 1-11; de export eindigt op 31-10: zondag niet gedekt
+  assert.deepStrictEqual([p.weken[8].dagen_gedekt, p.weken[8].kalender, p.weken[8].wd_open], [6, '1111110', [1, 1, 1, 1, 1]]);
+  // geen registreerder-weken (bewust: te klein per week en 100 kB extra)
+  assert.ok(p.registreerders.every((r) => r.weken === undefined));
+});
+test('wv4213 feestdag telt niet als open dag; verrichting in het weekend apart', () => {
+  const m = P.maak({ map: tmp(), personeel: () => NEP });
+  const r = (dag, reg) => ({ pnr: '900001', code: M.C.kort[0], oms: M.C.kort[1], type: 'V', reg: reg || 'A. Proefsen', agb: '', tarief: M.C.kort[2], dag, factuur: '2026-05-31' });
+  // Koningsdag 27-4-2026 (maandag) en Hemelvaart 14-5-2026 (donderdag); zaterdag 2-5 één regel
+  lees(m, M.maakExport({ agb: '009870', exportdatum: '2026-06-02', begin: '2026-04-27', eind: '2026-05-17', zonderPnr: true, regels: [r('2026-04-28'), r('2026-05-02'), r('2026-05-14'), r('2026-05-15')] }));
+  const p = m.app({ methode: 'GET', pad: '/app/pma' }).body.praktijken.find((x) => x.code === 'TG');
+  const w18 = p.weken.find((w) => w.week === '2026-W18'), w20 = p.weken.find((w) => w.week === '2026-W20');
+  assert.deepStrictEqual([w18.wd_open, w18.weekend, w18.wd.los], [[0, 1, 1, 1, 1], 1, [0, 1, 0, 0, 0]]);
+  assert.deepStrictEqual([w20.wd_open, w20.wd.los], [[1, 1, 1, 0, 1], [0, 0, 0, 1, 1]]);   // de regel op Hemelvaart telt wel mee, de dag niet als open
+  const apr = p.maanden.find((x) => x.maand === '2026-04'), mei = p.maanden.find((x) => x.maand === '2026-05');
+  assert.deepStrictEqual([apr.wd_open, mei.wd_open], [[0, 1, 1, 1, 0], [2, 2, 2, 1, 3]]);
+});
