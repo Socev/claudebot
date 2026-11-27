@@ -5,7 +5,8 @@
 # adres, PRIVE, openbaar domein nooit via het domein); scope (harde marker, onbekende marker, vastgehouden/weg, keuze hard, harde weging,
 # "mogelijk medisch" en onleesbaar gaan wél mee, quarantaine niet verstuurd, andere route niet, bijlage niet); target uit de bevestigde
 # kennisbestemming (niet PRIVE, onbekende code = null); alle versies van de route mee (buiten scope met een lege lijst) + versies die alleen de
-# databank nog kent; zet-gelijk + droge tweede ronde = 0; schakelaar/routes; nooit een '@' naar Supabase; koppeling in server.js.
+# databank nog kent; zet-gelijk + droge tweede ronde = 0; schakelaar/routes; een '@' alleen in het veld adres van een vermelding (wv4159) en
+# dan precies het opgeloste adres; koppeling in server.js.
 # Gebruik: bash test/sb2-berichten.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -97,8 +98,11 @@ let vv = B.versiesVan(db, 'gmail.david', opl);
 const V = vv.versies, t = vv.t;
 const g = V.get(R.goed);
 toets('scope: goed stuk → afzender X, ontvanger Y (één keer per kop), cc ZH; openbaar en eigen adres overgeslagen',
-  !!g && JSON.stringify(g.mentions) === JSON.stringify([{ kop: 'van', nr: 0, rol: 'afzender', object_id: E.X }, { kop: 'aan', nr: 1, rol: 'ontvanger', object_id: E.Y },
-    { kop: 'cc', nr: 0, rol: 'cc', object_id: E.ZH }]), g);
+  !!g && JSON.stringify(g.mentions) === JSON.stringify([{ kop: 'van', nr: 0, rol: 'afzender', object_id: E.X, adres: 'x@persoon.invalid' },
+    { kop: 'aan', nr: 1, rol: 'ontvanger', object_id: E.Y, adres: 'y@bedrijf.invalid' }, { kop: 'cc', nr: 0, rol: 'cc', object_id: E.ZH, adres: 'balie@ziekenhuis-proef.invalid' }]), g);
+toets('adres (wv4159): twee adressen van dezelfde entiteit in één kop → het adres van de eerste positie', g && g.mentions[1].nr === 1 && g.mentions[1].adres === 'y@bedrijf.invalid', g);
+toets('adres (wv4159): elk meegestuurd adres is opgelost (nooit eigen, openbaar of onbekend)', Array.from(V.values()).every((x) => x.mentions.every((m) => typeof m.adres === 'string'
+  && m.adres !== 'david.proef@voorbeeld.invalid' && m.adres !== 'wie@gmail.com' && opl.los(m.adres).object_id === m.object_id)));
 toets('target: bevestigde kennisbestemming TG → object-id', g && g.target_org_id === E.TG, g);
 for (const n of ['marker', 'markerNull', 'hard', 'weging', 'vast', 'weg']) {
   const x = V.get(R[n]);
@@ -132,10 +136,12 @@ function nepSb(o) {
       if (p.versies.length > 200) throw new Error('batch te groot');
       for (const v of p.versies) {
         u.versies++;
-        if (JSON.stringify(v).indexOf('@') >= 0) { u.geweigerd.apenstaart = (u.geweigerd.apenstaart || 0) + 1; continue; }
+        // zoals 0033: een '@' mag alleen in het veld adres van een vermelding
+        const zonder = Object.assign({}, v, { mentions: (v.mentions || []).map((m) => { const c = Object.assign({}, m); delete c.adres; return c; }) });
+        if (JSON.stringify(zonder).indexOf('@') >= 0) { u.geweigerd.apenstaart = (u.geweigerd.apenstaart || 0) + 1; continue; }
         const kk = p.route + '|' + v.revision_id;
         const oud = st.rijen.get(kk) || new Set();
-        const nieuw = new Set(v.mentions.map((m) => [m.kop, m.nr, m.rol, m.object_id].join(':')));
+        const nieuw = new Set(v.mentions.map((m) => [m.kop, m.nr, m.rol, m.object_id, m.adres || ''].join('|')));
         for (const x of oud) if (!nieuw.has(x)) u.weg++;
         for (const x of nieuw) if (oud.has(x)) u.gelijk++; else u.nieuw++;
         const ot = st.target.get(kk) || null;
@@ -166,7 +172,14 @@ function nepSb(o) {
   const rd = r.routes['gmail.david'];
   toets('echte ronde: alle versies van de route + de versie die alleen de databank kent, tweede ronde 0', r.ok && rd.verstuurd === V.size + 1 && rd.niet_meer_op_pod === 1 && rd.tweede === 0 && rd.eerste.nieuw === rd.vermeldingen, rd);
   toets('echte ronde: register- en scope-tellingen alleen getallen', typeof r.register.exact === 'number' && JSON.stringify(r).indexOf('@') < 0, r);
-  toets('nooit een @ naar Supabase (koppel en stand)', nep.st.payload.every((x, i) => nep.st.aanroepen[i] === 'sb2_bericht_register' || x.indexOf('@') < 0));
+  toets('een @ alleen in het adres van een vermelding (koppel en stand)', nep.st.payload.every((x, i) => {
+    if (nep.st.aanroepen[i] === 'sb2_bericht_register') return true;
+    const b = JSON.parse(x);
+    const vs = b.p && Array.isArray(b.p.versies) ? b.p.versies : [];
+    const kaal = JSON.stringify(Object.assign({}, b, { p: b.p ? Object.assign({}, b.p, { versies: vs.map((v) => Object.assign({}, v, { mentions: v.mentions.map((m) => { const c = Object.assign({}, m); delete c.adres; return c; }) })) }) : undefined }));
+    return kaal.indexOf('@') < 0;
+  }) && nep.st.payload.some((x) => x.indexOf('"adres":"x@persoon.invalid"') >= 0));
+  toets('adres in de databank (nep): de goede versie heeft afzender met adres', Array.from(nep.st.rijen.get('gmail.david|' + R.goed) || []).some((x) => x === 'van|0|afzender|' + E.X + '|x@persoon.invalid'));
   toets('target op de goede versie', nep.st.target.get('gmail.david|' + R.goed) === E.TG && nep.st.target.get('gmail.david|' + R.prive) === null);
   // stuk raakt buiten scope (harde marker): de volgende ronde haalt zijn vermeldingen en target weg
   db.prepare("UPDATE stuk SET marker_patient = 'gemarkeerd' WHERE stuk_id = (SELECT stuk_id FROM spiegel WHERE ids LIKE ?)").run('%"revisie":' + R.goed + '%');

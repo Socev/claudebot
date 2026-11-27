@@ -6,9 +6,10 @@
  *
  * WAAROM. secondbrain.synapse telde 0 verbindingen uit berichten: niemand vulde mention en target_org_id. Deze stap lost elke nacht afzender,
  * ontvangers en cc van de gespiegelde mailstukken op tegen het register (identifier email/zorgmail exact, anders domein met puntgrens) en
- * zet in Supabase ALLEEN verwijzingen: per opgelost adres rolcode + kop + positie + entity-id (nooit adres, naam, domein of hash), plus
+ * zet in de databank per opgelost adres rolcode + kop + positie + entity-id en (sinds wv4159, 27-11) het opgeloste adres zelf, plus
  * target_org_id = de eigen entiteit waar de router de mail bevestigd heen stuurde (niet PRIVE: dat is David zelf). David gaf Ja op de kaart
- * "Second Brain — mag Socev bijhouden wie met wie mailt?" (4-11-2026).
+ * "Second Brain — mag Socev bijhouden wie met wie mailt?" (4-11-2026) en op besluit nr 172 / 2C72 (25-11-2026: "mogen de mailadressen zelf
+ * nu in je eigen databank staan?"; de databank is sinds 19-11 de eigen Postgres in de pod, niet meer Supabase).
  *
  * HOE (nachtketen-stap sb2-berichten ná intake-voorstel en vóór sb2-synapsen; met de hand via mk-scripts/wv2372/hand.js [--droog]):
  *  1. Register via public.sb2_bericht_register (service_role): email/zorgmail/domein → entiteit, eigen entiteiten per short_code.
@@ -21,7 +22,9 @@
  *     maildomein; alleen bij precies één entiteit (dubbelzinnig = overslaan en tellen). Per (kop, entiteit) één vermelding (eerste positie).
  *  4. public.sb2_bericht_koppel in batches van ≤ 200 (zet-gelijk), daarna een droge tweede ronde: die moet 0 verschillen geven.
  *
- * Privacy: naar Supabase alleen revision-id's, rolcodes, posities en entity-id's. Logs en de staat: alleen tellingen.
+ * Privacy: naar de databank revision-id's, rolcodes, posities, entity-id's en per vermelding het opgeloste adres (veld adres; alleen adressen
+ * die op een entiteit uitkwamen, nooit Davids eigen adressen, PRIVE of een niet-opgelost adres; databankkant socev-scripts 0033). Naam, domein
+ * of hash gaan nooit mee. Logs en de staat: alleen tellingen.
  *
  * VORM. Geen eigen afhankelijkheden; database, RPC, schakelaar en eigen adressen komen via maak(o), zodat test/sb2-berichten.sh het met een
  * nep-Supabase en verzonnen adressen kan draaien.
@@ -148,7 +151,7 @@ function versiesVan(db, route, opl) {
           const k = kop + ':' + u.object_id;
           if (gezien.has(k)) continue;   // dezelfde entiteit twee keer in één kop: één vermelding (eerste positie)
           gezien.add(k);
-          v.mentions.push({ kop, nr: x.nr, rol, object_id: u.object_id });
+          v.mentions.push({ kop, nr: x.nr, rol, object_id: u.object_id, adres: x.adres });   // wv4159: adres van de eerste positie
         }
       }
       if (v.mentions.length > MAX_VERMELDINGEN) { tel(t.buiten, 'te_veel'); v.mentions = []; }

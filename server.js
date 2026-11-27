@@ -25788,8 +25788,8 @@ async function sb2SynapsenRonde() {
   return { ok: true, detail: detail };
 }
 // wv2383 (SB2 fase 6 § 6.2): berichtverbindingen — afzender/ontvangers/cc van de gespiegelde mailstukken opgelost tegen het register
-// (identifier email/zorgmail/domein) als verwijzing in secondbrain.mention (rolcode + kop + positie + entity-id; nooit een adres) en
-// target_org_id uit de routerbestemming; logica en waarom in sb2-berichten.js, databankkant socev-scripts 0025. Keten-stap ná
+// (identifier email/zorgmail/domein) als verwijzing in secondbrain.mention (rolcode + kop + positie + entity-id; sinds wv4159 ook het opgeloste
+// adres, kolom adres) en target_org_id uit de routerbestemming; logica en waarom in sb2-berichten.js, databankkant socev-scripts 0025 + 0033. Keten-stap ná
 // intake-voorstel en vóór sb2-synapsen, alleen met de schakelaar scripts-staat/sb2-berichten/aan.json {"aan": true, "routes": ["gmail.david"]}
 // (van claude, gewoon bestand); zonder schakelaar slaat de keten hem stil over. Zet-gelijk, daarna een droge tweede ronde (moet 0 geven).
 const SB2_BER_DIR = '/opt/data/scripts-staat/sb2-berichten';
