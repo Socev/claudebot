@@ -4877,7 +4877,8 @@ function handleRequest(req, res) {
       map_ingang: typeof mapIngangInfo === 'function' ? mapIngangInfo() : { module: false },   // wv3962: map → Intake (tellers, geen namen)   // wv3299: OVIS Tabula-opdrachtenloket (lijn, laatste ophaalronde, dagtellers per soort; nooit tekst, titel of code)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
-      weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
+      weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },
+      aankomst: typeof aankomstInfo === 'function' ? aankomstInfo() : { aan: false },   // wv4207: kaart bij aankomst (dag, praktijk, aantallen; geen tekst)   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
       contactringen: typeof contactringenInfo === 'function' ? contactringenInfo() : { aan: false },
       ml_weekboek: typeof mlWeekboekInfo === 'function' ? mlWeekboekInfo() : { aan: false },   // wv4131
       open_eindjes: typeof openEindjesInfo === 'function' ? openEindjesInfo() : { aan: false },
@@ -19903,6 +19904,7 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'doorgeefluik',         // wv1267: regel in de machinekamer als David een opdracht via Socev op de werklijst zette
   'manager',              // wv895: rapport van een manager-ronde op afroep (machinekamer; soort antwoord als David of Socev hem startte)
   'facturen-boekstuk',    // wv2316: boekstuk Google Home naar André (verstuurd = archief; concept of vraag = dag)
+  'aankomst',             // wv4207 (3C199): kaart bij aankomst op de praktijk (wat daar vandaag speelt, wie er werkt); hoofdkanaal, soort dag
   'weer-avond',           // wv2605: avondseintje bij vroeg vertrek (gladheid/storm/onweer/KNMI 05:00–08:00 morgen); hoofdkanaal, soort dag
   'nieuwsbrief',          // wv2190: wekelijkse bloemlezing uit de nieuwsbrieven (za 09:15, AI - Nieuwsbrief-bloemlezing); hoofdkanaal, soort dag
   'beleggen-week',        // wv2993: OVIS Beleggen weekbericht (zondag 09:00; alleen aantallen, geen namen of bedragen); hoofdkanaal, soort dag
@@ -19929,7 +19931,7 @@ const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
 // in Telegram tikte David 17 van 18 regels aan (mediaan 7 min), in de app 28 van 80 (mediaan 289 min).
 // wv3719 (3C04, David Ja 21-11 13:22): heartbeat = dag. 11 van de 19 heartbeat-berichten (afval, "morgen laatste dag") kwamen
 // als archief binnen, zonder seintje. Een stille ronde (NIETS) komt hier nooit: de n8n-Heartbeat stuurt dan niets.
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'beleggen-waarom': 'dag', 'pot-antwoord': 'dag', 'apps-avond': 'dag', 'herinnering-david': 'dag', pakjes: 'dag', 'pot-loonrun': 'dag' };   // wv4154: pakjes (vóór pot-loonrun: bericht-bronnen.sh K zoekt die regel)
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', aankomst: 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'beleggen-waarom': 'dag', 'pot-antwoord': 'dag', 'apps-avond': 'dag', 'herinnering-david': 'dag', pakjes: 'dag', 'pot-loonrun': 'dag' };   // wv4154: pakjes (vóór pot-loonrun: bericht-bronnen.sh K zoekt die regel)
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
@@ -27941,6 +27943,41 @@ async function weerAvondTik() {
   finally { weerAvondBezig = false; }
 }
 if (weerOchtend && SERVER_ECHT) { setInterval(function () { weerAvondTik(); }, 5 * 60000).unref(); }
+// ── wv4207 (besluitenpagina nr 499 = 3C199, David Ja 25-11-2026 22:09): ochtendbericht in drie momenten, moment 3 'ter plekke' ──
+// Bij aankomst op Tolgaarde of Groenhouten (ma–vr 07:00–11:59) één kaart in het hoofdgesprek met wat op déze praktijk vandaag speelt
+// (rubriek + praktijkpunten uit de briefing van vandaag) en wie er werkt (artsenrooster). Logica en waarom in aankomst-kaart.js;
+// ontwerp + Codex-ontwerpreview mk-scripts/wv4207/ontwerp.md. Eigen klok elke 2 min (echte pod, rol primair). Uit zonder uitrol:
+// {"uit": true} in klokken/aankomst-kaart.json. Bezorgen via berichtIntern (bron aankomst, soort dag = met seintje, sleutel per dag).
+const aankomstKaart = (function () {
+  const p = path.join(__dirname, 'aankomst-kaart.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ staatPad: path.join(KLOKKEN_DIR, 'aankomst-kaart.json'),
+      locatie: function () { return appSbRpc('sb_app_locatie', {}); },
+      rooster: function (d) { return appSbRpc('sb_kalender_tijdlijn', { p_van: d, p_tot: d }, 20000); },
+      // de briefing van vandaag zoals de app hem toont (vroege versie + aanvulling samen); compleet = het 07:00-deel staat er
+      briefing: async function () {
+        const b = await appBriefingLaad();
+        if (!b || !b.tekst) return null;
+        return { dag: b.dag, tekst: b.tekst, compleet: (b.delen || 1) > 1 || !BRIEFING_VROEG_RE.test(b.tekst) };
+      },
+      melden: async function (tekst, sl) {
+        const r = await berichtIntern({ kanaal: 'hoofd', bron: 'aankomst', klasse: 'normaal', soort: 'dag', tekst: tekst, sleutel: sl });
+        if (!r || r.status !== 200) throw new Error('bericht niet bezorgd (' + (r && r.status) + ')');
+      },
+      log: function (o) { schrijfLog(nu() + ' aankomst ' + velden(o)); } });
+  } catch (e) { logError('aankomst-kaart', e); return null; }
+})();
+function aankomstInfo() { if (!aankomstKaart) return { aan: false }; try { return aankomstKaart.info(); } catch (e) { return { aan: true, fout: true }; } }
+let aankomstBezig = false;
+async function aankomstTik() {
+  if (!aankomstKaart || !SERVER_ECHT || !rolPrimair() || aankomstBezig) return;
+  aankomstBezig = true;
+  try { await aankomstKaart.tik(); }
+  catch (e) { logError('aankomst-kaart', e); }
+  finally { aankomstBezig = false; }
+}
+if (aankomstKaart && SERVER_ECHT) { setInterval(function () { aankomstTik(); }, 2 * 60000).unref(); }
 // ── Dagplan in Vandaag te doen + Zet erbij (wv3906, nr 456 = 3C156, David Ja 22-11 18:15; ontwerp mk-scripts/wv3906/ontwerp.md) ──
 // GET /app/vandaag krijgt `dagplan` (vers uit heartbeat.md § Dagplan vandaag, buiten de 3-min-cache, plus Davids eigen herinneringen).
 // POST /app/dagplan/veeg {sleutel} = "- [x] … — weggeveegd door David" (alleen een regel die nog "- [ ]" is, niet in een tikvenster);
