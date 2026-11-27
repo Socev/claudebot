@@ -29,7 +29,7 @@ function omgeving(opts) {
     resolveKeuze: (d) => ({ runtime: 'claude', model: d.model, fallback: '' }),
     serverPad: (n, env, echt) => env || echt, serverProefDeel: (x) => x,
     schrijfLog: (r) => uit.log.push(r), nu: () => 'NU', velden: (o) => JSON.stringify(o), logError: (n) => uit.log.push('fout ' + n),
-    nzaCitaatToets: async () => ({ ok: false }),
+    nzaCitaatToets: async () => ({ ok: false }), nzaLeesPlek: async () => ({ ok: true, tekst: '' }),
     appWeiger: (res, status, melding, reden) => { uit.geweigerd.push({ status, reden }); return { status, reden }; },
     appStuur: (res, status, body) => { uit.gestuurd.push({ status, body }); return { status, body }; },
     enqueue: (key, f) => { uit.rij.push({ key, f }); },
@@ -112,4 +112,21 @@ test('mislukte advocaat → run fout; "bezig" zonder lopende run (herstart) → 
   const oud = l.body.runs.find((x) => x.id === 'r-20261127-0100-aaaaaaaa');
   assert.strictEqual(oud.status, 'fout');
   assert.match(oud.fout, /afgebroken/);
+});
+
+test('Codex MOET 2: twee gelijktijdige starts = één run, de tweede krijgt al bezig', async () => {
+  const o = omgeving();
+  const [r1, r2] = await Promise.all([o.ctx.appNzaRechter({}, RES(), {}, 'POST /app/nza/rechter', {}), o.ctx.appNzaRechter({}, RES(), {}, 'POST /app/nza/rechter', {})]);
+  const al = [r1, r2].filter((r) => r.body && r.body.al).length;
+  assert.strictEqual(al, 1);
+  assert.strictEqual(fs.readdirSync(path.join(o.T, 'rechter')).length, 1);
+  await draaiRij(o);
+  assert.strictEqual(o.uit.prompts.length, 3);
+});
+
+test('dossier niet te lezen: plek weer vrij', async () => {
+  const o = omgeving();
+  o.ctx.NZA_SCHERM.app = async () => ({ status: 503, body: {} });
+  assert.strictEqual((await o.ctx.appNzaRechter({}, RES(), {}, 'POST /app/nza/rechter', {})).reden, 'nza-rechter dossier');
+  assert.strictEqual(o.ctx.lopend(), null);
 });

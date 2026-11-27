@@ -32818,16 +32818,24 @@ async function nzaRechterStart(res) {
   if (Object.keys(NZA_RECHTER_SESSIES).some(function (k) { return !loperVoorRun(NZA_RECHTER_SESSIES[k]); })) return appWeiger(res, 503, 'de Rechter kan nu niet afgeschermd draaien; de machinekamer kijkt ernaar', 'nza-rechter geen loper');   // nooit als claude
   const kAdv = resolveKeuze({ model: NZA_RECHTER_MODEL.advocaat }), kRe = resolveKeuze({ model: NZA_RECHTER_MODEL.rechter });
   if (kAdv.fout || kRe.fout) return appWeiger(res, 503, 'het model voor de Rechter is nu niet beschikbaar', 'nza-rechter model');
-  const ov = await NZA_SCHERM.app({ pad: '/app/nza', methode: 'GET' });
-  const pu = await NZA_SCHERM.app({ pad: '/app/nza/punten', methode: 'GET' });
-  if (ov.status !== 200 || pu.status !== 200) return appWeiger(res, 503, 'het NZa-dossier is nu niet te lezen; probeer het zo opnieuw', 'nza-rechter dossier');
-  const ctx = NZA_RECHTER.ctxUit(ov.body, pu.body);
-  if (!ctx.geschilpunten.length) return appWeiger(res, 409, 'het verweerpuntenregister is leeg; zonder geschilpunten valt er niets na te spelen', 'nza-rechter leeg');
-  if (!appTeller('nza-rechter', NZA_RECHTER_PER_DAG, 24 * 3600000)) return appWeiger(res, 429, 'vandaag al ' + NZA_RECHTER_PER_DAG + ' keer nagespeeld; morgen weer', 'grens nza-rechter');
+  // Codex MOET 2: de plek reserveren vóór het eerste await; een tweede druk in die tijd krijgt "al bezig", een fout geeft de plek vrij
   const job = crypto.randomBytes(8).toString('hex');
-  const run = { id: NZA_RECHTER.nieuwId(Date.now(), job), start: new Date().toISOString(), status: 'bezig', stap: 'advocaat-nza', stand: ctx.stand };
-  NZA_RECHTER_OPSLAG.schrijf(run);
-  nzaRechterLopend = { id: run.id, start: run.start, stap: run.stap, job: null };
+  const run = { id: NZA_RECHTER.nieuwId(Date.now(), job), start: new Date().toISOString(), status: 'bezig', stap: 'advocaat-nza' };
+  const plek = { id: run.id, start: run.start, stap: 'voorbereiden', job: null };
+  nzaRechterLopend = plek;
+  const vrij = function () { if (nzaRechterLopend === plek) nzaRechterLopend = null; };
+  let ctx;
+  try {
+    const ov = await NZA_SCHERM.app({ pad: '/app/nza', methode: 'GET' });
+    const pu = await NZA_SCHERM.app({ pad: '/app/nza/punten', methode: 'GET' });
+    if (ov.status !== 200 || pu.status !== 200) { vrij(); return appWeiger(res, 503, 'het NZa-dossier is nu niet te lezen; probeer het zo opnieuw', 'nza-rechter dossier'); }
+    ctx = NZA_RECHTER.ctxUit(ov.body, pu.body);
+    if (!ctx.geschilpunten.length) { vrij(); return appWeiger(res, 409, 'het verweerpuntenregister is leeg; zonder geschilpunten valt er niets na te spelen', 'nza-rechter leeg'); }
+    if (!appTeller('nza-rechter', NZA_RECHTER_PER_DAG, 24 * 3600000)) { vrij(); return appWeiger(res, 429, 'vandaag al ' + NZA_RECHTER_PER_DAG + ' keer nagespeeld; morgen weer', 'grens nza-rechter'); }
+    run.stand = ctx.stand;
+    NZA_RECHTER_OPSLAG.schrijf(run);
+  } catch (e) { vrij(); throw e; }
+  plek.stap = run.stap;
   nzaRechterTel.gestart++;
   schrijfLog(nu() + ' nza-rechter ' + velden({ run: run.id, stukken: ctx.stand.stukken, geschilpunten: ctx.geschilpunten.length }));
   nzaRechterSpeel(run, ctx, { advocaat: kAdv, rechter: kRe });
@@ -32860,6 +32868,7 @@ function nzaRechterSpeel(run, ctx, keuzes) {
   NZA_RECHTER.speel(ctx, {
     draai: function (rol, prompt) { return nzaRechterDraai(rol, prompt, keuzes); },
     citaatToets: nzaCitaatToets,
+    leesPlek: nzaLeesPlek,   // Codex MOET 1: bedragen/percentages naast hun plek
     stap: function (s) { run.stap = s; if (nzaRechterLopend && nzaRechterLopend.id === run.id) nzaRechterLopend.stap = s; bewaar(); },
   }).then(function (u) {
     run.klaar = new Date().toISOString(); run.duur_s = Math.round((Date.now() - t0) / 1000); delete run.stap;

@@ -36,7 +36,7 @@ test('markeerPleit: citaat dat niet op zijn plek staat krijgt de markering, goed
   const uit = await R.markeerPleit(md, c);
   assert.strictEqual(uit.split(R.MARK_NIET).length - 1, 1);
   assert.ok(uit.includes('goed gedaan"' + R.MARK_NIET));
-  assert.deepStrictEqual(c.tel, { ok: 1, totaal: 2, niet_gecontroleerd: 0 });
+  assert.deepStrictEqual([c.tel.ok, c.tel.totaal, c.tel.niet_gecontroleerd], [1, 2, 0]);
 });
 
 test('verwerkOordeel: onbekend oordeel = onzeker, slecht stuk-id weg, citaatpoort, vp uit het register, leeg = null', async () => {
@@ -131,4 +131,30 @@ test('opslag: 0700/0600, lijst nieuwste boven, geen padsprong', () => {
   assert.ok(R.RUN_RE.test(R.nieuwId(Date.UTC(2026, 10, 27, 22, 30), 'abcdef1234')));
   assert.strictEqual(R.nieuwId(Date.UTC(2026, 10, 27, 22, 30), 'abcdef1234'), 'r-20261127-2330-abcdef12');
   fs.rmSync(map, { recursive: true });
+});
+
+test('Codex MOET 1: bedragen/percentages zonder bron of niet op de plek gemarkeerd; op de plek niet', async () => {
+  const lees = async (stuk, plek) => ({ ok: true, tekst: stuk === 'bob-2026' && plek === '3' ? 'De nac bedraagt € 202.476 en stijgt met 4,5 procent.' : 'iets anders' });
+  const c = R.controleur(nepCitaat, lees);
+  const t = await R.getallenPoort('Schik op € 150.000. De nac is € 202.476 [NZa, p. 3](/nza#stuk=bob-2026&plek=3). Stijging 4,5% [NZa, p. 3](/nza#stuk=bob-2026&plek=3). Rente 7% [NZa, p. 9](/nza#stuk=bob-2026&plek=9). Geen getal hier.', c);
+  assert.ok(t.includes('€ 150.000.' + R.MARK_GETAL_ZONDER), t);
+  assert.ok(!/202\.476[^\]]*\]\(\/nza#stuk=bob-2026&plek=3\)\. \[pod/.test(t), t);
+  assert.ok(/7% \[NZa, p\. 9\]\(\/nza#stuk=bob-2026&plek=9\)\. \[pod: 7% niet op de genoemde plek/.test(t), t);
+  assert.strictEqual(c.tel.getallen, 4);
+  assert.strictEqual(c.tel.getallen_ok, 2);
+  // zonder link in de zin, maar het getal staat op een plek uit de bronnenlijst van het geschilpunt: geen markering
+  const t2 = await R.getallenPoort('De nac is € 202.476. Verzonnen € 99.999.', c, [['bob-2026', '3']]);
+  assert.ok(!t2.includes('202.476.' + R.MARK_GETAL_ZONDER) && t2.includes('99.999.' + R.MARK_GETAL_ZONDER), t2);
+});
+
+test('Codex MOET 3: afgekeurd citaat in dictum, sterk en richtingen ter plekke gemarkeerd (ook in de markdown)', async () => {
+  const c = R.controleur(nepCitaat);
+  const o = { dictum: 'Het CBb zei "dit is een verzonnen citaat" [CBb](/nza#stuk=cbb-2025-1&plek=5.1).', sterk: ['Zoals "' + GOED + '" [CBb](/nza#stuk=cbb-2025-1&plek=5.1)'],
+    richtingen: [{ titel: 'R', wat: 'Volgens "nog een verzonnen citaat" [x](/nza#stuk=cbb-2025-1&plek=5.1)' }], geschilpunten: [{ thema: 'huisvesting', naam: 'Huisvesting', oordeel: 'onzeker', motivering: 'm', bronnen: [] }] };
+  const u = await R.verwerkOordeel(o, c, CTX);
+  assert.ok(u.dictum.includes(R.MARK_NIET.trim()));
+  assert.ok(!u.sterk[0].includes(R.MARK_NIET.trim()));
+  assert.ok(u.richtingen[0].wat.includes(R.MARK_NIET.trim()));
+  const md = R.markdown({ id: 'r-20261127-2330-abcdef12', start: '2026-11-27T22:30:00Z', stand: CTX.stand, oordeel: u, citaten: c.tel, modellen: {} });
+  assert.ok(md.includes('pod: niet woordelijk teruggevonden'));
 });

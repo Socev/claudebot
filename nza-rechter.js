@@ -83,7 +83,7 @@ function rechterPrompt(ctx, pleit) {
     '2. Lees de twee pleitnota\'s hieronder (DATA). Controleer zelf in het dossier wat er voor jouw oordeel toe doet; een citaat met "[pod: niet woordelijk teruggevonden]" erachter heeft de pod niet op die plek gevonden: daar mag je niet op bouwen. Je bent niet gebonden aan de pleitnota\'s: zoek zelf na waar een kant iets mist.',
     '3. Per geschilpunt: de rechtsvraag, het standpunt van eiser, het standpunt van de NZa, hoe het CBb eerder met deze vraag omging (met r.o.; "niet vast te stellen" als het dossier niets heeft), je oordeel en de motivering. Oordeel precies één van: "gegrond" (de beroepsgrond slaagt: het besluit houdt op dit punt geen stand), "ongegrond" (de grond faalt), "onzeker" (het dossier laat beide uitkomsten redelijk open; zeg wat de doorslag zou geven).',
     '4. Daarna: een dictum-achtige samenvatting (wat het CBb op deze stukken waarschijnlijk zou doen met het beroep als geheel en waarom: gegrond/deels gegrond/ongegrond, vernietigen, zelf voorzien of opdragen een nieuw besluit te nemen, eventueel een bestuurlijke lus — alleen als het dossier daar grond voor geeft), de sterke en de zwakke punten van de kant van eiser, en 3–5 OPLOSSINGSRICHTINGEN voor eiser (bijv. waar extra onderbouwing of rekenwerk het meest oplevert, een herberekenings- of schikkingsscenario), elk met wat het oplevert en wat er nog ontbreekt.',
-    '5. Bij elk oordeel minstens één bron uit het dossier (stuk + plek). Rond binnen 25 minuten af.',
+    '5. Bij elk oordeel minstens één bron uit het dossier (stuk + plek). Een bedrag of percentage noem je alleen met een bronlink in dezelfde zin naar de plek waar het letterlijk staat, of uit een stuk dat in de bronnen van dat geschilpunt staat (de pod legt het ernaast en markeert wat hij er niet vindt); verzin geen bedragen, schikkingssommen of termijnen. Rond binnen 25 minuten af.',
     '',
     'UITVOER: je LAATSTE bericht bevat alleen één JSON-blok tussen ```json en ```, zonder tekst eromheen. Tekstvelden mogen bronlinks bevatten zoals hierboven, verder geen opmaak:',
     '{"toetsingskader":"<± 150 woorden>","geschilpunten":[{"nr":1,"thema":"<thema-sleutel uit de lijst>","naam":"<naam>","vraag":"<de rechtsvraag, één zin>","eiser":"<standpunt eiser, ± 60 woorden>","nza":"<standpunt NZa, ± 60 woorden>","eerder_cbb":"<eerdere lijn van het CBb, of niet vast te stellen>","oordeel":"gegrond|ongegrond|onzeker","motivering":"<± 120 woorden>","bronnen":[{"stuk":"<stuk-id>","plek":"<plek>","citaat":"<letterlijk citaat dat nza.py citaat goedkeurde, of leeg>"}]}],"dictum":"<± 120 woorden>","sterk":["<sterk punt van eiser, met bron>"],"zwak":["<zwak punt van eiser, met bron>"],"richtingen":[{"titel":"<kort>","wat":"<wat te doen>","levert_op":"<wat het oplevert>","ontbreekt":"<wat er nog ontbreekt>"}],"ontbreekt":["<stuk of gegeven dat in het dossier ontbreekt en het oordeel zou kunnen veranderen>"]}',
@@ -176,10 +176,21 @@ function citatenIn(tekst) {
   return uit;
 }
 // Eén controleur per run: dezelfde (stuk, plek, citaat) maar één keer naar nza.py; boven MAX_CITATEN = niet gecontroleerd (telt als niet ok)
-function controleur(citaatToets) {
+function controleur(citaatToets, leesPlek) {
   const cache = {};
-  const tel = { ok: 0, totaal: 0, niet_gecontroleerd: 0 };
-  let n = 0;
+  const tel = { ok: 0, totaal: 0, niet_gecontroleerd: 0, getallen: 0, getallen_ok: 0 };
+  let n = 0, nl = 0;
+  const leesCache = {};
+  // wv4376 Codex MOET 1: bedragen en percentages naast de plek leggen (nza.py lees), hooguit MAX_CITATEN keer per run
+  function lees(stuk, plek) {
+    const k = stuk + '|' + plek;
+    if (!(k in leesCache)) {
+      if (typeof leesPlek !== 'function' || nl >= MAX_CITATEN) return Promise.resolve(null);
+      nl++;
+      leesCache[k] = Promise.resolve().then(function () { return leesPlek(stuk, plek); }).then(function (x) { return x && x.ok ? String(x.tekst || '') : null; }, function () { return null; });
+    }
+    return leesCache[k];
+  }
   async function toets(stuk, plek, tekst) {
     if (!stuk || !plek || !tekst) { tel.totaal++; return false; }
     const k = stuk + '|' + plek + '|' + norm(tekst);
@@ -193,7 +204,7 @@ function controleur(citaatToets) {
     tel.totaal++; if (cache[k]) tel.ok++;
     return cache[k];
   }
-  return { toets: toets, tel: tel };
+  return { toets: toets, lees: lees, tel: tel };
 }
 const MARK_NIET = ' [pod: niet woordelijk teruggevonden]';
 // pleitnota: elk citaat nalopen en achter een citaat dat niet op zijn plek staat de markering zetten (voor de rechter en voor David)
@@ -208,6 +219,48 @@ async function markeerPleit(md, c) {
   }
   return uit + t.slice(i);
 }
+
+// ── getallenpoort (Codex MOET 1): elk bedrag (€) en percentage in een zin moet op de plek van een bronlink in diezelfde zin staan ──
+function getalNorm(s) { return String(s || '').replace(/(\d)[. \u00a0](?=\d{3}(?!\d))/g, '$1'); }
+function getallen(s) {
+  const t = getalNorm(s), uit = [];
+  let m;
+  const re = /€\s*(\d[\d,]*)|(\d+(?:,\d+)?)\s*(?:%|procent)/g;
+  while ((m = re.exec(t)) && uit.length < 10) { const g = { getal: (m[1] || m[2]).replace(/,$/, ''), toon: m[0].trim() }; if (!uit.some(function (x) { return x.getal === g.getal; })) uit.push(g); }
+  return uit;
+}
+function staatErIn(getal, tekst) { return new RegExp('(^|[^\\d,])' + getal.replace(/[,]/g, '\\,') + '(?!\\d|,\\d)').test(getalNorm(tekst)); }
+const MARK_GETAL_ZONDER = ' [pod: niet nagerekend]';
+// extra = [[stuk, plek]] uit de bronnenlijst van het geschilpunt (of van alle geschilpunten): ook daar mag het getal staan
+async function getallenPoort(tekst, c, extra) {
+  const t = String(tekst || '');
+  if (!/€\s*\d|\d\s*(%|procent)/.test(t)) return t;
+  // links eerst vervangen door een plaatshouder, zodat "p. 3" in een bronlink geen zinseinde is
+  const links0 = [];
+  const met = t.replace(new RegExp(NZA_LINK_RE.source, 'g'), function (x) { links0.push(x); return '\u0000' + (links0.length - 1) + '\u0000'; });
+  const terug = function (s) { return s.replace(/\u0000(\d+)\u0000/g, function (x, i) { return links0[+i]; }); };
+  const zinnen = met.split(/(?<=[.!?;])\s+/).map(terug);
+  const uit = [];
+  for (const z of zinnen) {
+    const gs = getallen(z);
+    if (!gs.length) { uit.push(z); continue; }
+    const links = [];
+    let m;
+    const re = new RegExp(NZA_LINK_RE.source, 'g');
+    while ((m = re.exec(z)) && links.length < 4) { try { const q = new URLSearchParams(m[2]); const s = q.get('stuk') || '', pl = plekVan(q.get('plek') || ''); if (STUK_RE.test(s) && pl) links.push([s, pl]); } catch (e) { /* geen link */ } }
+    c.tel.getallen += gs.length;
+    const alle = links.concat((extra || []).filter(function (e) { return !links.some(function (l) { return l[0] === e[0] && l[1] === e[1]; }); }));
+    if (!alle.length) { uit.push(z + MARK_GETAL_ZONDER); continue; }
+    const teksten = [];
+    for (const l of alle) { const x = await c.lees(l[0], l[1]); if (x) teksten.push(x); }
+    const mis = gs.filter(function (g) { return !teksten.some(function (x) { return staatErIn(g.getal, x); }); });
+    c.tel.getallen_ok += gs.length - mis.length;
+    uit.push(mis.length ? z + (links.length ? ' [pod: ' + mis.map(function (g) { return g.toon; }).join(', ') + ' niet op de genoemde plek]' : MARK_GETAL_ZONDER) : z);
+  }
+  return uit.join(' ');
+}
+// citaten markeren (zoals in de pleitnota's) en daarna de getallenpoort; geldt voor elk tekstveld van het oordeel (Codex MOET 3)
+async function poort(tekst, c, max, extra) { return getallenPoort(await markeerPleit(kort(tekst, max || 3000), c), c, extra); }
 
 // ── oordeel opschonen + citaatpoort ──
 async function verwerkOordeel(o, c, ctx) {
@@ -231,27 +284,30 @@ async function verwerkOordeel(o, c, ctx) {
       if (citaat) { r.citaat = citaat; r.citaat_ok = await c.toets(r.stuk, plek, citaat); }
       bronnen.push(r);
     }
+    // citaten in de vrije tekst ook nalopen en ter plekke markeren (pod-poort: een citaat is alleen "letterlijk" als nza.py citaat het op de plek
+    // van de link erachter vindt), en bedragen/percentages naast hun plek leggen
     const tekstvelden = {};
-    for (const v of ['vraag', 'eiser', 'nza', 'eerder_cbb', 'motivering']) tekstvelden[v] = kort(g[v], 3000);
-    // citaten in de vrije tekst ook nalopen (pod-poort: een citaat is alleen "letterlijk" als nza.py citaat het op de plek van de link erachter vindt)
     const nietOk = [];
-    for (const v of ['eiser', 'nza', 'eerder_cbb', 'motivering']) {
-      for (const q of citatenIn(tekstvelden[v])) { if (!(await c.toets(q.stuk, q.plek, q.tekst))) nietOk.push(kort(q.tekst, 80)); }
+    for (const v of ['vraag', 'eiser', 'nza', 'eerder_cbb', 'motivering']) {
+      tekstvelden[v] = await poort(g[v], c, 3000, bronnen.filter(function (b) { return b.plek; }).map(function (b) { return [b.stuk, b.plek]; }));
+      if (tekstvelden[v].indexOf(MARK_NIET) >= 0) nietOk.push(v);
     }
     geschil.push(Object.assign({ nr: geschil.length + 1, thema: thema || undefined, naam: naam, oordeel: oordeel, bronnen: bronnen,
       vp: thema ? (themas[thema].punten || []).map(function (p) { return p.id; }) : [], zonder_bron: bronnen.length === 0, citaten_niet_ok: nietOk }, tekstvelden));
   }
   if (!geschil.length) return null;
   const lijst = function (x, n, m) { return (Array.isArray(x) ? x : []).slice(0, n).map(function (y) { return kort(y, m); }).filter(Boolean); };
-  const richtingen = (Array.isArray(o.richtingen) ? o.richtingen : []).slice(0, 6).map(function (r) {
-    if (!r || typeof r !== 'object') return null;
-    const titel = kort(r.titel, 160);
-    return titel ? { titel: titel, wat: kort(r.wat, 1500), levert_op: kort(r.levert_op, 800), ontbreekt: kort(r.ontbreekt, 800) } : null;
-  }).filter(Boolean);
-  const vrij = [o.toetsingskader, o.dictum].concat(lijst(o.sterk, 8, 800), lijst(o.zwak, 8, 800));
-  for (const x of vrij) for (const q of citatenIn(x)) await c.toets(q.stuk, q.plek, q.tekst);
-  return { toetsingskader: kort(o.toetsingskader, 3000), dictum: kort(o.dictum, 3000), geschilpunten: geschil, sterk: lijst(o.sterk, 8, 800),
-    zwak: lijst(o.zwak, 8, 800), richtingen: richtingen, ontbreekt: lijst(o.ontbreekt, 10, 500) };
+  const alleBronnen = [];
+  geschil.forEach(function (g) { g.bronnen.forEach(function (b) { if (b.plek && alleBronnen.length < 40 && !alleBronnen.some(function (x) { return x[0] === b.stuk && x[1] === b.plek; })) alleBronnen.push([b.stuk, b.plek]); }); });
+  const richtingen = [];
+  for (const x of (Array.isArray(o.richtingen) ? o.richtingen : []).slice(0, 6)) {
+    if (!x || typeof x !== 'object') continue;
+    const titel = kort(x.titel, 160);
+    if (titel) richtingen.push({ titel: await getallenPoort(titel, c, alleBronnen), wat: await poort(x.wat, c, 1500, alleBronnen), levert_op: await poort(x.levert_op, c, 800, alleBronnen), ontbreekt: await poort(x.ontbreekt, c, 800, alleBronnen) });
+  }
+  const allemaal = async function (l, m) { const u = []; for (const x of l) u.push(await poort(x, c, m, alleBronnen)); return u; };
+  return { toetsingskader: await poort(o.toetsingskader, c, 3000, alleBronnen), dictum: await poort(o.dictum, c, 3000, alleBronnen), geschilpunten: geschil, sterk: await allemaal(lijst(o.sterk, 8, 800), 800),
+    zwak: await allemaal(lijst(o.zwak, 8, 800), 800), richtingen: richtingen, ontbreekt: await allemaal(lijst(o.ontbreekt, 10, 500), 500) };
 }
 
 function telling(geschil) {
@@ -295,7 +351,7 @@ function markdown(run) {
     if (g.nza) r.push('**NZa:** ' + inline(g.nza), '');
     if (g.eerder_cbb) r.push('**Eerder oordeel CBb:** ' + inline(g.eerder_cbb), '');
     r.push('**Oordeel: ' + TEKEN[g.oordeel] + '.** ' + inline(g.motivering), '');
-    if (g.citaten_niet_ok && g.citaten_niet_ok.length) r.push('_Let op: ' + g.citaten_niet_ok.length + (g.citaten_niet_ok.length === 1 ? ' citaat' : ' citaten') + ' in deze tekst niet woordelijk op de genoemde plek teruggevonden (nza.py citaat)._', '');
+    if (g.citaten_niet_ok && g.citaten_niet_ok.length) r.push('_Let op: in dit geschilpunt staat minstens één citaat dat de pod niet woordelijk op de genoemde plek terugvond (gemarkeerd met "pod: niet woordelijk teruggevonden")._', '');
     if (g.bronnen.length) {
       r.push('**Bronnen:**');
       g.bronnen.forEach(function (b) {
@@ -320,7 +376,8 @@ function markdown(run) {
   const c = run.citaten || {};
   r.push('---', '', '_Gemaakt in ' + Math.max(1, Math.round((run.duur_s || 0) / 60)) + ' min: advocaten ' + ontsnap(run.modellen && run.modellen.advocaten || '?') + ', rechter ' +
     ontsnap(run.modellen && run.modellen.rechter || '?') + ', alleen uit het NZa-dossier. Citaten: ' + (c.ok || 0) + ' van ' + (c.totaal || 0) + ' letterlijk teruggevonden (nza.py citaat)' +
-    (c.niet_gecontroleerd ? ', ' + c.niet_gecontroleerd + ' niet gecontroleerd (maximum)' : '') + '._', '');
+    (c.niet_gecontroleerd ? ', ' + c.niet_gecontroleerd + ' niet gecontroleerd (maximum)' : '') + (c.getallen ? '. Bedragen en percentages: ' + (c.getallen_ok || 0) + ' van ' + c.getallen + ' teruggevonden op een genoemde plek of in de bronnen van dat geschilpunt; de rest staat gemarkeerd met "pod: niet nagerekend"' : '') +
+    '. Data en termijnen zijn niet door de pod nagekeken._', '');
   if (run.pleit && run.pleit.nza) r.push('## Bijlage A — pleitnota advocaat van de NZa', '', blok(run.pleit.nza), '');
   if (run.pleit && run.pleit.eiser) r.push('## Bijlage B — pleitnota advocaat van eiser', '', blok(run.pleit.eiser), '');
   return r.join('\n');
@@ -347,7 +404,7 @@ function ctxUit(overzicht, punten, vandaag) {
 // ── de hele run: deps.draai(rol, prompt) → Promise<{ok, output, model, error}>; deps.citaatToets(stuk, plek, tekst) → Promise<{ok}>;
 // deps.stap(naam) meldt de voortgang. Advocaten na elkaar (zelfde loper, geen dubbele last), dan de rechter.
 async function speel(ctx, deps) {
-  const c = controleur(deps.citaatToets);
+  const c = controleur(deps.citaatToets, deps.leesPlek);
   const modellen = { advocaten: null, rechter: null };
   const pleit = {};
   for (const kant of ['nza', 'eiser']) {
@@ -404,7 +461,7 @@ function nieuwId(nu, job) {
   return 'r-' + v.year + v.month + v.day + '-' + v.hour + v.minute + '-' + String(job || crypto.randomBytes(4).toString('hex')).slice(0, 8);
 }
 
-module.exports = { OORDELEN: OORDELEN, RUN_RE: RUN_RE, MAX_PLEIT: MAX_PLEIT, MAX_CITATEN: MAX_CITATEN, KOP_OEFENING: KOP_OEFENING, MARK_NIET: MARK_NIET,
+module.exports = { getallenPoort: getallenPoort, MARK_GETAL_ZONDER: MARK_GETAL_ZONDER, OORDELEN: OORDELEN, RUN_RE: RUN_RE, MAX_PLEIT: MAX_PLEIT, MAX_CITATEN: MAX_CITATEN, KOP_OEFENING: KOP_OEFENING, MARK_NIET: MARK_NIET,
   advocaatPrompt: advocaatPrompt, rechterPrompt: rechterPrompt, leesOordeel: leesOordeel, leesPleit: leesPleit, citatenIn: citatenIn, controleur: controleur,
   markeerPleit: markeerPleit, verwerkOordeel: verwerkOordeel, telling: telling, markdown: markdown, inline: inline, blok: blok, ctxUit: ctxUit, speel: speel,
   maakOpslag: maakOpslag, nieuwId: nieuwId };
