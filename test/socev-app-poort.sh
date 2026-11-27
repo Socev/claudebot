@@ -374,6 +374,17 @@ async function nepFetch(url, opt) {
       Object.assign(x, { status: 'open', later_tot: null, toon_vanaf: x.spoed ? null : b.p_toon, bewijs: b.p_bewijs != null ? b.p_bewijs : x.bewijs });
       return antw(200, { ok: true, punt: Object.assign({}, x) });
     }
+    if (fn === 'mk_voor_jou_controle_dicht') {   // wv4197: zoals de echte (compare-and-set op status + veld/waarde, door beheer, "Gezien: ")
+      const x = (sbStaat.vj || []).find((y) => y.sleutel === b.p_sleutel);
+      if (!/^Gezien: .{5,}/.test(b.p_bewijs || '') || !['sleutel', 'koppeling', 'bestand'].includes(b.p_veld)) return antw(400, { message: 'ongeldig' });
+      if (!x || x.status !== b.p_van || x.soort === 'besluit' || !x.voorwaarde || x.voorwaarde.veld !== b.p_veld || x.voorwaarde.waarde !== b.p_waarde) return antw(200, { ok: false, fout: 'conflict', nu: x ? x.status : null });
+      Object.assign(x, { status: 'gedaan', gesloten_door: 'beheer', gesloten_op: new Date().toISOString(), bewijs: b.p_bewijs });
+      return antw(200, { ok: true, punt: Object.assign({}, x), vrij: [], overgeslagen: [] });
+    }
+    if (fn === 'mk_voor_jou_sleutel_stand') {   // wv4197: alleen naam en tijden; onbekend = databank weg
+      const st = (sbStaat.sleutelStand || {})[b.p_naam];
+      return st ? antw(200, st) : antw(500, { message: 'kapot' });
+    }
     if (fn === 'mk_voor_jou_nog_niet') {   // wv1229: zoals de echte (compare-and-set, tik + teller in voorwaarde, meting)
       const x = (sbStaat.vj || []).find((y) => y.sleutel === b.p_sleutel);
       if (!/^app \d{1,2}-\d{1,2} \d{1,2}:\d{2}: David tikte Gedaan$/.test(b.p_tik || '')) return antw(400, { message: 'tik' });
@@ -512,7 +523,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { berichtVraagOpKaart, handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appVastJaDicht, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appDradenUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm, appVjDoel, appVjModuleKaart, appVjBron, appVjVoorwaardeMeet, appVjVoorwaardeRonde, appAnders, appAntwoordSeintjeKomt, VJU };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { berichtVraagOpKaart, handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appVastJaDicht, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appDradenUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm, appVjDoel, appVjModuleKaart, appVjBron, appVjVoorwaardeMeet, appVjVoorwaardeRonde, appVjControleIo, appAnders, appAntwoordSeintjeKomt, VJU };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -7650,6 +7661,49 @@ async function bewijs(o) {
         toets('wv1229 opstartronde op de reservekant: niets dicht, gooit "reserve" zodat hij blijft herkansen (Fable diffreview #3)', rf && rf.reserve === true && sbStaat.vj.find((y) => y.id === 9106).status === 'open', String(rf));
         Object.assign(H.appVjBron, bronBewaar); sbStaat.vj.length = vjN0; H.appStaat.vjCache = null;
         [9101, 9102, 9103, 9104, 9105, 9106].forEach((i) => { delete H.appStaat.vjTerug[i]; });
+        H.appStaat.tellers.voorjou.splice(0, H.appStaat.tellers.voorjou.length, ...telBewaar);
+      }
+      { // wv4197 (3C105): doe-kaart met controle — lijst openen sluit hem met "Gezien: …"; Gedaan bij niet-voldaan toont wat ontbreekt
+        const telBewaar = H.appStaat.tellers.voorjou.splice(0), vjN0 = sbStaat.vj.length, kopBewaar = H.appVjControleIo.koppeling;
+        const nD = () => sbRpc.filter((x) => x.fn === 'mk_voor_jou_controle_dicht');
+        const sinds = new Date(Date.now() - 3600000).toISOString();
+        const cPunt = (id, vw) => sbStaat.vj.push({ id, sleutel: 'wv' + id, soort: 'doen', titel: 'Proef — sleutel plakken', status: 'open', waar: 'overal', prive: false,
+          stappen: ['Plak de sleutel in Sleutelbos.'], herkomst: { wv: [id], auto: 'wv' }, voorwaarde: Object.assign({ bron: 'health', sinds }, vw), aangemaakt: sinds, bijgewerkt: sinds });
+        cPunt(9201, { veld: 'sleutel', waarde: 'proef_wv4197_a' });      // geplakt -> dicht bij de lijst
+        cPunt(9202, { veld: 'sleutel', waarde: 'proef_wv4197_b' });      // nog niet
+        cPunt(9203, { veld: 'koppeling', waarde: 'codex' });             // geweigerd
+        cPunt(9204, { veld: 'sleutel', waarde: 'proef_wv4197_kapot' });  // databank weg -> niets
+        sbStaat.sleutelStand = { proef_wv4197_a: { ok: true, bestaat: true, geschreven: true, op: new Date().toISOString() }, proef_wv4197_b: { ok: true, bestaat: false, geschreven: false, op: null } };
+        H.appVjControleIo.koppeling = (k) => k === 'codex' ? { laatste_meting: { t: new Date().toISOString(), uitkomst: 'geweigerd' }, geweigerd: { sinds } } : null;
+        H.appStaat.vjCache = null; H.appStaat.vjControleOp = 0;
+        let nr = nepRes(); await H.appVoorJouRoute({}, nr, { id: 'proef-apparaat', soort: 'reist' });
+        const d1 = nD(), x1 = sbStaat.vj.find((y) => y.id === 9201);
+        toets('wv4197 lijst openen: sleutel geplakt -> kaart dicht door beheer met "Gezien: de sleutel … staat in Sleutelbos", niet meer in de lijst; de andere drie blijven open',
+          d1.length === 1 && d1[0].b.p_sleutel === 'wv9201' && d1[0].b.p_veld === 'sleutel' && /^Gezien: de sleutel proef_wv4197_a staat in Sleutelbos/.test(d1[0].b.p_bewijs) && x1.status === 'gedaan' && x1.gesloten_door === 'beheer'
+          && !nr.b.punten.some((p) => p.id === 9201) && [9202, 9203, 9204].every((i) => sbStaat.vj.find((y) => y.id === i).status === 'open'), JSON.stringify([d1.map((x) => x.b), nr.b.punten.map((p) => p.id)]));
+        toets('wv4197 de vanzelf gesloten kaart staat onder Afgehandeld vandaag', (nr.b.afgehandeld || []).some((p) => p.id === 9201), JSON.stringify(nr.b.afgehandeld));
+        nr = nepRes(); await H.appVoorJouRoute({}, nr, { id: 'proef-apparaat', soort: 'reist' });
+        toets('wv4197 nog eens openen binnen de minuut: geen nieuwe meting', nD().length === 1, nD().length);
+        let rc = await K({ id: 9202, van: 'open', keuze: 'gedaan' });
+        const x2 = sbStaat.vj.find((y) => y.id === 9202);
+        toets('wv4197 Gedaan, sleutel nog niet in Sleutelbos -> 409 "Nog niet gezien: de sleutel … staat nog niet in Sleutelbos", kaart open', rc.status === 409 && rc.j.nog_niet === true
+          && /^Nog niet gezien: de sleutel proef_wv4197_b staat nog niet in Sleutelbos\./.test(rc.j.fout) && x2.status === 'open' && /^Nog niet gezien/.test(x2.meting), JSON.stringify([rc.status, rc.j]));
+        rc = await K({ id: 9203, van: 'open', keuze: 'gedaan' });
+        toets('wv4197 Gedaan, koppeling nog geweigerd -> 409 met "nog geweigerd"', rc.status === 409 && /Codex-inlog .* nog geweigerd/.test(rc.j.fout), JSON.stringify([rc.status, rc.j]));
+        sbStaat.sleutelStand.proef_wv4197_b = { ok: true, bestaat: true, geschreven: true, op: new Date().toISOString() };
+        rc = await K({ id: 9202, van: 'open', keuze: 'gedaan' });
+        const sc = nS()[nS().length - 1].b;
+        toets('wv4197 Gedaan als het klopt -> 200 "Gedaan. Gezien: …", bewijs = Davids tik (klus komt vrij), spoor in p_reden', rc.status === 200 && /^Gedaan\. Gezien: de sleutel proef_wv4197_b staat in Sleutelbos/.test(rc.j.melding)
+          && sc.p_sleutel === 'wv9202' && /^app \d+-\d+ \d\d:\d\d: David tikte Gedaan$/.test(sc.p_bewijs) && /^wv4197 controle waar: /.test(sc.p_reden), JSON.stringify([rc.status, rc.j.melding, sc]));
+        H.appStaat.vjCache = null; H.appStaat.vjControleOp = 0; const nd0 = nD().length;
+        nr = nepRes(); await H.appVoorJouRoute({}, nr, { id: 'proef-apparaat', soort: 'reist' });
+        toets('wv4197 kruisproef: een controle die niet kan meten sluit niets (geen vals groen)', nD().length === nd0 && sbStaat.vj.find((y) => y.id === 9204).status === 'open', nD().length);
+        rc = await K({ id: 9204, van: 'open', keuze: 'gedaan' });
+        const sd = nS()[nS().length - 1].b;
+        toets('wv4197 Gedaan bij niet vast te stellen -> 200 gedaan, bewijs zonder versie-kanttekening, spoor "niet vast te stellen"', rc.status === 200 && sd.p_sleutel === 'wv9204'
+          && /^app \d+-\d+ \d\d:\d\d: David tikte Gedaan$/.test(sd.p_bewijs) && /wv4197 controle niet vast te stellen/.test(sd.p_reden), JSON.stringify([rc.status, sd]));
+        H.appVjControleIo.koppeling = kopBewaar; sbStaat.vj.length = vjN0; H.appStaat.vjCache = null; H.appStaat.vjControleOp = 0;
+        [9201, 9202, 9203, 9204].forEach((i) => { delete H.appStaat.vjTerug[i]; });
         H.appStaat.tellers.voorjou.splice(0, H.appStaat.tellers.voorjou.length, ...telBewaar);
       }
       r = await K({ id: 2, keuze: 'terug' });

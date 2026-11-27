@@ -13435,8 +13435,19 @@ const appVjBron = {
     });
   },
 };
-async function appVjVoorwaardeMeet(v) {
+// wv4197 (3C105): de controles sleutel / koppeling / bestand (vj-controle.js); alleen lezen, nooit een sleutelwaarde
+const VJC = (function () { try { return require(typeof __dirname === 'string' ? path.join(__dirname, 'vj-controle.js') : './vj-controle.js'); } catch (e) { logError('vj-controle', e); return null; } })();
+const appVjControleIo = {
+  sleutel: function (naam, sinds) { return appSbRpc('mk_voor_jou_sleutel_stand', { p_naam: naam, p_sinds: sinds }, 8000); },
+  koppeling: function (k) { const i = typeof koppelingInfo === 'function' ? koppelingInfo() : {}; return i[k] || null; },
+  echtPad: function (f) { try { return fs.realpathSync(f); } catch (e) { if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return null; throw e; } },
+  stat: function (f) { try { return fs.lstatSync(f); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } },
+  lijst: function (d) { return fs.readdirSync(d); },
+};
+function appVjIsControle(v) { return !!(VJC && VJC.isControle(v)); }
+async function appVjVoorwaardeMeet(v, p) {
   const veld = v && v.veld, w = String((v && v.waarde) || '');
+  if (appVjIsControle(v)) return VJC.meet(v, p, appVjControleIo);
   try {
     if (veld === 'versie' || veld === 'image_versie') {
       const nu = String(appVjBron[veld]() || '').toLowerCase();
@@ -13453,7 +13464,8 @@ async function appVjVoorwaardeMeet(v) {
   } catch (e) { return { waar: null, spoor: veld + ' fout: ' + String(e && e.message || e).slice(0, 80) }; }
   return { waar: null, spoor: 'onbekend veld' };
 }
-function appVjNogNietTekst(v) {
+function appVjNogNietTekst(v, m) {
+  if (appVjIsControle(v) && m && m.mist) return VJC.nogNietTekst(m);
   const wie = APP_VJ_VELDNAAM[v && v.veld] || 'de app';
   if (v && (v.veld === 'versie' || v.veld === 'image_versie')) return 'Nog niet gelukt: de app draait nog de vorige versie. Herstart hem (nog eens) in Olares; zodra de nieuwe versie draait, gaat deze kaart vanzelf dicht. Lukt het na een herstart nog niet, zeg het Socev.';
   return 'Nog niet gelukt: ik zie nog geen herstart van ' + wie + ' na ' + appVjDag(appYmd(Date.parse(v.waarde))) + ' ' + appKlok(new Date(Date.parse(v.waarde)).toISOString())
@@ -13468,7 +13480,8 @@ async function appVjVoorwaardeRonde() {
   for (const p of punten) {
     const v = p.voorwaarde;
     if (!v || typeof v !== 'object' || !v.getikt || (p.status !== 'open' && p.status !== 'later')) continue;
-    const m = await appVjVoorwaardeMeet(v);
+    if (appVjIsControle(v) || (v.veld && !APP_VJ_VELDNAAM[v.veld])) continue;   // wv4197: controles meet appVjControleRonde (bij de lijst)
+    const m = await appVjVoorwaardeMeet(v, p);
     if (m.waar !== true) { uit.push(p.sleutel + ': ' + m.waar); continue; }
     const r = await appSbRpc('mk_voor_jou_status', { p_sleutel: p.sleutel, p_van: p.status, p_naar: 'gedaan', p_door: 'david', p_later_tot: null,
       p_bewijs: v.getikt + ' (dicht zodra ' + (APP_VJ_VELDNAAM[v.veld] || 'de app') + ' op de nieuwe versie draaide, gemeten ' + appVjDag(appYmd(nu)) + ' ' + appKlok(new Date(nu).toISOString()) + ')',
@@ -13491,6 +13504,39 @@ function appVjVoorwaardeStart(poging) {
   if (t && t.unref) t.unref();
 }
 if (APP_ECHT) appVjVoorwaardeStart(0);
+// wv4197 (3C105): bij het openen van de lijst (hooguit eens per minuut, alleen de actieve kant) meet de pod elke open kaart met een
+// controle; waar = dicht met "Gezien: …" (door beheer) en de klus die erop wachtte vrij (mk_voor_jou_controle_dicht). Niet waar of niet
+// vast te stellen = niets. Geeft het aantal gesloten kaarten.
+const APP_VJ_CONTROLE_MS = 60 * 1000, APP_VJ_CONTROLE_WACHT_MS = 2500;
+async function appVjControleRonde(punten) {
+  if (!VJC || appStaat.vjControleBezig || Date.now() - (appStaat.vjControleOp || 0) < APP_VJ_CONTROLE_MS) return 0;
+  const lijst = punten.filter(function (p) { return p && p.soort !== 'besluit' && (p.status === 'open' || p.status === 'later') && appVjIsControle(p.voorwaarde); });
+  appStaat.vjControleOp = Date.now();
+  if (!lijst.length) return 0;
+  appStaat.vjControleBezig = true;
+  let dicht = 0;
+  try {
+    if (!(await appRolOk())) return 0;
+    for (const p of lijst.slice(0, 20)) {
+      const v = p.voorwaarde, m = await VJC.meet(v, p, appVjControleIo);
+      if (m.waar !== true || !m.gezien) continue;
+      let r;
+      try { r = await appSbRpc('mk_voor_jou_controle_dicht', { p_sleutel: p.sleutel, p_van: p.status, p_veld: v.veld, p_waarde: v.waarde, p_bewijs: VJC.bewijsTekst(m), p_reden: 'pod-controle wv4197: ' + m.spoor }, 8000); }
+      catch (e) { logError('vj-controle', e); continue; }
+      if (r && r.ok === true) { dicht++; appStaat.vjWvCache = null; appStaat.wvCache = null; }
+      else logError('vj-controle', new Error('controle waar maar ' + p.sleutel + ' niet dicht (' + (r && (r.nu || r.fout)) + ')'));
+    }
+  } finally { appStaat.vjControleBezig = false; if (dicht) appStaat.vjCache = null; }
+  return dicht;
+}
+// Voor GET /app/voor-jou: wacht hooguit even op de ronde; duurt hij langer, dan loopt hij door en ziet David het bij de volgende Ververs.
+async function appVjControleBijLijst(punten) {
+  let t;
+  const n = await Promise.race([appVjControleRonde(punten).catch(function (e) { logError('vj-controle', e); return 0; }),
+    new Promise(function (ok) { t = setTimeout(function () { ok(0); }, APP_VJ_CONTROLE_WACHT_MS); })]);
+  clearTimeout(t);
+  return n;
+}
 // wv3967: de momentstap. Elke minuut: valt het volgende vaste moment binnen 6 minuten, dan kiest mk_voor_jou_moment welke wachtende
 // kaarten om dat moment in Voor jou komen (hooguit 5 erbij, hooguit 8 in beeld, de machinekamer-bundel als één punt); de rest schuift
 // door. Alleen de actieve kant; één keer per moment (na een herstart nog eens: de stap is idempotent).
@@ -13572,6 +13618,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   res._app.stil = true;   // de app leest bij openen van Vandaag en op Ververs
   let punten;
   try { punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appStuur(res, 200, { ok: true, punten: [], later: [], meer: 0, fout: 'de lijst is nu niet te lezen' }); }
+  if (await appVjControleBijLijst(punten)) { try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); } }   // wv4197
   vjKnoplinkOpruim(punten);   // wv4192: knopstap van een kaart die dicht is weg
   const nu = Date.now(), vandaag = appYmd(nu);
   const eigen = punten;
@@ -13598,7 +13645,9 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   const inLijst = new Set(lijst.map(function (p) { return p.id; }));
   const afgehandeld = eigen.filter(function (p) {
     const g = Date.parse(p.gesloten_op || '');
-    return (p.status === 'gedaan' || p.status === 'vervallen') && p.gesloten_door === 'david' && Number.isFinite(g) && appYmd(g) === vandaag && !inLijst.has(p.id);
+    // wv4197: ook een kaart die Socev zelf dichtzette omdat de controle het zag ("Gezien: …")
+    const zelf = p.gesloten_door === 'david' || (p.gesloten_door === 'beheer' && p.status === 'gedaan' && /^Gezien: /.test(String(p.bewijs || '')));
+    return (p.status === 'gedaan' || p.status === 'vervallen') && zelf && Number.isFinite(g) && appYmd(g) === vandaag && !inLijst.has(p.id);
   }).sort(function (x, y) { return String(y.gesloten_op).localeCompare(String(x.gesloten_op)); }).slice(0, 30)
     .map(function (p) { return { id: p.id, titel: appKort(p.titel, 120), status: p.status, t: p.gesloten_op, beantwoord: appVjBeantwoordKort(p, vr, af.map) }; });
   // wv4194 (3C17): Doe jij het — zolang Socevs beurt loopt staat de kaart hier als "Socev doet het" (status socev; oude app toont het woord)
@@ -14359,11 +14408,12 @@ async function appVoorJouKeuze(req, res, a, d) {
     body = { p_sleutel: p.sleutel, p_van: van, p_naar: keuze === 'wacht' ? 'later' : keuze, p_door: 'david', p_bewijs: bewijs, p_later_tot: tot };
   }
   // wv1229: Gedaan op een kaart met een voorwaarde (bv. herstart naar een nieuwe versie) telt pas als die nu waar is
+  let vwGezien = null;   // wv4197: wat de controle zag, voor de melding na Gedaan
   const vw = keuze === 'gedaan' && p.soort !== 'besluit' && p.voorwaarde && typeof p.voorwaarde === 'object' && p.voorwaarde.veld ? p.voorwaarde : null;   // Fable diffreview #2
   if (vw) {
-    const m = await appVjVoorwaardeMeet(vw);
+    const m = await appVjVoorwaardeMeet(vw, p);
     if (m.waar === false) {
-      const tekst = appVjNogNietTekst(vw);
+      const tekst = appVjNogNietTekst(vw, m);
       let rn;
       try { rn = await appSbRpc('mk_voor_jou_nog_niet', { p_sleutel: p.sleutel, p_van: van, p_tik: bewijs, p_meting: tekst }); } catch (e) {
         logError('app-voor-jou', e); appStaat.vjCache = null;
@@ -14376,11 +14426,13 @@ async function appVoorJouKeuze(req, res, a, d) {
       if (n >= 2) logError('app-voor-jou', new Error('voorwaarde ' + p.sleutel + ' al ' + n + 'x niet waar bij Gedaan: ' + m.spoor));   // Fable vooraf #1: de ronde ziet dit
       return appStuur(res, 409, { ok: false, fout: tekst, nog_niet: true, nu: van });
     }
-    if (m.waar === null) {   // niet vast te stellen: David niet vastzetten op een meetfout (zoals vóór wv1229), wel een spoor
+    if (m.waar === null && appVjIsControle(vw)) {   // wv4197: controle niet vast te stellen = Davids tik telt, zonder versie-kanttekening
+      body.p_reden = 'wv4197 controle niet vast te stellen: ' + m.spoor;
+    } else if (m.waar === null) {   // niet vast te stellen: David niet vastzetten op een meetfout (zoals vóór wv1229), wel een spoor
       body.p_bewijs = bewijs + ' (nieuwe versie niet vast te stellen)';
       body.p_reden = 'wv1229 voorwaarde niet vast te stellen: ' + m.spoor;
       logError('app-voor-jou', new Error('voorwaarde ' + p.sleutel + ' niet vast te stellen: ' + m.spoor));
-    } else body.p_reden = 'wv1229 voorwaarde waar: ' + m.spoor;
+    } else { body.p_reden = (appVjIsControle(vw) ? 'wv4197 controle waar: ' : 'wv1229 voorwaarde waar: ') + m.spoor; if (m.gezien) vwGezien = m.gezien; }
   }
   let r;
   try { r = await appSbRpc(fn, body); } catch (e) {
@@ -14404,7 +14456,7 @@ async function appVoorJouKeuze(req, res, a, d) {
   Object.keys(appStaat.vjTerug).forEach(function (k) { if (appStaat.vjTerug[k].tot <= nu) delete appStaat.vjTerug[k]; });
   const q = r.punt || {};
   const blijft = keuze === 'vanavond' && !(Date.parse(q.toon_vanaf || '') > Date.now());   // wv4194: spoed of deadline vandaag = de databank laat hem niet wachten
-  const melding = keuze === 'gedaan' ? (metKlus ? 'Gedaan. De klus erachter gaat zo verder en meet of het gelukt is.' : 'Gedaan. Socev kijkt bij de volgende ronde of het ook zo gemeten wordt.')
+  const melding = keuze === 'gedaan' && vwGezien ? 'Gedaan. Gezien: ' + vwGezien + '.' : keuze === 'gedaan' ? (metKlus ? 'Gedaan. De klus erachter gaat zo verder en meet of het gelukt is.' : 'Gedaan. Socev kijkt bij de volgende ronde of het ook zo gemeten wordt.')
     : keuze === 'later' ? 'Op later gezet tot ' + appVjDag(tot) + '.' : keuze === 'wacht' ? 'Komt ' + appVjDag(tot) + ' terug; dan vraagt Socev het opnieuw.'
     : keuze === 'vanavond' ? (blijft ? 'Deze kaart moet vandaag af; hij blijft in je lijst.' : 'Komt vanavond om ' + VJU.klokNL(Date.parse(q.toon_vanaf)) + ' terug.')
     : keuze === 'vervallen' ? 'Weggehaald: niet meer nodig.' : 'Teruggedraaid.';
