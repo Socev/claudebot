@@ -29,6 +29,8 @@ const R = [
   [J - 1, '12-31', '12850', 'SMR gedragsmatige ondersteuning', 'consult', 10, 1000],
   [J - 1, '12-31', '11201', 'Opslag praktijkondersteuner GGZ', 'module', 4400, 17600],
   [J - 1, '12-31', '12501', 'Consult militair', 'consult', 0, 0],
+  [J - 1, '12-31', '31174', 'Praktijkmanagement', 'module', 4400, 5500],
+  [J - 1, '12-31', '13038', 'Euthanasie', 'mi', 2, 600],
   [J, '06-30', '12011', 'Consult regulier vanaf 5 minuten', 'consult', 600, 6600],
   [J, '06-30', '11115', 'Inschrijving verzekerden tot 65 jaar', 'ion', 2300, 50600],
   [J, '06-30', '13005', 'ECG-diagnostiek (ECG maken)', 'mi', 20, 1240],
@@ -37,6 +39,7 @@ const R = [
   [J, '06-30', '30121', 'Resultaatbeloning', 'module', 2300, 2300],
   [J, '06-30', '11201', 'Opslag praktijkondersteuner GGZ', 'module', 2300, 9200],
   [J, '06-30', '13051', 'Meedenkadvies', 'mi', 30, 600],
+  [J, '06-30', '31174', 'Praktijkmanagement', 'module', 2300, 2875],
 ].map(([jaar, t, code, oms, cat, aantal, gedeclareerd]) => ({ entiteit: 'TG', jaar, tot: jaar + '-' + t, code, oms, cat, aantal, gedeclareerd }))
   .concat([{ entiteit: 'GH', jaar: J - 1, tot: (J - 1) + '-12-31', code: '12011', oms: 'x', cat: 'consult', aantal: 999, gedeclareerd: 9990 }]);
 const PAT = [[J - 2, null, 1000], [J - 1, null, 1100], [J - 1, '<65', 1100], [J, null, 1150], [J, '<65', 1150], [J, '85+', 3]]
@@ -46,6 +49,8 @@ const TAR = [
   L('12011', J, 11), L('11115', J, 22), L('13005', J, 62), L('13050', J, 2.1), L('13051', J, 20), L('12850', J, 100), L('11201', J, 5.4),
   L('12011', J + 1, 12), L('11115', J + 1, 23), L('13005', J + 1, 65), L('13050', J + 1, 2.2), L('13051', J + 1, 21), L('11201', J + 1, 5.6),
   L('30121', J + 1, 0.5, 'niveau 1'), L('30121', J + 1, 1.1, 'niveau 2'),
+  L('31174', J, 1.25), L('31174', J + 1, 1.3), L('13038', J + 1, 330),   // 31174: lijst = wat TG nu krijgt, maar TG heeft een eigen contract (alleen J)
+  { code: '31174', soort: 'zk_module_contract', entiteit: 'TG', geldig_van: J + '-01-01', geldig_tot: J + '-12-31', tarief: 1.25, niveau: null },
   { code: '31080', soort: 'zk_module_contract', entiteit: 'TG', geldig_van: J + '-01-01', geldig_tot: (J + 1) + '-12-31', tarief: 3.5, niveau: null },
   { code: '31080', soort: 'zk_module_contract', entiteit: 'TG', geldig_van: (J - 1) + '-01-01', geldig_tot: (J - 1) + '-12-31', tarief: 3, niveau: null },
 ];
@@ -104,7 +109,7 @@ test('berekend: per code met de hand — aantal × tarief doeljaar; inschrijving
 test('berekend: zonder tarief doeljaar staat met naam en reden en telt mee op het tarief van nu', async () => {
   const b = tg(j(await laad().v())).berekend;
   const z = b.zonder_tarief;
-  assert.deepStrictEqual(z.lijst.map((x) => x.code).sort(), ['11201', '12850', '30121']);
+  assert.deepStrictEqual(z.lijst.map((x) => x.code).sort(), ['11201', '12850', '13038', '30121', '31174']);
   const zr = (c) => z.lijst.find((x) => x.code === c);
   assert.match(zr('11201').reden, /^eigen contract \(nu 4,00, lijst 5,40\)/);   // TG krijgt 4, lijst J zegt 5,40 → lijst J+1 geldt niet
   assert.strictEqual(zr('11201').bedrag, 4600 * 4);
@@ -112,15 +117,21 @@ test('berekend: zonder tarief doeljaar staat met naam en reden en telt mee op he
   assert.strictEqual(zr('30121').bedrag, 4600 * 1);
   assert.match(zr('12850').reden, new RegExp('niet op de tarievenlijst ' + (J + 1)));
   assert.strictEqual(zr('12850').bedrag, 10 * 100);                 // niet in J: tarief van nu = gedeclareerd J-1
-  assert.strictEqual(z.codes, 3);
-  assert.strictEqual(z.nu, 18400 + 4600 + 1000);
+  // Codex MOET 1: eigen contract dat alleen nu loopt → niet de lijst van J+1, ook al is het lijsttarief nu gelijk
+  assert.match(zr('31174').reden, new RegExp('^eigen contract; tarief ' + (J + 1) + ' niet in de datahub$'));
+  assert.strictEqual(zr('31174').bedrag, rond(4600 * 1.25));
+  // alleen in J-1 gedeclareerd, geen lijst J-1 om mee te vergelijken → niet geraden
+  assert.match(zr('13038').reden, /niet na te gaan of de lijst/);
+  assert.strictEqual(zr('13038').bedrag, 600);
+  assert.strictEqual(z.codes, 5);
+  assert.strictEqual(z.nu, 18400 + 4600 + 1000 + 5750 + 600);
   const met = 1100 * 12 + 50 * 65 + 4600 * 23 + 4600 * 3.5 + 4600 * 2.2 + 30 * JAARDAGEN / DAGEN * 21;
   const metNu = 1100 * 11 + 50 * 62 + 4600 * 22 + 4600 * 3 + 4600 * 2.1 + 30 * JAARDAGEN / DAGEN * 20;
   assert.strictEqual(b.met_tarief.codes, 6);
   assert.strictEqual(b.met_tarief.doel, rond(met));
   assert.strictEqual(b.met_tarief.nu, rond(metNu));
-  assert.strictEqual(b.totaal, rond(met + 24000));
-  assert.strictEqual(b.op_nu, rond(metNu + 24000));
+  assert.strictEqual(b.totaal, rond(met + 30350));
+  assert.strictEqual(b.op_nu, rond(metNu + 30350));
   assert.strictEqual(b.met_tarief.pct, rond((met / metNu - 1) * 1000) / 10);
 });
 
@@ -132,9 +143,9 @@ test('berekend: groei van twee hele jaren met de hand — tarief + werk + nieuwe
   assert.strictEqual(a.bedrag_van, 90000);
   assert.strictEqual(a.tarief, 1100 * 0.5 + 4400 * 1);              // 4950
   assert.strictEqual(a.werk, 100 * 10 + 400 * 20);                  // 9000
-  assert.strictEqual(a.nieuw, 3000 + 13200 + 8800 + 4400 + 1000 + 17600);
+  assert.strictEqual(a.nieuw, 3000 + 13200 + 8800 + 4400 + 1000 + 17600 + 5500 + 600);
   assert.strictEqual(a.verschil, a.tarief + a.werk + a.nieuw);
-  assert.strictEqual(a.bedrag_naar, 151950);
+  assert.strictEqual(a.bedrag_naar, 158050);
   assert.ok(a.nieuw_codes.includes('ECG-diagnostiek'));
 });
 
@@ -144,10 +155,10 @@ test('berekend: groei naar het lopende jaar is omgerekend naar een heel jaar en 
   assert.deepStrictEqual([g.van, g.naar, g.heel, g.dagen, g.kwartalen], [J - 1, J, false, DAGEN, 2]);
   const f = JAARDAGEN / DAGEN, pv = 1100, pn = 1150;
   // verrichtingen per dag; modules/inschrijving: aantal J-1 × 1150/1100; 13051 nieuw (mi): per dag
-  const nj = { '12011': 600 * f, '13005': 20 * f, '11115': 4400 * pn / pv, '31080': 4400 * pn / pv, '13050': 4400 * pn / pv, '30121': 4400 * pn / pv, '11201': 4400 * pn / pv, '12850': 0 };
-  const pB = { '12011': 10.5, '13005': 60, '11115': 21, '31080': 3, '13050': 2, '30121': 1, '11201': 4, '12850': 100 };
-  const pL = { '12011': 11, '13005': 62, '11115': 22, '31080': 3, '13050': 2.1, '30121': 1, '11201': 4 };
-  const nB = { '12011': 1100, '13005': 50, '11115': 4400, '31080': 4400, '13050': 4400, '30121': 4400, '11201': 4400, '12850': 10 };
+  const nj = { '12011': 600 * f, '13005': 20 * f, '11115': 4400 * pn / pv, '31080': 4400 * pn / pv, '13050': 4400 * pn / pv, '30121': 4400 * pn / pv, '11201': 4400 * pn / pv, '12850': 0, '31174': 4400 * pn / pv, '13038': 0 };
+  const pB = { '12011': 10.5, '13005': 60, '11115': 21, '31080': 3, '13050': 2, '30121': 1, '11201': 4, '12850': 100, '31174': 1.25, '13038': 300 };
+  const pL = { '12011': 11, '13005': 62, '11115': 22, '31080': 3, '13050': 2.1, '30121': 1, '11201': 4, '31174': 1.25 };
+  const nB = { '12011': 1100, '13005': 50, '11115': 4400, '31080': 4400, '13050': 4400, '30121': 4400, '11201': 4400, '12850': 10, '31174': 4400, '13038': 2 };
   let tarief = 0, werk = 0;
   for (const c of Object.keys(nB)) { werk += (nj[c] - nB[c]) * pB[c]; if (pL[c]) tarief += nj[c] * (pL[c] - pB[c]); }
   const nieuw = 30 * f * 20;
@@ -162,9 +173,9 @@ test('berekend: lijn werkelijk (hele jaren) → lopend jaar omgerekend → doelj
   const b = tg(j(await laad().v())).berekend;
   const gr = b.grafiek;
   assert.deepStrictEqual(gr.x, [J - 2, J - 1, J, J + 1].map(String));
-  assert.deepStrictEqual(gr.reeksen[0].waarden, [90000, 151950, null, null]);
+  assert.deepStrictEqual(gr.reeksen[0].waarden, [90000, 158050, null, null]);
   assert.strictEqual(gr.reeksen[1].stippel, true);
-  assert.deepStrictEqual(gr.reeksen[1].waarden, [null, 151950, b.groei[1].bedrag_naar, b.totaal]);
+  assert.deepStrictEqual(gr.reeksen[1].waarden, [null, 158050, b.groei[1].bedrag_naar, b.totaal]);
 });
 
 test('berekend: alleen Tolgaarde; Groenhouten houdt zijn model of zijn eigen regel', async () => {

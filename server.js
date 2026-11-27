@@ -15983,9 +15983,9 @@ function appBerOmreken(tot) {   // lopend jaar t/m tot → factoren naar een hee
   return { dagen: dagen, jaar_dagen: jaarDagen, kwartalen: kw, dag: jaarDagen / dagen, kwartaal: kw ? 4 / kw : null };
 }
 // tarief van een code op een peildag: eigen contract van de praktijk, anders de lijst (alleen één regel zonder niveau)
-function appBerTarief(tar, code, ent, dag) {
+function appBerTarief(tar, code, ent, dag, alleenLijst) {
   const geldig = function (t) { return t.code === code && String(t.geldig_van) <= dag && (t.geldig_tot == null || String(t.geldig_tot) >= dag) && appIsGetal(t.tarief); };
-  const eigen = tar.filter(function (t) { return geldig(t) && t.soort === 'zk_module_contract' && t.entiteit === ent; })
+  const eigen = alleenLijst ? [] : tar.filter(function (t) { return geldig(t) && t.soort === 'zk_module_contract' && t.entiteit === ent; })
     .sort(function (a, b) { return String(b.geldig_van).localeCompare(String(a.geldig_van)); });
   if (eigen.length) return { tarief: eigen[0].tarief, bron: 'contract' };
   const lijst = tar.filter(function (t) { return geldig(t) && t.soort === 'zk_gecontracteerd' && t.entiteit == null; });
@@ -16080,11 +16080,16 @@ function appBerekend(code, rijen, tar, patRijen, jaarNu) {
     if (!t) reden = 'niet op de tarievenlijst ' + doel;
     else if (t.niveaus) reden = 'lijst ' + doel + ' kent meer niveaus (' + t.niveaus.join(', ') + ')';
     else if (t.bron === 'contract') tDoel = t.tarief;
-    else {
-      const lijstNu = appBerTarief(tar || [], c, code, (lopendJr || basis) + '-01-01');
-      if (l && l.p != null && lijstNu && lijstNu.tarief != null && Math.abs(l.p / lijstNu.tarief - 1) > APP_BER_MARGE) {
-        reden = 'eigen contract (nu ' + (Math.round(l.p * 100) / 100).toFixed(2).replace('.', ',') + ', lijst ' + lijstNu.tarief.toFixed(2).replace('.', ',') + '); tarief ' + doel + ' niet in de datahub';
-      } else tDoel = t.tarief;
+    else if ((tar || []).some(function (x) { return x.code === c && x.soort === 'zk_module_contract' && x.entiteit === code; })) {
+      reden = 'eigen contract; tarief ' + doel + ' niet in de datahub';   // Codex MOET 1: een contract dat nu loopt maakt de lijst niet geldig
+    } else {
+      // de lijst van het doeljaar geldt alleen als de praktijk nu ook het lijsttarief krijgt: gedeclareerde prijs tegen de LIJST (geen contract)
+      const pJr = l && l.p != null ? lopendJr : basis, pVgl = pJr === lopendJr ? l.p : b.p;
+      const lijstNu = appBerTarief(tar || [], c, code, pJr + '-01-01', true);
+      const euro = function (v) { return (Math.round(v * 100) / 100).toFixed(2).replace('.', ','); };
+      if (!lijstNu || lijstNu.tarief == null) reden = 'niet na te gaan of de lijst ' + doel + ' geldt (geen lijsttarief ' + pJr + ' om mee te vergelijken)';
+      else if (Math.abs(pVgl / lijstNu.tarief - 1) > APP_BER_MARGE) reden = 'eigen contract (nu ' + euro(pVgl) + ', lijst ' + euro(lijstNu.tarief) + '); tarief ' + doel + ' niet in de datahub';
+      else tDoel = t.tarief;
     }
     regels.push({ code: c, naam: appNaastLabel((info[c] || {}).oms, c), cat: (info[c] || {}).cat || null, aantal: Math.round(n * 10) / 10, herkomst: herkomst,
       tarief_nu: Math.round(pNu * 100) / 100, tarief_doel: tDoel, nu: n * pNu, doel: tDoel != null ? n * tDoel : null, reden: reden });
