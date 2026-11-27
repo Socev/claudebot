@@ -81,6 +81,10 @@ test('bestand: nieuw niet-leeg bestand na de kaart = dicht; oud, leeg, tijdelijk
   assert.ok(!/\/opt\/data|AI_SecondBrain/.test(C.nogNietTekst(m)), 'geen podpad naar David');
   // symlink naar buiten de vault = niet vast te stellen (kruisproef: nooit waar)
   assert.strictEqual((await C.meet(vw('bestand', f), kaart, io({ echt: { [f]: '/etc/passwd' }, fs: { '/etc/passwd': { c: na } } }))).waar, null);
+  // review ZOU 1: een rechtstreeks pad met een tijdelijke naam = niet vast te stellen, nooit waar
+  for (const t of [W + 'raw_input/proef/export.pdf.part', W + 'raw_input/proef/.syncthing.export.pdf.tmp']) {
+    assert.strictEqual((await C.meet(vw('bestand', t), kaart, io({ fs: { [t]: { c: na } } }))).waar, null, t);
+  }
   // map
   const map = (fsx) => C.meet(vw('bestand', d + '/'), kaart, io({ fs: Object.assign({ [d]: { soort: 'map' } }, fsx) }));
   assert.strictEqual((await map({ [d + '/oud.pdf']: { c: voor, m: voor } })).waar, false);

@@ -13510,18 +13510,23 @@ if (APP_ECHT) appVjVoorwaardeStart(0);
 const APP_VJ_CONTROLE_MS = 60 * 1000, APP_VJ_CONTROLE_WACHT_MS = 2500;
 async function appVjControleRonde(punten) {
   if (!VJC || appStaat.vjControleBezig || Date.now() - (appStaat.vjControleOp || 0) < APP_VJ_CONTROLE_MS) return 0;
-  const lijst = punten.filter(function (p) { return p && p.soort !== 'besluit' && (p.status === 'open' || p.status === 'later') && appVjIsControle(p.voorwaarde); });
+  const alle = punten.filter(function (p) { return p && p.soort !== 'besluit' && (p.status === 'open' || p.status === 'later') && appVjIsControle(p.voorwaarde); })
+    .sort(function (x, y) { return x.id - y.id; });
+  // review MOET 1: hooguit 20 per ronde, maar doorschuivend (de volgende ronde begint na de laatst gemeten kaart)
+  const van = alle.findIndex(function (p) { return p.id > (appStaat.vjControleNa || 0); });
+  const lijst = (van < 0 ? alle : alle.slice(van).concat(alle.slice(0, van))).slice(0, 20);
   appStaat.vjControleOp = Date.now();
   if (!lijst.length) return 0;
   appStaat.vjControleBezig = true;
   let dicht = 0;
   try {
     if (!(await appRolOk())) return 0;
-    for (const p of lijst.slice(0, 20)) {
+    for (const p of lijst) {
+      appStaat.vjControleNa = p.id;
       const v = p.voorwaarde, m = await VJC.meet(v, p, appVjControleIo);
       if (m.waar !== true || !m.gezien) continue;
       let r;
-      try { r = await appSbRpc('mk_voor_jou_controle_dicht', { p_sleutel: p.sleutel, p_van: p.status, p_veld: v.veld, p_waarde: v.waarde, p_bewijs: VJC.bewijsTekst(m), p_reden: 'pod-controle wv4197: ' + m.spoor }, 8000); }
+      try { r = await appSbRpc('mk_voor_jou_controle_dicht', { p_sleutel: p.sleutel, p_van: p.status, p_veld: v.veld, p_waarde: v.waarde, p_sinds: typeof v.sinds === 'string' ? v.sinds : null, p_bewijs: VJC.bewijsTekst(m), p_reden: 'pod-controle wv4197: ' + m.spoor }, 8000); }
       catch (e) { logError('vj-controle', e); continue; }
       if (r && r.ok === true) { dicht++; appStaat.vjWvCache = null; appStaat.wvCache = null; }
       else logError('vj-controle', new Error('controle waar maar ' + p.sleutel + ' niet dicht (' + (r && (r.nu || r.fout)) + ')'));

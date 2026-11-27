@@ -81,6 +81,7 @@ function meetBestand(w, sinds, io) {
   if (echt === null) return { waar: false, spoor: 'bestand ' + w + ' bestaat niet', mist: map ? 'de map ' + naam + ' bestaat nog niet' : 'het bestand ' + naam + ' is nog niet binnen' };
   if (typeof echt !== 'string' || (echt + '/').indexOf(WORTEL) !== 0) return { waar: null, spoor: 'bestand ' + w + ': pad buiten de vault' };
   if (!map) {
+    if (TIJDELIJK_RE.test(path.basename(echt))) return { waar: null, spoor: 'bestand ' + w + ': tijdelijke naam' };   // review ZOU 1
     const st = io.stat(echt);
     if (!st || !st.isFile()) return { waar: null, spoor: 'bestand ' + w + ': geen gewoon bestand' };
     if (!(st.size > 0)) return { waar: false, spoor: 'bestand ' + w + ' leeg', mist: 'het bestand ' + naam + ' staat er, maar is leeg' };

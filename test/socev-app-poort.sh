@@ -377,7 +377,8 @@ async function nepFetch(url, opt) {
     if (fn === 'mk_voor_jou_controle_dicht') {   // wv4197: zoals de echte (compare-and-set op status + veld/waarde, door beheer, "Gezien: ")
       const x = (sbStaat.vj || []).find((y) => y.sleutel === b.p_sleutel);
       if (!/^Gezien: .{5,}/.test(b.p_bewijs || '') || !['sleutel', 'koppeling', 'bestand'].includes(b.p_veld)) return antw(400, { message: 'ongeldig' });
-      if (!x || x.status !== b.p_van || x.soort === 'besluit' || !x.voorwaarde || x.voorwaarde.veld !== b.p_veld || x.voorwaarde.waarde !== b.p_waarde) return antw(200, { ok: false, fout: 'conflict', nu: x ? x.status : null });
+      if (!x || x.status !== b.p_van || x.soort === 'besluit' || !x.voorwaarde || x.voorwaarde.veld !== b.p_veld || x.voorwaarde.waarde !== b.p_waarde
+        || (x.voorwaarde.sinds || null) !== (b.p_sinds || null)) return antw(200, { ok: false, fout: 'conflict', nu: x ? x.status : null });
       Object.assign(x, { status: 'gedaan', gesloten_door: 'beheer', gesloten_op: new Date().toISOString(), bewijs: b.p_bewijs });
       return antw(200, { ok: true, punt: Object.assign({}, x), vrij: [], overgeslagen: [] });
     }
@@ -7702,7 +7703,15 @@ async function bewijs(o) {
         const sd = nS()[nS().length - 1].b;
         toets('wv4197 Gedaan bij niet vast te stellen -> 200 gedaan, bewijs zonder versie-kanttekening, spoor "niet vast te stellen"', rc.status === 200 && sd.p_sleutel === 'wv9204'
           && /^app \d+-\d+ \d\d:\d\d: David tikte Gedaan$/.test(sd.p_bewijs) && /wv4197 controle niet vast te stellen/.test(sd.p_reden), JSON.stringify([rc.status, sd]));
-        H.appVjControleIo.koppeling = kopBewaar; sbStaat.vj.length = vjN0; H.appStaat.vjCache = null; H.appStaat.vjControleOp = 0;
+        // review MOET 1: meer dan 20 controles -> de volgende ronde schuift door, elke kaart komt aan de beurt
+        sbStaat.vj.length = vjN0;
+        for (let i = 0; i < 25; i++) { cPunt(9300 + i, { veld: 'sleutel', waarde: 'proef_wv4197_r' + i }); sbStaat.sleutelStand['proef_wv4197_r' + i] = { ok: true, bestaat: false, geschreven: false, op: null }; }
+        const nSt = () => sbRpc.filter((x) => x.fn === 'mk_voor_jou_sleutel_stand').map((x) => x.b.p_naam);
+        const st0 = nSt().length;
+        for (let k = 0; k < 2; k++) { H.appStaat.vjCache = null; H.appStaat.vjControleOp = 0; nr = nepRes(); await H.appVoorJouRoute({}, nr, { id: 'proef-apparaat', soort: 'reist' }); }
+        const gemeten = new Set(nSt().slice(st0));
+        toets('wv4197 25 controles: na twee rondes is elke kaart gemeten (hooguit 20 per ronde, doorschuivend)', gemeten.size === 25 && nSt().length - st0 === 40, JSON.stringify([gemeten.size, nSt().length - st0]));
+        H.appVjControleIo.koppeling = kopBewaar; sbStaat.vj.length = vjN0; H.appStaat.vjCache = null; H.appStaat.vjControleOp = 0; H.appStaat.vjControleNa = 0;
         [9201, 9202, 9203, 9204].forEach((i) => { delete H.appStaat.vjTerug[i]; });
         H.appStaat.tellers.voorjou.splice(0, H.appStaat.tellers.voorjou.length, ...telBewaar);
       }
