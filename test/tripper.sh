@@ -327,6 +327,97 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     && !R.pastBij('2014-07-21', '2014-08-20', '2014-06-01', '2014-06-30') && !R.pastBij('2014-04-10', '2014-05-10', '2014-06-01', '2014-06-30'));   // review MOET 2: overlap is niet genoeg
   toets('14k geen steden, ids of tellers van het album naar de app buiten memorylane/uit_fotos', L14.every((x) => !('spoor' in x) && Object.keys(x.uit_fotos).sort().join() === 'periode,punt'));
 
+  // ── 15. wv4174 (2C100 e): Tripper schrijft alleen in het blok Nog te regelen ──
+  const crypto = require('crypto');
+  const sha = (x) => crypto.createHash('sha256').update(x).digest('hex');
+  const pagina15 = reis(['type: reis', 'onderwerp: "Schrijfproef"', 'periode: "2027-03-01 – 2027-03-05"', 'updated: 2026-11-01'],
+    '# Schrijfproef (gepland)\n\nIntro.\n\n## Nog te regelen\n\nEerst een zin.\n\n- [ ] Vervoer: nog niet bekend\n- [x] Inschrijven\n- [ ] Vervoer: nog niet bekend\n  - [ ] sub\n\n## Gerelateerd\n\n- [[20_Prive/Reizen/Index|Reizen]]\n- [ ] niet in het blok\n');
+  zet('2027 - Schrijfproef.md', pagina15);
+  zet('2027 - Zonder taken.md', reis(['type: reis', 'onderwerp: "Zonder taken"', 'periode: "2027-04-01 – 2027-04-02"'], '## Nog niet bekend\n\nHandboek volgt.\n\n## Bronnen\n\n- x\n'));
+  zet('2027 - Zonder blok.md', reis(['type: reis', 'onderwerp: "Zonder blok"', 'periode: "2027-05-01 – 2027-05-02"'], '## Verloop\n\nNiets.\n'));
+  zet('2022 - Voorbij met lijst.md', reis(['type: reis', 'onderwerp: "Voorbij"', 'periode: "2022-05-01 – 2022-05-02"'], '## Nog te regelen\n\n- [ ] oud\n'));
+  const m15 = R.maak({ vault: V, vv: VV, vandaag: () => '2026-11-27' });
+  const id15 = (n) => R.idVan(R.REIS_MAP + '/' + n);
+  const pad15 = (n) => path.join(RM, n), lees15 = (n) => fs.readFileSync(pad15(n), 'utf8');
+  const tr15 = () => m15.reis(id15('2027 - Schrijfproef.md')).body.reis.te_regelen;
+  const v0 = tr15();
+  toets('15a de leesroute geeft een versie (16 hex) van het blok', /^[0-9a-f]{16}$/.test(String(v0.versie)) && v0.open === 3 && v0.klaar === 1, v0);
+  // vink de derde taak (nr 2: de tweede "Vervoer"-regel met dezelfde tekst als nr 0)
+  let u = m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'vink', nr: 2, regel: '- [ ] Vervoer: nog niet bekend', klaar: true, versie: v0.versie });
+  const na1 = lees15('2027 - Schrijfproef.md');
+  const plek = pagina15.indexOf('- [ ] Vervoer: nog niet bekend\n  - [ ] sub') + 3;
+  toets('15b vink nr 2: precies één teken anders, de rest byte-gelijk (ook frontmatter en de gelijke regel nr 0)', u.status === 200 && u.body.geschreven === true
+    && na1.length === pagina15.length && na1[plek] === 'x' && sha(na1.slice(0, plek)) === sha(pagina15.slice(0, plek)) && sha(na1.slice(plek + 1)) === sha(pagina15.slice(plek + 1)), u);
+  toets('15c antwoord = het verse blok (open 2, klaar 2) met een nieuwe versie', u.body.te_regelen && u.body.te_regelen.open === 2 && u.body.te_regelen.klaar === 2 && u.body.te_regelen.versie !== v0.versie, u.body.te_regelen);
+  u = m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'vink', nr: 0, regel: '- [ ] Vervoer: nog niet bekend', klaar: true, versie: v0.versie });
+  toets('15d oude versie = 409 en het bestand blijft gelijk (MOET 1: verschoven lijst raakt nooit een andere regel)', u.status === 409 && lees15('2027 - Schrijfproef.md') === na1, u);
+  const v1 = tr15().versie;
+  u = m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'vink', nr: 0, regel: '- [ ] Iets anders', klaar: true, versie: v1 });
+  toets('15e verkeerde regeltekst bij de goede versie = 409, niets geschreven', u.status === 409 && lees15('2027 - Schrijfproef.md') === na1, u);
+  u = m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'vink', nr: 1, regel: '- [x] Inschrijven', klaar: true, versie: v1 });
+  toets('15f al zo = 200 zonder schrijven', u.status === 200 && u.body.geschreven === false && lees15('2027 - Schrijfproef.md') === na1, u);
+  u = m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'vink', nr: 1, regel: '- [x] Inschrijven', klaar: false, versie: v1 });
+  const na2 = lees15('2027 - Schrijfproef.md');
+  toets('15g vinkje eraf: [x] → [ ], één teken', u.status === 200 && na2.length === na1.length && na2.indexOf('- [ ] Inschrijven') > 0 && na2.replace('- [ ] Inschrijven', '- [x] Inschrijven') === na1, u);
+  u = m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'vink', nr: 3, regel: '  - [ ] sub', klaar: true, versie: tr15().versie });
+  toets('15h ingesprongen taak telt mee (zelfde telling als open/klaar)', u.status === 200 && lees15('2027 - Schrijfproef.md').indexOf('  - [x] sub') > 0, u);
+  const na3 = lees15('2027 - Schrijfproef.md');
+  u = m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'erbij', tekst: '  - [ ] ## Hotel\nboeken <!-- x --> ' });
+  const na4 = lees15('2027 - Schrijfproef.md');
+  const ins = na3.indexOf('  - [x] sub') + '  - [x] sub'.length;
+  toets('15i erbij: één regel na de laatste taak, met dezelfde inspringing; opgeschoond (geen kop, geen regeleinde, geen <!--)',
+    u.status === 200 && u.body.geschreven === true && na4 === na3.slice(0, ins) + '\n  - [ ] Hotel boeken x -->' + na3.slice(ins), JSON.stringify(na4.slice(ins - 20, ins + 40)));
+  toets('15j de regel "- [ ] niet in het blok" onder Gerelateerd is nooit geraakt, koppen gelijk', na4.indexOf('## Gerelateerd\n\n- [[20_Prive/Reizen/Index|Reizen]]\n- [ ] niet in het blok\n') > 0
+    && (na4.match(/^## /gm) || []).length === (pagina15.match(/^## /gm) || []).length);
+  u = m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'erbij', tekst: 'hotel  BOEKEN x -->' });
+  toets('15k hetzelfde open punt nog eens = niets geschreven', u.status === 200 && u.body.geschreven === false && lees15('2027 - Schrijfproef.md') === na4, u);
+  u = m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'erbij', tekst: '   ' });
+  toets('15l leeg punt = 400', u.status === 400 && lees15('2027 - Schrijfproef.md') === na4, u);
+  const zt = lees15('2027 - Zonder taken.md');
+  u = m15.regelen(id15('2027 - Zonder taken.md'), { actie: 'erbij', tekst: 'Handboek lezen' });
+  toets('15m blok zonder taken (Nog niet bekend): eerste taak na de laatste tekstregel; de rest byte-gelijk', u.status === 200
+    && lees15('2027 - Zonder taken.md') === zt.replace('Handboek volgt.\n', 'Handboek volgt.\n- [ ] Handboek lezen\n') && u.body.te_regelen.open === 1, lees15('2027 - Zonder taken.md'));
+  const zb = lees15('2027 - Zonder blok.md');
+  u = m15.regelen(id15('2027 - Zonder blok.md'), { actie: 'erbij', tekst: 'Iets' });
+  toets('15n geen blok = 409, niets geschreven', u.status === 409 && lees15('2027 - Zonder blok.md') === zb, u);
+  const vb15 = lees15('2022 - Voorbij met lijst.md');
+  u = m15.regelen(id15('2022 - Voorbij met lijst.md'), { actie: 'erbij', tekst: 'Iets' });
+  toets('15o voorbije reis = 409, niets geschreven', u.status === 409 && lees15('2022 - Voorbij met lijst.md') === vb15, u);
+  let symFout = null; try { u = m15.regelen(R.idVan(R.REIS_MAP + '/2021 - Koppeling.md'), { actie: 'erbij', tekst: 'Iets' }); } catch (e) { symFout = e.code || 'fout'; }
+  toets('15p symlink als reispagina: niet geschreven (fout of weigering), doel ongemoeid', (symFout || u.status >= 400) && fs.readFileSync(path.join(V, '10_Zakelijk', 'geheim.md'), 'utf8').indexOf('Iets') < 0, [symFout, u && u.status]);
+  toets('15q ongeldige vragen = 400 (id, handeling, nr, versie, te lang)', m15.regelen('../x', { actie: 'erbij', tekst: 'a' }).status === 400
+    && m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'weg' }).status === 400
+    && m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'vink', nr: -1, regel: 'x', klaar: true, versie: v1 }).status === 400
+    && m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'vink', nr: 0, regel: 'x', klaar: true, versie: 'abc' }).status === 400
+    && m15.regelen(id15('2027 - Schrijfproef.md'), { actie: 'erbij', tekst: 'x'.repeat(1001) }).status === 400 && lees15('2027 - Schrijfproef.md') === na4);
+  toets('15r onbekende id = 404', m15.regelen('0123456789ab', { actie: 'erbij', tekst: 'a' }).status === 404);
+  // gelijktijdige schrijver (nachtstap) tussen lezen en rename: wijzig ziet het en draait opnieuw op de verse tekst → zijn regel blijft staan
+  const echt = VV.wijzig;
+  let keer = 0;
+  const vvRace = Object.assign({}, VV, { wijzig: function (pad, fn, o) {
+    return echt(pad, function (t) { if (keer++ === 0) { const n = t.replace('Intro.', 'Intro, door de nachtstap aangevuld.'); fs.writeFileSync(pad + '.x', n); fs.renameSync(pad + '.x', pad); } return fn(t); }, o);
+  } });
+  const mR = R.maak({ vault: V, vv: vvRace, vandaag: () => '2026-11-27' });
+  u = mR.regelen(id15('2027 - Schrijfproef.md'), { actie: 'erbij', tekst: 'Na de race' });
+  const na5 = lees15('2027 - Schrijfproef.md');
+  toets('15s gelijktijdige nachtstap: zijn wijziging blijft, ons punt staat er ook (opnieuw op de verse tekst)', u.status === 200 && keer >= 2
+    && na5.indexOf('Intro, door de nachtstap aangevuld.') > 0 && na5.indexOf('- [ ] Na de race') > 0, [u.status, keer]);
+  keer = 0;
+  const vR = R.maak({ vault: V, vv: VV, vandaag: () => '2026-11-27' }).reis(id15('2027 - Schrijfproef.md')).body.reis.te_regelen;
+  const vvRace2 = Object.assign({}, VV, { wijzig: function (pad, fn, o) {
+    return echt(pad, function (t) { if (keer++ === 0) { const n = t.replace('- [ ] Vervoer: nog niet bekend\n- [ ] Inschrijven', '- [ ] Inschrijven\n- [ ] Vervoer: nog niet bekend'); fs.writeFileSync(pad + '.x', n); fs.renameSync(pad + '.x', pad); } return fn(t); }, o);
+  } });
+  const voorR2 = lees15('2027 - Schrijfproef.md');
+  u = R.maak({ vault: V, vv: vvRace2, vandaag: () => '2026-11-27' }).regelen(id15('2027 - Schrijfproef.md'), { actie: 'vink', nr: 0, regel: '- [ ] Vervoer: nog niet bekend', klaar: true, versie: vR.versie });
+  toets('15t gelijktijdige herschikking vlak vóór ons vinkje = 409; alleen de wijziging van de ander staat erin', u.status === 409
+    && lees15('2027 - Schrijfproef.md') === voorR2.replace('- [ ] Vervoer: nog niet bekend\n- [ ] Inschrijven', '- [ ] Inschrijven\n- [ ] Vervoer: nog niet bekend'), u);
+  toets('15u puur: regelenToepassen raakt niets buiten het blok en weigert zonder blok', R.regelenToepassen('---\ntype: reis\n---\n## Verloop\n', { actie: 'erbij', tekst: 'a' }).status === 409
+    && R.regelenToepassen('## Nog te regelen\n', { actie: 'erbij', tekst: 'a' }).tekst === '## Nog te regelen\n\n- [ ] a\n');
+  const srv15 = fs.readFileSync('server.js', 'utf8');
+  toets('15v server.js: POST-route, teller, glijdend, audit zonder tekst', /route === 'POST \/app\/tripper\/regelen'\) return typeof appTripperRegelen/.test(srv15)
+    && /appTeller\('tripper-regelen', 120, 3600000\)/.test(srv15) && srv15.indexOf("APP_GLIJD_ROUTES.add('POST /app/tripper/regelen')") > 0
+    && /res\._app\.reden = 'tripper regelen ' \+ id \+ ' ' \+ actie \+ ' ' \+ u\.status/.test(srv15));
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

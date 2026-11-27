@@ -377,12 +377,86 @@ function teRegelenVan(t) {
   if (!m) return null;
   const na = lijf.slice(m.index + m[0].length);
   const eind = /^(?:#{1,2}[ \t]|<!-- sb:generated)/m.exec(na);
-  let tekst = (eind ? na.slice(0, eind.index) : na).trim();
+  const ruw = eind ? na.slice(0, eind.index) : na;
+  let tekst = ruw.trim();
   let afgekapt = false;
   if (tekst.length > MAX_REGELEN) { const k = tekst.lastIndexOf('\n', MAX_REGELEN); tekst = tekst.slice(0, k > 0 ? k : MAX_REGELEN).trimEnd() + '\n\n…'; afgekapt = true; }
   const open = (tekst.match(/^[ \t]*[-*+][ \t]+\[ \]/gm) || []).length, klaar = (tekst.match(/^[ \t]*[-*+][ \t]+\[[xX]\]/gm) || []).length;
-  return { kop: m[0].replace(/^##[ \t]+/, '').trim().slice(0, 80), tekst, open, klaar, afgekapt };
+  return { kop: m[0].replace(/^##[ \t]+/, '').trim().slice(0, 80), tekst, open, klaar, afgekapt, versie: blokVersie(ruw) };
 }
+// ── wv4174 (besluitenpagina nr 200 = 2C100 e; David Ja met vingerafdruk 25-11-2026 22:27): Tripper schrijft voor het eerst, en alleen in het
+// blok Nog te regelen. Ontwerp mk-scripts/wv4174/ontwerp.md (Codex GO-MET-WIJZIGINGEN: MOET 1 = versie van het hele blok meesturen).
+//  - versie = de eerste 16 hex van sha256 van het blok zoals het in de pagina staat (alles tussen de kopregel en de volgende kop); de app krijgt
+//    hem bij het lezen en stuurt hem mee bij een vinkje: anders = 409, nooit een gok welke regel bedoeld was.
+//  - vink: de nr-de takenlijst-regel van het blok (TAAK_RE, dezelfde telling als open/klaar) moet nog precies "regel" zijn; alleen het ene teken
+//    tussen de haken verandert. erbij: één regel "- [ ] <tekst>" na de laatste takenlijst-regel (of na de laatste tekstregel van het blok).
+//  - de nieuwe tekst is altijd t.slice(0, p) + nieuw + t.slice(q); daarna een nacontrole (lengte, koppen, alles buiten het blok byte-gelijk).
+function blokVersie(ruw) { return crypto.createHash('sha256').update(String(ruw)).digest('hex').slice(0, 16); }
+const TAAK_RE = /^[ \t]*[-*+][ \t]+\[([ xX])\](?:[ \t]+(.*))?$/;
+const MAX_PUNT = 120;
+// [begin, einde) van het blok in de hele tekst t (dezelfde grenzen als teRegelenVan), of null
+function blokGrenzen(t) {
+  const fm = /^---\n[\s\S]*?\n---\n?/.exec(t);
+  const basis = fm ? fm[0].length : 0;
+  const m = REGELEN_KOP.exec(t.slice(basis));
+  if (!m) return null;
+  const begin = basis + m.index + m[0].length;
+  const eind = /^(?:#{1,2}[ \t]|<!-- sb:generated)/m.exec(t.slice(begin));
+  return { begin, einde: eind ? begin + eind.index : t.length };
+}
+// De regels van het blok met hun plek: [{ van, tot, regel }] (tot = einde van de regel, zonder het regeleinde)
+function blokRegels(t, g) {
+  const uit = [];
+  let p = g.begin;
+  while (p <= g.einde) {
+    let q = t.indexOf('\n', p);
+    if (q < 0 || q > g.einde) q = g.einde;
+    uit.push({ van: p, tot: q, regel: t.slice(p, q) });
+    if (q >= g.einde) break;
+    p = q + 1;
+  }
+  return uit;
+}
+function puntOpgeschoond(x) {
+  let s = String(x == null ? '' : x).replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').replace(/<!--/g, ' ').trim();
+  s = s.replace(/^(?:[-*+]\s+)?(?:\[[ xX]?\]\s*)?/, '').replace(/^[#>\s]+/, '').replace(/\s+/g, ' ').trim();
+  return s.slice(0, MAX_PUNT).trim();
+}
+const kopTel = (t) => (String(t).match(/^#{1,2}[ \t]/gm) || []).length;
+// Puur: de nieuwe paginatekst voor één handeling, of { fout, status } / { niets: true }. d = { actie, nr, regel, klaar, versie, tekst }.
+function regelenToepassen(t, d) {
+  const g = blokGrenzen(t);
+  if (!g) return { status: 409, fout: 'deze reispagina heeft nog geen blok Nog te regelen' };
+  const regels = blokRegels(t, g);
+  let nieuw, p, q, inv;
+  if (d.actie === 'vink') {
+    if (blokVersie(t.slice(g.begin, g.einde)) !== d.versie) return { status: 409, fout: 'de lijst is intussen veranderd; hij is opnieuw geladen' };
+    const taken = regels.filter((r) => TAAK_RE.test(r.regel.replace(/\s+$/, '')));
+    const r = taken[d.nr];
+    if (!r || r.regel.replace(/\s+$/, '') !== d.regel) return { status: 409, fout: 'de lijst is intussen veranderd; hij is opnieuw geladen' };
+    const m = /^([ \t]*[-*+][ \t]+\[)([ xX])\]/.exec(r.regel);
+    const nu = m[2] !== ' ', teken = d.klaar ? 'x' : ' ';
+    if (nu === !!d.klaar) return { niets: true };
+    p = r.van + m[1].length; q = p + 1; inv = teken;
+  } else {
+    const tekst = puntOpgeschoond(d.tekst);
+    if (!tekst) return { status: 400, fout: 'leeg punt' };
+    const taken = regels.filter((r) => TAAK_RE.test(r.regel.replace(/\s+$/, '')));
+    const zelfde = taken.some((r) => { const m = TAAK_RE.exec(r.regel.replace(/\s+$/, '')); return m[1] === ' ' && String(m[2] || '').trim().toLowerCase() === tekst.toLowerCase(); });
+    if (zelfde) return { niets: true };
+    const laatste = taken.length ? taken[taken.length - 1] : regels.filter((r) => r.regel.trim()).pop();
+    const voor = taken.length ? (/^([ \t]*[-*+][ \t]+)\[/.exec(taken[taken.length - 1].regel) || [null, '- '])[1] : '- ';
+    if (laatste) { p = q = laatste.tot; inv = '\n' + voor + '[ ] ' + tekst; }
+    else { p = q = g.begin; inv = '\n\n- [ ] ' + tekst; }
+  }
+  nieuw = t.slice(0, p) + inv + t.slice(q);
+  // nacontrole: alles buiten [p, q) byte-gelijk, evenveel koppen, het blok staat nog op dezelfde plek
+  if (nieuw.slice(0, p) !== t.slice(0, p) || nieuw.slice(p + inv.length) !== t.slice(q) || kopTel(nieuw) !== kopTel(t)) throw new Error('nacontrole regelen');
+  const g2 = blokGrenzen(nieuw);
+  if (!g2 || g2.begin !== g.begin || g2.einde !== g.einde + inv.length - (q - p)) throw new Error('nacontrole regelen blok');
+  return { tekst: nieuw };
+}
+
 // De hele reis uit een paginatekst (null als het geen reis is). vandaag 'JJJJ-MM-DD' voor gepland/nu/geweest.
 function ontleed(t, rel, vandaag) {
   const i = reisInfoUit(t, rel);
@@ -467,8 +541,40 @@ function maak(o) {
       te_regelen: komend ? teRegelenVan(t) : null,
       pad: rel, tekst: zonderFrontmatter(t), memorylane: koppeling(rel) }) } };
   }
+  // wv4174: één vinkje of één nieuw punt in Nog te regelen van een komende reis. Schrijven via vault-veilig wijzig (geen symlink, eigen tmp +
+  // rename, de mapgrendel van de andere vault-schrijvers, en vlak voor de rename: is het bestand intussen veranderd, dan opnieuw met de verse
+  // tekst, dus ook opnieuw de versietoets). Geen logregel met tekst; de aanroeper audit alleen id en uitkomst.
+  function regelen(id, d) {
+    if (!ID_RE.test(String(id))) return { status: 400, body: { ok: false, fout: 'ongeldige reis' } };
+    d = d && typeof d === 'object' ? d : {};
+    if (d.actie === 'vink') {
+      if (!Number.isSafeInteger(d.nr) || d.nr < 0 || d.nr > 500 || typeof d.regel !== 'string' || d.regel.length > 2000 || typeof d.klaar !== 'boolean' ||
+        !/^[0-9a-f]{16}$/.test(String(d.versie || ''))) return { status: 400, body: { ok: false, fout: 'onvolledige vraag' } };
+    } else if (d.actie === 'erbij') {
+      if (typeof d.tekst !== 'string' || d.tekst.length > 1000) return { status: 400, body: { ok: false, fout: 'onvolledige vraag' } };
+    } else return { status: 400, body: { ok: false, fout: 'onbekende handeling' } };
+    if (typeof o.vv.wijzig !== 'function') return { status: 503, body: { ok: false, fout: 'schrijven kan nu niet' } };
+    const rel = paden().find((x) => idVan(x) === id);
+    if (!rel) return { status: 404, body: { ok: false, fout: 'onbekende reis' } };
+    let uit = null, laatsteTekst = null, wil = false;
+    const geschreven = o.vv.wijzig(path.join(o.vault, rel), function (t) {
+      uit = null; laatsteTekst = t; wil = false;
+      if (Buffer.byteLength(t) > MAX_PAGINA) { uit = { status: 413, fout: 'de reispagina is te groot' }; return null; }
+      const r = ontleed(t, rel, vandaag());
+      if (!r) { uit = { status: 404, fout: 'onbekende reis' }; return null; }
+      if (r.stand !== 'gepland' && r.stand !== 'nu') { uit = { status: 409, fout: 'alleen bij een komende reis' }; return null; }
+      const x = regelenToepassen(t, d);
+      if (x.fout) { uit = { status: x.status, fout: x.fout }; return null; }
+      if (x.niets) return null;
+      laatsteTekst = x.tekst; wil = true;
+      return x.tekst;
+    }, { grendel: 5, krimpGrens: true });
+    if (uit) return { status: uit.status, body: { ok: false, fout: uit.fout, te_regelen: laatsteTekst != null ? teRegelenVan(laatsteTekst) : null } };
+    if (wil && !geschreven) return { status: 409, body: { ok: false, fout: 'de reispagina werd net ergens anders gewijzigd; probeer het opnieuw', te_regelen: null } };
+    return { status: 200, body: { ok: true, geschreven: !!geschreven, te_regelen: laatsteTekst != null ? teRegelenVan(laatsteTekst) : null } };
+  }
   function info() { return Object.assign({ aan: true }, laatst || { op: null, reizen: null, komend: null, onleesbaar: null, uit_fotos: null, uit_fotos_periode: null, uit_fotos_punt: null }); }
-  return { paden, reisInfo, lijst, reis, info };
+  return { paden, reisInfo, lijst, reis, regelen, info };
 }
 
-module.exports = { maak, ontleed, idVan, fotoReis, pastBij, soortUitTitel, teRegelenVan, geannuleerd, soortVan, deelnemersVan, vervoerVan, verblijfVan, plekkenVan, kostenVan, kaartVan, kaartPunt, fmObjLijst, flowMap, fmVeld, fmLijst, VERVOER, REIS_MAP, SOORTEN, SOORT_REGELS, ID_RE, MAX_TITEL };
+module.exports = { maak, regelenToepassen, blokVersie, puntOpgeschoond, ontleed, idVan, fotoReis, pastBij, soortUitTitel, teRegelenVan, geannuleerd, soortVan, deelnemersVan, vervoerVan, verblijfVan, plekkenVan, kostenVan, kaartVan, kaartPunt, fmObjLijst, flowMap, fmVeld, fmLijst, VERVOER, REIS_MAP, SOORTEN, SOORT_REGELS, ID_RE, MAX_TITEL };

@@ -6374,7 +6374,8 @@ APP_GLIJD_ROUTES.add('POST /app/financien/doel');
 APP_GLIJD_ROUTES.add('POST /app/financien/oppak');   // wv3925: Ik wil dit = David die werkt   // wv2621: doel erbij of weg = David die werkt
 ['POST /app/financien/ah/koppel', 'POST /app/financien/ah/ontkoppel'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2703: AH koppelen = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/potje');   // wv2706: potje zetten of weg = David die werkt
-APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');   // wv2715: boeking bij een reis tikken = David die werkt
+APP_GLIJD_ROUTES.add('POST /app/financien/reislabel');
+APP_GLIJD_ROUTES.add('POST /app/tripper/regelen');   // wv4174: een vinkje of punt in Nog te regelen = David die werkt   // wv2715: boeking bij een reis tikken = David die werkt
 ['POST /app/financien/corrigeer', 'POST /app/financien/herstel', 'POST /app/financien/naam'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv2717: zelf corrigeren = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel');
 APP_GLIJD_ROUTES.add('POST /app/zoek-snel/treffers');   // wv3682: de treffers vóór het antwoord = David die typt
@@ -17173,6 +17174,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/financien/doel') return appFinDoel(req, res, a, d);   // wv2621: doel erbij of weg (vaultpagina Doelen)
         if (route === 'GET /app/financien/ah' || route === 'POST /app/financien/ah/koppel' || route === 'POST /app/financien/ah/ontkoppel') return typeof appFinAh === 'function' ? appFinAh(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ah');   // wv2703: AH-kassabonnen
         if (route === 'POST /app/financien/potje') return appFinPotje(req, res, a, d);   // wv2706: potje per post zetten of weg (vaultpagina Potjes)
+        if (route === 'POST /app/tripper/regelen') return typeof appTripperRegelen === 'function' ? appTripperRegelen(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'tripper');   // wv4174 (2C100 e): vinkje of punt in Nog te regelen
         if (route === 'POST /app/financien/reizen') return appFinReizen(req, res, a, d);   // wv2715: kosten per reis (lijst of één reis)
         if (route === 'POST /app/financien/reislabel') return appFinReislabel(req, res, a, d);   // wv2715: boeking bij een reis: erbij, eraf of terug
         if (route === 'POST /app/financien/vermogen') return appFinVermogen(req, res, a, d);   // wv2716: vermogensverloop per maand sinds 2016
@@ -28136,6 +28138,21 @@ async function appTripper(req, res, a, route) {
   } catch (e) { logError('tripper', e); return appWeiger(res, 503, 'Tripper kon de reizen nu niet lezen; probeer het zo opnieuw', 'tripper fout'); }
   if (route === 'GET /app/tripper/lijst' && u.status === 200) res._app.stil = true;
   else res._app.reden = 'tripper ' + (m ? 'reis ' + (/^[0-9a-f]{12}$/.test(m[1]) ? m[1] : 'ongeldig') : 'onbekend') + ' ' + u.status;
+  return appStuur(res, u.status, u.body);
+}
+// wv4174 (besluitenpagina nr 200 = 2C100 e, David Ja met vingerafdruk 25-11-2026 22:27; ontwerp mk-scripts/wv4174/ontwerp.md, Codex GO-MET-WIJZIGINGEN):
+// Tripper schrijft voor het eerst, en alleen in het blok Nog te regelen van een komende reis. POST /app/tripper/regelen
+// { reis, actie: 'vink', nr, regel, klaar, versie } of { reis, actie: 'erbij', tekst }; reizen.js regelen doet het (vault-veilig wijzig onder de
+// mapgrendel, versie van het blok, alles buiten die ene regel byte-gelijk). Hooguit 120 per uur. Audit: alleen id, handeling en status (geen tekst).
+appStaat.tellers['tripper-regelen'] = [];
+async function appTripperRegelen(req, res, a, d) {
+  if (!tripper || typeof tripper.regelen !== 'function') return appWeiger(res, 404, 'Tripper zit niet in deze versie van de pod', 'tripper ontbreekt');
+  const id = /^[0-9a-f]{12}$/.test(String(d.reis || '')) ? String(d.reis) : 'ongeldig';
+  const actie = d.actie === 'vink' || d.actie === 'erbij' ? d.actie : 'onbekend';
+  if (!appTeller('tripper-regelen', 120, 3600000)) return appWeiger(res, 429, 'te vaak gewijzigd dit uur', 'grens tripper-regelen');
+  let u;
+  try { u = tripper.regelen(String(d.reis || ''), d); } catch (e) { logError('tripper-regelen', new Error((e && e.code) || 'schrijven faalde')); return appWeiger(res, 503, 'Tripper kon de reispagina nu niet bijwerken; probeer het zo opnieuw', 'tripper regelen fout'); }
+  res._app.reden = 'tripper regelen ' + id + ' ' + actie + ' ' + u.status + (u.body && u.body.geschreven ? ' geschreven' : '');
   return appStuur(res, u.status, u.body);
 }
 // ── einde OVIS Tripper ──
