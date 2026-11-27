@@ -283,7 +283,8 @@ function fase1(o = {}) {
   const m = PS.maak({ dir: z.dir, vault, registerPad: reg, vragenPad, d1: z.D.d1, cf: z.C.cf, nu: z.nu, melding: async () => {}, fout: () => {},
     tijdlijn: async (van, tot) => { tel.tijdlijn++; tel.van = van; if (o.tijdlijnFaalt || tel.faalt) throw new Error('weg'); return rijen.filter((r) => String(r.eind_datum || r.begin_datum) >= van); },   /* wv4149: zoals de RPC vanaf 'van' */ weer: async () => { tel.weer++; return weer; },
     nieuws: o.nieuws ? async () => { tel.nieuws++; return o.nieuws(); } : undefined, nieuwsTimeoutMs: o.nieuwsTimeoutMs,   // wv3023
-    medisch: o.medisch ? async (b) => { if ((PS.MEDISCH_BRONNEN.find((x) => x.id === b) || {}).team) tel.medisch_team++; else tel.medisch++; tel.medisch_bron.push(b); return o.medisch(b); } : undefined });   // wv3154; wv4210: teambronnen apart geteld
+    medisch: o.medisch ? async (b) => { if ((PS.MEDISCH_BRONNEN.find((x) => x.id === b) || {}).team) tel.medisch_team++; else tel.medisch++; tel.medisch_bron.push(b); return o.medisch(b); } : undefined,   // wv3154; wv4210: teambronnen apart geteld
+    voorJou: o.voorJou, voorJouDicht: o.voorJouDicht });   // wv4211
   return Object.assign(z, { m, zetReg, tel, vault, vragenPad });
 }
 const html = (D) => { const r = D.sq.prepare('SELECT bytes FROM envelop WHERE id = 1').get(); return JSON.parse(Buffer.from(r.bytes, 'base64')).html; };
@@ -1706,4 +1707,116 @@ test('wv4210 bouwHtml: zin en voor wie worden ge-escaped; zonder team geen mvoor
     const g = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 1, leeg: false, inhoud: { agenda: [], medisch: { nieuws: [{ bron: 'lhv', kop: 'K2', tekst: 't', ms: MT0, voor }], belangrijk: [{ bron: 'lhv', kop: 'Kop', tekst: 't', ms: MT0, tot: MT0 + DAG, voor, zin: 'Geheime proefzin' }] } }, toon: 1 });
     assert.doesNotMatch(g, /class="mvoor"|class="mz"|Geheime proefzin/, voor);
   }
+});
+
+// ── wv4211 (nr 924 = L24): de pen ook bij het team — inzendingen van personeel.socev.dev/pen (verzonnen adressen en tekst) ──
+function fase4211(o = {}) {
+  const kaarten = [], dicht = [];
+  const f = fase2(Object.assign({ set: null, voorJou: async (k) => { kaarten.push(k); }, voorJouDicht: async (sl, b) => { dicht.push(sl); return true; } }, o));
+  const rijen = [{ id: 'personeelsscherm-vast', status: 'aan', tekst: NIEUW }];
+  if (o.pen) rijen.push({ id: PS.PEN_RIJ, status: o.penStatus || 'aan', tekst: [PS.PEN_ZIN + ' (proef) ' + (o.direct ? PS.PEN_DIRECT_ZIN + '.' : 'eerst als voorstel bij David.')] });
+  fs.writeFileSync(path.join(f.vault, 'register.json'), JSON.stringify({ rijen }));
+  if (o.cfg !== null) fs.writeFileSync(path.join(f.dir, 'pen.json'), JSON.stringify(o.cfg || { schrijvers: [{ mail: 'Proef.Manager@Voorbeeld.nl', naam: 'Proef' }, { mail: 'eigenaar@voorbeeld.nl', naam: 'Dubbel' }, { mail: 'geen-adres', naam: 'X' }], route: o.route || 'david' }));
+  const zend = (mail, titel, datum, tijd) => f.D.sq.prepare('INSERT INTO pen_inzending (mail, naam, titel, datum, tijd, op) VALUES (?, ?, ?, ?, ?, ?)').run(mail, 'n', titel, datum, tijd || null, f.nu()).lastInsertRowid;
+  const standVan = (id) => f.D.sq.prepare('SELECT stand FROM pen_inzending WHERE id = ?').get(id).stand;
+  const beleid = () => f.C.calls.filter((c) => c.methode === 'PUT').map((c) => c.body.policies);
+  return Object.assign(f, { kaarten, dicht, zend, standVan, beleid });
+}
+
+test('wv4211 zonder registerrij: alleen David; zijn invoer = voorstel (niet op de tv), overnemen/weghalen zet de stand; ander adres geweigerd; geen schrijvers', async () => {
+  const f = fase4211({ pen: false });
+  const a = f.zend('eigenaar@voorbeeld.nl', 'Proefborrel vrijdag', '2026-11-20', '16:30'), b = f.zend('proef.manager@voorbeeld.nl', 'Mag niet', '2026-11-20');
+  await f.m.tik();
+  assert.strictEqual(f.standVan(a), 'david'); assert.strictEqual(f.standVan(b), 'geweigerd', 'kruisproef: zonder rij telt pen.json niet');
+  assert.strictEqual(f.D.sq.prepare('SELECT COUNT(*) AS n FROM pen_schrijver').get().n, 0);
+  assert.ok(!f.beleid().some((p) => p.some((x) => x.precedence === 3)), 'geen pen-regel in Access');
+  assert.doesNotMatch(html(f.D), /Proefborrel/, 'voorstel staat niet op de tv');
+  let st = await stand4209(f.m);
+  assert.deepStrictEqual(st.voorstellen.map((x) => [x.titel, x.pen, x.van]), [['Proefborrel vrijdag', true, null]]);
+  assert.deepStrictEqual(st.pen, { link: 'https://personeel.socev.dev/pen', rij: false, direct: false, schrijvers: [] });
+  assert.strictEqual(f.kaarten.length, 0, 'eigen invoer van David = geen kaart');
+  let r = await post(f.m, 'mededeling', { voorstel: st.voorstellen[0].id });
+  assert.strictEqual(r.status, 200); assert.match(html(f.D), /Proefborrel vrijdag/); assert.strictEqual(f.standVan(a), 'scherm');
+  st = await stand4209(f.m); assert.strictEqual(st.mededelingen[0].door, 'pen');
+  f.D.sq.prepare("UPDATE pen_inzending SET stand = 'nieuw' WHERE id = ?").run(a); await f.m.tik();   // Codex ZOU 1: stand kwijt ≠ tweede voorstel
+  assert.strictEqual(f.standVan(a), 'scherm'); assert.deepStrictEqual((await stand4209(f.m)).voorstellen, []);
+  r = await post(f.m, 'mededeling', { weg: st.mededelingen[0].id });
+  assert.strictEqual(r.status, 200); assert.doesNotMatch(html(f.D), /Proefborrel/); assert.strictEqual(f.standVan(a), 'weg');
+});
+
+test('wv4211 met registerrij: schrijvers in D1 en Access (eigen regel 3); voorstel met naam + één kaart per dag; laten liggen; fout; dubbel verwerken kan niet (Codex ZOU 1)', async () => {
+  const f = fase4211({ pen: true });
+  await f.m.tik();
+  assert.deepStrictEqual(f.D.sq.prepare('SELECT mail, naam FROM pen_schrijver').all().map((x) => [x.mail, x.naam]), [['proef.manager@voorbeeld.nl', 'Proef']], 'eigenaar en ongeldig adres eruit, kleine letters');
+  const p = f.beleid().at(-1);
+  assert.deepStrictEqual(p.map((x) => x.precedence), [1, 3], 'zonder kastje: eigenaar + pen'); assert.deepStrictEqual(p[1].include, [{ email: { email: 'proef.manager@voorbeeld.nl' } }]);
+  assert.strictEqual(f.D.sq.prepare("SELECT waarde FROM stand WHERE sleutel = 'pen_route'").get().waarde, 'david');
+  const n = f.beleid().length; await f.m.tik(); assert.strictEqual(f.beleid().length, n, 'zelfde lijst = geen nieuwe PUT');
+  const a = f.zend('proef.manager@voorbeeld.nl', 'Printer is weer gemaakt', '2026-11-17'), b = f.zend('proef.manager@voorbeeld.nl', 'Te laat', '2026-11-01');
+  const c = f.zend('proef.manager@voorbeeld.nl', 'Proeftraktatie', '2026-11-18');
+  await f.m.tik();
+  assert.strictEqual(f.standVan(a), 'david'); assert.match(f.standVan(b), /^fout:Die datum is al voorbij/);
+  let st = await stand4209(f.m);
+  assert.deepStrictEqual(st.voorstellen.map((x) => [x.titel, x.van]), [['Printer is weer gemaakt', 'Proef'], ['Proeftraktatie', 'Proef']]);
+  assert.deepStrictEqual(st.pen.schrijvers, ['Proef']);
+  assert.strictEqual(f.kaarten.length, 1); assert.strictEqual(f.kaarten[0].sleutel, 'scherm-pen-2026-11-16'); assert.doesNotMatch(JSON.stringify(f.kaarten[0]), /Printer|voorbeeld\.nl/, 'kaart zonder tekst of adres');
+  // ZOU 1: D1-stand ging verloren → volgende tik maakt geen tweede voorstel
+  f.D.sq.prepare("UPDATE pen_inzending SET stand = 'nieuw' WHERE id = ?").run(a);
+  f.zend('proef.manager@voorbeeld.nl', 'Nog een proef', '2026-11-19');
+  await f.m.tik();
+  assert.strictEqual(f.standVan(a), 'david'); assert.strictEqual((await stand4209(f.m)).voorstellen.length, 3); assert.strictEqual(f.kaarten.length, 1, 'één kaart per dag');
+  assert.doesNotMatch(html(f.D), /Printer/, 'kruisproef: route via David = niet op de tv');
+  for (const v of (await stand4209(f.m)).voorstellen) await post(f.m, 'mededeling', { voorstel: v.id, laat: true });
+  assert.strictEqual(f.standVan(a), 'laat'); assert.strictEqual(f.standVan(c), 'laat');
+  await f.m.tik(); assert.deepStrictEqual(f.dicht, ['scherm-pen-2026-11-16'], 'kaart dicht als er niets meer ligt');
+  // Socev-voorstellen dringen pen-voorstellen niet weg
+  f.zend('proef.manager@voorbeeld.nl', 'Blijft staan', '2026-11-19'); await f.m.tik();
+  for (let k = 0; k < 7; k++) f.m.voorstel({ titel: 'Socevproef ' + k, datum: '2026-11-19' });
+  st = await stand4209(f.m); assert.ok(st.voorstellen.some((x) => x.titel === 'Blijft staan')); assert.strictEqual(st.voorstellen.filter((x) => !x.pen).length, 5);
+});
+
+test('wv4211 rechtstreeks: alleen met de extra zin én route direct; dan meteen op de tv met naam in de app; noodknop werkt; kruisproeven', async () => {
+  const f = fase4211({ pen: true, direct: true, route: 'direct' });
+  await f.m.tik();
+  assert.strictEqual(f.D.sq.prepare("SELECT waarde FROM stand WHERE sleutel = 'pen_route'").get().waarde, 'direct');
+  const a = f.zend('proef.manager@voorbeeld.nl', 'Proefborrel in de personeelskamer', '2026-11-20', '16:30'), d = f.zend('eigenaar@voorbeeld.nl', 'Van David zelf', '2026-11-20');
+  await f.m.tik();
+  assert.strictEqual(f.standVan(a), 'scherm'); assert.match(html(f.D), /Proefborrel in de personeelskamer/);
+  assert.strictEqual(f.standVan(d), 'david', 'David via de pen = voorstel (zijn vingerafdruk blijft de knop)');
+  const st = await stand4209(f.m);
+  assert.deepStrictEqual(st.mededelingen.map((x) => [x.titel, x.door, x.van]), [['Proefborrel in de personeelskamer', 'pen', 'Proef']]);
+  assert.strictEqual(f.kaarten.length, 0, 'rechtstreeks = geen kaart');
+  await post(f.m, 'leeg', { aan: true }); assert.doesNotMatch(html(f.D), /Proefborrel/, 'noodknop');
+  // kruisproef: route direct in pen.json maar de registerrij zonder de extra zin = voorstel
+  const g = fase4211({ pen: true, direct: false, route: 'direct' });
+  const b = g.zend('proef.manager@voorbeeld.nl', 'Proef zonder zin', '2026-11-20');
+  await g.m.tik(); assert.strictEqual(g.standVan(b), 'david'); assert.doesNotMatch(html(g.D), /Proef zonder zin/);
+  // kruisproef: rij met de zin, pen.json op david = voorstel
+  const h = fase4211({ pen: true, direct: true, route: 'david' });
+  const c = h.zend('proef.manager@voorbeeld.nl', 'Proef via David', '2026-11-20');
+  await h.m.tik(); assert.strictEqual(h.standVan(c), 'david');
+});
+
+test('wv4211 inkrimpen en kastje: lijst leeg = eerst D1 dan Access; met gekoppeld kastje blijft zijn regel (adres uit D1); adres onbekend = niets aan Access', async () => {
+  const f = fase4211({ pen: true });
+  f.D.sq.exec("INSERT INTO stand VALUES ('kastje_ip', '198.51.100.7')");
+  const s = {}; s.token = { id: 'tok-1', client_id: 'x.access', ip_eis: true };
+  fs.writeFileSync(path.join(f.dir, 'stand.json'), JSON.stringify(s));
+  await f.m.penSync(f.nu());
+  let p = f.beleid().at(-1);
+  assert.deepStrictEqual(p.map((x) => x.precedence), [1, 2, 3]); assert.deepStrictEqual(p[1].require, [{ ip: { ip: '198.51.100.7/32' } }]);
+  // David haalt iedereen weg (pen.json leeg) → pen_schrijver leeg vóór de Access-PUT
+  fs.writeFileSync(path.join(f.dir, 'pen.json'), JSON.stringify({ schrijvers: [], route: 'david' }));
+  const vóór = f.D.log.length;
+  await f.m.penSync(f.nu());
+  p = f.beleid().at(-1); assert.deepStrictEqual(p.map((x) => x.precedence), [1, 2], 'kastje blijft, pen weg');
+  assert.strictEqual(f.D.sq.prepare('SELECT COUNT(*) AS n FROM pen_schrijver').get().n, 0);
+  assert.ok(f.D.log.slice(vóór).some((b) => b.includes('DELETE FROM pen_schrijver')));
+  // adres van het kastje onbekend → geen PUT (nooit het kastje kwijt)
+  const g = fase4211({ pen: true });
+  const s2 = {}; s2.token = { id: 'tok-1' }; fs.writeFileSync(path.join(g.dir, 'stand.json'), JSON.stringify(s2));
+  await assert.rejects(g.m.penSync(g.nu()), /adres van het kastje onbekend/); assert.strictEqual(g.beleid().length, 0);
+  assert.strictEqual(g.D.sq.prepare('SELECT COUNT(*) AS n FROM pen_schrijver').get().n, 0, 'groeien: Access eerst, dus D1 nog leeg');
+  // koppel/intrek nemen de pen-regel mee
+  assert.deepStrictEqual(PS._t.penSchrijversNorm([{ mail: 'a@b.nl', naam: 'A' }, { mail: 'A@B.nl', naam: 'Dubbel' }, { mail: 'c@d.nl', naam: '<b>' }], 'x@y.nl'), [{ mail: 'a@b.nl', naam: 'A' }]);
 });
