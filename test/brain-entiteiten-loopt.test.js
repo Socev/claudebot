@@ -40,6 +40,11 @@ t('persoon: roosterdagen met plek', () => {
   const l = B.looptUit(rijen, punten, Object.assign({}, basis, { persoon: true }));
   assert.deepStrictEqual(l.diensten, { dagen: ['2026-11-30'], totaal: 1, plek: 'Proefpraktijk' });
 });
+t('Codex ZOU 1: diensten op twee plekken = geen plek', () => {
+  const r2 = rijen.concat([{ event_id: 7, soort: 'dienst', hele_dag: true, begin_datum: '2026-12-01', titel: 'XX', entiteiten: [{ pad: PAD, rol: 'betreft' }, { pad: 'q.md', rol: 'context', naam: 'Andere praktijk' }] }]);
+  const l = B.looptUit(r2, [], Object.assign({}, basis, { persoon: true }));
+  assert.deepStrictEqual(l.diensten, { dagen: ['2026-11-30', '2026-12-01'], totaal: 2, plek: null });
+});
 t('geen treffer = lege lijsten; bron niet te lezen = null', () => {
   const l = B.looptUit(rijen, punten, Object.assign({}, basis, { id: 'org:ander', paden: ['10_Zakelijk/X.md'], objectId: null }));
   assert.deepStrictEqual([l.kaarten, l.afspraken, l.diensten], [[], [], null]);

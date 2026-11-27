@@ -448,7 +448,7 @@ function looptUit(rijen, punten, o) {
   }
   let afspraken = null, totaal = 0, diensten = null;
   if (Array.isArray(rijen)) {
-    const lijst = [], dagen = new Set(); let plek = null;
+    const lijst = [], dagen = new Set(), plekken = new Set();
     rijen.forEach(function (r0) {
       const r = r0 && r0.sb_kalender_tijdlijn && !r0.event_id ? r0.sb_kalender_tijdlijn : r0;
       if (!r || typeof r !== 'object') return;
@@ -464,12 +464,13 @@ function looptUit(rijen, punten, o) {
       } else if (r.soort === 'dienst' && o.persoon && mijn.some(function (e) { return e.rol === 'betreft'; })) {
         dagen.add(dag);
         const ctx = ents.find(function (e) { return e && e.rol === 'context' && !hoort(e) && e.naam; });
-        if (ctx && !plek) plek = masker(String(ctx.naam)).slice(0, 60);
+        if (ctx) plekken.add(masker(String(ctx.naam)).slice(0, 60));
       }
     });
     lijst.sort(function (a, b) { return (a.datum + (a.tijd || '')).localeCompare(b.datum + (b.tijd || '')); });
     totaal = lijst.length; afspraken = lijst.slice(0, LOOPT_AFSPRAAK_MAX);
-    if (dagen.size) diensten = { dagen: Array.from(dagen).sort().slice(0, LOOPT_DIENST_MAX), totaal: dagen.size, plek: plek };
+    // Codex ZOU 1: diensten op meer dan één plek = geen plek (anders staan dagen bij de verkeerde praktijk)
+    if (dagen.size) diensten = { dagen: Array.from(dagen).sort().slice(0, LOOPT_DIENST_MAX), totaal: dagen.size, plek: plekken.size === 1 ? Array.from(plekken)[0] : null };
   }
   return { kaarten: kaarten, afspraken: afspraken, afspraken_totaal: totaal, diensten: diensten };
 }
@@ -1058,7 +1059,8 @@ function maak(o) {
   function binnen(pr, ms) { return Promise.race([Promise.resolve(pr), new Promise(function (_, nee) { setTimeout(function () { nee(new Error('te traag')); }, ms); })]); }
   async function looptVan(k, paden, objectId) {
     if (!tijdlijn && !voorJou) return undefined;
-    const vandaag = amsDag(nu()), tot = amsDag(nu() + LOOPT_DAGEN * 86400000);
+    const vandaag = amsDag(nu());
+    const tot = new Date(Date.parse(vandaag + 'T12:00:00Z') + LOOPT_DAGEN * 86400000).toISOString().slice(0, 10);   // Codex ZOU 2: 14 kalenderdagen
     let rijen = null, punten = null;
     if (tijdlijn) {
       if (tlCache && tlCache.dag === vandaag && nu() - tlCache.op < 300000) rijen = tlCache.rijen;
