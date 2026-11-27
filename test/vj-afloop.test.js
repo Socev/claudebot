@@ -76,9 +76,11 @@ test('doe-kaart met een kale Gedaan: geen regel; met bericht wel', function () {
   assert.strictEqual(A.afloop(kaart({ soort: 'doen' }), opts({ rijen: [{ id: 901, status: 'gestart' }] })).tekst, 'Loopt nog');
   assert.strictEqual(A.afloop(kaart(), opts({ rijen: [{ id: 901, status: 'klaar', job_id: null }] })).tekst, 'Gedaan');
 });
-test('kaartJobs: knopbeurt en klus van de rij', function () {
-  assert.deepStrictEqual(A.kaartJobs(kaart(), { rijen: [{ id: 901, job_id: R1 }], knopJob: J1 }), [J1, R1]);
-  assert.deepStrictEqual(A.kaartJobs(kaart({ status: 'open' }), { knopJob: J1 }), []);
+test('meer klussen aan één kaart: loopt nog en mislukt gaan vóór gedaan', function () {
+  const k = kaart({ herkomst: { wv: [901, 902] } });
+  assert.strictEqual(A.afloop(k, opts({ rijen: [{ id: 901, status: 'klaar', job_id: R1 }, { id: 902, status: 'gestart' }] })).tekst, 'Loopt nog');
+  assert.strictEqual(A.afloop(k, opts({ rijen: [{ id: 901, status: 'klaar', job_id: R1 }, { id: 902, status: 'mislukt', job_id: null }], knopJob: J2 })).stand, 'mislukt');
+  assert.strictEqual(A.afloop(k, opts({ rijen: [{ id: 901, status: 'vervallen' }, { id: 902, status: 'klaar', job_id: R1 }] })).tekst, 'Gedaan: de proefknop staat aan en werkt.');
 });
 test('Te lezen: een bericht dat aan een kaart hangt staat er niet los; mislukt wel', function () {
   const nu = Date.parse('2026-11-27T12:00:00Z'), t = '2026-11-27T11:00:00Z';
@@ -89,13 +91,15 @@ test('Te lezen: een bericht dat aan een kaart hangt staat er niet los; mislukt w
   const basis = { per, staat: { sinds: '2026-11-01T00:00:00Z' }, tabs: {}, nu, mkKlussen: false };
   const zonder = TL.uit(basis).punten.map((p) => p.job_id).sort();
   assert.deepStrictEqual(zonder, [J1, J2, L1].sort());
-  const met = TL.uit(Object.assign({ aanKaart: new Set([J1, J2, R1]) }, basis)).punten.map((p) => p.job_id);
-  assert.deepStrictEqual(met, [J2]);
+  const met = TL.uit(Object.assign({ aanKaart: new Set([J1, J2, R1]) }, basis)).punten.map((p) => p.job_id).sort();
+  assert.deepStrictEqual(met, [J2, L1].sort());   // L1 hangt via agent_job R1 aan geen getoonde regel: blijft
+  assert.deepStrictEqual(TL.uit(Object.assign({ aanKaart: new Set([L1]) }, basis)).punten.map((p) => p.job_id).sort(), [J1, J2].sort());
 });
 test('server.js: lijstroute geeft snel en afloop alleen op het kanaal, gevoelig blijft openklappen, Te lezen krijgt aanKaart', function () {
   assert.match(src, /if \(!k\.kan \|\| k\.gevoelig \|\| k\.stop\) continue;/);
   assert.match(src, /snel: snel\[p\.id\], afloop: appVjAfloopVorm\(afl\.per\[p\.id\]\)/);
-  assert.match(src, /appTeLezen\(a, moet, nu, afl\.jobs\)/);
+  assert.match(src, /appTeLezen\(a, moet, nu, aanKaart\)/);
+  assert.match(src, /lijst\.concat\(afgehandeld\)\.forEach\(function \(x\) \{ if \(x\.afloop && x\.afloop\.job_id\) aanKaart\.add\(x\.afloop\.job_id\); \}\);/);
   assert.match(src, /aanKaart: aanKaart instanceof Set \? aanKaart : undefined/);
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'uitrol.sh'), 'utf8'), /RELEASE_OPTIONEEL="[^"]*\bvj-afloop\.js\b/);
 });

@@ -188,9 +188,9 @@ function uit(o) {
           if (!(tijd(tabs[kanaal]) >= t)) soort = 'antwoord';   // David zag het gesprek ná het antwoord: dan niet (meer)
         }
       }
-      // wv4232 (L48): het antwoord of rapport bij een knopdruk op een Voor jou-kaart hangt als afloopregel aan die kaart (Afgehandeld);
-      // dan niet ook los hier. Mislukt blijft wel staan.
-      if ((soort === 'klus' || soort === 'antwoord') && o.aanKaart && x.ok !== false && (o.aanKaart.has(x.job_id) || o.aanKaart.has(x.agent_job))) soort = null;
+      // wv4232 (L48): het antwoord of rapport waar een getoonde afloopregel van een Voor jou-kaart naartoe tikt (o.aanKaart = die job_ids),
+      // staat niet ook los hier. Mislukt blijft wel staan.
+      if ((soort === 'klus' || soort === 'antwoord') && o.aanKaart && x.ok !== false && o.aanKaart.has(x.job_id)) soort = null;
       if (!soort && bewaard && !(o.moet && o.moet.has(x.job_id))) soort = 'bewaard';
       if (!soort) return;
       if (x.soort === 'bericht' || x.soort === 'knop') van = kort(x.tekst, VAN_MAX) || null;

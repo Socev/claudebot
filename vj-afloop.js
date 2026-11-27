@@ -15,7 +15,8 @@
 //   - rij mislukt/afgebroken, of het rapport/antwoord met ok false → Mislukt: <uitkomstzin>
 //   - rij vervallen                               → Niet doorgegaan
 //   - geen rij: het antwoord van de knopbeurt als "Reactie: …" (geen bewijs dat iets gedaan is), Mislukt bij ok false, of niets
-// Een kaart die David op "Niet meer nodig" zette, krijgt geen afloop.
+// Meer klussen aan één kaart: de stand die het meest zegt (bezig > loopt > rij > wacht > mislukt > gedaan > niet). Een kaart die David op
+// "Niet meer nodig" zette, krijgt geen afloop. Te lezen laat alleen het bericht weg waar een getoonde regel naartoe tikt (server.js).
 
 const ZIN_MAX = 110;
 const JOB_RE = /^[0-9a-f]{16}$/;
@@ -69,39 +70,36 @@ function afloop(p, o) {
 function afloopKaal(p, o) {
   if (!p || p.status !== 'gedaan') return null;
   const knopJob = JOB_RE.test(String(o.knopJob || '')) ? o.knopJob : null;
-  const zonder = function (x) { return Object.assign({ kanaal: null, job_id: null, t: null }, x); };
   if (knopJob && lopend(knopJob, o)) return zonder({ stand: 'bezig', tekst: 'Socev is ermee bezig', open: true });
-  const r = rijenVan(p, o.rijen)[0] || null;
   const knopB = knopJob ? bericht(knopJob, o) : null;
-  if (r) {
-    const st = String(r.status || '');
-    if (st === 'gestart') return zonder({ stand: 'loopt', tekst: 'Loopt nog', open: true });
-    if (st === 'open') return zonder({ stand: 'rij', tekst: 'Staat in de rij', open: true });
-    if (st === 'geblokkeerd') return /^\s*david/i.test(String(r.geblokkeerd_door || ''))
-      ? Object.assign(zonder({ stand: 'wacht', tekst: 'Wacht weer op jou', open: true }), knopB ? { kanaal: knopB.kanaal, job_id: knopB.job_id } : {})
-      : zonder({ stand: 'rij', tekst: 'Staat in de rij', open: true });
-    if (st === 'vervallen') return zonder({ stand: 'niet', tekst: 'Niet doorgegaan', open: false, t: r.klaar_op || null });
-    const klusB = r.job_id ? bericht(r.job_id, o, true) : null;
-    if (st === 'klaar') return Object.assign(klaarUit(r.job_id ? klusB : knopB, r.klaar_op), { open: false });
-    if (st === 'mislukt' || st === 'afgebroken') {
-      const b = klusB || knopB;
-      return { stand: 'mislukt', tekst: metKop('Mislukt', b && b.zin), kanaal: b ? b.kanaal : null, job_id: b ? b.job_id : null, t: r.klaar_op || (b && b.t) || null, open: false };
-    }
-    return null;
+  const rijen = rijenVan(p, o.rijen);
+  if (rijen.length) {
+    // Codex-review wv4232 MOET 3: meer klussen aan één kaart = de stand die het meest zegt (loopt nog gaat vóór gedaan, mislukt vóór gedaan)
+    const per = rijen.map(function (r) { return afloopRij(r, knopB, o); }).filter(Boolean);
+    per.sort(function (x, y) { return RANG[x.stand] - RANG[y.stand]; });
+    return per[0] || null;
   }
   if (knopB) return knopB.ok ? { stand: 'reactie', tekst: metKop('Reactie', knopB.zin), kanaal: knopB.kanaal, job_id: knopB.job_id, t: knopB.t || null, open: false }
     : Object.assign(klaarUit(knopB, null), { open: false });
   return null;
 }
-// De jobs die bij de kaart horen (knopbeurt en klus van de rij), voor Te lezen: een bericht met die job_id of agent_job hangt aan de
-// kaart en staat niet ook los in Te lezen (een mislukt bericht wel: dat toetst te-lezen.js op ok).
-function kaartJobs(p, o) {
-  o = o || {};
-  if (!p || p.status !== 'gedaan') return [];
-  const uit = [];
-  if (JOB_RE.test(String(o.knopJob || ''))) uit.push(o.knopJob);
-  rijenVan(p, o.rijen).forEach(function (r) { if (JOB_RE.test(String(r.job_id || ''))) uit.push(r.job_id); });
-  return uit;
+const RANG = { bezig: 0, loopt: 1, rij: 2, wacht: 3, mislukt: 4, gedaan: 5, reactie: 6, niet: 7 };
+function zonder(x) { return Object.assign({ kanaal: null, job_id: null, t: null }, x); }
+function afloopRij(r, knopB, o) {
+  const st = String(r.status || '');
+  if (st === 'gestart') return zonder({ stand: 'loopt', tekst: 'Loopt nog', open: true });
+  if (st === 'open') return zonder({ stand: 'rij', tekst: 'Staat in de rij', open: true });
+  if (st === 'geblokkeerd') return /^\s*david/i.test(String(r.geblokkeerd_door || ''))
+    ? Object.assign(zonder({ stand: 'wacht', tekst: 'Wacht weer op jou', open: true }), knopB ? { kanaal: knopB.kanaal, job_id: knopB.job_id } : {})
+    : zonder({ stand: 'rij', tekst: 'Staat in de rij', open: true });
+  if (st === 'vervallen') return zonder({ stand: 'niet', tekst: 'Niet doorgegaan', open: false, t: r.klaar_op || null });
+  const klusB = r.job_id ? bericht(r.job_id, o, true) : null;
+  if (st === 'klaar') return Object.assign(klaarUit(r.job_id ? klusB : knopB, r.klaar_op), { open: false });
+  if (st === 'mislukt' || st === 'afgebroken') {
+    const b = klusB || knopB;
+    return { stand: 'mislukt', tekst: metKop('Mislukt', b && b.zin), kanaal: b ? b.kanaal : null, job_id: b ? b.job_id : null, t: r.klaar_op || (b && b.t) || null, open: false };
+  }
+  return null;
 }
 
-module.exports = { afloop: afloop, kaartJobs: kaartJobs, ZIN_MAX: ZIN_MAX, metKop: metKop };
+module.exports = { afloop: afloop, ZIN_MAX: ZIN_MAX, metKop: metKop };

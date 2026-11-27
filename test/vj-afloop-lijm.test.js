@@ -41,7 +41,7 @@ test('snel: alleen open besluiten, gevoelig/stop/regels/steekwoorden/knopstap ni
   assert.strictEqual(s[1].knop.tekst_id, 't1');
   assert.deepStrictEqual(fouten, []);
 });
-test('afloop: Ja met klus klaar = Gedaan + link naar het rapport; knopbeurt bezig; Niet meer nodig niet; Te lezen-jobs', async function () {
+test('afloop: Ja met klus klaar = Gedaan + link naar het rapport; knopbeurt bezig; Niet meer nodig niet', async function () {
   const nu = Date.parse('2026-11-27T18:00:00Z');
   const k1 = kaart(1, { status: 'gedaan', gesloten_door: 'david', gesloten_op: '2026-11-27T12:00:00Z', herkomst: { wv: [901] } });
   const k2 = kaart(2, { status: 'gedaan', gesloten_door: 'david', gesloten_op: '2026-11-27T17:59:00Z', herkomst: {} });
@@ -60,7 +60,6 @@ test('afloop: Ja met klus klaar = Gedaan + link naar het rapport; knopbeurt bezi
   assert.deepStrictEqual(JSON.parse(JSON.stringify(r.appVjAfloopVorm(a.per[1]))), { stand: 'gedaan', tekst: 'Gedaan: de proefknop staat aan (een klus van Socev).', kanaal: 'machinekamer', job_id: J('d') });
   assert.strictEqual(a.per[2].stand, 'bezig');
   assert.strictEqual(r.appVjAfloopVorm(a.per[2]).job_id, null);
-  assert.deepStrictEqual([...a.jobs].sort(), [J('a'), J('b'), J('c')].sort());
   assert.strictEqual(r.appVjAfloopVorm(undefined), undefined);
   assert.deepStrictEqual(fouten, []);
 });

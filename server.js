@@ -13695,7 +13695,7 @@ function appVjKnopJob(p, v, afMap) {
   return null;
 }
 async function appVjAfloopAlle(punten, nu, afMap) {
-  const uit = { per: {}, jobs: new Set() };
+  const uit = { per: {} };
   if (!VJA) return uit;
   const kaarten = (punten || []).filter(function (p) { return p && p.status === 'gedaan' && p.gesloten_door === 'david' && nu - (Date.parse(p.gesloten_op || '') || 0) < APP_VJ_AFLOOP_MS; });
   if (!kaarten.length) return uit;
@@ -13723,7 +13723,6 @@ async function appVjAfloopAlle(punten, nu, afMap) {
     try {
       const x = VJA.afloop(p, o);
       if (x) uit.per[p.id] = x;
-      VJA.kaartJobs(p, o).forEach(function (j) { uit.jobs.add(j); });
     } catch (e) { logError('vj-afloop', e); }
   });
   return uit;
@@ -13757,7 +13756,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   try { vr = appVragen(); } catch (e) { vr = {}; }
   const af = await appVjAfgeleid(punten, nu);   // wv1018: vóór de lijst (beantwoord leest de afgeleide koppeling ook)
   // wv4232 (L48): knopstand voor de eerste besluiten in de lijst (alleen op het kanaal: de huidige app) en de afloop na een knopdruk
-  let snel = {}, afl = { per: {}, jobs: new Set() };
+  let snel = {}, afl = { per: {} };
   if (kanaal) {
     try { snel = await appVjSnel(zichtbaar, af.map); } catch (e) { logError('vj-snel', e); snel = {}; }
     try { afl = await appVjAfloopAlle(eigen, nu, af.map); } catch (e) { logError('vj-afloop', e); }
@@ -13777,6 +13776,9 @@ async function appVoorJouRoute(req, res, a, kanaal) {
     return (p.status === 'gedaan' || p.status === 'vervallen') && zelf && Number.isFinite(g) && (appYmd(g) === vandaag || (p.gesloten_door === 'david' && afloopNu)) && !inLijst.has(p.id);
   }).sort(function (x, y) { return String(y.gesloten_op).localeCompare(String(x.gesloten_op)); }).slice(0, 30)
     .map(function (p) { return { id: p.id, titel: appKort(p.titel, 120), status: p.status, t: p.gesloten_op, beantwoord: appVjBeantwoordKort(p, vr, af.map), afloop: appVjAfloopVorm(afl.per[p.id]) }; });
+  // wv4232 (Codex MOET 2): alleen een bericht waar een getoonde afloopregel naartoe tikt, staat niet ook los in Te lezen
+  const aanKaart = new Set();
+  lijst.concat(afgehandeld).forEach(function (x) { if (x.afloop && x.afloop.job_id) aanKaart.add(x.afloop.job_id); });
   // wv4194 (3C17): Doe jij het — zolang Socevs beurt loopt staat de kaart hier als "Socev doet het" (status socev; oude app toont het woord)
   if (VJU) eigen.forEach(function (p) {
     if (inLijst.has(p.id) || (p.status !== 'open' && p.status !== 'later')) return;
@@ -13808,7 +13810,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   // wv2245: Te lezen; een fout hier raakt Moet iets en de kaarten niet (te_lezen.fout, lege lijst). Zonder module: geen veld (oude stand).
   let teLezen;
   if (teLezenMod) {
-    try { teLezen = await appTeLezen(a, moet, nu, afl.jobs); } catch (e) { logError('te-lezen', e); teLezen = { punten: [], meer: 0, ongezien: 0, nieuw: 0, afgevinkt: [], bewaard: null, fout: 'Te lezen is nu niet te lezen', gezien_bekend: false }; }
+    try { teLezen = await appTeLezen(a, moet, nu, aanKaart); } catch (e) { logError('te-lezen', e); teLezen = { punten: [], meer: 0, ongezien: 0, nieuw: 0, afgevinkt: [], bewaard: null, fout: 'Te lezen is nu niet te lezen', gezien_bekend: false }; }
     teLezen.punten.forEach(function (p) { sleutels.push(p.sleutel); });
   }
   appMoetGezienOpruim(punten, nu, vandaag);
@@ -14025,7 +14027,7 @@ async function appTeLezenPer() {
   return per;
 }
 // Voor GET /app/voor-jou/kanaal. moet = de punten van Moet iets (die tonen we hier niet nog eens).
-async function appTeLezen(a, moet, nu, aanKaart) {   // wv4232: aanKaart = jobs die als afloop aan een kaart hangen
+async function appTeLezen(a, moet, nu, aanKaart) {   // wv4232: aanKaart = job_ids waar een getoonde afloopregel naartoe tikt
   const per = await appTeLezenPer();
   const klussen = {};   // wv3967: machinekamer-klusrapporten niet meer in Te lezen (mkKlussen false), dus geen herkomst nodig
   const g = appGezienDavid();
@@ -22796,13 +22798,9 @@ async function telOwSloten(res, t, naam, teller, max) {
 }
 async function telTeLezenPunten() {
   const nu = Date.now();
-  let moet = [], aanKaart;
-  try {
-    const punten = await appVjPunten(), af = await appVjAfgeleid(punten, nu);
-    moet = (await appMoetIets(punten, nu, af)) || [];
-    try { aanKaart = (await appVjAfloopAlle(punten, nu, af.map)).jobs; } catch (e) { aanKaart = undefined; }   // wv4232: zoals Te lezen in de app
-  } catch (e) { logError('tel-telezen', e); moet = []; }
-  const tl = await appTeLezen(null, moet, nu, aanKaart);
+  let moet = [];
+  try { const punten = await appVjPunten(); moet = (await appMoetIets(punten, nu, await appVjAfgeleid(punten, nu))) || []; } catch (e) { logError('tel-telezen', e); moet = []; }
+  const tl = await appTeLezen(null, moet, nu);
   return (tl && Array.isArray(tl.punten) ? tl.punten : []).filter(function (p) { return p && TEL_SLEUTEL_TL_RE.test(String(p.sleutel)); });
 }
 function telTeLezenTitel(p) {
