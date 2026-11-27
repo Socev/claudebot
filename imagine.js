@@ -565,7 +565,13 @@ function maak(deps) {
       }
       rs.push(r);
     }
-    if (rs.every(function (r) { return r.al; })) return { status: 200, al: true, groep: rs[0].taak ? rs[0].taak.vergelijk : null, taken: rs.map(function (r) { return r.taak; }) };
+    // review Codex ZOU 1: dezelfde beurt_id eerst met twee en nu met drie modellen → gemengde groepen; de nieuwe taken weer uit de rij, 409
+    const oud = rs.filter(function (r) { return r.al; });
+    if (oud.length && oud.length < n) {
+      for (const x of rs) if (!x.al) { const t = open().prepare('SELECT * FROM taak WHERE id = ?').get(x.taak.id); if (t && t.studio) { try { S.stopGeheugen(t.studio); } catch (e) {} } }
+      return { status: 409, fout: 'deze vergelijking liep al met andere modellen; start hem opnieuw' };
+    }
+    if (oud.length === n) return { status: 200, al: true, groep: rs[0].taak ? rs[0].taak.vergelijk : null, taken: rs.map(function (r) { return r.taak; }) };
     log('imagine vergelijk groep=' + groep + (n === 3 ? ' drie' : ''));
     return { status: 200, groep: groep, taken: rs.map(function (r) { return r.taak; }) };
   }

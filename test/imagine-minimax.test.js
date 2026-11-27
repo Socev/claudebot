@@ -127,6 +127,20 @@ u = io.BytesIO(); m.save(u, 'PNG'); sys.stdout.buffer.write(u.getvalue())`, [b, 
   await klaarOp(bron, tVoor + 5);
   if (r.status === 200) await roep('/app/imagine/vergelijk/' + r.body.groep + '/kies', { houd: [] });
 
+  // review Codex ZOU 1: dezelfde beurt_id terwijl de eerste twee nog lopen, nu met drie modellen → 409 en de MiniMax-taak niet in de rij
+  C.scenario = 'hang';
+  const zelfde = nb();
+  r = await roep('/app/imagine/vergelijk', { versie: v1, velden: { opdracht: 'lente' }, beurt_id: zelfde });
+  const g2 = r.body.groep, eerste = (r.body.taken || []).map((t) => t.id);
+  r = await roep('/app/imagine/vergelijk', { versie: v1, velden: { opdracht: 'lente' }, minimax: true, beurt_id: zelfde });
+  await slaap(300);
+  const mmLoopt = (await roep('/app/imagine/bron/' + bron)).body.taken.filter((t) => t.stand === 'opdracht-minimax' && (t.status === 'wacht' || t.status === 'bezig')).length;
+  toets('M4 zelfde beurt (nog lopend) eerst twee, dan drie: 409 en geen MiniMax-taak in de rij', r.status === 409 && mmLoopt === 0, { s: r.status, f: r.body.fout, mmLoopt });
+  for (const id of eerste) await roep('/app/imagine/stop/' + id, {});
+  C.scenario = 'goed';
+  await klaarOp(bron, 0);
+  if (g2) await roep('/app/imagine/vergelijk/' + g2 + '/kies', { houd: [] });
+
   // ── M5. allemaal of geen: rij met plek voor drie maar MiniMax kan niet → niets blijft in de rij ──
   const yp = path.join(STUDIO, 'flows', 'beeld-opdracht-minimax', 'flow.yaml'), yOud = fs.readFileSync(yp, 'utf8');
   const y = JSON.parse(yOud); y.velden = basisV.concat([{ naam: 'kapot', label: 'kapot', soort: 'tekst', verplicht: true, pad: '77.inputs.value' }]);
