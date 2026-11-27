@@ -642,6 +642,10 @@ jobs:
       - name: "seintje-soort (wv4121, 3C16)"
         if: ${{ !cancelled() }}
         run: node --test test/seintje-soort.test.js
+      # wv4126: pod-klok in schaduwstand (C71 stap a) — wandklok NL incl. zomer-/wintertijd, gat niet inhalen, herstart niet dubbel, vergelijking met n8n.
+      - name: "pod-klok (wv4126, C71 stap a)"
+        if: ${{ !cancelled() }}
+        run: node --test test/pod-klok.test.js
       # wv2991: OVIS Personeelsscherm fase 0 — proefscherm tekenen, koppelen met IP-eis, intrekken, tik en meldingen (nep-D1, nep-Cloudflare).
       - name: "personeelsscherm (wv2991, OVIS Personeelsscherm fase 0)"
         if: ${{ !cancelled() }}

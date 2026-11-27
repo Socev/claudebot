@@ -4820,6 +4820,7 @@ function handleRequest(req, res) {
       mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },
       pot_app: typeof potAppInfo === 'function' ? potAppInfo() : { aan: false },   // wv1894: OVIS POT (lezen)   // wv1269: App Mediatheek (aantallen, geen inhoud)
       weekinhaal: typeof weekinhaalInfo === 'function' ? weekinhaalInfo() : { aan: false },
+      pod_klok: typeof podKlokInfo === 'function' ? podKlokInfo() : { aan: false },
       heartbeat_moment: hbMomentLaatst,   // wv3686: laatste momentbesluit (meta)
       storingsdienst: typeof storingsdienstInfo === 'function' ? storingsdienstInfo() : null,   // wv3712: onderzoek per alarm (laatste ronde, wacht, vandaag, verbruik)
       hartslag_alarm: typeof hartslagAlarmInfo === 'object' ? hartslagAlarmInfo : null,   // wv3484: verlopen hartslag → box (laatste ronde, gemeld, overgeslagen)   // wv3194: inhaal gemiste weekrondes (laatste tik, aantallen deze week, bezig)
@@ -26082,6 +26083,26 @@ async function weekinhaalTik() {
   try { weekinhaal.opruimen(); } catch (e) {}
 }
 if (weekinhaal && SERVER_ECHT) { setTimeout(function () { weekinhaalTik(); }, 240000).unref(); setInterval(function () { weekinhaalTik(); }, 15 * 60000).unref(); }
+// wv4126 (C71 stap a, David Ja 25-11-2026, besluitenpagina nr 81): pod-klok in SCHADUWSTAND. Elke 20 s (echte pod, rol primair, noodrem
+// POD_KLOK=0) rekent pod-klok.js op de Amsterdamse wandklok uit welke van acht n8n-klokken (Quotumalarm, Health-rapporten, Facturen-,
+// Bank-, Harvester-, Nieuwsbrief-ronde, Werkvoorraad-tikker, CISO-bezorger) nu zou starten en schrijft dat in klokken/pod-klok-schaduw.jsonl.
+// Start zelf NIETS. Gemiste minuten (> 3 min) worden niet ingehaald (regel 'gat'). Vergelijken: node pod-klok.js vergelijk. /health pod_klok.
+/* podKlok:begin */
+const podKlok = (function () {
+  try {
+    const K = require(path.join(__dirname, 'pod-klok.js'));
+    return K.maak({ staatPad: path.join(KLOKKEN_DIR, 'pod-klok.json'), logPad: path.join(KLOKKEN_DIR, 'pod-klok-schaduw.jsonl'),
+      uit: function () { if (process.env.POD_KLOK === '0') return true; try { return !rolPrimair(); } catch (e) { return true; } },
+      log: function (r) { schrijfLog(nu() + ' ' + r); } });
+  } catch (e) { logError('pod-klok', e); return null; }
+})();
+function podKlokInfo() { if (!podKlok) return { aan: false, module: false }; try { return podKlok.health(); } catch (e) { return { fout: true }; } }
+if (podKlok && SERVER_ECHT === true) {
+  setTimeout(function () { podKlok.tik(); }, 30000).unref();
+  setInterval(function () { podKlok.tik(); }, 20000).unref();
+  setInterval(function () { podKlok.opruimen(); }, 6 * 3600000).unref();
+}
+/* podKlok:einde */
 // wv3484 (21-11-2026): alarm op een verlopen hartslag. De NZa-wachter lag 15-11 t/m 20-11 stil zonder dat iemand het zag: het oordeel
 // te_laat stond alleen op de Ringkaart, de Stiltewachter (n8n) bewaakt alleen zijn eigen watchlist. Elk kwartier (echte pod, rol
 // primair, noodrem HARTSLAG_ALARM=0): mk_hartslag_stand lezen, de watchlist van de Stiltewachter (Data Table stilte_state) lezen, en
