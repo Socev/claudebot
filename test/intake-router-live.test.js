@@ -1249,3 +1249,50 @@ test('wv4133: een plek-keuze gaat door naar MailMan (naKeuze met bron, bron_id, 
   assert.equal(mk.length, 1); assert.equal(mk[0].bron_id, 'b1'); assert.equal(mk[0].lens, 'geen'); assert.ok(mk[0].tijd);
   E.r.sluit();
 });
+
+// ── wv4206 (besluitenpagina nr 477 / 3C177): wekelijkse nakijkronde — wat de nakijker anders zou doen komt op Even nakijken ──
+test('wv4206 3C177: weekronde zet vanzelf geplaatste stukken op Even nakijken met de zin van de nakijker; Klopt/Verplaats; oud, foute versie of kapot bestand = niets', async () => {
+  const GHH = { plek: 'Huisartsenpraktijk Groenhouten (voorheen HAP Leusden)', zekerheid: 'hoog', zin: 'Uitnodiging voor een overleg.' };
+  let week = null;
+  const E = omgeving({ lenzenLive: () => ['kennis', 'geen'], live: () => ({ 'gmail:david': true }),
+    indelingLeren: () => ({ aan: true, auto: ['hoog', 'redelijk'], nakijken: true }),
+    indeling: async function () { return Object.assign({ ok: true }, GHH); },
+    nakijkWeek: () => { if (week === 'kapot') throw new Error('kapot'); return week; } });
+  const mail1 = (van, ond) => E.zet({ bron: 'gmail:david', meta: { van, van_naam: 'Proef', onderwerp: ond, aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(van, ond, GEWOON) }] });
+  const ls = (id) => E.db.prepare('SELECT staat, bewijs, keuze, keuze_door, versie FROM live_stuk WHERE stuk_id = ?').get(id);
+  const a = mail1('a@ander.example', 'Een'); await E.r.ronde();
+  E.klok.t += 60000; const b = mail1('b@ander.example', 'Twee'); await E.r.ronde();
+  E.klok.t += 60000; const c = mail1('c@ander.example', 'Drie'); await E.r.ronde();
+  for (const id of [a, b, c]) { assert.equal(ls(id).staat, 'klaar'); assert.equal(ls(id).bewijs, 'model'); }
+  let ov = await E.r.appOverzicht(50); assert.equal(ov.nakijken.length, 0);
+  // zonder bestand weigert Klopt op een gewoon vanzelf geplaatst stuk
+  assert.equal((await E.r.appKeuze({ stuk_id: a, keuze: 'klopt' }, 'app:proef')).status, 409);
+  const nu = () => new Date(E.klok.t).toISOString();
+  week = { versie: 1, ronde_op: nu(), stukken: [
+    { stuk_id: a, versie: ls(a).versie, waarom: 'Deze afzender zette je\nzelf bij Tolgaarde.' },
+    { stuk_id: b, versie: ls(b).versie + 1, waarom: 'Oude versie.' },     // foute versie: niet op de lijst
+    { stuk_id: 'stk_kapot', versie: 1, waarom: 'x' }, { stuk_id: c, versie: ls(c).versie, waarom: '' },   // vorm fout / geen waarom
+    { stuk_id: c, versie: ls(c).versie, waarom: 'Gaat over de HAGRO-vergadering.' }] };
+  ov = await E.r.appOverzicht(50);
+  assert.deepEqual(ov.nakijken.map((x) => x.stuk_id).sort(), [a, c].sort()); assert.equal(ov.live.nakijken, 2);
+  const na = ov.nakijken.find((x) => x.stuk_id === a);
+  assert.equal(na.zin, 'Nagekeken: Deze afzender zette je zelf bij Tolgaarde.'); assert.equal(na.nagekeken, true);
+  assert.equal(na.kan.klopt, true); assert.equal(na.kan.verplaats, true); assert.deepEqual(na.plek, { lens: 'kennis', entiteit: 'GH', zeker: true });
+  assert.equal((await E.r.appKeuze({ stuk_id: b, keuze: 'klopt' }, 'app:proef')).status, 409);   // foute versie
+  let k = await E.r.appKeuze({ stuk_id: a, keuze: 'klopt' }, 'app:proef'); assert.equal(k.status, 200); assert.equal(k.j.uitkomst, 'klopt');
+  assert.equal(ls(a).keuze, 'kennis:GH'); assert.equal(ls(a).staat, 'klaar');
+  assert.equal(E.db.prepare("SELECT count(*) n FROM correctie WHERE stuk_id = ? AND json_extract(wat, '$.keuze') = 'klopt' AND leren_mag = 1").get(a).n, 1);
+  k = await E.r.appKeuze({ stuk_id: c, keuze: 'bestemming', lens: 'kennis', entiteit: 'HAGRO' }, 'app:proef'); assert.equal(k.status, 200);
+  assert.ok(E.bestanden().some((f) => f.startsWith('10_Zakelijk/HAGRO/raw_input/')));
+  ov = await E.r.appOverzicht(50); assert.equal(ov.nakijken.length, 0);
+  // meer dan 10 in het bestand: hooguit 10 gelezen
+  week = { versie: 1, ronde_op: nu(), stukken: Array.from({ length: 12 }, (_, i) => ({ stuk_id: 'stk_20261028_ffffff' + String(i).padStart(2, '0'), versie: 1, waarom: 'w' })).concat([{ stuk_id: b, versie: ls(b).versie, waarom: 'Elfde.' }]) };
+  ov = await E.r.appOverzicht(50); assert.equal(ov.nakijken.length, 0);
+  week = { versie: 1, ronde_op: nu(), stukken: [{ stuk_id: b, versie: ls(b).versie, waarom: 'Twee.' }] };
+  ov = await E.r.appOverzicht(50); assert.deepEqual(ov.nakijken.map((x) => x.stuk_id), [b]);
+  E.klok.t += 8 * 864e5; ov = await E.r.appOverzicht(50); assert.equal(ov.nakijken.length, 0);   // ronde ouder dan een week
+  assert.equal((await E.r.appKeuze({ stuk_id: b, keuze: 'klopt' }, 'app:proef')).status, 409);
+  week = 'kapot'; ov = await E.r.appOverzicht(50); assert.equal(ov.ok, true); assert.equal(ov.nakijken.length, 0);
+  E.r.sluit();
+});

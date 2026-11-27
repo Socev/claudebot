@@ -2486,7 +2486,8 @@ function maak(o) {
     // wv4094 (3C101): Klopt op een stuk dat Intake eerst plaatste (Even nakijken). Telt als Davids keuze (leren_mag 1: voorbeeld voor het model)
     // en haalt het stuk van de nakijklijst; de plek verandert niet. Verplaats = de gewone bestemmingskeuze hieronder.
     if (keuze === 'klopt') {
-      if (!sam.nakijken || (ls.staat !== 'automatisch' && ls.staat !== 'klaar')) return { status: 409, j: { ok: false, fout: 'dit stuk staat niet (meer) op Even nakijken; ververs' } };
+      const wkx = sam.nakijken ? null : nakijkWeek().get(id);   // wv4206: ook een stuk dat de weekronde op de lijst zette
+      if (!(sam.nakijken || (wkx && wkx.versie === ls.versie)) || (ls.staat !== 'automatisch' && ls.staat !== 'klaar')) return { status: 409, j: { ok: false, fout: 'dit stuk staat niet (meer) op Even nakijken; ververs' } };
       if (ls.keuze_door && ls.keuze_door !== 'router') return { status: 200, j: { ok: true, uitkomst: 'al_zo' } };
       const pl = plekNu(ls, sam);
       if (!pl || !pl.lens) return { status: 409, j: { ok: false, fout: 'Intake weet niet waar dit stuk nu staat; kies Verplaats' } };
@@ -3165,17 +3166,47 @@ function maak(o) {
    * de lijst (geen kaart, geen herinnering). Nieuwste eerst, hooguit NAKIJK_MAX.
    */
   const NAKIJK_DAGEN = 7, NAKIJK_MAX = 100;
+  /*
+   * WEKELIJKSE NAKIJKRONDE (wv4206, besluitenpagina nr 477 / 3C177, David Ja 25-11-2026 21:54): de machinekamer leest één keer per week na wat Intake
+   * vanzelf plaatste en zet alleen wat hij anders zou doen (hooguit NAKIJK_WEEK_MAX) in nakijk-week.json: { ronde_op, stukken: [{ stuk_id, versie,
+   * waarom }] }. Die stukken komen op dezelfde lijst Even nakijken, met "Nagekeken: <waarom>" als zin; Klopt en Verplaats zoals daar. Een ronde
+   * ouder dan NAKIJK_DAGEN telt niet meer (een week niet aangeraakt = goed). Kapot of geen bestand = niets extra. Intake verplaatst zelf niets.
+   */
+  const NAKIJK_WEEK_MAX = 10;
+  function nakijkWeek() {
+    let j = null; try { j = o.nakijkWeek ? o.nakijkWeek() : null; } catch (e) { j = null; }
+    const m = new Map();
+    if (!j || typeof j !== 'object' || !Array.isArray(j.stukken)) return m;
+    const t = Date.parse(String(j.ronde_op || ''));
+    if (!isFinite(t) || t < nu() - NAKIJK_DAGEN * DAG || t > nu() + DAG) return m;
+    for (const x of j.stukken) {
+      if (m.size >= NAKIJK_WEEK_MAX) break;
+      if (!x || !/^stk_[0-9]{8}_[0-9a-f]{8}$/.test(String(x.stuk_id || '')) || !Number.isInteger(x.versie) || m.has(x.stuk_id)) continue;
+      const w = typeof x.waarom === 'string' ? eenRegel(x.waarom, 200) : '';
+      if (w) m.set(x.stuk_id, { versie: x.versie, waarom: w });
+    }
+    return m;
+  }
   function nakijkLijst(r, ctx) {
     const rijen = db.prepare("SELECT r.stuk_id, r.versie, r.status, r.op, r.samenvatting FROM live_stuk l JOIN router_stuk r ON r.stuk_id = l.stuk_id AND r.versie = l.versie " +
       "WHERE l.staat IN ('automatisch','klaar') AND (l.keuze_door IS NULL OR l.keuze_door = 'router') AND r.status = 'beoordeeld' AND r.op >= ? " +
       "AND json_extract(r.samenvatting, '$.nakijken') = 1 ORDER BY r.op DESC, r.stuk_id DESC LIMIT ?").all(nuIso(nu() - NAKIJK_DAGEN * DAG), NAKIJK_MAX);
-    return rijen.map(function (row) {
+    // wv4206: wat de weekronde anders zou doen, bovenaan (ook als het al om een andere reden op de lijst stond: dan met de zin van de nakijker)
+    const wk = nakijkWeek(), week = [];
+    for (const [id, x] of wk) {
+      const row = db.prepare("SELECT r.stuk_id, r.versie, r.status, r.op, r.samenvatting FROM live_stuk l JOIN router_stuk r ON r.stuk_id = l.stuk_id AND r.versie = l.versie " +
+        "WHERE l.stuk_id = ? AND l.versie = ? AND l.staat IN ('automatisch','klaar') AND (l.keuze_door IS NULL OR l.keuze_door = 'router') AND r.status = 'beoordeeld'").get(id, x.versie);
+      if (row) week.push(row);
+    }
+    const inWeek = new Set(week.map(function (x) { return x.stuk_id; }));
+    return week.concat(rijen.filter(function (x) { return !inWeek.has(x.stuk_id); })).map(function (row) {
       const s = stukVoorApp(row, r, null, ctx);
       const ls = db.prepare('SELECT * FROM live_stuk WHERE stuk_id = ?').get(row.stuk_id);
       const inFact = !!db.prepare("SELECT 1 FROM uitvoering WHERE stuk_id = ? AND versie = ? AND lens = 'facturen'").get(row.stuk_id, ls.versie);
       s.plek = plekNu(ls, safeJson(row.samenvatting) || {});
       s.beslist = 'vanzelf'; s.beslist_op = ls.sinds;
-      // de zin van het model zet stukVoorApp (wv4100)
+      // de zin van het model zet stukVoorApp (wv4100); bij de weekronde (wv4206) de zin van de nakijker
+      if (inWeek.has(row.stuk_id)) { s.zin = 'Nagekeken: ' + wk.get(row.stuk_id).waarom; s.nagekeken = true; }
       s.kan = { klopt: true, verplaats: !inFact, in_facturen: inFact || undefined, toch_bewaren: false, verwijder: false };
       return s;
     });
