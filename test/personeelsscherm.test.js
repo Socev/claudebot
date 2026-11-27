@@ -1702,6 +1702,8 @@ test('wv4210 voor wie kiezen en eigen zin: alleen bij een bericht dat David vast
 test('wv4210 bouwHtml: zin en voor wie worden ge-escaped; zonder team geen mvoor', () => {
   const h = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 1, leeg: false, inhoud: { agenda: [], medisch: { team: true, nieuws: [], belangrijk: [{ bron: 'nvda', kop: 'Kop', tekst: 't', ms: MT0, tot: MT0 + DAG, voor: 'assistentes', zin: 'Zin <script>x</script> & "y"' }] } }, toon: 1 });
   assert.match(h, /<div class="mz">Zin &lt;script&gt;x&lt;\/script&gt; &amp; &quot;y&quot;<\/div>/); assert.match(h, /voor assistentes/);
-  const g = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 1, leeg: false, inhoud: { agenda: [], medisch: { nieuws: [], belangrijk: [{ bron: 'lhv', kop: 'Kop', tekst: 't', ms: MT0, tot: MT0 + DAG, voor: 'onzin' }] } }, toon: 1 });
-  assert.doesNotMatch(g, /class="mvoor"/);
+  for (const voor of ['onzin', 'artsen']) {   // Codex ZOU 1: ook een geldige doelgroep en een zin zonder teamvlag komen er niet op
+    const g = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 1, leeg: false, inhoud: { agenda: [], medisch: { nieuws: [{ bron: 'lhv', kop: 'K2', tekst: 't', ms: MT0, voor }], belangrijk: [{ bron: 'lhv', kop: 'Kop', tekst: 't', ms: MT0, tot: MT0 + DAG, voor, zin: 'Geheime proefzin' }] } }, toon: 1 });
+    assert.doesNotMatch(g, /class="mvoor"|class="mz"|Geheime proefzin/, voor);
+  }
 });

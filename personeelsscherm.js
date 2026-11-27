@@ -190,6 +190,7 @@ for(i=0;i<V.length;i++){V[i].classList.toggle('aan',V[i]===a);var B=V[i].querySe
     + (nw.items.length ? nw.items.slice(0, NIEUWS_N).map((x) => `<div class="nws"><span class="nt">${esc(nwTijd(x.ms))}</span><span class="nk">${esc(x.kop)}</span></div>`).join('')
       : '<div class="niets">Nu geen recent nieuws: de NOS is niet bereikbaar of het nieuwste bericht is ouder dan 6 uur. Dan staat dit scherm niet op de tv.</div>')
     + '<div class="voet">Bron: NOS</div></section>' : '';
+  const mdTeam = !!(md && md.team);   // wv4210: met de teamrij een bredere kop en bronregel
   const mdDatum = (ms) => { const a = amsDelen(ms), d = datumDelen(a.datum); return d.dg + ' ' + d.mn; };
   // blad per beurt: 3 berichten per blad; het klokscript toont elke keer dat de pagina langskomt het volgende blad (zonder script: blad 1)
   const mdPaneel = (lijst, plek, kop, lab, voet, leegTekst) => {
@@ -198,13 +199,13 @@ for(i=0;i<V.length;i++){V[i].classList.toggle('aan',V[i]===a);var B=V[i].querySe
       + (bladen.length ? bladen.map((bl, b) => `<div class="blad${b === 0 ? ' aan' : ''}">${bl.map((x) => {
         const br = (MEDISCH_BRONNEN.find((y) => y.id === x.bron) || { naam: '' }).naam;
         const q = qrBij(x.url, medischDomein(x.bron));
-        const vw = typeof x.voor === 'string' && VOOR_WIE[x.voor] ? `<span class="mvoor">voor ${esc(VOOR_WIE[x.voor])}</span>` : '';   // wv4210
+        const vw = mdTeam && typeof x.voor === 'string' && VOOR_WIE[x.voor] ? `<span class="mvoor">voor ${esc(VOOR_WIE[x.voor])}</span>` : '';   // wv4210: alleen met de teamvlag (Codex ZOU 1)
+        const zin = mdTeam && typeof x.zin === 'string' ? x.zin : '';
         return `<div class="mb${q ? ' mq' : ''}"><div class="mi"><div class="mm"><span class="chip a">${esc(br)}</span><span>${esc(mdDatum(x.ms))}</span>${vw}${Number.isFinite(x.tot) ? `<span class="mtot">blijft staan tot ${esc(mdDatum(x.tot))}</span>` : ''}</div>`
-          + `<div class="mk">${esc(x.kop)}</div>${x.zin ? `<div class="mz">${esc(x.zin)}</div>` : ''}${x.tekst ? `<div class="mt">${esc(x.tekst)}</div>` : ''}</div>${q}</div>`;
+          + `<div class="mk">${esc(x.kop)}</div>${zin ? `<div class="mz">${esc(zin)}</div>` : ''}${x.tekst ? `<div class="mt">${esc(x.tekst)}</div>` : ''}</div>${q}</div>`;
       }).join('')}</div>`).join('') : `<div class="niets">${leegTekst}</div>`)
       + `<div class="voet">${voet}</div></section>`;
   };
-  const mdTeam = !!(md && md.team);   // wv4210: met de teamrij een bredere kop en bronregel
   const medHtml = (mdN ? mdPaneel(mdN, ++plek, 'Medisch nieuws', mdTeam ? 'Voor het hele team' : 'NHG · LHV · RIVM', mdTeam ? 'Bron: NHG, LHV, RIVM, NVDA, NVvPO en Thuisarts · elk uur bijgewerkt' : 'Bron: nieuwsberichten van NHG, LHV en RIVM · elk uur bijgewerkt', 'Nog geen berichten van de afgelopen 30 dagen binnen.') : '')
     + (mdB ? mdPaneel(mdB, ++plek, 'Belangrijk', mdTeam ? 'LHV · NHG · NVDA' : 'LHV · NHG', mdTeam ? 'Blijft enkele weken staan · bron: LHV, NHG en NVDA' : 'Blijft enkele weken staan · bron: LHV en NHG', mdTeam ? 'Nu geen belangrijke berichten. Een bericht van LHV, NHG of NVDA over een standaard, cao, tarief, subsidie of oproep komt hier vanzelf; jij kunt er een vastzetten.' : 'Nu geen belangrijke berichten. Een bericht van LHV of NHG over een standaard, cao, tarief, subsidie of oproep komt hier vanzelf; jij kunt er een vastzetten.') : '');
   // wv4141 (2C55): stipjes (k van n) in plaats van "Info k/n"; sc.lab (alleen app-voorbeeld) = tekst, sc.stip = [k, n] (app-voorbeeld)
