@@ -31805,10 +31805,11 @@ function beleggenSmal(d) {
 const PMA_DIR = serverPad('pma', process.env.PMA_DIR, '/opt/data/pma', serverProefDeel('pma'));
 const pmaFin = { waarden: null, op: 0, bezig: null };
 const pmaPersoneel = { waarden: null, op: 0, bezig: null };   // wv3047
+const pmaRooster = { waarden: null, op: 0, bezig: null };   // wv4218: DocPlan-rooster per persoon per dag (waarnemers uit de verzamelnaam)
 const pmaApp = (function () {
   const p = path.join(__dirname, 'pma.js');
   if (!fs.existsSync(p)) return null;
-  try { return require(p).maak({ map: PMA_DIR, finPatienten: function () { return pmaFin.waarden; }, personeel: function () { return pmaPersoneel.waarden; } }); }
+  try { return require(p).maak({ map: PMA_DIR, finPatienten: function () { return pmaFin.waarden; }, personeel: function () { return pmaPersoneel.waarden; }, rooster: function () { return pmaRooster.waarden; } }); }
   catch (e) { logError('pma', new Error('laden faalde')); return null; }
 })();
 function pmaFinVers() {
@@ -31850,6 +31851,25 @@ function pmaPersoneelVers(nu) {
     .then(function () { pmaPersoneel.bezig = null; });
   return pmaPersoneel.bezig;
 }
+// wv4218 (besluitenpagina nr 930 = L30): het DocPlan-rooster voor PMA › Artsen. Alleen lezen, twee bestaande databankfuncties:
+// sb_dienst_dagen (per praktijk per persoon per dag, vanaf 1-1 van twee jaar terug) en sb_dienst_alias_lijst (personen met hun rol per praktijk).
+// Review Codex MOET 1 (rollen per jaar) gemeten 27-11-2026: personen in sb_dienst_alias_lijst hangen niet van p_jaar af (alle personen met een rol
+// of alias), en entity_role heeft bij TG/GH geen geldigheidsdata (0 van 86) en niemand met naast waarnemer een andere rol; komen er data, filter dan hier.
+// Hooguit eens per 10 minuten; mislukt = de vorige stand (of null: dan blijft alles bij de verzamelnaam). Geen inhoud in de log.
+function pmaRoosterVers() {
+  if (pmaRooster.bezig) return pmaRooster.bezig;
+  if (Date.now() - pmaRooster.op < 10 * 60000) return Promise.resolve();
+  const jaar = new Date().getFullYear();
+  pmaRooster.bezig = Promise.all([appSbRpc('sb_dienst_dagen', { p_van: (jaar - 2) + '-01-01' }, 20000), appSbRpc('sb_dienst_alias_lijst', { p_jaar: jaar }, 20000)])
+    .then(function (r) {
+      const dagen = Array.isArray(r[0]) ? r[0] : null, personen = r[1] && Array.isArray(r[1].personen) ? r[1].personen : null;
+      if (!dagen || !personen) throw new Error('vorm');
+      pmaRooster.waarden = { dagen: dagen, personen: personen }; pmaRooster.op = Date.now();
+    })
+    .catch(function () { pmaRooster.op = Date.now() - 5 * 60000; logError('pma', new Error('docplan-rooster niet te lezen')); })   // over vijf minuten opnieuw
+    .then(function () { pmaRooster.bezig = null; });
+  return pmaRooster.bezig;
+}
 async function appPma(req, res, a, route, d) {
   if (!pmaApp) return appWeiger(res, 404, 'PMA zit niet in deze versie van de pod', 'pma ontbreekt');
   if (!appTeller('pma', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens pma');
@@ -31857,6 +31877,7 @@ async function appPma(req, res, a, route, d) {
   if (post && !appTeller('pma-schrijf', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens pma-schrijf');
   if (route === 'GET /app/pma' || route === 'POST /app/pma/controleer') await pmaFinVers();
   if (route === 'GET /app/pma/personeel' || route === 'POST /app/pma/koppel' || route === 'POST /app/pma/persoon') await pmaPersoneelVers(false);   // wv3047
+  if (route === 'GET /app/pma/personeel') await pmaRoosterVers();   // wv4218
   let u;
   try { u = pmaApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
   catch (e) { logError('pma', new Error('route faalde')); return appWeiger(res, 503, 'PMA is nu niet te lezen; probeer het zo opnieuw', 'pma fout'); }   // geen inhoud in de log

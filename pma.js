@@ -459,6 +459,44 @@ function werkdagenVan(i) {
   return uit;
 }
 
+// wv4218 (besluitenpagina nr 930 = L30, David Ja 25-11-2026): waarnemers uit de verzamelnaam halen met het DocPlan-rooster. Gemeten 27-11-2026:
+// DocPlan levert het rooster per persoon per dag (public.sb_dienst_dagen) en de rollen per praktijk (sb_dienst_alias_lijst); server.js geeft
+// die als gegeven: { dagen: [{ pr, obj, datum, dagen }], personen: [{ object_id, naam, rollen: [{ praktijk, rol }] }] } of null.
+// Regel per dag: kandidaten = de personen in het rooster van die praktijk met een waarnemerrol daar, min de waarnemers die die dag onder hun
+// eigen Promedico-naam declareerden (zij gebruikten de verzamelnaam niet; koppeling DocPlan → PMA-persoon op naam, lijkt() = 2 en uniek,
+// alleen personen met een artsrol bij die praktijk). Precies één kandidaat = de regels van de verzamelnaam (een groep met rol waarnemer op die
+// dag) gaan naar die persoon, bron "docplan-rooster". Nul of meer kandidaten = de dag blijft bij de groep. DocPlan alleen lezen.
+const WAARNEMER_DP = /waarne/i;
+const rolOpDag = (rollen, praktijk, d) => { let u = null; for (const r of rollen || []) if (r.praktijk === praktijk && r.van <= d && (!r.tot || r.tot >= d) && (!u || r.van >= u.van)) u = r; return u ? u.rol : null; };
+function dpId(obj) { let h = 0x811c9dc5; for (const c of String(obj)) { h ^= c.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return -((h % 2000000000) + 1); }   // vaste negatieve id: nooit een PMA-persoon
+// i: { praktijk, rooster, personen (PMA, met rollen), eigen: Map dag → Set pid (declareerde onder eigen naam) }. Uit: Map dag → { obj, naam, pid }
+// (pid = PMA-persoon als de waarnemer daar al staat, anders null), plus i.match (obj → pid) voor de toets.
+function waarnemerDagen(i) {
+  const uit = new Map(), r = i.rooster;
+  if (!r || !Array.isArray(r.dagen) || !Array.isArray(r.personen)) return uit;
+  const wn = new Map();
+  for (const p of r.personen) if (p && p.object_id && (p.rollen || []).some((x) => x && x.praktijk === i.praktijk && WAARNEMER_DP.test(String(x.rol || '')))) wn.set(String(p.object_id), String(p.naam || '').trim());
+  const artsen = (i.personen || []).filter((p) => !p.groep && (p.rollen || []).some((x) => x.praktijk === i.praktijk && ARTS_ROLLEN.includes(x.rol)));
+  const match = new Map();
+  for (const [obj, naam] of wn) {
+    const a = ontleedNaam(naam);
+    const hits = a ? artsen.filter((p) => lijkt(a, ontleedNaam(p.naam)) === 2) : [];
+    if (hits.length === 1) match.set(obj, hits[0].id);
+  }
+  const perDag = new Map();
+  for (const x of r.dagen) {
+    if (!x || x.pr !== i.praktijk || !wn.has(String(x.obj)) || !isoGoed(x.datum) || !(Number(x.dagen) > 0)) continue;
+    if (!perDag.has(x.datum)) perDag.set(x.datum, new Set());
+    perDag.get(x.datum).add(String(x.obj));
+  }
+  for (const [d, s] of perDag) {
+    const eigen = (i.eigen && i.eigen.get(d)) || new Set();
+    const kand = [...s].filter((o) => !(match.has(o) && eigen.has(match.get(o))));
+    if (kand.length === 1) uit.set(d, { obj: kand[0], naam: wn.get(kand[0]) || 'Waarnemer', pid: match.has(kand[0]) ? match.get(kand[0]) : null });
+  }
+  if (i.uitMatch) for (const [o, p] of match) i.uitMatch.set(o, p);
+  return uit;
+}
 function nuIso() { return new Date().toISOString(); }
 const groepVan = (codes, code, type) => (type === 'O' ? 'niet-gedeclareerd' : (codes.get(code) || {}).groep || 'nog-in-te-delen');
 // wv4213 (L27, David 25-11-2026 Ja): ISO-week van een dag ('2026-W14'; de week hoort bij het jaar van zijn donderdag) en de rolgroep voor de
@@ -489,6 +527,7 @@ function maak(o) {
   // wv3047: personeel uit Nmbrs (nmbrs-data.js 'pma': namen, functies, dienstverband, roosters; geen bedragen) en de dossiernamen uit de vault,
   // van server.js als gegeven: { peil, medewerkers: [...], dossiers: [{ pad, naam, entiteit }] } of null (dan alleen koppelen op naam)
   const personeelVan = typeof o.personeel === 'function' ? o.personeel : () => null;
+  const roosterVan = typeof o.rooster === 'function' ? o.rooster : () => null;   // wv4218: DocPlan-rooster per persoon per dag (of null)
   let sleutel = null;
   function mappen() {
     for (const m of [map, bronMap, wachtMap]) { if (!fs.existsSync(m)) fs.mkdirSync(m, { recursive: true, mode: 0o700 }); try { fs.chmodSync(m, 0o700); } catch (e) { /* niet van ons */ } }
@@ -1113,6 +1152,10 @@ function maak(o) {
       leeg.klein_aantal = inst('klein_aantal', 30); leeg.invaldag_min = inst('invaldag_min', 5);
       const st = namenStand(db), personen = personenLees(db);
       const alle = db.prepare('SELECT praktijk, naam, persoon, soort, eerst, bevestigd, negeer FROM registreerder ORDER BY praktijk, naam').all().map((r) => Object.assign({}, r));
+      // wv4218: DocPlan-rooster (gegeven van server.js; null = niet te lezen, dan blijft alles bij de groep zoals vóór L30)
+      const rooster = roosterVan();
+      const byId = new Map(personen.map((p) => [p.id, p])), virt = new Map();
+      leeg.docplan = { stand: rooster && Array.isArray(rooster.dagen) ? 'ok' : 'niet te lezen', praktijken: {} };
       leeg.praktijken = db.prepare('SELECT code, naam FROM praktijk WHERE code IN (SELECT DISTINCT praktijk FROM dagbron) ORDER BY code DESC').all().map((r) => Object.assign({}, r));
       leeg.personen = personen;
       leeg.registreerders = alle.map((r) => {
@@ -1132,8 +1175,25 @@ function maak(o) {
         for (const j of jaren) for (const f of feestdagen(j)) feest.add(f);
         const naarPersoon = new Map(alle.filter((r) => r.praktijk === pr.code && r.bevestigd && r.persoon && !r.negeer).map((r) => [r.naam, r.persoon]));
         const perP = new Map();
-        for (const r of db.prepare('SELECT registreerder AS naam, dag, code, type, COUNT(*) AS n, SUM(tarief_cent) AS c FROM regel WHERE praktijk = ? GROUP BY registreerder, dag, code, type').iterate(pr.code)) {
-          const pid = naarPersoon.get(r.naam); if (!pid) continue;
+        const rijen = db.prepare('SELECT registreerder AS naam, dag, code, type, COUNT(*) AS n, SUM(tarief_cent) AS c FROM regel WHERE praktijk = ? GROUP BY registreerder, dag, code, type').all(pr.code);
+        // wv4218 (L30): wie die dag onder een eigen naam declareerde, en per dag de ene waarnemer uit het DocPlan-rooster (of geen)
+        const eigen = new Map();
+        for (const r of rijen) { const pid = naarPersoon.get(r.naam); if (pid && byId.has(pid) && !byId.get(pid).groep) { if (!eigen.has(r.dag)) eigen.set(r.dag, new Set()); eigen.get(r.dag).add(pid); } }
+        const wnDag = waarnemerDagen({ praktijk: pr.code, rooster, personen, eigen });
+        const verschoven = new Map();   // pid → Set van dagen die uit de verzamelnaam kwamen
+        const dpT = { persoon: new Set(), groep: new Set(), regels_persoon: 0, regels_groep: 0, wie: new Set() };
+        for (const r of rijen) {
+          let pid = naarPersoon.get(r.naam); if (!pid) continue;
+          const gp = byId.get(pid);
+          if (gp && gp.groep && rolOpDag(gp.rollen, pr.code, r.dag) === 'waarnemer') {
+            const w = wnDag.get(r.dag);
+            if (w) {
+              pid = w.pid != null ? w.pid : dpId(w.obj);
+              if (w.pid == null && !virt.has(pid)) virt.set(pid, { id: pid, naam: w.naam || 'Waarnemer', dossier: null, nmbrs: null, dienst: 'zzp', groep: false, rollen: [], rooster: [], docplan: true });
+              if (!verschoven.has(pid)) verschoven.set(pid, new Set());
+              verschoven.get(pid).add(r.dag); dpT.persoon.add(r.dag); dpT.regels_persoon += r.n; dpT.wie.add(pid);
+            } else { dpT.groep.add(r.dag); dpT.regels_groep += r.n; }
+          }
           const c = r.type === 'O' ? null : codes.get(r.code);
           if (c && !(c.telt_werkdag === undefined ? 1 : c.telt_werkdag)) continue;
           if (!perP.has(pid)) perP.set(pid, new Map());
@@ -1160,8 +1220,17 @@ function maak(o) {
           const elders = p.rollen.some((r) => r.praktijk !== pr.code);
           const eigen = m && (m.entiteit === pr.code || (m.entiteit === 'POT' && !elders));
           const w = werkdagenVan({ groep: p.groep, dagen, gedekt, rollen, hand: p.rooster.filter((r) => r.praktijk === pr.code), nmbrs: m ? { dienst: m.dienst, rooster: eigen ? m.rooster : [], contract: eigen ? m.contract : [] } : null, drempel, feest });
+          // wv4218: een dag uit de verzamelnaam staat in het DocPlan-rooster, dus gewerkt (ook buiten het eigen patroon), als waarnemer
+          const vs = verschoven.get(p.id);
+          if (vs) for (const x of w) if (vs.has(x.dag)) { if (x.soort === 'los' || x.soort === 'invaldag') x.soort = 'gewerkt'; x.bron = 'docplan-rooster'; if (!x.rol) x.rol = 'waarnemer'; }
           uitP[p.id] = w.map((x) => { const t = x.t || { n: 0, d: 0, kort: 0, middel: 0, lang: 0, vk: 0, vl: 0, mi: 0, poh: 0, cent: 0 }; return [x.dag, x.soort, x.uren, x.rol, x.bron, t.n, t.d, t.kort, t.middel, t.lang, t.vk, t.vl, t.mi, t.poh, t.cent]; });
         }
+        // wv4218: waarnemers die alleen in DocPlan staan (geen eigen Promedico-naam): alleen hun roosterdagen, nooit afwezig, uren onbekend
+        for (const [vid] of virt) {
+          const dagen = perP.get(vid); if (!dagen || !dagen.size) continue;
+          uitP[vid] = [...dagen.keys()].sort().map((d) => { const t = dagen.get(d); return [d, WEEKDAG(d) > 4 ? 'weekend' : 'gewerkt', null, 'waarnemer', 'docplan-rooster', t.n, t.d, t.kort, t.middel, t.lang, t.vk, t.vl, t.mi, t.poh, t.cent]; });
+        }
+        leeg.docplan.praktijken[pr.code] = { dagen_persoon: dpT.persoon.size, dagen_groep: [...dpT.groep].filter((d) => !dpT.persoon.has(d)).length, regels_persoon: dpT.regels_persoon, regels_groep: dpT.regels_groep, personen: dpT.wie.size };
         leeg.werkdagen[pr.code] = uitP;
         // Nmbrs-rooster per persoon (voor het scherm: welke uren gelden, en of de daguren een echt patroon zijn)
       }
@@ -1171,6 +1240,8 @@ function maak(o) {
         p.nmbrs_naam = m ? m.naam : null;
         p.nmbrs_entiteit = m ? m.entiteit : null;   // review MOET 1: Nmbrs-uren gelden alleen bij deze praktijk
       }
+      // wv4218: DocPlan-waarnemers achteraan (negatieve id, docplan: true; niet te koppelen of te bewerken, geen rollen in PMA)
+      for (const [vid, v] of [...virt].sort((a, b) => a[1].naam.localeCompare(b[1].naam, 'nl') || a[0] - b[0])) if (Object.values(leeg.werkdagen).some((w) => w[vid])) leeg.personen.push(Object.assign(v, { nmbrs_rooster: null, nmbrs_naam: null, nmbrs_entiteit: null }));
       return leeg;
     }, false);
   }
@@ -1382,4 +1453,4 @@ function maak(o) {
   return { app, info, herbouw, jaarBedragen, indeling, chatControleer, _plan: plan, _pseudo: pseudo };   // wv4212: chatControleer
 }
 
-module.exports = { isoWeek, ROLGROEP, maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht };
+module.exports = { isoWeek, ROLGROEP, waarnemerDagen, dpId, maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht };

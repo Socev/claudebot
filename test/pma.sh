@@ -28,6 +28,7 @@ if echo "$B" | grep -nE "finD1\(" | grep -viE "SELECT"; then echo "ROOD  server.
 [ $f = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS"
 node --test test/pma.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma.test.js"; f=1; }
 node --test test/pma-werkdag.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-werkdag.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-werkdag.test.js (wv3047: werkdagregels en personeel)"; f=1; }
+node --test test/pma-waarnemer.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-waarnemer.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-waarnemer.test.js (wv4218: waarnemers via het DocPlan-rooster)"; f=1; }
 node --test test/pma-bom.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-bom.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-bom.test.js (wv3409: kapotte of opgeblazen ZIP wordt snel en zuinig geweigerd)"; f=1; }
 node --test test/pma-chat.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-chat.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-chat.test.js (wv4212: PMA-ZIP via de chat, wacht, ontbreekt)"; f=1; }
 node --test test/pma-chat-server.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-chat-server.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-chat-server.test.js (wv4212: regel in het hoofdkanaal)"; f=1; }
