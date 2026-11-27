@@ -31852,6 +31852,7 @@ let strateegBezig = false, strateegBezigSinds = 0;
 // pauze, geen kwartier afgerond in 45 min (gerekend vanaf 09:00) of de bezig-vlag langer dan 10 min vast → één logregel en één box-rij per dag
 // (meta-sleutel klokwacht_dag in strateeg.sqlite; overleeft een herstart). Geen bericht aan David, geen herstel: alleen zichtbaar maken.
 const STRATEEG_STIL_MS = 45 * 60000, STRATEEG_VAST_MS = 10 * 60000;
+let strateegKlokLogDag = '';   // logregel hooguit eens per dag per proces, ook als de box-rij steeds faalt
 function strateegBoxTekst(t) {   // kale zin → box-rij met kop; een tekst die al met een kop begint blijft gelijk
   t = String(t || '');
   if (/^\n?## \[/.test(t)) return t.charAt(0) === '\n' ? t : '\n' + t;
@@ -31877,18 +31878,18 @@ function strateegKlokWacht() {
     const o = strateegKlokOordeel({ nuMs: nuMs, min: Number(k.slice(11, 13)) * 60 + Number(k.slice(14, 16)), beursdag: beursdag, stand: inf.stand,
       laatsteTik: inf.laatste_tik || null, bezigSinds: strateegBezig ? strateegBezigSinds : 0 });
     if (!o || strateegApp._M.get('klokwacht_dag') === dag) return o;
-    strateegApp._M.zet('klokwacht_dag', dag);
     const hhmm = function (ms) { return new Date(ms).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(11, 16); };
     const herstart = inf.laatste_tik && inf.laatste_tik < APP_PROCES_START;
-    schrijfLog(nu() + ' strateeg ' + velden({ stap: 'klokwacht', soort: o.soort, minuten: o.minuten, herstart: herstart ? 1 : 0 }));
+    if (strateegKlokLogDag !== dag) { strateegKlokLogDag = dag; schrijfLog(nu() + ' strateeg ' + velden({ stap: 'klokwacht', soort: o.soort, minuten: o.minuten, herstart: herstart ? 1 : 0 })); }
     const wat = o.soort === 'vast'
       ? 'Strateeg-klok hangt: de minuuttik is al ' + o.minuten + ' min bezig (normaal hooguit ± 2 min)'
       : 'Strateeg-klok stil: geen kwartier afgerond sinds ' + hhmm(o.sinds) + ' (' + o.minuten + ' min)';
-    ovisBoxRij('\n## [direct] ' + k.slice(0, 16) + ' — ' + wat + ' #beleggen-strateeg\n- status: open\n- van: pod server.js (wv4357; hooguit 1×/dag)\n' +
+    const gezet = ovisBoxRij('\n## [direct] ' + k.slice(0, 16) + ' — ' + wat + ' #beleggen-strateeg\n- status: open\n- van: pod server.js (wv4357; hooguit 1×/dag)\n' +
       '- gemeten: stand ' + inf.stand + ', tikken vandaag ' + inf.tikken_vandaag + ', podproces sinds ' + hhmm(APP_PROCES_START) +
       (herstart ? ' (de pod herstartte ná de laatste tik: eerst kijken of de pod of Olares weg was, bin/api.log supervisor-regels)' : '') + '\n' +
       '- gevolg als er niets gebeurt: de proefboeken (fictief geld) slaan kwartierbeslissingen en Ideeën-rondes over; de proefmaand meet dan minder.\n' +
       '- voorstel: tabel tik in strateeg.sqlite en api.log (strateeg-regels, rol, supervisor) rond de laatste tik nakijken; niets herstarten zonder oorzaak.\n');
+    if (gezet === true) strateegApp._M.zet('klokwacht_dag', dag);   // Codex MOET 1: pas markeren als de rij er echt staat; anders volgende minuut opnieuw
     return o;
   } catch (e) { logError('strateeg-klokwacht', new Error('controle faalde')); return null; }
 }

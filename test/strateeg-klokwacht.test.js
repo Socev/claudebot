@@ -27,11 +27,11 @@ function omgeving(o) {
     SERVER_ECHT: true, rolPrimair: function () { return o.primair !== false; }, APP_PROCES_START: o.procesStart || 0,
     strateegBezig: !!o.bezigSinds, strateegBezigSinds: o.bezigSinds || 0,
     strateegApp: { info: function () { return o.info; }, _M: { get: function (k) { return meta[k] == null ? null : meta[k]; }, zet: function (k, v) { meta[k] = String(v); } } },
-    ovisBoxRij: function (t) { box.push(t); return true; }, schrijfLog: function (t) { log.push(t); }, nu: function () { return 'T'; },
+    ovisBoxRij: function (t) { if (o.boxFaalt) return false; box.push(t); return true; }, schrijfLog: function (t) { log.push(t); }, nu: function () { return 'T'; },
     velden: function (x) { return Object.keys(x).map(function (k) { return k + '=' + x[k]; }).join(' '); }, logError: function (w) { log.push('fout ' + w); },
   };
   vm.createContext(ctx);
-  vm.runInContext(knipRegel('const STRATEEG_STIL_MS = ') + knipFunctie('strateegBoxTekst') + knipFunctie('strateegKlokOordeel') + knipFunctie('strateegKlokWacht') +
+  vm.runInContext(knipRegel('const STRATEEG_STIL_MS = ') + knipRegel('let strateegKlokLogDag = ') + knipFunctie('strateegBoxTekst') + knipFunctie('strateegKlokOordeel') + knipFunctie('strateegKlokWacht') +
     '\nthis.wacht = strateegKlokWacht; this.oordeel = strateegKlokOordeel; this.boxTekst = strateegBoxTekst;', ctx);
   return { ctx, meta, box, log };
 }
@@ -56,6 +56,13 @@ test('hooguit één box-rij per dag, ook na een herstart (meta), en de volgende 
   f.ctx.wacht();
   assert.strictEqual(f.box.length, 1, 'nieuwe dag = nieuwe rij');
   assert.match(f.box[0], /sinds 09:00 \(60 min\)/, 'stilte telt vanaf 09:00, niet vanaf gisteravond');
+});
+
+test('box-rij faalt (Codex MOET 1): niet gemarkeerd, volgende minuut opnieuw; logregel maar één keer', function () {
+  const e = omgeving({ nu: NL('2026-11-26 17:26'), boxFaalt: true, info: { stand: 'aan', laatste_tik: NL('2026-11-26 11:01'), tikken_vandaag: 9 } });
+  e.ctx.wacht(); e.ctx.__nu = NL('2026-11-26 17:27'); e.ctx.wacht();
+  assert.strictEqual(e.meta.klokwacht_dag, undefined, 'niet gemarkeerd');
+  assert.strictEqual(e.log.filter(function (l) { return /klokwacht/.test(l); }).length, 1, 'één logregel');
 });
 
 test('normale dag: geen melding (kwartier 14 min geleden, ochtend vóór 09:46, na 22:00, weekend, feestdag, stand wacht/klaar, rol passief)', function () {
