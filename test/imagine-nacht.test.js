@@ -128,9 +128,10 @@ const filmTaak = (im, n) => im._db().prepare('SELECT * FROM taak WHERE id = ?').
     const h = await app(im, '/app/imagine/v/' + open1.versie + '/immich', 'POST', {});
     const na = im.nachtStand('2026-11-27');
     toets('5a. Houd (Zet in Immich op het filmpje) → stand houd, besloten', h.status === 200 && uploads.length === 1 && na.houd === 1 && na.besloten === true, { h: h.body, na });
-    const v2 = await im.nachtStart([K(1, 1985), K(3, 1996), K(30, 1991, '11-28'), K(31, 1992)], { dag: '2026-11-28', aantal: 2, md: '11-28' });
+    const nacht1 = rij.map((x) => x.immich);   // ook de twee die mislukten of gestopt werden
+    const v2 = await im.nachtStart(nacht1.map((u) => ({ immich: u, jaar: 1985, md: '11-28' })).concat([K(30, 1991, '11-28'), K(31, 1992)]), { dag: '2026-11-28', aantal: 2, md: '11-28' });
     const rij2 = nachtRijen(im).filter((x) => x.dag === '2026-11-28');
-    toets('5b. besloten → volgende nacht weer; eerder gekozen foto nooit opnieuw', v2.gekozen === 2 && rij2.every((x) => [uu(1), uu(3)].indexOf(x.immich) < 0), { v2, rij2 });
+    toets('5b. besloten → volgende nacht weer; eerder gekozen foto nooit opnieuw (ook niet na mislukt/gestopt)', v2.gekozen === 2 && v2.kandidaten === 2 && rij2.every((x) => nacht1.indexOf(x.immich) < 0), { v2, rij2 });
     // Weg op een stuk van nacht 2 (eerst afronden)
     await im._ronde3(); await rondaf(S, 3, film); await totDat(() => filmTaak(im, rij2[0]).status === 'klaar');
     await im._ronde3(); await rondaf(S, 4, film); await totDat(() => filmTaak(im, rij2[1]).status === 'klaar');
