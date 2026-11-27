@@ -9,15 +9,17 @@
  * alleen nog na.
  *
  * WAT.
- * - Box (00_Systeem/Meldingen/machinekamer.md): een rij (`## [soort] JJJJ-MM-DD …`) met `- status: afgehandeld|gesloten|klaar|gedaan`
- *   en een datum direct achter dat woord (d-m, d-m-jjjj of jjjj-mm-dd; jaar uit de rijkop) die meer dan `dagen` (7) dagen voor
+ * - Box (00_Systeem/Meldingen/machinekamer.md): een rij (`## [soort] JJJJ-MM-DD …`) met `- status: afgehandeld|gesloten|klaar|gedaan|
+ *   gebouwd|opgelost|vervallen|vervangen|dicht|hersteld|afgerond|beantwoord` (wv4363) en een datum direct achter dat woord (d-m, d-m-jjjj of
+ *   jjjj-mm-dd; jaar uit de rijkop; zonder datum de rijkopdatum) die meer dan `dagen` (7) dagen voor
  *   vandaag ligt, gaat ongewijzigd naar Archief/machinekamer-JJJJ-MM.md (JJJJ-MM = maand van die datum), direct onder de regel
  *   "Ongewijzigd overgenomen …" (nieuwste bovenaan; een identiek blok dat er al staat niet nogmaals). Zelfde formaat als de
- *   droomronde. Nooit in machinekamer-archief-t-m-*.md. Een afgesloten rij zonder datum krijgt de datum van vandaag achter het
- *   statuswoord en blijft staan. Onder `## Archief` staat alleen de verwijzingsregel: een maand komt erbij als die link ontbreekt.
+ *   droomronde. Nooit in machinekamer-archief-t-m-*.md. (Tot wv4363 kreeg een afgesloten rij zonder datum eerst
+ *   een stempel van vandaag; nu telt de rijkop.) Open/bezig/info/rijen zonder statusregel blijven altijd staan. Onder `## Archief` staat alleen de verwijzingsregel: een maand komt erbij als die link ontbreekt.
  *   Rijen die een schrijver ónder `## Archief` zette, gaan naar boven (vóór de eerste rij). Het blok "**Formaat van een rij:**"
  *   blijft altijd in de box (een rij die het bevat, wordt vlak ervoor afgeknipt). Regels binnen ``` tellen niet als rijkop.
- * - Register (00_Systeem/Open vragen aan David.md): een tabelrij (6 cellen) met status beantwoord|vervallen|afgehandeld en een datum
+ * - Register (00_Systeem/Open vragen aan David.md): een tabelrij (6 cellen) met status beantwoord|vervallen|afgehandeld (sinds wv4363
+ *   ook gedaan|ingetrokken|afgesloten|afgerond|gebouwd|vervangen|opgegaan|gesloten|opgelost) en een datum
  *   (eerste datum in de statuscel, jaar uit Gesteld; zonder datum de Gesteld-datum) ouder dan `dagen` gaat ongewijzigd naar
  *   Archief/open-vragen-JJJJ-MM.md, bovenaan de tabel. Een rij die bij een open of uitgestelde Voor jou-kaart hoort (sleutel,
  *   wvN of herkomst.register), blijft staan: de Voor jou-ronde vergelijkt kaart en rij. Kunnen de kaarten niet gelezen worden,
@@ -36,8 +38,10 @@ const path = require('path');
 const BOX_REL = path.join('00_Systeem', 'Meldingen', 'machinekamer.md');
 const REG_REL = path.join('00_Systeem', 'Open vragen aan David.md');
 const ARCH_REL = path.join('00_Systeem', 'Meldingen', 'Archief');
-const BOX_SLOT = /^\**(afgehandeld|gesloten|klaar|gedaan)\b/;
-const REG_SLOT = /^[*\[\s]*(beantwoord|vervallen|afgehandeld)\b/i;
+// wv4363 (MrLean 27-11): ook gebouwd/opgelost/vervallen/vervangen/dicht/hersteld/afgerond/beantwoord; hoofdletters tellen niet
+const BOX_SLOT = /^\**(afgehandeld|gesloten|klaar|gedaan|gebouwd|opgelost|vervallen|vervangen|dicht|hersteld|afgerond|beantwoord)\b/i;
+// wv4363: ook gedaan/ingetrokken/afgesloten/afgerond/gebouwd/vervangen/opgegaan/gesloten/opgelost (gemeten in het register 27-11)
+const REG_SLOT = /^[*\[\s]*(beantwoord|vervallen|afgehandeld|gedaan|ingetrokken|afgesloten|afgerond|gebouwd|vervangen|opgegaan|gesloten|opgelost)\b/i;
 const MAANDEN = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
 const INLEIDING = 'Ongewijzigd overgenomen';
 
@@ -45,7 +49,6 @@ function iso(j, m, d) { return j + '-' + String(m).padStart(2, '0') + '-' + Stri
 function geldig(j, m, d) { const t = new Date(Date.UTC(j, m - 1, d)); return t.getUTCFullYear() === j && t.getUTCMonth() === m - 1 && t.getUTCDate() === d; }
 function dagen(a, b) { return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86400000); }   // b - a
 function amsVandaag() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
-function dm(vandaag) { const p = vandaag.split('-').map(Number); return p[2] + '-' + p[1]; }
 
 // Datum aan het begin van `rest` (na scheidingstekens): jjjj-mm-dd of d-m[-jjjj]. jaar = rijkop/Gesteld; ligt d-m vóór `basis`, dan jaar+1.
 function datumVooraan(rest, jaar, basis) {
@@ -81,8 +84,11 @@ function boxRij(L, g) {
   const s = L[r.stj].slice('- status:'.length).trim();
   const w = BOX_SLOT.exec(s);
   if (!w) return r;
-  r.woord = w[1];
+  r.woord = w[1].toLowerCase();
   r.datum = datumVooraan(s.slice(w[0].length), r.jaar, r.kopdatum);
+  // wv4363: zonder (herkenbare) datum achter het woord telt de datum uit de rijkop; voorheen kreeg zo'n rij eerst een stempel
+  // van vandaag en ging hij pas een week later (42 rijen bleven zo hangen)
+  if (!r.datum) { r.datum = r.kopdatum; r.uitKop = true; }
   return r;
 }
 function blokTekst(L, r) {
@@ -96,10 +102,9 @@ function maandVan(datum) { return datum.slice(0, 7); }
 function boxPlan(tekst, vandaag, grens) {
   const L = tekst.split('\n');
   const R = segmenten(L).map(function (g) { return boxRij(L, g); });
-  const archief = {}; let stempels = 0;
+  const archief = {}; const stempels = 0;   // wv4363: geen stempels meer (datum uit de rijkop)
   R.forEach(function (r) {
     if (!r.woord) return;
-    if (!r.datum) { stempels++; return; }
     if (dagen(r.datum, vandaag) > grens) (archief[maandVan(r.datum)] = archief[maandVan(r.datum)] || []).push(blokTekst(L, r));
   });
   return { archief: archief, stempels: stempels, rijen: R.filter(function (r) { return r.rij; }).length };
@@ -113,18 +118,10 @@ function boxNieuw(tekst, vandaag, grens, bewaard, maanden) {
   const ai = R.findIndex(function (r) { return r.kop.trim() === '## Archief'; });
   if (ai < 0) throw new Error('box: kop ## Archief niet gevonden');
   if (R.filter(function (r) { return r.kop.trim() === '## Archief'; }).length !== 1) throw new Error('box: ## Archief staat er meer dan één keer');
-  let weg = 0, gestempeld = 0;
+  let weg = 0; const gestempeld = 0;
   const stuk = function (r) {   // regels die in de box blijven voor segment r ([] = rij weg; bij een afgeknipte rij alleen het formaatblok)
     if (r.woord && r.datum && dagen(r.datum, vandaag) > grens && bewaard.has(blokTekst(L, r))) { weg++; return L.slice(r.cut, r.e); }
-    const b = L.slice(r.s, r.e);
-    if (r.woord && !r.datum && r.stj !== null) {
-      const i = r.stj - r.s;
-      // review wv2902 MOET 2: valt vandaag in een ander jaar dan de rijkop, dan het jaar erbij (d-m-jjjj), anders leest de parser rijkop-jaar
-      const stempel = dm(vandaag) + (r.jaar && String(r.jaar) !== vandaag.slice(0, 4) ? '-' + vandaag.slice(0, 4) : '');
-      const n = b[i].replace(new RegExp('^(- status:\\s*\\**' + r.woord + ')'), '$1 ' + stempel);
-      if (n !== b[i]) { b[i] = n; gestempeld++; }
-    }
-    return b;
+    return L.slice(r.s, r.e);   // wv4363: datumloze afgesloten rij krijgt geen stempel meer (datum uit de rijkop)
   };
   const kop = L.slice(0, G.length ? G[0].s : L.length);
   const voor = [], omhoog = []; let nOmhoog = 0;
