@@ -394,6 +394,24 @@ async function nepFetch(url, opt) {
       });
       return antw(200, { ok: true, vervallen: uit, overgeslagen: [] });
     }
+    if (fn === 'mk_voor_jou_sleutel_geleverd') {   // wv4184: zoals de echte (migratie mk-scripts/wv4184): kaarten met doel sleutelbos/sleutel:<naam> dicht, dan de klussen
+      if (sbStaat.sgKapot) return antw(500, { message: 'kapot' });
+      if (!/^[a-z0-9_]{3,64}$/.test(b.p_naam || '') || /__/.test(b.p_naam)) return antw(200, { ok: false, reden: 'naam niet in de vorm van een kluissleutel' });
+      if (!/^app \d{1,2}-\d{1,2} \d{1,2}:\d{2}: David plakte de sleutel in Sleutelbos \(vingerafdruk\)$/.test(b.p_bewijs || '')) return antw(200, { ok: false, reden: 'bewijs niet in de vorm van een levering in Sleutelbos' });
+      if (typeof b.p_erbij !== 'string' || b.p_erbij.length < 20 || b.p_erbij.length > 1500) return antw(200, { ok: false, reden: 'aanvulling' });
+      const kaarten = [], wvs = [], vrij = [], over = [];
+      (sbStaat.vj || []).filter((x) => ['open', 'later'].includes(x.status) && x.soort !== 'besluit' && x.herkomst && x.herkomst.doel && x.herkomst.doel.scherm === 'sleutelbos' && x.herkomst.doel.focus === 'sleutel:' + b.p_naam).forEach((x) => {
+        x.status = 'gedaan'; x.gesloten_door = 'david'; x.bewijs = b.p_bewijs; kaarten.push(x.sleutel);
+        ((x.herkomst && x.herkomst.wv) || []).map(Number).forEach((n) => { if (!wvs.includes(n)) wvs.push(n); });
+      });
+      wvs.forEach((n) => {
+        const w = (sbStaat.wvItems || []).find((y) => y.id === n);
+        if (!w || w.status !== 'geblokkeerd' || !/^\s*david/i.test(w.geblokkeerd_door || '')) return;
+        if ((sbStaat.vj || []).some((o) => ['open', 'later'].includes(o.status) && ((o.herkomst && o.herkomst.wv) || []).map(Number).includes(n))) { over.push({ wv: n }); return; }
+        w.status = 'open'; w.geblokkeerd_door = null; w.erbij = b.p_erbij; vrij.push(n);
+      });
+      return antw(200, { ok: true, kaarten, vrij, overgeslagen: over });
+    }
     if (fn === 'mk_voor_jou_gedaan_vrijgeven') {   // wv1853: zoals de echte (door David, "tikte Gedaan", geen besluit, rij wacht op David, geen andere open/later kaart)
       if (sbStaat.vjKapot) return antw(500, { message: 'kapot' });
       if (!b.p_sleutel) return antw(400, { message: 'sleutel verplicht' });
@@ -4856,6 +4874,75 @@ async function bewijs(o) {
         const xn = (r.j.sleutels || []).find((x) => x.id === 'proef_nieuw');
         toets('18N lijst toont de nieuwe sleutel (naam, sinds wv4172 meteen in het register met klasse B, vervangbaar), zonder waarde', xn && xn.kan === true && xn.in_register === true && xn.klasse === 'B' && !JSON.stringify(r.j).includes(WN), JSON.stringify(xn));
         spNep.kluis = spNep.kluis.filter((x) => !/^proef_nieuw/.test(x.naam));
+        // ── 18B. wv4184 (2C71): Sleutelbos als bestelbalie — bestelling in het register (verwacht), kaart met doel sleutelbos/sleutel:<naam>
+        {
+          H.appStaat.tellers.sleutels = [];
+          const logW = []; ctx.schrijfLog = (x) => logW.push(x); ctx.nu = () => 'NU'; ctx.velden = (o) => JSON.stringify(o);   // buiten het knipsel (in productie bestaan ze)
+          const reg0 = REG18();
+          reg0.verwacht = { proef_besteld: { waarvoor: 'Proef: lezen bij de proefdienst', maaklink: 'https://proef.example/keys', besteld_op: '2026-11-27', door: 'machinekamer' },
+            proef_linkfout: { waarvoor: 'x', maaklink: 'http://proef.example/keys', besteld_op: '27-11-2026', door: 'machinekamer' },
+            proef_inlog: { waarvoor: 'y', maaklink: 'https://iemand:geheim@proef.example/', door: 'machinekamer' },
+            telegram_bot_token: { waarvoor: 'portaal-only', door: 'machinekamer' }, 'Kapot Naam': { waarvoor: 'z' }, proef_lijst: ['x'],
+            proef_een: { waarvoor: 'vervang mij', door: 'machinekamer' } };
+          fs.writeFileSync(path.join(MB, 'Sleutelregister - portaalgegevens.json'), JSON.stringify(reg0, null, 1) + '\n');
+          r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+          const vw = r.j.verwacht || [], vb = vw.find((x) => x.naam === 'proef_besteld'), vl = vw.find((x) => x.naam === 'proef_linkfout'), vi = vw.find((x) => x.naam === 'proef_inlog'), ve = vw.find((x) => x.naam === 'proef_een');
+          toets('18B wv4184 lijst: verwacht met naam, waarvoor, https-maaklink, besteld_op en bestaat (proef_een staat al in de kluis)', vb && vb.waarvoor === 'Proef: lezen bij de proefdienst' && vb.maaklink === 'https://proef.example/keys' && vb.besteld_op === '2026-11-27' && vb.bestaat === false && ve && ve.bestaat === true, JSON.stringify(vw));
+          toets('18B wv4184 lijst: http- en inlog-maaklink = null, foute datum = null; portaal-only naam, foute naam en geen object vallen weg', vl && vl.maaklink === null && vl.besteld_op === null && vi && vi.maaklink === null
+            && !vw.some((x) => x.naam === 'telegram_bot_token' || x.naam === 'Kapot Naam' || x.naam === 'proef_lijst') && vw.length === 4, JSON.stringify(vw));
+          sbStaat.vj = (sbStaat.vj || []).filter((x) => !/^vj-wv4184/.test(x.sleutel)).concat([
+            { sleutel: 'vj-wv4184-a', soort: 'doen', status: 'open', herkomst: { wv: [94184], doel: { scherm: 'sleutelbos', focus: 'sleutel:proef_besteld' } } },
+            { sleutel: 'vj-wv4184-b', soort: 'doen', status: 'open', herkomst: { wv: [94185], doel: { scherm: 'sleutelbos', focus: 'sleutel:proef_anders' } } },
+            { sleutel: 'vj-wv4184-c', soort: 'doen', status: 'open', herkomst: { wv: [94186], doel: { scherm: 'sleutelbos', focus: 'sleutel:proef_twee' } } },
+            { sleutel: 'vj-wv4184-d', soort: 'doen', status: 'open', herkomst: { wv: [94186], titel: 'andere kaart voor dezelfde klus' } }]);
+          sbStaat.wvItems = (sbStaat.wvItems || []).filter((x) => x.id < 94184 || x.id > 94186).concat([94184, 94185, 94186].map((id) => ({ id, status: 'geblokkeerd', geblokkeerd_door: 'David: sleutel plakken' })));
+          const nRpc = sbRpc.length, nBox = boxRijen18().length;
+          await vers(P);
+          r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_besteld', waarde: WN }, { pot: P.jar });
+          const sg = sbRpc.slice(nRpc).filter((x) => x.fn === 'mk_voor_jou_sleutel_geleverd'), regB = REG18(), kA = sbStaat.vj.find((x) => x.sleutel === 'vj-wv4184-a'), kB = sbStaat.vj.find((x) => x.sleutel === 'vj-wv4184-b'), wA = sbStaat.wvItems.find((x) => x.id === 94184);
+          toets('18B wv4184 levering: 200, één aanroep mk_voor_jou_sleutel_geleverd met naam en vast bewijs, zonder waarde', r.status === 200 && sg.length === 1 && sg[0].b.p_naam === 'proef_besteld'
+            && /^app \d{1,2}-\d{1,2} \d{1,2}:\d{2}: David plakte de sleutel in Sleutelbos \(vingerafdruk\)$/.test(sg[0].b.p_bewijs) && /\[Pod, wv4184\] David plakte sleutel proef_besteld/.test(sg[0].b.p_erbij) && !JSON.stringify(sg).includes(WN), JSON.stringify([r.j, sg]));
+          toets('18B wv4184 levering: kaart met dit doel dicht (gedaan, david), klus vrij met aanvulling; kaart voor een andere naam blijft open', kA.status === 'gedaan' && kA.gesloten_door === 'david' && wA.status === 'open' && /Sleutelbos/.test(wA.erbij) && kB.status === 'open'
+            && sbStaat.wvItems.find((x) => x.id === 94185).status === 'geblokkeerd', JSON.stringify([kA, wA, kB]));
+          toets('18B wv4184 register: uitleg uit de bestelling in de registerrij, bestelling weg, andere bestellingen blijven', regB.kluis.proef_besteld && regB.kluis.proef_besteld.waarvoor === 'Proef: lezen bij de proefdienst' && regB.kluis.proef_besteld.klasse === 'B'
+            && !('proef_besteld' in regB.verwacht) && 'proef_linkfout' in regB.verwacht && 'proef_een' in regB.verwacht, JSON.stringify([regB.kluis.proef_besteld, Object.keys(regB.verwacht)]));
+          const bxB = boxRijen18();
+          toets('18B wv4184 nazorg: eerst "de klus die erop wachtte gaat verder"; box-rij zonder "waarvoor invullen" (de bestelling gaf de uitleg)', /klus die erop wachtte gaat verder/.test(r.j.nazorg[0]) && bxB.length === nBox + 1
+            && /nieuwe sleutel proef_besteld/.test(bxB[0]) && !/waarvoor invullen/.test(bxB[0]), JSON.stringify(r.j.nazorg) + ' ' + bxB[0]);
+          r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+          toets('18B wv4184 geleverde bestelling staat niet meer in verwacht', !(r.j.verwacht || []).some((x) => x.naam === 'proef_besteld'), JSON.stringify(r.j.verwacht));
+          // Twee kaarten voor één klus: de klus blijft wachten (andere open kaart), wel deze kaart dicht; nazorg belooft geen klus (Codex ZOU 1)
+          await vers(P);
+          r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_twee', waarde: WN }, { pot: P.jar });
+          toets('18B wv4184 andere open kaart voor dezelfde klus: kaart dicht, klus blijft geblokkeerd, nazorg "kaart is dicht" zonder "gaat verder"', r.status === 200 && sbStaat.vj.find((x) => x.sleutel === 'vj-wv4184-c').status === 'gedaan'
+            && sbStaat.wvItems.find((x) => x.id === 94186).status === 'geblokkeerd' && r.j.nazorg.some((x) => /kaart in Voor jou is dicht\.$/.test(x)) && !r.j.nazorg.some((x) => /gaat verder/.test(x)), JSON.stringify(r.j.nazorg));
+          // Databank weg (Codex MOET 2): geleverd-merk blijft, de herhaling handelt het later af
+          const reg2 = REG18(); reg2.verwacht.proef_later = { waarvoor: 'Proef later', door: 'machinekamer', besteld_op: '2026-11-27' }; fs.writeFileSync(path.join(MB, 'Sleutelregister - portaalgegevens.json'), JSON.stringify(reg2, null, 1) + '\n');
+          sbStaat.vj.push({ sleutel: 'vj-wv4184-e', soort: 'doen', status: 'open', herkomst: { wv: [94187], doel: { scherm: 'sleutelbos', focus: 'sleutel:proef_later' } } });
+          sbStaat.wvItems.push({ id: 94187, status: 'geblokkeerd', geblokkeerd_door: 'David: sleutel' });
+          sbStaat.sgKapot = true; await vers(P);
+          r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_later', waarde: WN }, { pot: P.jar });
+          const regL = REG18();
+          toets('18B wv4184 databank weg: toch 200 (sleutel staat erin), nazorg "gaat vanzelf dicht", geleverd-merk in het register, uitleg al in de registerrij, kaart nog open', r.status === 200 && r.j.nazorg.some((x) => /gaat vanzelf dicht/.test(x))
+            && regL.verwacht.proef_later && regL.verwacht.proef_later.geleverd && regL.verwacht.proef_later.geleverd.soort === 'nieuw' && regL.kluis.proef_later.waarvoor === 'Proef later'
+            && sbStaat.vj.find((x) => x.sleutel === 'vj-wv4184-e').status === 'open', JSON.stringify([r.j.nazorg, regL.verwacht.proef_later]));
+          r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+          toets('18B wv4184 geleverd maar niet afgehandeld: niet meer in verwacht (David hoeft niets opnieuw)', !(r.j.verwacht || []).some((x) => x.naam === 'proef_later'), JSON.stringify(r.j.verwacht));
+          sbStaat.sgKapot = false; vm.runInContext('sleutelLevHerhaalOp = 0', ctx);
+          r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+          for (let i = 0; i < 50 && REG18().verwacht.proef_later; i++) await new Promise((z) => setTimeout(z, 20));
+          toets('18B wv4184 herhaling bij GET: kaart dicht, klus vrij, merk weg', !REG18().verwacht.proef_later && sbStaat.vj.find((x) => x.sleutel === 'vj-wv4184-e').status === 'gedaan' && sbStaat.wvItems.find((x) => x.id === 94187).status === 'open', JSON.stringify(REG18().verwacht));
+          // Vervangen van een bestaande sleutel met een bestelling: uitleg alleen als de registerrij er nog geen had (proef_een heeft er een)
+          await vers(P);
+          r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: WN + 'v' }, { pot: P.jar });
+          const regE = REG18();
+          toets('18B wv4184 vervangen met bestelling: bestaande uitleg blijft, bestelling weg, geen kaart = geen belofte in de nazorg', r.status === 200 && regE.kluis.proef_een.waarvoor !== 'vervang mij' && !('proef_een' in regE.verwacht)
+            && !r.j.nazorg.some((x) => /gaat verder|kaart in Voor jou/.test(x)), JSON.stringify([regE.kluis.proef_een.waarvoor, r.j.nazorg]));
+          toets('18B wv4184 logregel sleutel-bestel met naam, aantal kaarten en vrije klus, zonder waarde', logW.some((x) => /sleutel-bestel .*"naam":"proef_besteld".*"kaarten":1.*"vrij":"wv94184"/.test(x)) && !logW.join().includes(WN), logW.join(' | '));
+          spNep.kluis = spNep.kluis.filter((x) => !/^proef_(besteld|twee|later)$/.test(x.naam));
+          H.appStaat.tellers.sleutels = [];
+          delete ctx.schrijfLog; delete ctx.nu; delete ctx.velden;
+        }
       }
       // ── 18W. wv1786: weggooien (POST /app/sleutels/weg): alleen proef_-rijen en vorige-kopieën, verse vingerafdruk, de kluis beslist
       {

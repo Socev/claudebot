@@ -6236,7 +6236,19 @@ function sleutelRegisterBij(plek, naam, soort, via) {
       else m.vervangen_op = vandaag;
       m.klasse = 'B'; m.vervangen_voor = voor; m.vervangen_via = via;
       if (!oud) j[sec][naam] = m;
-      info = { bestond: !!oud, waarvoor: typeof m.waarvoor === 'string' && m.waarvoor.trim() !== '', afhandeling: typeof m.afhandeling === 'string' ? m.afhandeling.slice(0, 20) : null };
+      // wv4184 (2C71): bestelling van de machinekamer (sectie verwacht) -> uitleg in de registerrij; levering via Sleutelbos krijgt een
+      // geleverd-merk dat pas weggaat als de databank kaart en klus heeft afgehandeld (Codex MOET 2: herhaalbaar, niet alleen gelogd)
+      let lev = null;
+      if (sec === 'kluis' && via === 'sleutelbos') {
+        const vw = j.verwacht && typeof j.verwacht === 'object' && !Array.isArray(j.verwacht) ? j.verwacht : null;
+        const b = vw && Object.prototype.hasOwnProperty.call(vw, naam) && vw[naam] && typeof vw[naam] === 'object' && !Array.isArray(vw[naam]) ? vw[naam] : null;
+        let uitBestelling = false;
+        if (b && typeof b.waarvoor === 'string' && b.waarvoor.trim() && !(typeof m.waarvoor === 'string' && m.waarvoor.trim())) { m.waarvoor = b.waarvoor.trim().slice(0, 200); uitBestelling = true; }
+        const tMs = Date.now();
+        lev = { naam: naam, op: new Date(tMs).toISOString(), wanneer: sleutelWanneer(tMs), soort: soort, besteld: !!b, uitleg: uitBestelling };
+        if (b) b.geleverd = { op: lev.op, wanneer: lev.wanneer, soort: soort, uitleg: uitBestelling };
+      }
+      info = { bestond: !!oud, waarvoor: typeof m.waarvoor === 'string' && m.waarvoor.trim() !== '', afhandeling: typeof m.afhandeling === 'string' ? m.afhandeling.slice(0, 20) : null, levering: lev };
       return JSON.stringify(j, null, 1) + '\n';   // het bestand staat in precies dit formaat (gemeten: rondgang identiek)
     }, { grendel: 5, geenGrendel: boxGeenGrendel });
     return ok && info ? Object.assign({ ok: true, voor: voor }, info) : { ok: false, reden: reden || 'niet geschreven' };
@@ -6278,8 +6290,106 @@ function sleutelNaSchrijven(t, u, wie, via) {
   else uit.push('Het sleutelregister kon niet vanzelf worden bijgewerkt (' + reg.reden + ').');
   uit.push(box ? 'Socev heeft het doorgegeven aan de machinekamer' + (soort === 'nieuw' ? ' (uitleg in het register en, als de pod hem moet lezen, de witte lijst)' : '') + '. Jij hoeft niets meer door te geven.'
     : 'Doorgeven aan de machinekamer lukte niet; meld het daar even.');
+  if (reg.ok && reg.levering) uit.levering = reg.levering;   // wv4184: de app-route handelt kaart en klus af (async, sleutelLevering)
   return uit;
 }
+
+// ── wv4184 (besluitenpagina nr 171 = 2C71, David Ja 25-11-2026): Sleutelbos als bestelbalie ──
+// De machinekamer zet een bestelling in het register (sectie verwacht, mk-scripts/sleutel-bestel.py) en een Voor jou-kaart met doel
+// {scherm sleutelbos, focus sleutel:<naam>}. Plakt David die sleutel in Sleutelbos (verse vingerafdruk, gewone poort hierboven), dan:
+// uitleg uit de bestelling in de registerrij (sleutelRegisterBij), en hier: de databank sluit de kaart(en) met dat doel en geeft de klus
+// die erop wachtte vrij (mk_voor_jou_sleutel_geleverd, migratie mk-scripts/wv4184/migratie.sql). Lukt dat niet (databank weg), dan blijft
+// het geleverd-merk in het register staan en probeert de pod het opnieuw (bij GET /app/sleutels en na de start); pas na ok weg.
+// Nooit een waarde: alleen naam, tijd en soort. Ontwerp + Codex-review: mk-scripts/wv4184/ontwerp.md.
+const SLEUTEL_BESTEL_MAX = 20;
+const sleutelWanneer = function (tMs) { return appVjDag(appYmd(tMs)) + ' ' + appKlok(new Date(tMs).toISOString()); };
+const sleutelLevBezig = new Set();
+// Bewijs en aanvulling: vaste vormen (de databank toetst het bewijs letterlijk)
+function sleutelLevTekst(lev) {
+  return { bewijs: 'app ' + lev.wanneer + ': David plakte de sleutel in Sleutelbos (vingerafdruk)',
+    erbij: '[Pod, wv4184] David plakte sleutel ' + lev.naam + ' in Sleutelbos (' + lev.wanneer + ', verse vingerafdruk): ' + (lev.soort === 'nieuw' ? 'nieuwe kluissleutel' : 'bestaande kluissleutel vervangen') +
+      '. Het sleutelregister is bijgewerkt (klasse B' + (lev.uitleg ? ', uitleg uit de bestelling' : '') + '). De pod las de waarde niet en zette hem niet op de witte lijst; moet de pod hem lezen: witte lijst + herstartkaart (zie box-rij #sleutelbos-nazorg).' };
+}
+// Het register bijwerken na de databank: bestelling weg als het geleverd-merk nog het onze is; zonder bestelling (alleen een kaart)
+// bij een fout een merk erbij zetten zodat de herhaling het oppakt. Fout hier = gelogd (de levering zelf is al gebeurd).
+function sleutelLevRegister(lev, klaar) {
+  try {
+    VV().wijzig(SP_META_PAD, function (t) {
+      let j; try { j = JSON.parse(t); } catch (e) { return null; }
+      if (!j || typeof j !== 'object') return null;
+      const vw = j.verwacht && typeof j.verwacht === 'object' && !Array.isArray(j.verwacht) ? j.verwacht : null;
+      const b = vw && Object.prototype.hasOwnProperty.call(vw, lev.naam) && vw[lev.naam] && typeof vw[lev.naam] === 'object' ? vw[lev.naam] : null;
+      if (klaar) {
+        if (!b || !b.geleverd || b.geleverd.op !== lev.op) return null;
+        delete vw[lev.naam];
+      } else {
+        if (b) return null;   // merk staat er al (sleutelRegisterBij)
+        if (!vw) j.verwacht = {};
+        j.verwacht[lev.naam] = { waarvoor: '', door: 'pod', geleverd: { op: lev.op, wanneer: lev.wanneer, soort: lev.soort, uitleg: false } };
+      }
+      return JSON.stringify(j, null, 1) + '\n';
+    }, { grendel: 5, geenGrendel: boxGeenGrendel });
+  } catch (e) { logError('sleutel-bestel', e); }
+}
+// → { ok, kaarten, vrij } | { ok: false, reden }
+async function sleutelLevering(lev) {
+  if (!lev || SLEUTEL_VERBODEN_NAAM.has(lev.naam) || sleutelLevBezig.has(lev.naam)) return { ok: false, reden: 'bezig' };
+  sleutelLevBezig.add(lev.naam);
+  try {
+    const tk = sleutelLevTekst(lev);
+    let r = null, fout = null;
+    try { r = await appSbRpc('mk_voor_jou_sleutel_geleverd', { p_naam: lev.naam, p_bewijs: tk.bewijs, p_erbij: tk.erbij }, 8000); } catch (e) { fout = e; logError('sleutel-bestel', e); }
+    if (r && r.ok === true) {
+      appStaat.vjCache = null; appStaat.vjWvCache = null; appStaat.wvCache = null;
+      const vrij = Array.isArray(r.vrij) ? r.vrij : [], kaarten = Array.isArray(r.kaarten) ? r.kaarten : [];
+      if (lev.besteld || kaarten.length) schrijfLog(nu() + ' sleutel-bestel ' + velden({ naam: lev.naam, kaarten: kaarten.length, vrij: vrij.map(function (x) { return 'wv' + x; }).join(',') || '-' }));
+      sleutelLevRegister(lev, true);
+      return { ok: true, kaarten: kaarten.length, vrij: vrij.length };
+    }
+    // Een vormfout (r.ok false) komt niet vanzelf goed: niet eindeloos herhalen
+    if (r && r.ok === false) { logError('sleutel-bestel', new Error('geweigerd: ' + String(r.reden || '').slice(0, 120))); sleutelLevRegister(lev, true); return { ok: false, reden: String(r.reden || 'geweigerd').slice(0, 120) }; }
+    sleutelLevRegister(lev, false);
+    return { ok: false, reden: fout ? 'databank niet bereikbaar' : 'geen antwoord', later: true };
+  } finally { sleutelLevBezig.delete(lev.naam); }
+}
+function sleutelLevNazorg(lev, r) {
+  if (r && r.ok && r.vrij > 0) return 'Socev had hierom gevraagd: de kaart in Voor jou is dicht en de klus die erop wachtte gaat verder.';
+  if (r && r.ok && r.kaarten > 0) return 'Socev had hierom gevraagd: de kaart in Voor jou is dicht.';
+  if (r && r.ok) return lev.besteld ? 'Socev had hierom gevraagd; de bestelling is afgehandeld.' : null;
+  if (r && r.later && lev.besteld) return 'De kaart in Voor jou gaat vanzelf dicht zodra Socev de databank weer bereikt.';
+  return null;
+}
+// Herhaling: geleverde bestellingen waarvan de afhandeling nog niet lukte (hooguit eens per minuut, op de achtergrond)
+let sleutelLevHerhaalOp = 0;
+function sleutelLevHerhaal() {
+  if (Date.now() - sleutelLevHerhaalOp < 60000 || !rolPrimair()) return;
+  sleutelLevHerhaalOp = Date.now();
+  const vw = spMeta().verwacht;
+  if (!vw || typeof vw !== 'object' || Array.isArray(vw)) return;
+  Object.keys(vw).slice(0, SLEUTEL_BESTEL_MAX).forEach(function (naam) {
+    const g = vw[naam] && vw[naam].geleverd;
+    if (!APP_SLEUTEL_KLUIS_RE.test(naam) || !g || typeof g !== 'object' || typeof g.op !== 'string' || !/^\d{1,2}-\d{1,2} \d{1,2}:\d{2}$/.test(String(g.wanneer || ''))) return;
+    sleutelLevering({ naam: naam, op: g.op, wanneer: g.wanneer, soort: g.soort === 'vervangen' ? 'vervangen' : 'nieuw', besteld: vw[naam].door !== 'pod', uitleg: g.uitleg === true })
+      .catch(function (e) { logError('sleutel-bestel', e); });
+  });
+}
+setTimeout(function () { try { sleutelLevHerhaal(); } catch (e) { logError('sleutel-bestel', e); } }, 90000).unref();
+// Wat de app toont: open bestellingen (nog niet geleverd), alleen vaste vormen; een maaklink alleen als https zonder inlog in het adres
+// (de app toont hem bovendien alleen bij een bekende aanbieder: de links in Sleutelbos komen nooit zomaar van de pod of uit de vault)
+function sleutelBestellingen(meta, kluisNamen) {
+  const vw = meta && meta.verwacht && typeof meta.verwacht === 'object' && !Array.isArray(meta.verwacht) ? meta.verwacht : {};
+  return Object.keys(vw).filter(function (naam) {
+    const b = vw[naam];
+    return APP_SLEUTEL_KLUIS_RE.test(naam) && !/__/.test(naam) && !APP_SLEUTEL_PORTAAL_KLUIS.has(naam) && b && typeof b === 'object' && !Array.isArray(b) && !b.geleverd && b.door !== 'pod';
+  }).slice(0, SLEUTEL_BESTEL_MAX).map(function (naam) {
+    const b = vw[naam];
+    let link = null;
+    try { const u = new URL(String(b.maaklink || '')); if (u.protocol === 'https:' && !u.username && !u.password && String(b.maaklink).length <= 300) link = u.href; } catch (e) { link = null; }
+    const dag = typeof b.besteld_op === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(b.besteld_op) ? b.besteld_op : null;
+    return { naam: naam, waarvoor: appSleutelTekst(typeof b.waarvoor === 'string' ? b.waarvoor : '', 200), maaklink: link, besteld_op: dag, bestaat: !!(kluisNamen && kluisNamen.has(naam)) };
+  });
+}
+// ── einde wv4184 (pod-deel; app-routes hieronder roepen sleutelLevering) ──
 // ── einde sleutelportaal ─────────────────────────────────────────────────────
 
 // ── Socev-app poort (/app/*, fase 1, 7-10-2026) ─────────────────────────────────────────────────
@@ -18503,7 +18613,10 @@ async function appSleutelLijst() {
   const handmatig = (Array.isArray(meta.handmatig) ? meta.handmatig : []).filter(function (h) { return h && typeof h === 'object' && typeof h.naam === 'string' && h.naam.trim(); }).slice(0, 100)
     .map(function (h) { return Object.assign({ naam: appSleutelTekst(h.naam, 120), waar: appSleutelTekst(h.plek || '', 160), waarvoor: appSleutelTekst(h.waarvoor || '', 200), klasse: appSleutelTekst(h.klasse || '', 4),
       vervangen_voor: appSleutelTekst(h.vervangen_voor || null, 10), instructie: appSleutelTekst(h.instructie || null, 400) }, appSleutelStandVelden(h)); });
-  return { sleutels: uit, fouten: fouten, handmatig: handmatig };
+  // wv4184 (2C71): open bestellingen van de machinekamer; zonder leesbare kluis geen 'bestaat' (dan null: de app kiest niets)
+  const kluisNamen = fouten.indexOf('kluis') < 0 ? new Set(uit.filter(function (x) { return x.plek === 'kluis'; }).map(function (x) { return x.naam; })) : null;
+  const verwacht = sleutelBestellingen(meta, kluisNamen).map(function (b) { return kluisNamen ? b : Object.assign(b, { bestaat: null }); });
+  return { sleutels: uit, fouten: fouten, handmatig: handmatig, verwacht: verwacht };
 }
 
 // wv4172 (d) en (e) hieronder; (a) en (c) — register + box-rij na schrijven — staan in het sleutelportaal-blok (sleutelNaSchrijven), gedeeld met het portaal.
@@ -18553,7 +18666,8 @@ function sleutelGebruikVan(kaart, id) {
 async function appSleutels(req, res, a) {
   // wv1901/wv3446: de lijst (namen, nooit waarden) op elk apparaat; vast blijft het echte soort (vervangen en weggooien zijn beheer)
   const l = await appSleutelLijst();
-  appStuur(res, 200, { ok: true, sleutels: l.sleutels, fouten: l.fouten, handmatig: l.handmatig, vast: appVastBeheerDicht(a), primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
+  try { sleutelLevHerhaal(); } catch (e) { logError('sleutel-bestel', e); }   // wv4184: een eerder mislukte afhandeling opnieuw (achtergrond)
+  appStuur(res, 200, { ok: true, sleutels: l.sleutels, fouten: l.fouten, handmatig: l.handmatig, verwacht: l.verwacht, vast: appVastBeheerDicht(a), primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
 }
 async function appSleutelVervang(req, res, reg, a, s, d) {
   // De waarde meteen uit het verzoekobject halen; vanaf hier bestaat hij alleen in deze functie.
@@ -18600,7 +18714,10 @@ async function appSleutelVervang(req, res, reg, a, s, d) {
   }
   if (!u.ok) return appStuur(res, 422, { ok: false, fout: String(u.uitkomst).slice(0, 200), naam: t.naam, plek: t.plek });   // geen 502: de app leest dat als 'pod weg'
   // wv4172: register + box-rij vanzelf (geen huiswerk); de knop "Vorige terugzetten" bestaat alleen in het portaal
-  const nazorg = sleutelNaSchrijven(t, u, 'de app ("' + a.naam + '")', 'sleutelbos').map(function (x) { return /Vorige terugzetten/.test(x) ? 'De vorige waarde blijft bewaard; terugzetten kan in het sleutelportaal (/sleutels) of via de machinekamer.' : String(x).slice(0, 400); });
+  const nz = sleutelNaSchrijven(t, u, 'de app ("' + a.naam + '")', 'sleutelbos');
+  const nazorg = nz.map(function (x) { return /Vorige terugzetten/.test(x) ? 'De vorige waarde blijft bewaard; terugzetten kan in het sleutelportaal (/sleutels) of via de machinekamer.' : String(x).slice(0, 400); });
+  // wv4184 (2C71): een kaart die om deze sleutel vroeg gaat dicht en de wachtende klus gaat verder (de databank beslist)
+  if (nz.levering) { const ln = sleutelLevNazorg(nz.levering, await sleutelLevering(nz.levering).catch(function (e) { logError('sleutel-bestel', e); return null; })); if (ln) nazorg.unshift(ln); }
   appStuur(res, 200, { ok: true, naam: t.naam, plek: t.plek, uitkomst: String(u.uitkomst).slice(0, 200), nazorg: nazorg });
 }
 
@@ -18638,8 +18755,10 @@ async function appSleutelNieuw(req, res, reg, a, s, d) {
   // review wv2481 MOET 1: twee tabbladen tegelijk -> de kluis weigert de tweede met 'naam bestaat al'; dat is een conflict (409), geen 422
   if (!u.ok) return appStuur(res, /bestaat al/.test(String(u.uitkomst)) ? 409 : 422, { ok: false, fout: String(u.uitkomst).slice(0, 200), naam: naam });
   // wv4172: geen "laat de machinekamer hem in het register zetten" meer; de pod zet hem er zelf in en geeft de rest door (box-rij)
-  appStuur(res, 200, { ok: true, naam: naam, plek: 'kluis', uitkomst: String(u.uitkomst).slice(0, 200),
-    nazorg: sleutelNaSchrijven(t, u, 'de app ("' + a.naam + '")', 'sleutelbos').map(function (x) { return String(x).slice(0, 400); }) });
+  const nz = sleutelNaSchrijven(t, u, 'de app ("' + a.naam + '")', 'sleutelbos');
+  const nazorg = nz.map(function (x) { return String(x).slice(0, 400); });
+  if (nz.levering) { const ln = sleutelLevNazorg(nz.levering, await sleutelLevering(nz.levering).catch(function (e) { logError('sleutel-bestel', e); return null; })); if (ln) nazorg.unshift(ln); }   // wv4184
+  appStuur(res, 200, { ok: true, naam: naam, plek: 'kluis', uitkomst: String(u.uitkomst).slice(0, 200), nazorg: nazorg });
 }
 
 // wv1786 (Sleutelwissel 2 § C): POST /app/sleutels/weg { naam } — een proef_-rij of de vorige-kopie van een sleutel weggooien.
