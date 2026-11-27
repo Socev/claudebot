@@ -1450,7 +1450,81 @@ function maak(o) {
       return n;
     }, true);
   }
-  return { app, info, herbouw, jaarBedragen, indeling, chatControleer, _plan: plan, _pseudo: pseudo };   // wv4212: chatControleer
+  // wv4219 (L31): per praktijk met data de laatste gedekte dag (alleen datums; geen databank = lege lijst)
+  function dataTot() {
+    return metDb((db) => {
+      if (!db) return [];
+      return db.prepare('SELECT d.praktijk AS code, p.naam AS naam, MAX(d.dag) AS data_tot FROM dagbron d LEFT JOIN praktijk p ON p.code = d.praktijk GROUP BY d.praktijk ORDER BY d.praktijk DESC').all()
+        .map((r) => ({ code: r.code, naam: r.naam || r.code, data_tot: r.data_tot }));
+    }, false);
+  }
+  return { app, info, herbouw, jaarBedragen, indeling, chatControleer, dataTot, _plan: plan, _pseudo: pseudo };   // wv4212: chatControleer
 }
 
-module.exports = { isoWeek, ROLGROEP, waarnemerDagen, dpId, maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht };
+// ── wv4219 (besluitenpagina nr 931 = L31, David Ja 25-11-2026): exportherinnering. Puur (geen I/O, geen klok); server.js (nachtketenstap
+// pma-export, 06:30) leest dataTot(), de open Voor jou-kaarten en de eigen staat, en voert uit wat dit teruggeeft. Ontwerp + Codex-
+// ontwerpreview: mk-scripts/wv4219/ontwerp.md (GO-MET-WIJZIGINGEN, MOET 1 verwerkt: een oude kwartaalkaart blokkeert de nieuwe niet).
+// Inschrijfgeld staat alleen op dag 1 van een kwartaal: een export die die dag mist, mist het inschrijfgeld.
+//   a. eerste week van een kwartaal, een praktijk met data loopt tot vóór dag 1, nog geen kaart voor dit kwartaal, geen andere open
+//      PMA-exportkaart (L26) → één kaart pma-kwartaal-<jaar>-q<n>; oude kwartaalkaarten die nog open staan gaan dan dicht.
+//   b. kwartaalkaart open en alle praktijken met data bij tot dag 1 → kaart dicht met bewijs.
+//   c. > 45 dagen achter en die data_tot nog niet gemeld → één regel voor het ochtendbericht (niet naast een open/nieuwe kwartaalkaart).
+//   d. data bij: niets.
+const EXPORT_ACHTER_DAGEN = 45, EXPORT_KAART_DAGEN = 7;
+const KWARTAAL_SL_RE = /^pma-kwartaal-\d{4}-q[1-4]$/;
+function dagNl(iso) { const [j, m, d] = String(iso).split('-').map(Number); return d + '-' + m + '-' + j; }
+function dagenVerschil(a, b) { return Math.round((Date.parse(b + 'T12:00:00Z') - Date.parse(a + 'T12:00:00Z')) / 86400000); }
+function kwartaalVan(dag) {
+  const j = Number(dag.slice(0, 4)), q = Math.floor((Number(dag.slice(5, 7)) - 1) / 3) + 1;
+  return { jaar: j, q, start: j + '-' + String((q - 1) * 3 + 1).padStart(2, '0') + '-01', sleutel: 'pma-kwartaal-' + j + '-q' + q };
+}
+function exportKaart(k, achter, vandaag) {
+  const vorig = achter.filter((p) => p.data_tot < (k.jaar - 1) + '-12-31' && p.data_tot.slice(0, 4) === String(k.jaar - 1));
+  const stappen = ['Exporteer in Promedico met de gegevensset PMA, per praktijk, van 1-1-' + k.jaar + ' t/m vandaag.'];
+  if (k.q === 1 && vorig.length) stappen.push(vorig.map((p) => p.naam).join(' en ') + ': exporteer ook ' + (k.jaar - 1) + ' (1-1 t/m 31-12), want die cijfers lopen nu tot ' + vorig.map((p) => dagNl(p.data_tot)).join(' en ') + '.');
+  stappen.push('Geef de ZIP in het gesprek aan Socev (paperclip): de pod controleert hem en je krijgt een link naar PMA. Of kies hem zelf in PMA bij Inlezen.');
+  stappen.push('Tik in PMA bij Inlezen op Inlezen. Deze kaart gaat vanzelf dicht als het inschrijfgeld van dit kwartaal erin staat.');
+  return {
+    sleutel: k.sleutel, soort: 'doen', waar: 'pc', duur_min: 10,
+    titel: 'PMA — nieuw kwartaal: export t/m vandaag inlezen',
+    waarom: 'Het ' + k.q + 'e kwartaal van ' + k.jaar + ' is begonnen. Het inschrijfgeld staat alleen op de eerste dag van het kwartaal (' + dagNl(k.start) +
+      '); PMA heeft van ' + achter.map((p) => p.naam + ' cijfers tot ' + dagNl(p.data_tot)).join(' en van ') + ', dus dat inschrijfgeld ontbreekt nog. Een export t/m vandaag (' + dagNl(vandaag) + ') heeft het wel.',
+    stappen,
+    herkomst: { module: 'pma', handmatig: 'pma-export', kwartaal: k.jaar + '-q' + k.q, doel: { scherm: 'pma' } },
+  };
+}
+function exportHerinnering(o) {
+  const vandaag = String(o.vandaag), st = o.staat && typeof o.staat === 'object' ? o.staat : {};
+  const kaarten = Object.assign({}, st.kaarten || {}), gemeld = Object.assign({}, st.gemeld || {});
+  const pr = (o.praktijken || []).filter((p) => p && p.data_tot);
+  const open = (o.open || []).filter((x) => x && (x.status === 'open' || x.status === 'later'));
+  const k = kwartaalVan(vandaag);
+  const uit = { kaart: null, sluit: [], regel: null, staat: { dag: vandaag, kaarten, gemeld }, reden: [] };
+  if (!pr.length) { uit.reden.push('geen data'); return uit; }
+  const achter = pr.filter((p) => p.data_tot < k.start);
+  const eigenOpen = open.find((x) => x.sleutel === k.sleutel);
+  // b. kaart van dit kwartaal open en alles bij → dicht
+  if (eigenOpen && !achter.length) uit.sluit.push({ sleutel: k.sleutel, van: eigenOpen.status, bewijs: 'Gezien: PMA heeft nu cijfers t/m ' + pr.map((p) => dagNl(p.data_tot)).join(' en ') + '.' });
+  // a. kaart in de eerste week
+  const ander = open.find((x) => !KWARTAAL_SL_RE.test(String(x.sleutel)) && /^PMA\b/i.test(String(x.titel || '')) && /export/i.test(String(x.titel || '')));
+  if (achter.length && dagenVerschil(k.start, vandaag) < EXPORT_KAART_DAGEN && !kaarten[k.sleutel]) {
+    if (ander) uit.reden.push('andere exportkaart open');
+    else {
+      uit.kaart = exportKaart(k, achter, vandaag);
+      kaarten[k.sleutel] = vandaag;
+      for (const x of open) if (KWARTAAL_SL_RE.test(String(x.sleutel)) && x.sleutel !== k.sleutel) uit.sluit.push({ sleutel: x.sleutel, van: x.status, bewijs: 'Vervangen door de kaart van het nieuwe kwartaal.' });
+    }
+  }
+  // c. ochtendregel bij > 45 dagen achter, één keer per data_tot; niet naast de kwartaalkaart
+  const lang = pr.filter((p) => dagenVerschil(p.data_tot, vandaag) > EXPORT_ACHTER_DAGEN && gemeld[p.code] !== p.data_tot);
+  const kaartLoopt = !!uit.kaart || (!!eigenOpen && !uit.sluit.some((s) => s.sleutel === k.sleutel));
+  if (lang.length && !kaartLoopt) {
+    uit.regel = 'De cijfers van ' + lang.map((p) => p.naam + ' lopen tot ' + dagNl(p.data_tot) + ' (' + dagenVerschil(p.data_tot, vandaag) + ' dagen)').join(', die van ') +
+      '. Een nieuwe export uit Promedico (gegevensset PMA, 1-1-' + k.jaar + ' t/m vandaag) maakt ze weer bij.';
+    uit.regel_voor = lang.map((p) => ({ code: p.code, data_tot: p.data_tot }));   // pas na een gelukte melding in gemeld (server.js)
+  }
+  for (const c of Object.keys(kaarten)) if (c < 'pma-kwartaal-' + (k.jaar - 2)) delete kaarten[c];   // staat klein houden
+  return uit;
+}
+
+module.exports = { isoWeek, ROLGROEP, waarnemerDagen, dpId, maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht, exportHerinnering, kwartaalVan };

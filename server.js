@@ -28537,6 +28537,8 @@ const nachtketen = (function () {
         return weerOchtend.doe({ ams: ctx.ams });
       } },
       // wv3936 (2C64): Gezondheid "Deze week" — bij een nieuwe afwijking één regel in het loket vóór apps-editie; een fout meldt de keten (box-rij)
+      // wv4219 (L31): PMA-exportherinnering — kwartaalkaart in de eerste week, ochtendregel bij > 45 dagen achter; een fout meldt de keten (box-rij)
+      { naam: 'pma-export', start_na: [6, 30], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return pmaExportStap(ctx); } },
       { naam: 'gezondheid-week', start_na: [6, 30], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return gezondheidWeekStap(ctx); } },
       // wv3940 (3C46): Laat rusten bij een Gambia-contact geldt 6 dagen; de correctierij van een tik geldt maar één ochtend, dus schrijft
       // deze stap de rij van vandaag opnieuw (uit de bewaarde standen van gisteren + lopende Laat rusten) zolang er één loopt. Niets lopend =
@@ -31920,6 +31922,58 @@ function pmaChatIn(upload) {
     'Je hoeft hem niet zelf te openen of in te lezen: inlezen doet David met één tik in PMA. Neem in je antwoord dit blok over, met de link precies zo:\n' + regels.join('\n') + '\n]';
 }
 // ── einde OVIS PMA ──
+// ── PMA-exportherinnering (buiten het PMA-blok: alleen datums en sleutels in de log) ──
+// wv4219 (besluitenpagina nr 931 = L31, David Ja 25-11-2026): exportherinnering. Nachtketenstap pma-export (06:30, primaire kant, vóór
+// apps-editie van 06:50). Regels en waarom in pma.js exportHerinnering (puur); ontwerp + Codex-ontwerpreview mk-scripts/wv4219/ontwerp.md.
+// Eerste week van een kwartaal en de data mist dag 1 (inschrijfgeld) → één Voor jou-kaart pma-kwartaal-<jaar>-q<n> (niet als een andere
+// PMA-exportkaart open staat, zoals L26); data bij → die kaart dicht met bewijs; > 45 dagen achter → één regel "Uit je Apps" in het
+// ochtendbericht, één keer per stand. Data bij: niets. Staat in APP_DATA/pma-export.json (alleen datums en sleutels). Een fout = ok:false,
+// de keten zet één box-rij; de staat blijft dan staan zodat de volgende poging of de volgende dag het opnieuw doet (de kaart is een upsert).
+function pmaExportBestand() { return path.join(APP_DATA, 'pma-export.json'); }   // lui: toetsen knippen dit blok zonder APP_DATA
+async function pmaExportStap(ctx, opt) {
+  const o = opt || {};
+  const m = o.mod || pmaApp;
+  let P = o.P;
+  if (!P) { try { P = require(path.join(__dirname, 'pma.js')); } catch (e) { P = null; } }
+  if (!m || typeof m.dataTot !== 'function' || !P || typeof P.exportHerinnering !== 'function') return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+  const t = o.ams || ovisAms(), dag = ctx && ctx.datum ? ctx.datum : t.datum;
+  const bestand = o.bestand || pmaExportBestand();
+  const st = appLeesStreng(bestand, {});
+  if (st.dag === dag) return { ok: true, al_gedaan: true };
+  let pr;
+  try { pr = m.dataTot(); } catch (e) { logError('pma-export', new Error('PMA niet te lezen')); return { ok: false, reden: 'PMA niet te lezen' }; }
+  if (!pr.length) { appSchrijfJson(bestand, Object.assign({}, st, { dag: dag })); return { ok: true, detail: { praktijken: 0 } }; }
+  let open;
+  try {
+    const j = await (o.lijst || function () { return appSbRpc('mk_voor_jou_lijst', { p_alles: false }); })();
+    open = ((j && j.punten) || []).filter(function (x) { return x && /^PMA\b/i.test(String(x.titel || '')) || /^pma-/.test(String(x && x.sleutel)); })
+      .map(function (x) { return { sleutel: String(x.sleutel), titel: String(x.titel || ''), status: x.status }; });
+  } catch (e) { logError('pma-export', new Error('Voor jou niet te lezen')); return { ok: false, reden: 'Voor jou niet te lezen' }; }
+  const u = P.exportHerinnering({ vandaag: dag, praktijken: pr, staat: st, open: open });
+  if (u.kaart) {
+    try { await (o.zet || function (k) { return appSbRpc('mk_voor_jou_zet', { p: k }); })(u.kaart); if (typeof appStaat !== 'undefined') appStaat.vjCache = null; }
+    catch (e) { logError('pma-export', new Error('kaart zetten mislukt')); return { ok: false, reden: 'kaart zetten mislukt' }; }
+  }
+  let dicht = 0;
+  for (const x of u.sluit) {
+    try { await (o.status || function (y) { return appSbRpc('mk_voor_jou_status', { p_sleutel: y.sleutel, p_van: y.van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: y.bewijs }); })(x); dicht++; }
+    catch (e) { logError('pma-export', new Error('kaart sluiten mislukt')); }   // morgen opnieuw: de regel blijft gelden
+  }
+  if (dicht && typeof appStaat !== 'undefined') appStaat.vjCache = null;
+  const laat = dag === t.datum && t.uur * 60 + t.min >= 6 * 60 + 50;
+  let regel = false;
+  if (u.regel && !laat) {
+    try {
+      await (o.meld || loketMeld)({ app: 'pma', onderwerp: 'achterstand', laan: 'editie', editie: 'ochtend', datum: dag, tekst: u.regel, link: 'https://app.socev.dev/?app=pma', doel: { scherm: 'pma' } });
+      (u.regel_voor || []).forEach(function (r) { u.staat.gemeld[r.code] = r.data_tot; });
+      regel = true;
+    } catch (e) { logError('pma-export', new Error('loketregel mislukt')); return { ok: false, reden: 'regel voor het ochtendbericht mislukt' }; }
+  }
+  appSchrijfJson(bestand, u.staat);
+  schrijfLog(nu() + ' pma-export ' + velden({ dag: dag, kaart: u.kaart ? u.kaart.sleutel : '-', dicht: dicht, regel: regel ? 'ja' : (u.regel ? 'te laat' : 'nee'), reden: u.reden.join(',') || '-' }));
+  return { ok: true, detail: { kaart: u.kaart ? u.kaart.sleutel : null, dicht: dicht, regel: regel, te_laat: (u.regel && laat) || undefined, reden: u.reden } };
+}
+// ── einde PMA-exportherinnering ──
 // ── OVIS Vastgoed (wv3085, 14-11-2026; advies vault "01_Ontwikkeling/Overheids-API's - wat kunnen we ermee (Fable 5.2, 14-11-2026)" § 4) ──
 // Eén privé-scherm met alles over Davids woning en zijn twee garageboxen. Logica in vastgoed.js (alleen fs, path, node:sqlite; geen netwerk);
 // opslag /opt/data/vastgoed (700): vastgoed.sqlite (600). Het dossier komt uit de vault (20_Prive/Huis, bestandsnamen 20_Prive/Bronnen/Huis;
