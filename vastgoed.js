@@ -1162,7 +1162,10 @@ function nuEnBinnenkort(x) {
     if (/garage|box/i.test(p.pad)) bk.push(...alvUit(p.md, p.object || null));
   }
   const rv = x.kern && x.kern.rentevast;
-  if (rv && isoVeilig(rv.datum || '')) bk.push({ datum: rv.datum, tekst: 'De rentevaste periode van de hypotheek loopt af (eerste deel)', soort: 'rentevast', object: 'woning' });
+  if (rv && isoVeilig(rv.datum || '')) {   // het deel met de vroegste datum bij naam (wikilinkresten eraf), en of de datum uit Davids Excel komt
+    const deel = String(rv.deel || '').split(/\[\[|\\/)[0].replace(/\s+/g, ' ').trim().slice(0, 60);
+    bk.push({ datum: rv.datum, tekst: `De rentevaste periode van ${deel ? 'hypotheekdeel ' + deel : 'het eerste hypotheekdeel'} loopt af${rv.excel ? ' (datum uit je Excel)' : ''}`, soort: 'rentevast', object: 'woning' });
+  }
   bk.push(...wozBinnenkort(vandaag, x.eigen));
   const gezien = new Set();
   const binnenkort = bk.filter((b) => b.datum >= vandaag && b.datum <= tot).sort((a, b) => a.datum.localeCompare(b.datum))

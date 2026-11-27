@@ -59,13 +59,14 @@ test('nuEnBinnenkort: Loopt nu, Binnenkort (gesorteerd, horizon), registerregels
     { pad: '20_Prive/Huis/Garagebox Proefpark (box 7).md', md: '# Box\n' + ALV, object: 'box-7' },
     { pad: '20_Prive/Huis/Garageboxen.md', md: '# Boxen\n' + ALV },
   ];
-  const r = V.nuEnBinnenkort({ vandaag: '2026-11-27', paginas, kern: { rentevast: { datum: '2031-05-01' } }, eigen: [], nieuw: [{ tekst: 'x' }], nieuw_aantal: 3 });
+  const r = V.nuEnBinnenkort({ vandaag: '2026-11-27', paginas, kern: { rentevast: { datum: '2031-05-01', deel: 'Hypo2 [[10_Zakelijk/Proef\\|Proef]]', excel: true } }, eigen: [], nieuw: [{ tekst: 'x' }], nieuw_aantal: 3 });
   assert.strictEqual(r.loopt.length, 1, 'alleen status lopend');
   assert.strictEqual(r.loopt[0].naam, 'Kelder'); assert.strictEqual(r.loopt[0].kelder, true); assert.strictEqual(r.loopt[0].sinds, '2026-11-07');
   assert.strictEqual(r.loopt[0].stand, 'De aannemer maakt nu een eerste schatting van de kosten.');
   assert.deepStrictEqual(r.binnenkort.map((b) => [b.soort, b.datum]), [['alv', '2027-01-27'], ['woz', '2027-02-28'], ['energielabel', '2028-11-06'], ['rentevast', '2031-05-01']], 'gesorteerd, één ALV, 2041 en 2020 vallen weg');
   assert.match(r.binnenkort[0].tekst, /16:00/);
   assert.strictEqual(r.binnenkort[1].wanneer, 'eind februari 2027');
+  assert.strictEqual(r.binnenkort[3].tekst, 'De rentevaste periode van hypotheekdeel Hypo2 loopt af (datum uit je Excel)', 'deel bij naam, zonder wikilink');
   assert.strictEqual(r.nieuw_aantal, 3);
   const regels = V.binnenkortRegels(r.binnenkort);
   assert.deepStrictEqual(regels.map((x) => x.sleutel), ['vastgoed-alv-2027-01-27', 'vastgoed-woz-seintje-2027', 'vastgoed-energielabel-woning-2028-11-06', 'vastgoed-rentevast-2031-05-01']);
