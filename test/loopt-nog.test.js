@@ -44,6 +44,7 @@ is('rond = afgerond/genegeerd binnen 14 dagen', ids(g.rond) === ['a5', 'a7'].joi
 is('in orde = personeel groen (geen meta)', ids(g.in_orde) === 'test-drie-contract_einde-2027');
 is('agenda groen: alleen het aantal vanaf vandaag', u.agenda_in_orde === 1);
 is('Davidse is niet David', !L.isDavid('Davidse') && L.isDavid('David (en X)') && L.isDavid('david'));
+is('wv4132: collega die David heet = ander', !L.isDavid('David Jansen') && L.isDavid('David / Ilse') && L.isDavid('David en Karin') && L.isDavid(' David '));
 // telling scherm = telling tabellen: per wachter tellen alle rijen precies één keer
 for (const w of ['actie', 'correspondentie', 'agenda', 'personeel']) {
   const t = u.tellingen[w];

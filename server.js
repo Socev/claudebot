@@ -12737,6 +12737,8 @@ function appGeefDoorVelden(d) {
   const aan = schoon(d.aan).replace(/[‖|]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (typeof d.aan !== 'string' || aan.length < 2) return { fout: 'vul in aan wie je het doorgeeft' };
   if (aan.length > 60) return { fout: 'die naam is te lang (hooguit 60 tekens)' };
+  // Codex ZOU 1: Kies portie (vanDavid) en Loopt nog lezen "David…" als David zelf; zo'n naam zou in zijn lijstje blijven
+  if (/^david(?:$|\s*[(\/+;,&]|\s+(?:en|of|met)\b)/i.test(aan)) return { fout: 'vul de naam van de ander in (niet David zelf)' };
   if (!Object.hasOwn(APP_GD_VIA, String(d.via || ''))) return { fout: 'kies mail of WhatsApp' };
   if (d.erbij !== undefined && d.erbij !== null && typeof d.erbij !== 'string') return { fout: 'ongeldige knop' };
   const erbij = schoon(d.erbij, true).replace(/\n{3,}/g, '\n\n');
@@ -12756,7 +12758,7 @@ function appGeefDoorBeurt(a, rij, datum, positie, gd) {
   const ctx = '(Knopdruk bij het actielijstje in de app (Vandaag) om ' + tijd + '. Actielijstje van ' + datum + ', punt ' + positie + (bron ? ', bron ' + JSON.stringify(bron) : '') + '. ' +
     (actiepunt ? 'De knop zette het actiepunt al op naam van ' + JSON.stringify(aan) + ' (Loopt nog › Wacht op anderen); de Actie-Bewaker kijkt over een week of het gebeurd is en legt het anders aan David voor. '
       : 'De actie komt over een week terug in zijn lijstje om te zien of het gebeurd is. ') +
-    'Zet een conceptbericht klaar waarmee David deze actie aan ' + JSON.stringify(aan) + ' overdraagt: wat er moet gebeuren, waarom en wanneer (uit de bron van de actie' + (erbij ? ' en wat David erbij schreef' : '') + '), kort en in Davids eigen stem (skill mijn-mailstem). ' +
+    'Zet een conceptbericht klaar waarmee David deze actie aan ' + JSON.stringify(aan) + ' overdraagt: wat er moet gebeuren, waarom en wanneer (uit de bron van de actie' + (erbij ? ' en wat David erbij schreef' : '') + '), kort en in Davids eigen stem (skill mijn-mailstem); neem een datum of termijn alleen letterlijk over uit de bron (of uit wat David erbij schreef) en laat hem anders weg. ' +
     (mail ? 'Mail: zoek het adres op (skill contacten-opzoeken) en zet een Gmail-concept klaar (skill mailconcept-aanmaken); loopt het contact met deze persoon via doktersmaten of het praktijkadres in Outlook, geef dan de kale tekst om te plakken. '
       : 'WhatsApp: geef alleen de tekst om te kopiëren in een codeblok, met het nummer erbij als je het vindt (skill contacten-opzoeken). ') +
     'Verstuur nooit zelf; David verstuurt. Weet je niet zeker wie dit is of vind je geen adres of nummer, zet de tekst dan toch klaar en zeg dat in één zin. Antwoord David kort: waar het concept staat.)';

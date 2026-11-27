@@ -42,7 +42,9 @@ function laatsteAfweging(b) {
   const l = delen.length ? delen[delen.length - 1] : t;
   return l.length > AFWEGING_MAX ? l.slice(0, AFWEGING_MAX - 1).replace(/\s+\S*$/, '') + ' …' : l;
 }
-function isDavid(eigenaar) { return /^\s*david\b/i.test(String(eigenaar || '')); }
+// wv4132: dezelfde regel als Kies portie (AI - Voorwerk, vanDavid): "David", "David (en …)", "David / …"; een doorgegeven actie
+// aan een collega die ook David heet ("David Jansen") hoort bij Wacht op anderen
+function isDavid(eigenaar) { return /^david(?:$|\s*[(\/+;,&]|\s+(?:en|of|met)\b)/i.test(String(eigenaar || '').trim()); }
 
 function titelVan(w, r) {
   if (w === 'actie') return schoon(r.actie, 200);
