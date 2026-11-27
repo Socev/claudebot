@@ -20,7 +20,7 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
   const s1 = src.indexOf('// ── Doorgeefluik (wv1267'), s2 = src.indexOf('// ── einde Doorgeefluik ──');
   toets('0 server.js: blok Doorgeefluik gevonden', s1 > 0 && s2 > s1);
   const knopSrc = pak(/\nasync function appKnop\(req, res, reg, a, s, d, kaart\) \{[\s\S]*?\n\}\n/, 'appKnop');
-  const hulp = ['appOntmasker', 'appElfproef', 'appBsnMasker', 'appEenRegel', 'appVraagUit', 'appVraagLeeg', 'appKnopBevestiging']
+  const hulp = ['appOntmasker', 'appElfproef', 'appBsnMasker', 'appEenRegel', 'appVraagUit', 'appVraagLeeg', 'appKnopBevestiging', 'appVraagKnoppenVeld']
     .map(function (n) { return pak(new RegExp('\\nfunction ' + n + '\\([^)]*\\) \\{[\\s\\S]*?\\n\\}\\n'), n); }).join('\n') + '\n' + src.match(/^const APP_VAST_JA_DICHT = (?:true|false);$/m)[0] + '\n' + pak(/\nfunction appVastJaDicht\(a\) \{[^\n]*\}\n/, 'appVastJaDicht') + '';
   toets('0 bron doorgeefluik in BERICHT_BRONNEN', /'doorgeefluik',\s+\/\/ wv1267/.test(src));
   toets('0 health kent doorgeefluik', /doorgeefluik: typeof doorgeefInfo === 'function' \? doorgeefInfo\(\)/.test(src));

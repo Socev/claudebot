@@ -22,7 +22,7 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
   toets('0 server.js: blok Doorgeefluik gevonden', s1 > 0 && s2 > s1);
   const vraagDbSrc = pak(/\nfunction appDoorbouwVraag\(jobId, vraag, bericht\) \{[\s\S]*?\n\}\n/, 'appDoorbouwVraag');   // wv3810
   const knopSrc = pak(/\nasync function appKnop\(req, res, reg, a, s, d, kaart\) \{[\s\S]*?\n\}\n/, 'appKnop');
-  const hulp = ['appOntmasker', 'appElfproef', 'appBsnMasker', 'appEenRegel', 'appVraagUit', 'appVraagLeeg', 'appKnopBevestiging']
+  const hulp = ['appOntmasker', 'appElfproef', 'appBsnMasker', 'appEenRegel', 'appVraagUit', 'appVraagLeeg', 'appKnopBevestiging', 'appVraagKnoppenVeld']
     .map(function (n) { return pak(new RegExp('\\nfunction ' + n + '\\([^)]*\\) \\{[\\s\\S]*?\\n\\}\\n'), n); }).join('\n') + '\n' + src.match(/^const APP_VAST_JA_DICHT = (?:true|false);$/m)[0] + '\n' + pak(/\nfunction appVastJaDicht\(a\) \{[^\n]*\}\n/, 'appVastJaDicht') + '';
   toets('0 bron doorgeefluik in BERICHT_BRONNEN', /'doorgeefluik',\s+\/\/ wv1267/.test(src));
   toets('0 health kent doorgeefluik', /doorgeefluik: typeof doorgeefInfo === 'function' \? doorgeefInfo\(\)/.test(src));
@@ -229,8 +229,8 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
   fs.writeFileSync(SCH, '{"aan": true}');
   vragen[q7.job + ':' + q7.hash].antwoord = { keuze: 'ja', t: new Date().toISOString() };
   toets('7 al beantwoord: geen veld', D.appDoorbouwVraag(q7.job, vr7, VR7) === undefined);
-  toets('7 bron: geschiedenis zet doorbouw op de vraag (niet bij verlopen of Telegram)', /verlopen: verlopen \|\| undefined,\n        doorbouw: !verlopen && !appNaarTelegramNu\(b\) && typeof doorbouwVraagVeld === 'function' \? doorbouwVraagVeld\(bRij, \(appVraagUit\(x\.antwoord\) \|\| \{\}\)\.tekst, x\.antwoord\) : undefined \}/.test(src));
-  toets('7 bron: opgehaald antwoord (appUitslag) zet doorbouw op de vraag', /gevoelig: appVraagGevoelig\(id, vraag\.hash\),\n      doorbouw: typeof doorbouwVraagVeld === 'function' \? appDoorbouwVraag\(id, vraag, out\) : undefined \} : null,/.test(src));
+  toets('7 bron: geschiedenis zet doorbouw op de vraag (niet bij verlopen of Telegram)', /verlopen: verlopen \|\| undefined,(?: knoppen: verlopen \? undefined : appVraagKnoppenVeld\(b\),   \/\/ wv4179)?\n        doorbouw: !verlopen && !appNaarTelegramNu\(b\) && typeof doorbouwVraagVeld === 'function' \? doorbouwVraagVeld\(bRij, \(appVraagUit\(x\.antwoord\) \|\| \{\}\)\.tekst, x\.antwoord\) : undefined \}/.test(src));
+  toets('7 bron: opgehaald antwoord (appUitslag) zet doorbouw op de vraag', /gevoelig: appVraagGevoelig\(id, vraag\.hash\),(?: knoppen: appVraagKnoppenVan\(id, vraag\.hash\),   \/\/ wv4179)?\n      doorbouw: typeof doorbouwVraagVeld === 'function' \? appDoorbouwVraag\(id, vraag, out\) : undefined \} : null,/.test(src));
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
