@@ -12725,6 +12725,56 @@ const APP_VOORWERK_KNOP_WF = process.env.APP_VOORWERK_KNOP_WF || 'SLYiYwqAabFlC8
 // besluitknoppen bij de 3e aanbieding (wacht_op, geef_door: 7 dagen later met een notitie). Telegram kent alleen de eerste vijf.
 const APP_ACTIE_KEUZE = { gedaan: 'g', later: 'l', laten_vallen: 'w', terug: 'o', blok: 'b', later_morgen: 'm', later_datum: 'd', wacht_op: 'a', geef_door: 'p' };
 const APP_ACTIES_PER_UUR = 200;   // wv3710: de weekstapel is ± 45 kaartjes in één keer (was 60)
+// ── Geef door aan iemand (wv4132, besluitenpagina nr 449 = 3C149, David Ja 25-11-2026 22:05; review Een 9 - nachtwachters § F4) ──
+// Geef door kan sinds wv4132 een naam en een weg (mail/WhatsApp) meekrijgen. De tik gaat zoals altijd naar AI - Voorwerk-knoppen (met aan):
+// een actiepunt (actie_state) krijgt die eigenaar (weg uit Davids lijstje, Loopt nog › Wacht op anderen; de Actie-Bewaker volgt hem en legt
+// hem terug bij David als hij blijft liggen), een taak, belofte of deadline komt zoals voorheen over een week terug met "doorgegeven aan X".
+// Daarna start de pod één knopbeurt bij Socev in het hoofdkanaal: hij zet het conceptbericht klaar (Gmail-concept in Davids stem, of de
+// WhatsApp-tekst om te kopiëren). Niets wordt verstuurd: David verstuurt zelf. Zonder aan/via werkt de knop zoals vóór wv4132.
+const APP_GD_VIA = { mail: 'mail', whatsapp: 'WhatsApp' };
+function appGeefDoorVelden(d) {
+  const schoon = function (v, nl) { return String(v == null ? '' : v).replace(/\p{Cf}/gu, '').normalize('NFKC').replace(nl ? /[\u0000-\u0009\u000b-\u001f\u007f]+/g : /[\u0000-\u001f\u007f]+/g, ' ').replace(/[ \t]+/g, ' ').trim(); };
+  const aan = schoon(d.aan).replace(/[‖|]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (typeof d.aan !== 'string' || aan.length < 2) return { fout: 'vul in aan wie je het doorgeeft' };
+  if (aan.length > 60) return { fout: 'die naam is te lang (hooguit 60 tekens)' };
+  if (!Object.hasOwn(APP_GD_VIA, String(d.via || ''))) return { fout: 'kies mail of WhatsApp' };
+  if (d.erbij !== undefined && d.erbij !== null && typeof d.erbij !== 'string') return { fout: 'ongeldige knop' };
+  const erbij = schoon(d.erbij, true).replace(/\n{3,}/g, '\n\n');
+  if (erbij.length > 500) return { fout: 'je toelichting is te lang (hooguit 500 tekens)' };
+  return { aan: aan, via: String(d.via), erbij: erbij };
+}
+// De conceptbeurt; geeft {job_id, in_rij} of {fout: tekst voor David}. Geen appMagBeurt: die schrijft zelf een weigering, en de tik is al gelukt.
+function appGeefDoorBeurt(a, rij, datum, positie, gd) {
+  const kanaal = 'hoofd';
+  if (appKnopInRij(kanaal) >= APP_KNOP_RIJ_MAX) return { fout: 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken voor Socev in de rij' };
+  if (!appTeller('beurt', APP_BEURTEN_PER_UUR, 3600000)) return { fout: 'te veel berichten aan Socev dit uur' };
+  const regel = appOntmasker(appKort(appSleutelMasker(String(rij.regel || rij.titel || '').replace(/^\d+\.\s*/, '')), 220), 'lijstje');
+  const bron = appOntmasker(appKort(String(rij.bron || ''), 30), 'lijstje');
+  const aan = appOntmasker(gd.aan, 'lijstje'), erbij = gd.erbij ? appOntmasker(gd.erbij, 'lijstje') : '';
+  const mail = gd.via === 'mail', actiepunt = rij.bron === 'actie_state', tijd = appKlok();
+  const kop = '[KNOP] David koos GEEF DOOR bij een actie uit zijn actielijstje: ' + JSON.stringify(regel) + ' — aan ' + JSON.stringify(aan) + ', via ' + APP_GD_VIA[gd.via] + (erbij ? ' — erbij: ' + erbij : '');
+  const ctx = '(Knopdruk bij het actielijstje in de app (Vandaag) om ' + tijd + '. Actielijstje van ' + datum + ', punt ' + positie + (bron ? ', bron ' + JSON.stringify(bron) : '') + '. ' +
+    (actiepunt ? 'De knop zette het actiepunt al op naam van ' + JSON.stringify(aan) + ' (Loopt nog › Wacht op anderen); de Actie-Bewaker kijkt over een week of het gebeurd is en legt het anders aan David voor. '
+      : 'De actie komt over een week terug in zijn lijstje om te zien of het gebeurd is. ') +
+    'Zet een conceptbericht klaar waarmee David deze actie aan ' + JSON.stringify(aan) + ' overdraagt: wat er moet gebeuren, waarom en wanneer (uit de bron van de actie' + (erbij ? ' en wat David erbij schreef' : '') + '), kort en in Davids eigen stem (skill mijn-mailstem). ' +
+    (mail ? 'Mail: zoek het adres op (skill contacten-opzoeken) en zet een Gmail-concept klaar (skill mailconcept-aanmaken); loopt het contact met deze persoon via doktersmaten of het praktijkadres in Outlook, geef dan de kale tekst om te plakken. '
+      : 'WhatsApp: geef alleen de tekst om te kopiëren in een codeblok, met het nummer erbij als je het vindt (skill contacten-opzoeken). ') +
+    'Verstuur nooit zelf; David verstuurt. Weet je niet zeker wie dit is of vind je geen adres of nummer, zet de tekst dan toch klaar en zeg dat in één zin. Antwoord David kort: waar het concept staat.)';
+  const socevRij = 'Actielijstje ' + datum + ', punt ' + positie + ': ' + regel;
+  const davidRij = 'Geef door (knop bij het actielijstje in de app) aan ' + aan + ' via ' + APP_GD_VIA[gd.via] + ' bij ' + JSON.stringify(regel) + (erbij ? ' — erbij: ' + erbij : '');
+  const drukT = Date.now();
+  const bijStart = function () {
+    const nu = Math.max(Date.now(), (appStaat.chatlogLaatsteTs || 0) + 2);
+    const wacht = nu - drukT > APP_KNOP_WACHT_MELD_MS ? '\n(Deze knopdruk stond tot ' + appKlok() + ' in de rij omdat Socev nog bezig was.)' : '';
+    return appChatLogVoor(kanaal, [{ rol: 'socev', tekst: socevRij, ts: nu - 1 }, { rol: 'david', ts: nu, bevestiging: 'knop-anders', tekst: davidRij }])
+      .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); });
+  };
+  const chatId = APP_KANALEN[kanaal];
+  const inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
+  const st = appStartBeurt(a, kanaal, kop + '\n' + ctx, { soort: 'knop', bijStart: bijStart, tekst: '↪ Geef door aan ' + gd.aan + ' (' + APP_GD_VIA[gd.via] + '): ' + regel });
+  if (!st.job_id) return { fout: st.fout === 'noodstop' ? 'Socev staat stil (noodstop)' : 'Socev kon de beurt niet starten' };
+  return { job_id: st.job_id, in_rij: inRij };
+}
 appStaat.tellers.actie = appStaat.tellers.actie || [];
 async function appVoorwerkKnop(body) {
   const geheim = appKnopSleutel();
@@ -12743,6 +12793,12 @@ async function appActieRoute(req, res, a, d) {
   const datum = String(d.datum || ''), positie = typeof d.positie === 'number' ? d.positie : NaN, keuze = String(d.keuze || '');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 99 || !Object.hasOwn(APP_ACTIE_KEUZE, keuze)) return appWeiger(res, 400, 'ongeldige knop', 'actie velden');   // wv3710: weekstapel 11…90   // hasOwn: geen 'constructor'
   const tot = keuze === 'later_datum' ? String(d.tot || '') : '';
+  // wv4132: Geef door met naam en weg; zonder aan en via de oude knop (7 dagen later, geen concept)
+  let gd = null;
+  if (keuze === 'geef_door' && (d.aan !== undefined || d.via !== undefined)) {
+    gd = appGeefDoorVelden(d);
+    if (gd.fout) return appWeiger(res, 400, gd.fout, 'actie geef door');
+  }
   if (keuze === 'later_datum') {   // n8n (Rij toetsen) toetst dezelfde grens nog eens
     const v = appYmd(Date.now());
     if (!/^\d{4}-\d{2}-\d{2}$/.test(tot) || !isFinite(Date.parse(tot + 'T12:00:00Z')) || appYmdPlus(tot, 0) !== tot || tot <= v || tot > appYmdPlus(v, 90)) return appWeiger(res, 400, 'kies een datum vanaf morgen en hooguit 90 dagen vooruit', 'actie datum');
@@ -12758,7 +12814,7 @@ async function appActieRoute(req, res, a, d) {
   // wv452: message_id 0 = het lijstje ging alleen naar de app (geen Telegram-bericht om bij te werken); n8n toetst nonce en status zelf
   const mid = Number(rij.message_id) > 0 ? Number(rij.message_id) : 0;
   let j;
-  try { j = await appVoorwerkKnop(Object.assign({ nonce: rij.nonce, keuze: APP_ACTIE_KEUZE[keuze], message_id: mid }, tot ? { tot: tot } : {})); } catch (e) {
+  try { j = await appVoorwerkKnop(Object.assign({ nonce: rij.nonce, keuze: APP_ACTIE_KEUZE[keuze], message_id: mid }, tot ? { tot: tot } : {}, gd ? { aan: gd.aan } : {})); } catch (e) {
     logError('app-actie', e);
     // Bij een time-out kan de tik toch zijn doorgegaan: niet "mislukt" zeggen, wel laten nakijken
     // 503, geen 502: de app leest 502/504 als "Socev niet bereikbaar"
@@ -12771,8 +12827,16 @@ async function appActieRoute(req, res, a, d) {
     return appWeiger(res, 503, 'de knoppen zijn hier nu niet ingericht; probeer het later opnieuw', 'actie sleutel');
   }
   const uitkomst = ['ok', 'al_afgehandeld', 'weg', 'geweigerd', 'bezig', 'mislukt'].indexOf(j && j.uitkomst) >= 0 ? j.uitkomst : 'onbekend';
-  const melding = appKort(j && j.popup || 'Onbekend antwoord van de knoppen; kijk bij Ververs.', 200);
+  let melding = appKort(j && j.popup || 'Onbekend antwoord van de knoppen; kijk bij Ververs.', 200);
   res._app.reden = 'actie ' + keuze + ' ' + datum + '#' + positie + ' -> ' + uitkomst;
+  // wv4132: na een gelukte Geef door de conceptbeurt bij Socev (een mislukte start maakt de tik niet ongedaan)
+  let concept = null;
+  if (uitkomst === 'ok' && gd) {
+    try { concept = appGeefDoorBeurt(a, rij, datum, positie, gd); } catch (e) { logError('app-actie', e); concept = { fout: 'Socev kon de beurt niet starten' }; }
+    melding += concept.job_id ? ' Socev zet het concept ' + (gd.via === 'mail' ? 'als Gmail-concept' : 'voor WhatsApp') + ' klaar; je ziet het in het gesprek.'
+      : ' Het concept kon ik niet klaarzetten (' + concept.fout + '); vraag het Socev in het gesprek.';
+    res._app.reden += concept.job_id ? ' concept ' + concept.job_id : ' concept niet: ' + concept.fout;
+  }
   // wv3707: een tik op een deadline-regel werkt het register bij zodra ↩️ niet meer kan (deadline-lijstje.js)
   if (uitkomst === 'ok' && rij.bron === 'deadline' && DL_LIJSTJE) setTimeout(function () { dlVerwerkStil('tik'); }, DL_LIJSTJE.TIK_RUST_MS + 10000).unref();
   // wv4038 (3C63): Gedaan op een gekoppelde klus sluit na de ↩️-tijd ook de andere plekken (koppel-klus.js)
@@ -12789,7 +12853,7 @@ async function appActieRoute(req, res, a, d) {
     const c = appStaat.vandaag;
     if (c && c.data && c.data.vandaag === vandaag) c.data.acties = acties;
   } catch (e) { logError('app-actie', e); if (appStaat.vandaag) appStaat.vandaag.data = null; }
-  appStuur(res, 200, { ok: uitkomst === 'ok', uitkomst: uitkomst, melding: melding, acties: appActiesNu(acties) });
+  appStuur(res, 200, Object.assign({ ok: uitkomst === 'ok', uitkomst: uitkomst, melding: melding, acties: appActiesNu(acties) }, concept ? { concept: concept.job_id ? { job_id: concept.job_id, kanaal: 'hoofd', in_rij: !!concept.in_rij } : { fout: concept.fout } } : {}));
 }
 
 // ── Deadlines in het actielijstje (wv3707, nr 371 = 3C71; waarom en werking in deadline-lijstje.js) ──
