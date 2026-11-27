@@ -36152,7 +36152,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'personeelsscherm/voorstel': 20, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, pakjes: 30, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, vastgoed: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20, 'wachter-kaart': 30, 'wachter-correcties': 20 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'personeelsscherm/voorstel': 20, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, pakjes: 30, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, vastgoed: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20, 'wachter-kaart': 30, 'wachter-correcties': 20, rooster: 60 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata', 'eindjes', 'eindjes/oordeel', 'wachter-kaart', 'wachter-correcties']);   // wv4153: idem   // wv4124: wachter-kaart idem   // wv4007: eindjes alleen beurtpas of API_SECRET   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -36474,6 +36474,16 @@ async function smalActie(actie, d, wie) {
   if (actie === 'osint') return smalOsint(d, !(wie && wie.mk));   // Socev-sleutel of beurtpas = socev; API_SECRET = machinekamer
   // wv4125 (besluit nr 419 / 3C119): Pakjes lezen voor de Actie-Bewaker ("is X al besteld of bezorgd?" vóór hij "nog niet gedaan" meldt).
   // Alleen de lijst, ingekort door pakjes.kaal (geen adres, volgcode, volglink of bestelnummer); verversen, verbergen en "Is geleverd" blijven de app.
+  if (actie === 'rooster') {
+    // wv4328 (David Ja 27-11-2026, doorgeefluik 7e0c5460): nakijk.py kijkt vóór "waarnemer nog gezocht" in het artsenrooster (DocPlan-feeds
+    // rooster-tg/gh-artsen en -gezocht). Alleen lezen: per dag per praktijk wie er staat en hoeveel GEZOCHT-diensten open of vervallen zijn.
+    const dag = /^\d{4}-\d{2}-\d{2}$/, van = String(d.van || ''), tot = String(d.tot || d.van || '');
+    if (!dag.test(van) || !dag.test(tot) || tot < van) return { status: 400, j: { ok: false, fout: 'van/tot als JJJJ-MM-DD, tot niet vóór van' } };
+    if ((Date.parse(tot) - Date.parse(van)) / 86400000 > 62) return { status: 400, j: { ok: false, fout: 'hooguit 62 dagen' } };
+    const r = await appSbRpc('sb_rooster_nakijk', { p_van: van, p_tot: tot }, 15000);
+    if (!r || typeof r !== 'object' || !Array.isArray(r.dagen)) return { status: 503, j: { ok: false, fout: 'rooster niet te lezen' } };
+    return { status: 200, j: { ok: true, feeds: r.feeds || [], dagen: r.dagen } };
+  }
   if (actie === 'pakjes') {
     if (!pakjes || typeof pakjes.lijst !== 'function') return { status: 404, j: { ok: false, fout: 'Pakjes zit niet in deze versie van de pod' } };
     const u = pakjes.lijst(pakjesGekocht(), pakjesOnderwerpen);
