@@ -32,8 +32,8 @@ const LIJST = [
   { id: 'I8Zp1BVfmcknTGmp', naam: 'AI - Systeemrapport', comp: 'systeemrapport', sessie: 'structuur-wachter' },
   { id: 'sYkXgXKcZx4nDndO', naam: 'AI - Vault-Conciërge', comp: 'vault_concierge', sessie: 'vault-concierge' },
   { id: 'OcLEvP7xgEd9khA3', naam: 'AI - Research-scout', comp: 'research_scout', sessie: 'research-scout' },
-  { id: 'Em9VynFMj1RpmZMJ', naam: 'AI - Harvester-ronde', comp: 'harvester-ronde', ronde: 'harvester' },
-  { id: 'WAMA9vIEgWs6dpqp', naam: 'AI - Nieuwsbrief-bloemlezing', comp: 'nieuwsbrief-bloemlezing', ronde: 'nieuwsbrief' },
+  { id: 'Em9VynFMj1RpmZMJ', naam: 'AI - Harvester-ronde', comp: 'harvester-ronde', ronde: 'harvester', start: 'Start ronde' },
+  { id: 'WAMA9vIEgWs6dpqp', naam: 'AI - Nieuwsbrief-bloemlezing', comp: 'nieuwsbrief-bloemlezing', ronde: 'nieuwsbrief', start: 'Start ronde' },
 ];
 
 // ── tijd (Europe/Amsterdam zonder bibliotheek) ──
@@ -110,6 +110,42 @@ function workflowSpec(w) {
 function startMs(e) { const s = e && (e.startedAt || e.createdAt); const t = s ? Date.parse(s) : NaN; return isFinite(t) ? t : null; }
 const LOPEND = ['running', 'waiting', 'new', 'unknown'];
 
+// ── wv4253: startfout = een run die de pod nooit een ronde liet beginnen ──
+// 25-11: AI - MrLean run 176137 kreeg 403 op "Start run" (schijfhapering Olares) en telde als gelopen; de ronde werd niet ingehaald.
+// Startfout als de run klaar is én (a) de startknoop (pod-aanroep) faalde met 401/403/408/429/5xx of zonder HTTP-antwoord (netwerk,
+// time-out), ook via een foutuitgang (onError continueErrorOutput/continueRegularOutput: status success), of (b) de run 'crashed' of
+// 'error' eindigde zonder dat de startknoop draaide. Al het andere (startknoop gelukt, andere 4xx, geen rundata bij error, onbekende
+// startknoop) blijft "gelopen". Vangnetten tegen dubbel: alleen beoordeeld als de hartslag ouder is dan de tick, en sessieBezig.
+const START_CODES = /^(401|403|408|429|5\d\d)$/;
+function foutCode(f) {
+  if (f == null) return null;
+  if (typeof f === 'string') { const m = /^\s*(\d{3})\b/.exec(f); return m ? m[1] : ''; }
+  if (typeof f !== 'object') return '';
+  for (const k of ['httpCode', 'statusCode', 'status']) { const v = f[k]; if (v != null && /^\d{3}$/.test(String(v))) return String(v); }
+  if (f.response && f.response.status != null && /^\d{3}$/.test(String(f.response.status))) return String(f.response.status);
+  for (const k of ['message', 'description']) { const m = /^\s*(\d{3})\b/.exec(String(f[k] || '')); if (m) return m[1]; }
+  return '';   // fout zonder HTTP-code: geen antwoord van de pod (netwerk, time-out)
+}
+// -> { startfout: bool, detail }
+function startfoutVan(ex, startNaam) {
+  const st = ex && ex.status;
+  if (!ex || LOPEND.indexOf(st) >= 0 || !startNaam) return { startfout: false, detail: 'loopt of onbekend' };
+  const rd = ex.data && ex.data.resultData, runs = rd && rd.runData ? rd.runData[startNaam] : null;
+  if (!rd || !rd.runData) return st === 'crashed' ? { startfout: true, detail: 'crashed zonder rundata' } : { startfout: false, detail: 'geen rundata' };
+  if (!Array.isArray(runs) || !runs.length) {
+    return st === 'crashed' || st === 'error' ? { startfout: true, detail: st + ' vóór de startknoop' } : { startfout: false, detail: 'startknoop niet gedraaid' };
+  }
+  const r = runs[runs.length - 1], main = (r.data && r.data.main) || [];
+  const goed = (main[0] || []).filter(function (it) { return it && it.json && it.json.error == null; });
+  if (goed.length) return { startfout: false, detail: 'startknoop gelukt' };
+  let f = r.error || null;
+  if (!f) { const it = [].concat(main[1] || [], main[0] || []).find(function (x) { return x && x.json && x.json.error != null; }); f = it ? it.json.error : null; }
+  if (!f) return st === 'crashed' ? { startfout: true, detail: 'crashed op de startknoop' } : { startfout: false, detail: 'startknoop zonder uitvoer' };
+  const code = foutCode(f);
+  if (code === '' || START_CODES.test(code)) return { startfout: true, detail: 'startknoop ' + (code || 'zonder antwoord') };
+  return { startfout: false, detail: 'startknoop ' + code };
+}
+
 // ── staat: /opt/data/weekinhaal.json, schrijven onder een grendelbestand (pod en CLI), atomair via tmp + rename ──
 function slaap(ms) { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch (e) {} }
 function staatOpslag(pad) {
@@ -149,6 +185,18 @@ function maak(dep) {
   const opslag = staatOpslag(dep.staatPad || '/opt/data/weekinhaal.json');
   const log = dep.log || function () {};
   let bezigTik = false, laatsteTik = null;
+  const startfoutCache = new Map();   // execution-id -> uitkomst (alleen afgeronde runs; die veranderen niet meer)
+  async function startfout(e, startNaam) {
+    const id = String(e.id);
+    if (startfoutCache.has(id)) return startfoutCache.get(id);
+    if (LOPEND.indexOf(e.status) >= 0) return { startfout: false, detail: 'loopt' };
+    let x = null;
+    try { x = await dep.n8n('GET', '/executions/' + encodeURIComponent(id) + '?includeData=true'); } catch (err) { return { startfout: false, detail: 'details niet te lezen' }; }
+    if (!x || x.status !== 200 || !x.json) return { startfout: false, detail: 'details niet te lezen' };
+    const u = startfoutVan(x.json, startNaam);
+    if (LOPEND.indexOf(x.json.status) < 0) { startfoutCache.set(id, u); if (startfoutCache.size > 200) startfoutCache.delete(startfoutCache.keys().next().value); }
+    return u;
+  }
 
   // wv3659: de pod legt een weigering van de voorpoort vast (laatste per sessie); beoordeel() telt die run dan niet als gelopen
   // staat.poort[sessie] = de laatste 20 weigeringen (ISO), elk aan de run gekoppeld die toen startte
@@ -212,6 +260,7 @@ function maak(dep) {
       return dep.box('\n## [weekinhaal] ' + isoNl(klok()) + ' — ' + r.naam + ': ' + kop + ' (automatisch, wv3194)\n' +
         '- status: ' + (r.status === 'ingehaald' ? 'gesloten (ter info; mislukt de run, dan meldt de Foutmelder hem)' : 'open') + '\n- van: pod (weekinhaal)\n' +
         '- gemeten: ' + (r.reden === 'voorpoort' ? 'de n8n-run na de geplande tick werd door de voorpoort (zegel) geweigerd, de poort is nu weer groen (wv3659),'
+          : r.reden === 'startfout' ? 'de n8n-run na de geplande tick faalde op de startknoop en begon geen ronde (' + String(r.startfout || '?').slice(0, 120) + '; wv4253),'
           : 'geen n8n-run na de geplande tick') + ' en hartslag ' + r.comp + ' ouder dan de tick; MCP execute_workflow production ' +
         (r.aanroep ? (r.aanroep.ok ? 'aanvaard' : 'zonder antwoord (' + String(r.aanroep.fout || '?').slice(0, 40) + ')') : '?') + ' op ' + isoNl(Date.parse(r.aanroep_op || r.op)) + '.\n' +
         (r.status === 'ingehaald' ? '' : '- gevolg als er niets gebeurt: deze weekronde blijft overgeslagen tot de volgende tick; de hartslag meldt hem na zijn drempel.\n' +
@@ -283,7 +332,23 @@ function maak(dep) {
     if (nu - T < WACHT_MS) return { besluit: 'wacht (tick < 60 min geleden)', T: Tiso };
     let ex;
     try { ex = await executies(item.id); } catch (e) { return { besluit: 'executies niet te lezen', T: Tiso }; }
-    const na = ex.filter(function (e) { const t = startMs(e); return t === null || t >= T - MARGE_MS; });
+    let na = ex.filter(function (e) { const t = startMs(e); return t === null || t >= T - MARGE_MS; });
+    // wv4253: runs die op de startknoop faalden tellen niet (zie startfoutVan); alleen bekeken als de hartslag ouder is dan de tick
+    const startfouten = [];
+    if (na.length) {
+      const hs0 = await c.hartslag();
+      const lr0 = hs0 && Object.prototype.hasOwnProperty.call(hs0, item.comp) && hs0[item.comp] ? Date.parse(hs0[item.comp]) : NaN;
+      const hsOud = hs0 && Object.prototype.hasOwnProperty.call(hs0, item.comp) && (hs0[item.comp] == null || (isFinite(lr0) && lr0 < T));
+      const startNaam = item.start || 'Start run';
+      if (hsOud && (w.nodes || []).some(function (n) { return n && n.name === startNaam && !n.disabled; })) {
+        const blijft = [];
+        for (const e of na) {
+          const u = startMs(e) === null ? { startfout: false } : await startfout(e, startNaam);
+          if (u.startfout) startfouten.push({ id: String(e.id), detail: u.detail }); else blijft.push(e);
+        }
+        na = blijft;
+      }
+    }
     // wv3659: een run die de voorpoort (zegel, wv904) weigerde is geen gelopen ronde (18-11: MrLean gemist, hartslag niet gestempeld).
     // Alleen als ELKE run na de tick een eigen weigering heeft binnen 2 min van zijn start (marge klokverschil n8n/pod; Codex MOET 1:
     // een run die wél door de poort kwam blijft "gelopen", ook als een latere poging geweigerd werd).
@@ -300,6 +365,7 @@ function maak(dep) {
       });
     })();
     if (na.length && !geweigerd) return { besluit: 'gelopen: run ' + na[0].id + ' (' + na[0].mode + ', ' + na[0].status + ')', T: Tiso };
+    const sf = startfouten.length ? startfouten.map(function (x) { return x.id + ' ' + x.detail; }).join('; ').slice(0, 160) : null;
     const hs = await c.hartslag();
     if (!hs) return { besluit: 'hartslag niet te lezen', T: Tiso };
     if (!Object.prototype.hasOwnProperty.call(hs, item.comp)) return { besluit: 'hartslagcomponent ' + item.comp + ' onbekend', T: Tiso };
@@ -323,7 +389,7 @@ function maak(dep) {
       if (!groen) return { besluit: 'wacht: voorpoort weigerde run ' + na[0].id + ' en is nog niet groen (herzegelen)', T: Tiso };
     }
     return { start: true, besluit: 'inhalen', T: Tiso, sleutel: sleutel, trigger: sp.trigger, meerTriggers: sp.meerTriggers, voor_ids: ex.map(function (e) { return String(e.id); }),
-      reden: geweigerd ? 'voorpoort' : null };
+      reden: geweigerd ? 'voorpoort' : (sf ? 'startfout' : null), startfout: sf };
   }
 
   async function start(item, b, nu) {
@@ -337,6 +403,7 @@ function maak(dep) {
       if (s.rondes[b.sleutel]) return false;
       s.rondes[b.sleutel] = { workflow: item.id, naam: item.naam, comp: item.comp, T: b.T, status: 'gestart', op: new Date(nu).toISOString(), voor_ids: b.voor_ids.slice(0, 25) };
       if (b.reden) s.rondes[b.sleutel].reden = b.reden;
+      if (b.startfout) s.rondes[b.sleutel].startfout = b.startfout;
       return true;
     });
     if (!vast) return 'niet gestart: sleutel bestond al';
@@ -457,7 +524,7 @@ async function n8nApi(methode, pad) {
   return { status: r.status, json: j };
 }
 
-module.exports = { maak: maak, LIJST: LIJST, regelNaarSpec: regelNaarSpec, laatsteTick: laatsteTick, workflowSpec: workflowSpec, amsNaarMs: amsNaarMs, isoNl: isoNl,
+module.exports = { maak: maak, LIJST: LIJST, startfoutVan: startfoutVan, regelNaarSpec: regelNaarSpec, laatsteTick: laatsteTick, workflowSpec: workflowSpec, amsNaarMs: amsNaarMs, isoNl: isoNl,
   mcpAanroep: mcpAanroep, n8nApi: n8nApi, staatOpslag: staatOpslag, GRENZEN: { WACHT_MS: WACHT_MS, VENSTER_MS: VENSTER_MS, MCP_MS: MCP_MS, ZOMBIE_MS: ZOMBIE_MS } };
 
 if (require.main === module) {

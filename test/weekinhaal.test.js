@@ -73,7 +73,7 @@ function opstelling(o) {
     n8n: async (m, p) => {
       let x = /^\/workflows\/(\w+)$/.exec(p); if (x) return st.wfs[x[1]] ? { status: 200, json: st.wfs[x[1]] } : { status: 404 };
       x = /^\/executions\?workflowId=(\w+)/.exec(p); if (x) return st.execFout ? { status: 500 } : { status: 200, json: { data: (st.exec[x[1]] || []).slice().reverse() } };
-      x = /^\/executions\/(\d+)$/.exec(p); if (x) { const e = [].concat(st.exec.wfA, st.exec.wfB).find((y) => y.id === x[1]); return e ? { status: 200, json: e } : { status: 404 }; }
+      x = /^\/executions\/(\d+)(?:\?includeData=true)?$/.exec(p); if (x) { const e = [].concat(st.exec.wfA, st.exec.wfB).find((y) => y.id === x[1]); return e ? { status: 200, json: e } : { status: 404 }; }
       return { status: 404 };
     },
     mcpStart: async (args, ms) => {
@@ -388,4 +388,74 @@ test('wv3659: poortWeigering alleen voor sessies uit de lijst; opruimen wist oud
   m.poortWeigering('sessie-a', st.nu - 61 * 24 * UUR);
   m.opruimen();
   assert.deepEqual(m.staat().poort, {});
+});
+
+// ── wv4253: een run die op de startknoop faalde (401/403/5xx, geen antwoord, crashed) is geen gelopen ronde ──
+const T_FOUT = '2026-11-15T08:30:09Z';
+function startRun(json) { return { 'Woensdag 10:00': [{ data: { main: [[{ json: {} }]] } }], 'Start run': [json] }; }
+const RUN_403 = startRun({ executionStatus: 'error', error: { description: '403 - ""', message: 'Forbidden', context: {} } });            // 176137
+const RUN_403_UIT = startRun({ executionStatus: 'success', data: { main: [[], [{ json: { error: { message: '403 - ""', name: 'AxiosError' } } }]] } });  // foutuitgang
+const RUN_OK = startRun({ executionStatus: 'success', data: { main: [[{ json: { ok: true, job_id: 'abc' } }], []] } });
+function foutOpstelling(status, runData, extra) {
+  const o = opstelling();
+  o.st.exec.wfA.push(Object.assign({ id: '176137', mode: 'trigger', status: status, startedAt: T_FOUT,
+    data: runData === undefined ? undefined : { resultData: { runData: runData } } }, extra || {}));
+  return o;
+}
+test('wv4253: 403 op de startknoop (run error, zoals 176137) -> één inhaal met reden startfout in staat en box', async () => {
+  const { st, m } = foutOpstelling('error', RUN_403);
+  const r = await m.tik();
+  assert.match(r.uitkomst, /gestart \(MCP ok\)/); assert.equal(st.mcp.length, 1);
+  const s = m.staat().rondes['wfA|' + new Date(T_ZO).toISOString()];
+  assert.equal(s.reden, 'startfout'); assert.match(s.startfout, /^176137 startknoop 403/);
+  assert.deepEqual(s.voor_ids, ['176137']);
+  assert.match(st.box[0], /faalde op de startknoop en begon geen ronde \(176137 startknoop 403; wv4253\)/);
+  st.nu += 30 * MIN; assert.equal((await m.tik()).per[0].besluit, 'staat: ingehaald'); assert.equal(st.mcp.length, 1);
+});
+const STARTFOUT = [
+  ['403 via de foutuitgang (status success)', 'success', RUN_403_UIT],
+  ['401', 'error', startRun({ executionStatus: 'error', error: { httpCode: '401', message: 'Unauthorized' } })],
+  ['502', 'error', startRun({ executionStatus: 'error', error: { message: '502 - "Bad Gateway"' } })],
+  ['geen antwoord (ECONNRESET)', 'error', startRun({ executionStatus: 'error', error: { message: 'socket hang up', code: 'ECONNRESET' } })],
+  ['crashed zonder rundata', 'crashed', undefined],
+  ['crashed vóór de startknoop', 'crashed', { 'Woensdag 10:00': [{ data: { main: [[{ json: {} }]] } }] }],
+  ['error vóór de startknoop', 'error', { 'Woensdag 10:00': [{ data: { main: [[{ json: {} }]] } }] }],
+];
+for (const [naam, status, rd] of STARTFOUT) {
+  test('wv4253 startfout: ' + naam + ' -> inhalen', async () => {
+    const o = foutOpstelling(status, rd);
+    if (rd === undefined) delete o.st.exec.wfA[0].data;
+    await o.m.tik(); assert.equal(o.st.mcp.length, 1, naam);
+  });
+}
+const GEEN_STARTFOUT = [
+  ['startknoop gelukt, run later error', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT, data: { resultData: { runData: RUN_OK } } }); }, /^gelopen/],
+  ['startknoop 400 (geen startfout)', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT, data: { resultData: { runData: startRun({ executionStatus: 'error', error: { httpCode: '400' } }) } } }); }, /^gelopen/],
+  ['startknoop 409 (geen startfout)', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT, data: { resultData: { runData: startRun({ executionStatus: 'error', error: { message: '409 - "bezig"' } }) } } }); }, /^gelopen/],
+  ['error zonder rundata', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT }); }, /^gelopen/],
+  ['403 maar run loopt nog', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'running', startedAt: T_FOUT, data: { resultData: { runData: RUN_403 } } }); }, /^gelopen/],
+  ['403 maar ook een tweede run die wel startte', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT, data: { resultData: { runData: RUN_403 } } }, { id: '2', mode: 'manual', status: 'success', startedAt: '2026-11-15T12:00:00Z', data: { resultData: { runData: RUN_OK } } }); }, /^gelopen: run 2/],
+  ['403 maar hartslag na de tick', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT, data: { resultData: { runData: RUN_403 } } }); o.st.hs.comp_a = '2026-11-15T09:00:00Z'; }, /^gelopen/],
+  ['403 maar hartslag niet te lezen', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT, data: { resultData: { runData: RUN_403 } } }); o.st.hsFout = true; }, /^gelopen/],
+  ['403 maar startknoop heet anders in de workflow', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT, data: { resultData: { runData: RUN_403 } } }); o.st.wfs.wfA.nodes[1].name = 'Begin'; }, /^gelopen/],
+  ['403 maar details niet te lezen', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT, data: { resultData: { runData: RUN_403 } } }); o.dep.n8n = ((f) => async (mm, p) => /includeData/.test(p) ? { status: 500 } : f(mm, p))(o.dep.n8n); }, /^gelopen/],
+  ['403 maar sessie bezig', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT, data: { resultData: { runData: RUN_403 } } }); o.st.sessieBezig = true; }, /sessie\/ronde bezig/],
+  ['403 maar > 36 u na de tick', (o) => { o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT, data: { resultData: { runData: RUN_403 } } }); o.st.nu = T_ZO + 36 * UUR + MIN; }, /^vervallen/],
+];
+for (const [naam, breek, verwacht] of GEEN_STARTFOUT) {
+  test('wv4253 kruisproef: ' + naam + ' -> niets', async () => {
+    const o = opstelling();
+    breek(o);
+    const r = await o.m.tik();
+    assert.equal(o.st.mcp.length, 0, naam);
+    assert.match(r.per[0].besluit, verwacht);
+  });
+}
+test('wv4253: details van een afgeronde run maar één keer gelezen (cache); Harvester/Nieuwsbrief hebben startknoop "Start ronde"', async () => {
+  const o = opstelling(); let n = 0;
+  o.st.exec.wfA.push({ id: '1', mode: 'trigger', status: 'error', startedAt: T_FOUT, data: { resultData: { runData: RUN_OK } } });
+  o.dep.n8n = ((f) => async (mm, p) => { if (/includeData/.test(p)) n++; return f(mm, p); })(o.dep.n8n);
+  await o.m.tik(); o.st.nu += 15 * MIN; await o.m.tik();
+  assert.equal(n, 1); assert.equal(o.st.mcp.length, 0);
+  for (const x of W.LIJST) assert.equal(x.start || 'Start run', /Harvester|Nieuwsbrief/.test(x.naam) ? 'Start ronde' : 'Start run', x.naam);
 });
