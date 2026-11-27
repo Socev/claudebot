@@ -242,6 +242,23 @@ function puntBij(model, begin) {
 }
 const GESPREK_NIET = /geld deze maand|uit je apps|gambia-weekreview/i;
 const GESPREK_MAX = 40;
+// wv4080: één stuk = één stemaanroep (pod: hooguit 45 s; gemeten 3,3 s + 25 ms per teken). 27-11 stond er een lijst van 4.687 tekens in
+// de briefing ("Je acties van vandaag (396)"): die haalde twee keer de 45 s niet en het gesprek bleef staan. Een tekst- of puntstuk
+// langer dan GESPREK_STUK_MAX wordt op een zinsgrens (anders woordgrens) ingekort met "De rest staat in de app."; vraagstukken niet
+// (uitleg <= 900 + vraag <= 600: de vraag mag nooit wegvallen).
+const GESPREK_STUK_MAX = 1200, GESPREK_REST = ' De rest staat in de app.';
+function gesprekKort(z) {
+  z = String(z || '');
+  if (z.length <= GESPREK_STUK_MAX) return z;
+  const max = GESPREK_STUK_MAX - GESPREK_REST.length;
+  let k = z.slice(0, max);
+  // eerst een regelgrens (lijst), dan een zinseinde (niet "15." van een genummerde regel), anders een woordgrens
+  const nl = k.lastIndexOf('\n'), zin = /[\s\S]*[^\d\s][.!?…](?=\s)/.exec(k), sp = k.lastIndexOf(' ');
+  if (nl >= max / 2) k = k.slice(0, nl);
+  else if (zin && zin[0].length >= max / 2) k = zin[0];
+  else if (sp >= max / 2) k = k.slice(0, sp);
+  return k.replace(/[\s,;:—–\-(]+$/, '') + GESPREK_REST;
+}
 function gesprek(model, vragen, o) {
   o = o || {};
   const spreek = o.spreek || plat, kaart = o.kaart || function () { return null; };
@@ -261,12 +278,12 @@ function gesprek(model, vragen, o) {
       // een blok dat begint met een kop van n8n slaat alleen dat blok over; een gewone kop daarna zet het weer aan
       if (weg || GESPREK_NIET.test(b.md)) return;
       const z = spreek(b.md).trim();
-      if (z) stukken.push({ soort: 'tekst', tekst: plat(b.md).slice(0, 1500), spreek: z });
+      if (z) stukken.push({ soort: 'tekst', tekst: plat(b.md).slice(0, 1500), spreek: gesprekKort(z) });
       return;
     }
     const p = b.punt;
     if (!p || p.niet_door || p.gambia || GESPREK_NIET.test(String(p.rubriek || ''))) return;
-    stukken.push({ soort: 'punt', punt_id: p.id, tekst: plat(p.tekst).slice(0, 1200), rubriek: p.rubriek || null, spreek: spreek(p.tekst) });
+    stukken.push({ soort: 'punt', punt_id: p.id, tekst: plat(p.tekst).slice(0, 1200), rubriek: p.rubriek || null, spreek: gesprekKort(spreek(p.tekst)) });
     (bij[p.id] || []).forEach(vraagStuk);
     laatstePunt = stukken.length - 1;   // ná de eigen vragen van dit punt
   });
@@ -302,4 +319,4 @@ function correctiesVoorWachter(m, vandaag, dagen) {
 }
 
 module.exports = { STANDEN, STAND_TEKST, RUST_DAGEN, punten, puntId, plat, vaultPad, bronVan, editieSleutel, snoei, zetStand, standenVan, correctieTekst, rustLopend, volgendeDag, correctiesVoorWachter,
-  AV_MAX, AV_GEVOELIG, autovragen, puntBij, gesprek, KAART_TITEL_MAX, KAART_WAAROM_MAX, kaartVanVraag };
+  AV_MAX, AV_GEVOELIG, autovragen, puntBij, gesprek, gesprekKort, GESPREK_STUK_MAX, KAART_TITEL_MAX, KAART_WAAROM_MAX, kaartVanVraag };

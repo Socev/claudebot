@@ -233,3 +233,30 @@ test('server: briefingAutovragenZet gebruikt kaartVanVraag en slaat niet-briefin
   assert.ok(/BP\.kaartVanVraag\(v\.vraag, v\.uitleg\)/.test(f) && /titel: kt\.titel, waarom: kt\.waarom/.test(f));
   assert.ok(/const b = appVjBriefing\(p\);\s*\n\s*if \(!b\) continue;/.test(f), 'null-kaart overslaan');
 });
+
+test('wv4080: gesprek kort een te lang tekst- of puntstuk in (één stemaanroep), vraagstuk niet', () => {
+  const zin = 'Proefactie nummer zoveel bij de proefstichting moet nog worden nagekeken. ';
+  const lijst = '**✅ Je acties van vandaag (99)**\n' + Array.from({ length: 70 }, (_, i) => (i + 1) + '. ' + zin).join('\n');
+  const tekst = '**🌅 Ochtendbericht**\n\nWeer: droog.\n\n**De drie van vandaag**\n• ' + zin.repeat(12) + '\n• Kort proefpunt over de garage.\n\n' + lijst + '\n\n**Slot**\n\n' + zin.repeat(20);
+  const m = P.punten(tekst, DAG, { bestaat: () => true });
+  const uitleg = 'Uitleg bij de proefvraag die lang is. '.repeat(31).trim();   // ± 1170 tekens (server: hooguit 900 + vraag 600)
+  const vraag = 'Zal ik de proefgarage morgen om tien uur bellen over de keuring van de proefauto?';
+  const st = P.gesprek(m, [{ n: 1, punt_id: null, vraag: vraag, uitleg: uitleg }], { kaart: () => ({ id: 1 }) });
+  const lang = st.filter((s) => s.soort !== 'vraag' && /De rest staat in de app/.test(s.spreek));
+  assert.ok(lang.length >= 1, 'lange lijst in de toetsdata');
+  lang.forEach((s) => {
+    assert.ok(s.spreek.length <= P.GESPREK_STUK_MAX, 'hooguit ' + P.GESPREK_STUK_MAX + ' tekens: ' + s.spreek.length);
+    assert.ok(/[^\d\s][.!?…] De rest staat in de app\.$/.test(s.spreek), 'op een regel- of zinsgrens, niet na een lijstnummer: ' + s.spreek.slice(-60));
+  });
+  const kort = st.find((s) => /Kort proefpunt/.test(s.spreek));
+  assert.ok(kort && !/De rest staat/.test(kort.spreek), 'kort stuk ongemoeid');
+  const vr = st.find((s) => s.soort === 'vraag');
+  assert.ok(vr && vr.spreek.length > P.GESPREK_STUK_MAX && vr.spreek.endsWith(vraag), 'vraagstuk heel, de vraag aan het eind');
+  // stem = hash van de ingekorte tekst (anders maakt de pod een andere wav dan de telefoon vraagt)
+  const crypto = require('crypto');
+  st.forEach((s) => assert.strictEqual(s.stem, crypto.createHash('sha256').update(s.spreek).digest('hex').slice(0, 12)));
+  // zonder zinsgrens: woordgrens
+  const w = P.gesprekKort('woord '.repeat(400));
+  assert.ok(w.length <= P.GESPREK_STUK_MAX && /woord De rest staat in de app\.$/.test(w), w.slice(-40));
+  assert.strictEqual(P.gesprekKort('kort'), 'kort');
+});
