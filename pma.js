@@ -1610,4 +1610,253 @@ function brief(p, opt) {
   return { praktijk: p.code, naam: p.naam, kwartaal: K, heel: kHeel, vergeleken: !!t, data_tot: p.data_tot || null, link, regels, gemaakt: o.vandaag || null };
 }
 
-module.exports = { isoWeek, ROLGROEP, waarnemerDagen, dpId, maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht, exportHerinnering, kwartaalVan, brief };
+// ── wv4354 (besluitenpagina nr 932 = L32 stap 2, David Ja 25-11-2026 22:15): Socev beantwoordt PMA-vragen in de chat. Puur (geen I/O, geen
+// klok): server.js (POST /smal/pma, skill pma-lezen) geeft het overzicht (= GET /app/pma, wat het scherm krijgt) en de vraag; dit telt met de
+// regels van PMA › Overzicht (socev-app pmaTekst.ts: bakkenVan, somBakken, dekkingPeriode, patientenTussen, vorigJaar; Kengetallen/Verrichtingen),
+// zodat het getal in de chat gelijk is aan het scherm. Alleen praktijk- en rolgroepniveau; per medewerker alleen als o.perMedewerker (schakelaar
+// /opt/data/pma/chat.json, Davids keuze op een Voor jou-kaart). Nooit iets op patiëntniveau (het overzicht kent dat ook niet).
+// Ontwerp + Codex-ontwerpreview: mk-scripts/wv4354/ontwerp.md.
+const CHAT_MAAND = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+const CHAT_MND = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
+const CHAT_ROLGROEP = { arts: 'Artsen (samen)', assistente: 'Assistentes', 'poh-s': 'POH-S', 'poh-ggz': 'POH-GGZ', ander: 'Anderen', los: 'Niet gekoppeld' };
+const CHAT_ROLGROEP_ZIN = { arts: 'artsen (samen)', assistente: 'assistentes', 'poh-s': 'POH-S', 'poh-ggz': 'POH-GGZ', ander: 'anderen', los: 'niet gekoppeld' };
+// wat → [soort, sleutel, naam]; soort g = groep, s = subgroep, x = bijzonder
+const CHAT_WAT = {
+  verrichtingen: ['x', 'n', 'Verrichtingen'], alles: ['x', 'n', 'Verrichtingen'],
+  consulten: ['g', 'consult', 'Consulten'], consult: ['g', 'consult', 'Consulten'],
+  'consult-kort': ['s', 'consult:kort', 'Consulten korter dan 5 min'], 'consult-middel': ['s', 'consult:middel', 'Consulten 5 tot 20 min'],
+  'consult-lang': ['s', 'consult:lang', 'Consulten 20 min en langer'], 'consulten-20': ['s', 'consult:lang', 'Consulten 20 min en langer'],
+  'aandeel-lang': ['x', 'lang', 'Aandeel consulten 20 min en langer'],
+  visites: ['g', 'visite', 'Visites'], visite: ['g', 'visite', 'Visites'],
+  'visite-kort': ['s', 'visite:kort', 'Visites korter dan 20 min'], 'visite-lang': ['s', 'visite:lang', 'Visites 20 min en langer'],
+  'poh-ggz': ['g', 'poh-ggz', 'POH-GGZ'], mi: ['g', 'mi', 'M&I'], materiaal: ['g', 'materiaal', 'Materiaal'], overig: ['g', 'overig', 'Overig'],
+  modules: ['g', 'module', 'Modules'], 'niet-gedeclareerd': ['g', 'niet-gedeclareerd', 'Niet gedeclareerd'], 'nog-in-te-delen': ['g', 'nog-in-te-delen', 'Nog in te delen'],
+  inschrijfgeld: ['x', 'ig', 'Inschrijfgeld'], patienten: ['x', 'pat', 'Ingeschreven patiënten'],
+};
+const CHAT_ALIAS = { 'm&i': 'mi', 'm-en-i': 'mi', ggz: 'poh-ggz', pohggz: 'poh-ggz', 'poh ggz': 'poh-ggz', module: 'modules', patiënten: 'patienten', inschrijving: 'inschrijfgeld',
+  'consulten-lang': 'consult-lang', 'lange-consulten': 'consult-lang', 'consult-20': 'consult-lang', 'consulten-20-min': 'consult-lang', 'visites-lang': 'visite-lang', 'visites-kort': 'visite-kort' };
+class ChatFout extends Error { constructor(status, msg, extra) { super(msg); this.status = status; this.extra = extra || null; } }
+function cWeekMaandag(week) {
+  const j = Number(week.slice(0, 4)), n = Number(week.slice(6));
+  const jan4 = Date.UTC(j, 0, 4, 12), wd = (new Date(jan4).getUTCDay() + 6) % 7;
+  return new Date(jan4 + ((n - 1) * 7 - wd) * 864e5).toISOString().slice(0, 10);
+}
+function cMaandenVan(soort, w) {
+  if (soort === 'maand') return [w];
+  if (soort === 'week') { const a = cWeekMaandag(w), b = plusDag(a, 6); return a.slice(0, 7) === b.slice(0, 7) ? [a.slice(0, 7)] : [a.slice(0, 7), b.slice(0, 7)]; }
+  const j = Number(w.slice(0, 4)), van = soort === 'kwartaal' ? (Number(w.slice(6)) - 1) * 3 + 1 : 1, tot = soort === 'kwartaal' ? van + 2 : 12, u = [];
+  for (let m = van; m <= tot; m++) u.push(j + '-' + String(m).padStart(2, '0'));
+  return u;
+}
+function cPeriodeDagen(soort, w) {
+  if (soort === 'week') { const a = cWeekMaandag(w); return [a, plusDag(a, 6)]; }
+  const ms = cMaandenVan(soort, w), l = ms[ms.length - 1];
+  return [ms[0] + '-01', l + '-' + String(bMaandDagen(l)).padStart(2, '0')];
+}
+const cVorigJaar = (w) => String(Number(w.slice(0, 4)) - 1) + w.slice(4);
+function cBakken(p, soort, w) { if (soort === 'week') return (p.weken || []).filter((x) => x.week === w); const ms = cMaandenVan(soort, w); return p.maanden.filter((m) => ms.includes(m.maand)); }
+function cDekking(p, soort, w) {
+  if (soort !== 'week') return bDekking(p, cMaandenVan(soort, w));
+  const x = (p.weken || []).find((y) => y.week === w);
+  return !x || !x.dagen_gedekt ? 'niets' : x.dagen_gedekt < x.dagen ? 'deels' : 'heel';
+}
+function cSom(bakken) {   // = somBakken van het scherm
+  const u = { groepen: {}, sub: {}, subc: {}, voorlopig: 0, n: 0, cent: 0, dagen: 0, gedekt: 0, wd: {}, weekend: 0 };
+  for (const x of bakken) {
+    for (const [g, v] of Object.entries(x.groepen || {})) { const t = u.groepen[g] || (u.groepen[g] = { n: 0, cent: 0 }); t.n += v.n; t.cent += v.cent; if (g !== 'niet-gedeclareerd') { u.n += v.n; u.cent += v.cent; } }
+    for (const [k, v] of Object.entries(x.sub || {})) u.sub[k] = (u.sub[k] || 0) + v;
+    for (const [k, v] of Object.entries(x.subc || {})) u.subc[k] = (u.subc[k] || 0) + v;
+    for (const [k, v] of Object.entries(x.wd || {})) { const t = u.wd[k] || (u.wd[k] = 0); u.wd[k] = t + v.reduce((a, n) => a + n, 0); }
+    u.weekend += x.weekend || 0; u.voorlopig += x.voorlopig || 0; u.dagen += x.dagen || 0; u.gedekt += x.dagen_gedekt || 0;
+  }
+  return u;
+}
+function cPatienten(p, [van, tot]) {   // = patientenTussen van het scherm
+  const getal = (xs) => xs.map((k) => k.patienten).filter((n) => typeof n === 'number');
+  const ks = p.kwartalen.filter((k) => k.peildatum >= van && k.peildatum <= tot);
+  if (ks.length) { const g = getal(ks); return g.length ? g.reduce((a, n) => a + n, 0) / g.length : null; }
+  const voor = getal(p.kwartalen.filter((k) => k.peildatum <= van));
+  return voor.length ? voor[voor.length - 1] : null;
+}
+function cInschrijfgeld(p, [van, tot]) {
+  const ks = p.kwartalen.filter((k) => k.peildatum >= van && k.peildatum <= tot);
+  if (!ks.length) return null;
+  return ks.reduce((a, k) => a + k.inschrijfgeld.basis + k.inschrijfgeld.opslag + k.inschrijfgeld.modules + k.inschrijfgeld.jaarmodule, 0);
+}
+function cPeriodes(ps, soort) {
+  const s = new Set();
+  for (const p of ps) {
+    if (soort === 'week') { for (const w of p.weken || []) if (w.dagen_gedekt > 0) s.add(w.week); continue; }
+    for (const m of p.maanden) if (m.dagen_gedekt > 0) s.add(soort === 'maand' ? m.maand : soort === 'kwartaal' ? bKwVan(m.maand) : m.maand.slice(0, 4));
+  }
+  return [...s].sort().reverse();
+}
+// Periode uit Davids woorden; zonder jaar = de laatste met data. Geeft { soort, waarde } of gooit 400.
+function chatPeriode(tekst, ps) {
+  const t = String(tekst == null ? '' : tekst).trim().toLowerCase().replace(/\s+/g, ' ');
+  const laatsteMet = (soort, pas) => cPeriodes(ps, soort).find(pas) || null;
+  if (!t || t === 'laatste' || t === 'laatste kwartaal') {
+    const lijst = cPeriodes(ps, 'kwartaal');
+    const w = lijst.find((k) => ps.every((p) => cDekking(p, 'kwartaal', k) === 'heel')) || lijst[0];
+    if (!w) throw new ChatFout(404, 'er is nog niets ingelezen');
+    return { soort: 'kwartaal', waarde: w };
+  }
+  let m;
+  if ((m = /^(\d{4})$/.exec(t))) return { soort: 'jaar', waarde: m[1] };
+  if ((m = /^(\d{4})-(\d{2})$/.exec(t)) && Number(m[2]) >= 1 && Number(m[2]) <= 12) return { soort: 'maand', waarde: t };
+  if ((m = /^(\d{4})[- ]?[kq]([1-4])$/.exec(t))) return { soort: 'kwartaal', waarde: m[1] + '-K' + m[2] };
+  if ((m = /^(\d{4})-?w(\d{1,2})$/.exec(t)) && Number(m[2]) >= 1 && Number(m[2]) <= 53) return { soort: 'week', waarde: m[1] + '-W' + String(Number(m[2])).padStart(2, '0') };
+  if ((m = /^(?:[kq]|kwartaal )([1-4])(?: (\d{4}))?$/.exec(t))) {
+    if (m[2]) return { soort: 'kwartaal', waarde: m[2] + '-K' + m[1] };
+    const w = laatsteMet('kwartaal', (k) => k.endsWith('-K' + m[1]));
+    if (!w) throw new ChatFout(404, 'geen K' + m[1] + ' met data');
+    return { soort: 'kwartaal', waarde: w };
+  }
+  if ((m = /^week ?(\d{1,2})(?: (\d{4}))?$/.exec(t)) && Number(m[1]) >= 1 && Number(m[1]) <= 53) {
+    const nn = String(Number(m[1])).padStart(2, '0');
+    if (m[2]) return { soort: 'week', waarde: m[2] + '-W' + nn };
+    const w = laatsteMet('week', (k) => k.endsWith('-W' + nn));
+    if (!w) throw new ChatFout(404, 'geen week ' + Number(m[1]) + ' met data');
+    return { soort: 'week', waarde: w };
+  }
+  if ((m = /^([a-z]+)\.?(?: (\d{4}))?$/.exec(t))) {
+    let i = CHAT_MAAND.indexOf(m[1]); if (i < 0) i = CHAT_MND.indexOf(m[1].slice(0, 3)) >= 0 && m[1].length <= 4 ? CHAT_MND.indexOf(m[1].slice(0, 3)) : -1;
+    if (m[1] === 'mar') i = 2;
+    if (i >= 0) {
+      const mm = String(i + 1).padStart(2, '0');
+      if (m[2]) return { soort: 'maand', waarde: m[2] + '-' + mm };
+      const w = laatsteMet('maand', (k) => k.endsWith('-' + mm));
+      if (!w) throw new ChatFout(404, 'geen ' + CHAT_MAAND[i] + ' met data');
+      return { soort: 'maand', waarde: w };
+    }
+  }
+  throw new ChatFout(400, 'periode niet begrepen; gebruik jjjj, jjjj-Kn, jjjj-mm, jjjj-Wnn, een maandnaam, Kn, week n of laatste');
+}
+function chatPeriodeTekst(soort, w) {
+  if (soort === 'maand') return CHAT_MAAND[Number(w.slice(5)) - 1] + ' ' + w.slice(0, 4);
+  if (soort === 'kwartaal') return 'K' + w.slice(6) + ' ' + w.slice(0, 4);
+  if (soort === 'week') { const a = cWeekMaandag(w), b = plusDag(a, 6); return 'week ' + Number(w.slice(6)) + ' ' + w.slice(0, 4) + ' (' + dagNl(a) + ' t/m ' + dagNl(b) + ')'; }
+  return w;
+}
+const chatHash = (soort, w) => (soort === 'jaar' ? w : soort === 'kwartaal' ? w.slice(0, 4) + '-k' + w.slice(6) : soort === 'week' ? w.slice(0, 4) + '-w' + w.slice(6) : w);
+function chatWat(lijst, ps) {
+  const ruw = (Array.isArray(lijst) ? lijst : String(lijst == null ? '' : lijst).split(/[,;]/)).map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+  const soorten = new Set();
+  for (const p of ps) for (const b of p.maanden) for (const k of Object.keys(b.sub || {})) if (k.startsWith('mi:')) soorten.add(k.slice(3));
+  const u = [], fout = [];
+  for (const r0 of ruw.length ? ruw : ['verrichtingen']) {
+    const r = CHAT_ALIAS[r0] || CHAT_ALIAS[r0.replace(/\s+/g, '-')] || r0.replace(/\s+/g, '-');
+    if (CHAT_WAT[r]) { const [s, k, naam] = CHAT_WAT[r]; if (!u.some((x) => x.k === k && x.s === s)) u.push({ id: r, s, k, naam }); continue; }
+    const mi = /^(?:mi[:-])?(.+)$/.exec(r)[1].replace(/-/g, ' ');
+    const hit = [...soorten].find((x) => x.toLowerCase() === mi || (x.toLowerCase() === 'ecg' && /^ecg'?s?$/.test(mi)));
+    if (hit) { if (!u.some((x) => x.k === 'mi:' + hit)) u.push({ id: 'mi:' + hit, s: 's', k: 'mi:' + hit, naam: hit }); continue; }
+    fout.push(r0.slice(0, 40));
+  }
+  if (fout.length) throw new ChatFout(400, 'onbekend: ' + fout.join(', '), { kan: Object.keys(CHAT_WAT).concat([...soorten].sort().map((x) => 'mi:' + x)) });
+  return u.slice(0, 12);
+}
+const cR = (x, d) => (x == null ? null : Math.round(x * Math.pow(10, d)) / Math.pow(10, d));
+function chatWaarden(p, soort, w, wat) {
+  const dagen = cPeriodeDagen(soort, w), s = cSom(cBakken(p, soort, w)), pat = cPatienten(p, dagen);
+  const u = [];
+  for (const x of wat) {
+    if (x.k === 'pat') { u.push({ id: x.id, naam: x.naam, aantal: pat == null ? null : Math.round(pat) }); continue; }
+    if (x.k === 'ig') { const c = cInschrijfgeld(p, dagen); u.push({ id: x.id, naam: x.naam, bedrag_eur: c == null ? null : Math.round(c / 100), kwartalen: p.kwartalen.filter((k) => k.peildatum >= dagen[0] && k.peildatum <= dagen[1]).map((k) => bKwTekst(bKwVan(k.peildatum.slice(0, 7)))) }); continue; }
+    if (x.k === 'lang') {
+      const c = (s.sub['consult:kort'] || 0) + (s.sub['consult:middel'] || 0) + (s.sub['consult:lang'] || 0);
+      u.push({ id: x.id, naam: x.naam, procent: c ? cR((s.sub['consult:lang'] || 0) / c * 100, 1) : null, van_consulten: c }); continue;
+    }
+    const n = x.k === 'n' ? s.n : x.s === 'g' ? (s.groepen[x.k] || {}).n || 0 : s.sub[x.k] || 0;
+    const cent = x.k === 'n' ? s.cent : x.s === 'g' ? (s.groepen[x.k] || {}).cent || 0 : s.subc[x.k];
+    const p1 = bPer1000(n, pat);
+    u.push({ id: x.id, naam: x.naam, aantal: n, bedrag_eur: cent == null ? null : Math.round(cent / 100), per_1000: p1 == null ? null : x.s === 's' && x.k.startsWith('mi:') ? cR(p1, 1) : Math.round(p1), _p1: p1 });
+  }
+  return { som: s, waarden: u, patienten: pat == null ? null : Math.round(pat) };
+}
+function chatDekTekst(p, soort, w, dek, s) {
+  if (dek === 'heel') return 'helemaal ingelezen';
+  if (dek === 'niets') return 'niets ingelezen';
+  const [a, b] = cPeriodeDagen(soort, w), totaal = dagenVerschil(a, b) + 1;   // ook de maanden zonder enige data tellen mee
+  return 'deels ingelezen (' + s.gedekt + ' van ' + totaal + ' dagen' + (p.data_tot ? '; data t/m ' + dagNl(p.data_tot) : '') + ')';
+}
+const cVerschil = (nu, toen) => (nu == null || toen == null || !toen ? null : cR((nu / toen - 1) * 100, 1));
+function cGetal(x) { return x == null ? '–' : bNl(x, Number.isInteger(x) ? 0 : 1); }
+function chatZinWaarde(v) {
+  if (v.procent !== undefined) return v.naam.toLowerCase() + ' ' + (v.procent == null ? '–' : bNl(v.procent, 1) + ' %') + ' (van ' + bNl(v.van_consulten, 0) + ' consulten)';
+  if (v.kwartalen !== undefined) return 'inschrijfgeld ' + (v.bedrag_eur == null ? 'geen (geen kwartaalbegin in deze periode)' : '€ ' + bNl(v.bedrag_eur, 0));
+  if (v.id === 'patienten') return 'ingeschreven patiënten ' + cGetal(v.aantal);
+  return v.naam.toLowerCase().replace(/^m&i$/, 'M&I').replace(/^poh-ggz$/, 'POH-GGZ').replace(/^ecg$/, 'ECG\'s') + ' ' + bNl(v.aantal, 0) + (v.per_1000 != null ? ' (' + cGetal(v.per_1000) + ' per 1000)' : '');
+}
+function chatVraag(ov, vraag, opt) {
+  const q = vraag || {}, o = opt || {};
+  try {
+    if (!ov || !Array.isArray(ov.praktijken)) throw new ChatFout(503, 'PMA is nu niet te lezen');
+    const pr = String(q.praktijk || 'beide').trim().toUpperCase().replace(/^TOLGAARDE$/, 'TG').replace(/^GROENHOUTEN$/, 'GH');
+    if (!['TG', 'GH', 'BEIDE'].includes(pr)) throw new ChatFout(400, 'praktijk moet TG, GH of beide zijn');
+    const ps = ov.praktijken.filter((p) => pr === 'BEIDE' || p.code === pr).filter((p) => Array.isArray(p.maanden) && p.maanden.some((m) => m.dagen_gedekt > 0));
+    const bekend = Array.isArray(ov.bekend) && ov.bekend.length ? ov.bekend : Object.values(PRAKTIJKEN);
+    const zonder = bekend.filter((b) => (pr === 'BEIDE' || b.code === pr) && !ps.some((p) => p.code === b.code)).map((b) => ({ praktijk: b.code, naam: b.naam, zin: b.naam + ': nog geen export ingelezen in PMA.' }));
+    if (!ps.length) throw new ChatFout(404, pr === 'BEIDE' ? 'er is nog niets ingelezen' : (pr === 'TG' ? 'Tolgaarde' : 'Groenhouten') + ': nog geen export ingelezen');
+    const per = String(q.per || 'praktijk').trim().toLowerCase();
+    if (!['praktijk', 'rolgroep', 'medewerker'].includes(per)) throw new ChatFout(400, 'per moet praktijk, rolgroep of medewerker zijn');
+    if ((per === 'medewerker' || (q.wie != null && String(q.wie).trim())) && !o.perMedewerker) {
+      return { status: 403, body: { ok: false, geweigerd: 'per_medewerker', fout: 'Cijfers per medewerker noemt Socev niet in de chat; ze staan in PMA › Medewerkers.',
+        links: ps.map((p) => ({ praktijk: p.code, link: '/pma#medewerkers/' + p.code.toLowerCase() })) } };
+    }
+    const { soort, waarde } = chatPeriode(q.periode, ps);
+    const wat = per === 'praktijk' ? chatWat(q.wat, ps) : [];
+    const vj = q.vorig_jaar === true || /^(ja|true|1|yes)$/i.test(String(q.vorig_jaar || ''));
+    if (per === 'medewerker' && soort === 'week') throw new ChatFout(400, 'per medewerker alleen per maand, kwartaal of jaar (zoals het scherm)');
+    const uit = [];
+    for (const p of ps) {
+      const dek = cDekking(p, soort, waarde), r = chatWaarden(p, soort, waarde, wat);
+      const x = { praktijk: p.code, naam: p.naam, periode: waarde, periode_tekst: chatPeriodeTekst(soort, waarde), dekking: dek, dekking_tekst: chatDekTekst(p, soort, waarde, dek, r.som),
+        data_van: p.data_van || null, data_tot: p.data_tot || null, link: '/pma#overzicht/' + p.code.toLowerCase() + '/' + chatHash(soort, waarde) };
+      if (per === 'praktijk') {
+        x.waarden = r.waarden;
+        if (r.som.voorlopig) x.nog_niet_gefactureerd = r.som.voorlopig;
+        if (vj) {
+          const w2 = cVorigJaar(waarde), dek2 = cDekking(p, soort, w2);
+          if (dek2 === 'niets') x.vorig_jaar = { periode: w2, periode_tekst: chatPeriodeTekst(soort, w2), dekking: 'niets', tekst: 'geen data van ' + chatPeriodeTekst(soort, w2) + ' in PMA' + (p.data_van ? ' (PMA heeft data vanaf ' + dagNl(p.data_van) + ')' : '') };
+          else {
+            const r2 = chatWaarden(p, soort, w2, wat), vergelijk = dek === 'heel' && dek2 === 'heel';
+            x.vorig_jaar = { periode: w2, periode_tekst: chatPeriodeTekst(soort, w2), dekking: dek2, dekking_tekst: chatDekTekst(p, soort, w2, dek2, r2.som), waarden: r2.waarden, vergeleken: vergelijk };
+            // zoals de tegels: verschil alleen als beide periodes helemaal gedekt zijn; per 1000 met de ongeronde waarden
+            if (vergelijk) r.waarden.forEach((v, i) => { const t = r2.waarden[i];
+              if (v.procent !== undefined) { if (v.procent != null && t.procent != null) v.verschil_procentpunt = cR(v.procent - t.procent, 1); return; }
+              if (v.aantal !== undefined && v.kwartalen === undefined) v.verschil_pct = cVerschil(v.aantal, t.aantal);
+              if (v._p1 != null && t._p1 != null) v.verschil_per_1000_pct = cVerschil(v._p1, t._p1);
+              if (v.kwartalen !== undefined) v.verschil_pct = cVerschil(v.bedrag_eur, t.bedrag_eur); });
+            for (const v of r2.waarden) delete v._p1;
+          }
+        }
+        for (const v of x.waarden) delete v._p1;
+        const delen = x.waarden.map(chatZinWaarde);
+        let zin = p.naam + ', ' + x.periode_tekst + ': ' + delen.join('; ') + (dek === 'heel' ? '' : ' — ' + x.dekking_tekst) + '.';
+        if (x.vorig_jaar) zin += x.vorig_jaar.dekking === 'niets' ? ' Een jaar eerder: ' + x.vorig_jaar.tekst + '.'
+          : ' Een jaar eerder (' + x.vorig_jaar.periode_tekst + (x.vorig_jaar.dekking === 'heel' ? '' : ', ' + x.vorig_jaar.dekking_tekst) + '): ' + x.vorig_jaar.waarden.map(chatZinWaarde).join('; ') + '.';
+        x.zin = zin;
+      } else if (per === 'rolgroep') {
+        x.rolgroepen = Object.keys(CHAT_ROLGROEP).filter((k) => r.som.wd[k]).map((k) => ({ rolgroep: k, naam: CHAT_ROLGROEP[k], verrichtingen_ma_vr: r.som.wd[k] }));
+        x.weekend = r.som.weekend;
+        x.uitleg = 'verrichtingen maandag t/m vrijdag per rolgroep (artsen altijd samen), zoals PMA › Overzicht › week en weekdag; weekend apart';
+        x.zin = p.naam + ', ' + x.periode_tekst + ' (ma–vr): ' + x.rolgroepen.map((g) => CHAT_ROLGROEP_ZIN[g.rolgroep] + ' ' + bNl(g.verrichtingen_ma_vr, 0)).join('; ') + (x.weekend ? '; weekend ' + bNl(x.weekend, 0) : '') + (dek === 'heel' ? '' : ' — ' + x.dekking_tekst) + '.';
+      } else {
+        const ms = cMaandenVan(soort, waarde), wie = q.wie ? kaal(q.wie) : '';
+        const regs = (p.registreerders || []).map((g) => { const t = { kort: 0, middel: 0, lang: 0, visite_kort: 0, visite_lang: 0, mi: 0, poh: 0, overig: 0, totaal: 0 };
+          for (const m of g.maanden) if (ms.includes(m.maand)) for (const k of Object.keys(t)) t[k] += m[k] || 0; return Object.assign({ naam: g.naam, groep: g.soort === 'verzamel' }, t); })
+          .filter((g) => g.totaal > 0 && (!wie || kaal(g.naam).includes(wie))).sort((a, b) => (a.naam < b.naam ? -1 : 1));
+        x.medewerkers = regs.slice(0, 40); x.meer = Math.max(0, regs.length - 40);
+        x.uitleg = 'per naam zoals Promedico de regel boekt (wie boekte, niet altijd wie het werk deed), zoals PMA › Overzicht › per registreerder';
+        x.link_medewerkers = '/pma#medewerkers/' + p.code.toLowerCase();
+      }
+      uit.push(x);
+    }
+    return { status: 200, body: Object.assign({ ok: true, per, soort, periode: waarde, praktijken: uit }, zonder.length ? { zonder_data: zonder } : {}) };
+  } catch (e) {
+    if (e instanceof ChatFout) return { status: e.status, body: Object.assign({ ok: false, fout: e.message }, e.extra || {}) };
+    throw e;
+  }
+}
+
+module.exports = { isoWeek, ROLGROEP, waarnemerDagen, dpId, maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht, exportHerinnering, kwartaalVan, brief, chatVraag, chatPeriode };

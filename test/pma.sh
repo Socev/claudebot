@@ -37,4 +37,5 @@ node --test test/pma-export.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test
 grep -qF "{ naam: 'pma-export', start_na: [6, 30]" server.js || { echo "ROOD  server.js: nachtketenstap pma-export ontbreekt (wv4219)"; f=1; }
 node --test test/pma-brief.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-brief.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-brief.test.js (wv4220: brief na inlezen, loketregel)"; f=1; }
 grep -qF "if (route === 'POST /app/pma/inlees' && u.status === 200 && u.body && u.body.brief) pmaBriefMeld(u.body.brief)" server.js || { echo "ROOD  server.js: brief na inlezen gaat niet naar het loket (wv4220)"; f=1; }
+node --test test/pma-chatvraag.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-chatvraag.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-chatvraag.test.js (wv4354: PMA-vragen in de chat, /smal/pma, schakelaar per medewerker)"; f=1; }
 exit $f

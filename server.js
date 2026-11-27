@@ -32036,6 +32036,34 @@ async function pmaBriefMeld(b, opt) {
   return (o.meld || loketMeld)({ app: 'pma', onderwerp: 'brief-' + b.praktijk.toLowerCase(), laan: 'editie', editie: 'eerstvolgende', datum: (o.ams || ovisAms()).datum,
     tekst: pmaBriefTekst(b), link: 'https://app.socev.dev' + b.link, doel: { scherm: 'pma' } });
 }
+// wv4354 (besluitenpagina nr 932 = L32 stap 2, David Ja 25-11-2026 22:15): Socev beantwoordt PMA-vragen in de chat (skill pma-lezen).
+// Zelfde overzicht als GET /app/pma en dezelfde telling als PMA › Overzicht (pma.js chatVraag, puur). Alleen lezen; praktijk en rolgroep.
+// Per medewerker alleen als Davids schakelaar aan staat: PMA_DIR/chat.json {"per_medewerker": true} (map 700 van claude: Socev kan hem niet
+// zetten; de machinekamer zet hem na Davids Ja op de Voor jou-kaart). Elke vraag leest het bestand opnieuw; onleesbaar = uit. Opent met de
+// agent-sleutel of API_SECRET (geen nieuwe sleutel); alleen de bekende velden gaan door. Log zonder inhoud. Ontwerp: mk-scripts/wv4354/ontwerp.md.
+//   POST /smal/pma {secret, praktijk?, periode?, wat?, vorig_jaar?, per?, wie?}
+function pmaChatSchakelaar() {
+  try { const j = JSON.parse(fs.readFileSync(path.join(PMA_DIR, 'chat.json'), 'utf8')); return !!(j && j.per_medewerker === true); } catch (e) { return false; }
+}
+function pmaSmal(d) {
+  if (!pmaApp) return { status: 404, j: { ok: false, fout: 'PMA zit niet in deze versie van de pod' } };
+  let P;
+  try { P = require(path.join(__dirname, 'pma.js')); } catch (e) { P = null; }
+  if (!P || typeof P.chatVraag !== 'function') return { status: 404, j: { ok: false, fout: 'PMA-vragen zitten niet in deze versie van de pod' } };
+  const b = {};
+  ['praktijk', 'periode', 'wat', 'vorig_jaar', 'per', 'wie'].forEach(function (k) { if (d[k] != null) b[k] = Array.isArray(d[k]) ? d[k].slice(0, 12).map(function (x) { return String(x).slice(0, 60); }) : String(d[k]).slice(0, 200); });
+  let u;
+  try {
+    const ov = pmaApp.app({ pad: '/app/pma', methode: 'GET' });
+    if (ov.status !== 200) return { status: 503, j: { ok: false, fout: 'PMA is nu niet te lezen; probeer het zo opnieuw' } };
+    u = P.chatVraag(ov.body, b, { perMedewerker: pmaChatSchakelaar() });
+  } catch (e) { logError('pma', new Error('chatvraag faalde')); return { status: 503, j: { ok: false, fout: 'PMA is nu niet te lezen; probeer het zo opnieuw' } }; }   // geen inhoud in de log
+  const j = u.body || {};
+  const vol = function (l) { return l && l.charAt(0) === '/' ? 'https://app.socev.dev' + l : l; };
+  (j.praktijken || []).forEach(function (x) { x.link = vol(x.link); if (x.link_medewerkers) x.link_medewerkers = vol(x.link_medewerkers); });
+  (j.links || []).forEach(function (x) { x.link = vol(x.link); });
+  return { status: u.status, j: j };
+}
 function pmaInfo() {
   if (!pmaApp) return { aan: false };
   try { const i = pmaApp.info(); i.fin_controle = pmaFin.waarden ? 'ja' : 'nog niet gelezen'; return i; } catch (e) { return { aan: true, fout: true }; }
@@ -36289,7 +36317,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'personeelsscherm/voorstel': 20, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, pakjes: 30, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, vastgoed: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20, 'wachter-kaart': 30, 'wachter-correcties': 20, rooster: 60 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'personeelsscherm/voorstel': 20, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, pakjes: 30, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, vastgoed: 60, pma: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20, 'wachter-kaart': 30, 'wachter-correcties': 20, rooster: 60 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
 const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata', 'eindjes', 'eindjes/oordeel', 'wachter-kaart', 'wachter-correcties']);   // wv4153: idem   // wv4124: wachter-kaart idem   // wv4007: eindjes alleen beurtpas of API_SECRET   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
@@ -36529,6 +36557,7 @@ async function smalActie(actie, d, wie) {
   if (actie === 'bank') return bankSmal(d);   // wv680: alleen-lezen bankluis (zie bankSmal)
   if (actie === 'mailconcept') return mailconceptSmal(d);   // wv4098: ontvangers en feitenstrook voor een chatconcept (alleen lezen)
   if (actie === 'beleggen') return beleggenSmal(d);
+  if (actie === 'pma') return pmaSmal(d);   // wv4354: Socev leest PMA-cijfers op praktijk- en rolgroepniveau (per medewerker alleen met Davids schakelaar); nooit schrijven
   if (actie === 'vastgoed') return vastgoedSmal(d);   // wv4227: Socev leest Vastgoed (kern, tab, zoek); nooit schrijven   // wv3756: Socev in het gewone gesprek (stand, dagboekregel); nooit handelen
   if (actie === 'homey') return HOMEY_POD ? HOMEY_POD.homeySmal(d, wie) : (!wie || !wie.mk ? { status: 403, j: { ok: false, fout: 'homey alleen vanuit de machinekamer (API_SECRET)' } } : { status: 404, j: { ok: false, fout: 'homey.js zit niet in deze release' } });   // wv3460: Homey (Athom MCP), alleen API_SECRET (zie homeySmal in homey.js; wv3886)
   if (actie === 'tibber') return tibberSmal(d, wie);   // wv2707: Tibber-uurronde los (opdracht uur), alleen API_SECRET (zie tibberSmal)
