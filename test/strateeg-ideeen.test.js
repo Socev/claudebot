@@ -95,6 +95,11 @@ test('ISIN-controlecijfer, tarief per land, L&S-keuze op ISIN en op naam', () =>
   assert.strictEqual(I.lsKiesIsin(t, NVDA, 'NVIDIA').id, 1);
   assert.strictEqual(I.lsKiesIsin(t, NVDA, 'Nordex'), null, 'naam past niet bij de ISIN');
   assert.strictEqual(I.lsKiesNaam(t, 'Nvidia Corporation').id, 1);
+  // wv4015: L&S schrijft "AKZO NOBEL" en "INTL PAPER"; de stellingen noemden "AkzoNobel" en "International Paper" (25-11 en 24-11 onterecht niet te koop)
+  const l2 = I.lsTreffers([{ instrumentId: 7, isin: 'NL0013267909', displayname: 'AKZO NOBEL      EO 0,5', categorySymbol: 'STK' }, { instrumentId: 8, isin: 'US4601461035', displayname: 'INTL PAPER DL 1', categorySymbol: 'STK' }]);
+  assert.strictEqual(I.lsKiesIsin(l2, 'NL0013267909', 'AkzoNobel').id, 7);
+  assert.strictEqual(I.lsKiesIsin(l2, 'US4601461035', 'International Paper').id, 8);
+  assert.strictEqual(I.lsKiesIsin(l2, 'US4601461035', 'Graphic Packaging'), null, 'naam past niet bij de ISIN');
   const twee = I.lsTreffers([{ instrumentId: 4, isin: 'DK0062498333', displayname: 'NOVO NORDISK B', categorySymbol: 'STK' }, { instrumentId: 5, isin: 'US6701002056', displayname: 'NOVO NORDISK ADR', categorySymbol: 'STK' }]);
   assert.strictEqual(I.lsKiesNaam(twee, 'Novo Nordisk'), null, 'twee ISINs = niet te kiezen');
   assert.strictEqual(I.lsKiesNaam(twee, 'Novo Nordisk', ['DK0062498333']).id, 4, 'bij meerdere noteringen wint de ene die de Strateeg al kent');
@@ -310,6 +315,12 @@ test('toetsen: gesloten Polymarket-markt beslist zonder model; één zachte bron
   assert.strictEqual(w2.d.prepare('SELECT status FROM idee_stand').get().status, 'open');
   assert.strictEqual(w2.d.prepare('SELECT oordeel, kans FROM idee_herzien').get().oordeel, 'uitgekomen');
   assert.strictEqual(w2.d.prepare('SELECT kans_nu FROM idee_stand').get().kans_nu, 0.9);
+  assert.ok(/s1 \|[^\n]*\| vorige kans 0\.\d+\n/.test(w2.log.prompts.filter((p) => p.schema === G.SCHEMA_B).pop().prompt), 'wv4015: B ziet zijn vorige kans');
+  // wv4015: een ronde die bij een herstart op 'bezig' bleef staan wordt bij de volgende ronde afgesloten
+  w2.d.prepare("INSERT INTO idee_ronde (ms, dag, soort, status) VALUES (?, '2026-11-24', 'extra', 'bezig')").run(klok.t - 3600000);
+  await w2.m._denk.ronde('vast');
+  assert.strictEqual(w2.d.prepare("SELECT COUNT(*) AS n FROM idee_ronde WHERE status = 'bezig'").get().n, 0);
+  assert.strictEqual(w2.d.prepare("SELECT reden FROM idee_ronde WHERE status = 'afgebroken'").get().reden, 'herstart');
   assert.strictEqual(I.bewijsGenoeg([{ hard: 0, uitgever: 'Blog', melders: 1 }]), false);
   assert.strictEqual(I.bewijsGenoeg([{ hard: 0, uitgever: 'A', melders: 1 }, { hard: 0, uitgever: 'B', melders: 1 }]), true);
   assert.strictEqual(I.bewijsGenoeg([{ hard: 1, uitgever: 'SEC', melders: 1 }]), true);

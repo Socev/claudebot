@@ -2,6 +2,7 @@
  "versie": 1,
  "opgesteld": "2026-11-23",
  "bron": "mk-scripts/wv4012/ontwerp.md (Fable 5.2); David 23-11 22:57: handelen op nieuws en ideeën, niet op koerspatronen",
+ "prompts": "2 (27-11-2026, wv4015: vroegste beslisdatum, koersbewegende gebeurtenissen voorop, ja = goed voor de koers, vorige kans bij het toetsen)",
  "start": 1000,
  "koop": { "kans_min": 0.30, "kans_grens": [0.05, 0.95], "voordeel_poly": 0.15, "voordeel_model": 0.20, "verwacht_min": 0.05,
    "effect_ja_min": 0.05, "effect_max": 0.40, "al_gelopen": 0.5, "posities": 6, "per_positie": 0.15, "min_order": 100,

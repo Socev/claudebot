@@ -22,7 +22,7 @@ function woordRe(namen) {
   return l.length ? new RegExp('(^|[^\\p{L}\\p{N}])(' + l.map(esc).join('|') + ')(?![\\p{L}\\p{N}])', 'iu') : null;
 }
 function kaal(n) {
-  return String(n || '').toUpperCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' AND ').replace(/[^A-Z0-9 ]/g, ' ')
+  return String(n || '').toUpperCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' AND ').replace(/[^A-Z0-9 ]/g, ' ').replace(/\bINTL\b/g, 'INTERNATIONAL')
     .replace(/\b(INC|CORP|CORPORATION|CO|LTD|PLC|NV|N V|SA|AG|SE|ASA|AB|HOLDING|HOLDINGS|GROUP|CLASS|CL|A|B|C|THE|DL|EO|SF|DK|LS|ADR|REGISTERED|SHARES|AKTIE)\b/g, ' ')
     .replace(/\b\d+\b/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -157,7 +157,9 @@ function naamWoorden(n) { return kaal(n).split(' ').filter((w) => w.length >= 3)
 function lsKiesIsin(treffers, isin, naam) {
   const t = treffers.filter((x) => x.isin === isin); if (t.length !== 1) return null;
   const w = naamWoorden(naam); if (!w.length) return null;
-  return kaal(t[0].naam).split(' ').includes(w[0]) || kaal(t[0].naam).includes(w[0]) ? t[0] : null;
+  // ook zonder spaties: "AkzoNobel" tegen L&S "AKZO NOBEL" (wv4015: 25-11 daardoor onterecht niet te koop)
+  const ln = kaal(t[0].naam);
+  return ln.split(' ').includes(w[0]) || ln.includes(w[0]) || ln.replace(/ /g, '').includes(w[0]) ? t[0] : null;
 }
 // op naam (L&S zoekt alleen op één woord): de enige aandelentreffer waarvan de naam alle naamwoorden bevat; 0 of ≥ 2 = niet te kiezen
 // bekend: ISIN's die de Strateeg al gemeten heeft (universum); bij meerdere noteringen wint precies één bekende (Roche: genotsbewijs, aandeel, ADR)
