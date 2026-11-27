@@ -14,7 +14,7 @@ echo "$C" | grep -qF "execFile('python3', ['-I', script, 'scherm']" || { echo "R
 g=0
 grep -q "const NZA_SCHERM = (function () {" server.js || { echo "ROOD  server.js: NZA_SCHERM ontbreekt"; g=1; }
 R=$(grep -oE "'(GET|POST) /app/nza[a-z/]*'" server.js | sort -u | tr '\n' ' ')
-[ "$R" = "'GET /app/nza' 'GET /app/nza/punten' 'GET /app/nza/scorekaart' 'GET /app/nza/vragen' 'POST /app/nza/draad' 'POST /app/nza/dubbelcheck' 'POST /app/nza/stuk' 'POST /app/nza/zittingsmap' " ] || { echo "ROOD  server.js: NZa-routes zijn niet precies GET /app/nza(/punten|/scorekaart|/vragen) en POST /app/nza/stuk|draad|dubbelcheck|zittingsmap ($R)"; g=1; }   # wv4221 scorekaart, wv4224 zittingsmap
+[ "$R" = "'GET /app/nza' 'GET /app/nza/punten' 'GET /app/nza/rechter' 'GET /app/nza/scorekaart' 'GET /app/nza/vragen' 'POST /app/nza/draad' 'POST /app/nza/dubbelcheck' 'POST /app/nza/rechter' 'POST /app/nza/rechter/run' 'POST /app/nza/stuk' 'POST /app/nza/zittingsmap' " ] || { echo "ROOD  server.js: NZa-routes zijn niet precies GET /app/nza(/punten|/scorekaart|/vragen) en POST /app/nza/stuk|draad|dubbelcheck|zittingsmap ($R)"; g=1; }   # wv4221 scorekaart, wv4224 zittingsmap, wv4376 rechter
 grep -qF "APP_GLIJD_ROUTES.add('POST /app/nza/zittingsmap');" server.js || { echo "ROOD  server.js: zittingsmap verlengt de sessie niet"; g=1; }
 grep -qF "register: serverPad('nza-register', process.env.NZA_REGISTER" server.js || { echo "ROOD  server.js: registermap (wv3676) niet via serverPad"; g=1; }
 grep -qF "APP_GLIJD_ROUTES.add('POST /app/nza/stuk');" server.js || { echo "ROOD  server.js: NZa-stuk verlengt de sessie niet"; g=1; }
@@ -71,7 +71,8 @@ K=$(grep -vE '^\s*(\*|//)' "$KJS" 2>/dev/null)
 if echo "$K" | grep -nE "require\(|\bfetch\s*\(|import\(|console\.|\beval\(|new Function|XMLHttpRequest|WebSocket|(^|[^.a-zA-Z])exec(File|Sync)?\(|spawn\("; then echo "ROOD  CI-poort: nza-dubbelcheck.js laadt modules of raakt netwerk/shell/log"; k=1; fi
 D=$(awk '/── OVIS NZa Dubbelcheck \(wv3157/,/── einde OVIS NZa Dubbelcheck ──/' server.js)
 [ -n "$D" ] || { echo "ROOD  server.js: blok OVIS NZa Dubbelcheck niet gevonden"; k=1; }
-grep -qF "const LOPER_ZOALS = { 'ovis-nza-check': 'ovis-nza' };" server.js || { echo "ROOD  loper: ovis-nza-check volgt ovis-nza niet"; k=1; }
+grep -qF "const LOPER_ZOALS = { 'ovis-nza-check': 'ovis-nza'," server.js || { echo "ROOD  loper: ovis-nza-check volgt ovis-nza niet"; k=1; }
+for s in ovis-nza-rechter ovis-nza-rechter-nza ovis-nza-rechter-eiser; do grep -E "^const LOPER_ZOALS = " server.js | grep -qF "'$s': 'ovis-nza'" || { echo "ROOD  loper: $s volgt ovis-nza niet (wv4376)"; k=1; }; done
 echo "$D" | grep -qF "if (!loperVoorRun(NZA_CHECK_SESSIE)) return appWeiger(res, 503" || { echo "ROOD  Dubbelcheck start ook zonder loper (als claude)"; k=1; }
 grep -qF "'ovis-nza': 'geen', 'ovis-nza-check': 'geen'," server.js || { echo "ROOD  lessen: ovis-nza-check niet 'geen'"; k=1; }
 grep -qF "if (j.max_ms > 0) runOpts.maxMs = j.max_ms;" server.js || { echo "ROOD  processJob: geen eigen bovengrens per job"; k=1; }

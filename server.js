@@ -1289,7 +1289,7 @@ function loperStand() {
 function loperNooit(chatId) { return Object.prototype.hasOwnProperty.call(SOCEV_ENV_EXTRA, String(chatId || '')); }
 // /run: alleen smal (de aanroeper toetst dat). Ook buiten de vault-werkruimte: de loper weigert dan de cwd (dicht), nooit stil
 // als 1001 (Fable wv715 #7).
-const LOPER_ZOALS = { 'ovis-nza-check': 'ovis-nza' };   // wv3157: Dubbelcheck van OVIS NZa draait precies zo afgeschermd als OVIS NZa zelf
+const LOPER_ZOALS = { 'ovis-nza-check': 'ovis-nza', 'ovis-nza-rechter': 'ovis-nza', 'ovis-nza-rechter-nza': 'ovis-nza', 'ovis-nza-rechter-eiser': 'ovis-nza' };   // wv4376: Rechter (drie stemmen) idem   // wv3157: Dubbelcheck van OVIS NZa draait precies zo afgeschermd als OVIS NZa zelf
 function loperVoorRun(chatId) {
   if (loperNooit(chatId)) return false;
   const s = loperStand();
@@ -3010,7 +3010,7 @@ const LESSEN_EMBED_MODEL = '@cf/baai/bge-m3';   // 1024 dims, meertalig; de less
 const LESSEN_DOMEIN = {
   '40687': 'pa', 'agenda-wachter': 'pa', 'correspondentie-wachter': 'pa',
   'actie-bewaker': 'pa', 'personeels-wachter': 'pa', 'nachtconsolidatie': 'pa',
-  'dagplan': 'pa', 'parro': 'pa', 'signal': 'pa', 'cijfermeester': 'geen', 'cijfer-meester': 'beide', 'ovis-nza': 'geen', 'ovis-nza-check': 'geen',   // wv3087: vertrouwelijk procesdossier, geen lessen die andere zaken noemen
+  'dagplan': 'pa', 'parro': 'pa', 'signal': 'pa', 'cijfermeester': 'geen', 'cijfer-meester': 'beide', 'ovis-nza': 'geen', 'ovis-nza-check': 'geen', 'ovis-nza-rechter': 'geen', 'ovis-nza-rechter-nza': 'geen', 'ovis-nza-rechter-eiser': 'geen',   // wv3087: vertrouwelijk procesdossier, geen lessen die andere zaken noemen
  
   'telegram-debug': 'machine', 'structuur-wachter': 'machine', 'werkkamer': 'machine',
   'vault-concierge': 'machine', 'site-verversing': 'machine', 'kaizen-review': 'machine',
@@ -6510,7 +6510,9 @@ APP_GLIJD_ROUTES.add('POST /app/zoek-snel/uitzoeken');   // wv3821: de tik op "Z
 ['controleer', 'inlees', 'intrek', 'code', 'koppel', 'rol', 'rooster', 'persoon'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt (wv3047: koppel, rol, rooster, persoon)   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
 ['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar', 'woz-bezwaar', 'gezien', 'kelder-pdf', 'project-concept'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt; wv3102: + WOZ-beschikking
 APP_GLIJD_ROUTES.add('POST /app/nza/stuk');
-APP_GLIJD_ROUTES.add('POST /app/nza/zittingsmap');   // wv4224: een zittingsmap maken = David die werkt
+APP_GLIJD_ROUTES.add('POST /app/nza/zittingsmap');   // (wv4224)
+APP_GLIJD_ROUTES.add('POST /app/nza/rechter');   // wv4376: de zaak naspelen = David die werkt
+APP_GLIJD_ROUTES.add('POST /app/nza/rechter/run');   // wv4224: een zittingsmap maken = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/nza/draad');   // wv3156: een vraagdraad lezen in de tab Vragen   // wv3099: een stuk lezen in het NZa-scherm = David die werkt
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -6612,7 +6614,7 @@ const APP_NZA_KOP = [
   '- Staat het er niet: zeg "Niet in het dossier", noem wat er wel is, en zet het met `nza.py gat "<omschrijving>"` op de lijst. Niet aanvullen uit eigen kennis.',
   // wv3158 (David 15-11-2026: wat ontbreekt moet OVIS NZa zelf gaan zoeken en inladen)
   '- Ontbreekt er een STUK (je antwoord heeft een kop of alinea "Wat ontbreekt", of je mist een rapport, brief, verslag, bijlage): zet ELK ontbrekend stuk als zoekrij met `nza.py ontbreekt "<titel van het stuk>" --waarom "<waarvoor nodig>" --waar "<waar het te vinden zou zijn>" --zoekwoorden "w1, w2, w3" --vraag "<de vraag van David, kort>" [--soort openbaar|woo|partij|vertrouwelijk]`. Zoekwoorden: 2–4 losse woorden (of een jaartal) die in de titel van dat stuk zouden staan; ze gaan als zoekopdracht naar overheidssites, dus nooit een naam van een persoon, een nummer of iets uit het procesdossier dat niet openbaar is. Soort: openbaar (gepubliceerd of te publiceren), woo (intern stuk van een overheid, alleen via een Woo-verzoek), partij (bij een partij of de advocaat op te vragen), vertrouwelijk (wordt niet gezocht). De wachter zoekt elke ochtend in de openbare bronnen en neemt een vondst op; zeg in je antwoord dat het op de lijst Ontbreekt staat en geef die lijst als tikbare link, letterlijk zo: [lijst Ontbreekt](/nza#s=ontbreekt) (opent in Apps › NZa de tab Ontbreekt met per stuk waarvoor nodig, waar te vinden, waar al gezocht en het concept-verzoek; wv4373). Tabellen die op een bladzijde als beeld staan, zijn met OCR leesbaar (blok "[Tekst uit een afbeelding …]": kan leesfouten bevatten; noem dat en citeer er niet letterlijk uit).',
-  '- Geen advies over de procedure en geen voorspelling van de uitspraak. Nalopen = per bewering bron (wel/niet gecontroleerd), sterk/redelijk/zwak met één zin waarom, het sterkste tegenargument uit de stukken van de NZa of de rechter, wat ontbreekt.',
+  '- In dit gesprek geen advies over de procedure en geen voorspelling van de uitspraak (wv4376, David 27-11-2026: een gemotiveerd OEFENoordeel staat alleen in het onderdeel Rechter, op Davids eigen knop; vraagt hij hier hoe de rechter zou oordelen, verwijs dan naar [Rechter](/nza#s=rechter) en geef zelf geen oordeel). Nalopen = per bewering bron (wel/niet gecontroleerd), sterk/redelijk/zwak met één zin waarom, het sterkste tegenargument uit de stukken van de NZa of de rechter, wat ontbreekt.',
   '- Voor reeksen en sectorcijfers verwijs je naar de Cijfer-Meester met een link die de vraag al invult (wv3729): [Vraag het de Cijfer-Meester](/?app=cijfer-meester&vraag=<de cijfervraag als losse sectorvraag, URL-gecodeerd, hooguit 300 tekens>); een tik zet de vraag klaar in zijn gesprek en David verstuurt hem zelf. Zet in die vraag geen namen, geen stuk-id\'s en niets uit het procesdossier dat niet openbaar is. Een tarief noem je alleen met stuk en bladzijde uit de beschikking.',
   // wv4143 (2C41, David 25-11-2026 Ja): het ene antwoord was 5.300 tekens; David leest op zijn telefoon tussen twee spreekuren
   '- Begin ELK antwoord (ook een doorvraag en Niet in het dossier) met de kop "### In het kort" en daaronder precies drie korte regels als opsomming ("- …", elk hooguit ± 25 woorden: de kern en wat het voor de zaak betekent, met de belangrijkste bronlink); daarna een lege regel en pas dan de onderbouwing met bronnen. Staat het niet in het dossier, dan begint de eerste regel met "Niet in het dossier.". Niet bij het vaste antwoord buiten het werkgebied en niet bij de ontvangstzin van een nieuw stuk.',
@@ -18676,6 +18678,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
         if (route === 'GET /app/vastgoed' || route === 'GET /app/vastgoed/kelder' || /^GET \/app\/vastgoed\/foto\/[0-9a-f-]{36}$/.test(route) || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar|gezien|kelder-pdf|project-concept)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking; wv4229: + concept-bezwaar
         if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk' || route === 'GET /app/nza/punten' || route === 'GET /app/nza/scorekaart' || route === 'POST /app/nza/zittingsmap') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen); wv3676: tab Punten
+        if (route === 'GET /app/nza/rechter' || route === 'POST /app/nza/rechter' || route === 'POST /app/nza/rechter/run') return typeof appNzaRechter === 'function' ? appNzaRechter(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-rechter');   // wv4376: tab Rechter
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
         if (route === 'GET /app/beleggen/strateeg' || route === 'GET /app/beleggen/strateeg/backtest' || route === 'POST /app/beleggen/strateeg/stand' || route === 'POST /app/beleggen/strateeg/idee') return typeof appStrateeg === 'function' ? appStrateeg(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'strateeg');   // wv3993: Strateeg (fictief)
         if (route === 'GET /app/beleggen' || route === 'GET /app/beleggen/week' || route === 'GET /app/beleggen/teller' || /^POST \/app\/beleggen\/(plan|soort|positie|transactie|bestand|dagboek|volglijst|signaal|bedrijf|week\/keuze|past)$/.test(route)) return typeof appBeleggen === 'function' ? appBeleggen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'beleggen');   // wv2982: OVIS Beleggen fase 1
@@ -20403,7 +20406,7 @@ function berichtBronJob(zin, nu, lijst) {
   Object.keys(alle).forEach(function (id) {
     const j = alle[id];
     if (!j || j.agent || j.app || j.status !== 'done' || (j.result && j.result.ok === false) || !APP_JOB_RE.test(id)) return;   // alleen geslaagd afgerond (Fable #6)
-    if (j.chat_id === APP_KANALEN.hoofd || j.chat_id === APP_KANALEN['cijfer-meester'] || j.chat_id === APP_KANALEN['ovis-nza'] || j.chat_id === 'ovis-nza-check') return;   // wv3157
+    if (j.chat_id === APP_KANALEN.hoofd || j.chat_id === APP_KANALEN['cijfer-meester'] || j.chat_id === APP_KANALEN['ovis-nza'] || j.chat_id === 'ovis-nza-check' || /^ovis-nza-rechter/.test(String(j.chat_id || ''))) return;   // wv3157; wv4376 Rechter
     if (!(nu - (j.done_at || 0) < BERICHT_BRONJOB_MS)) return;
     let out = '';
     try { out = appUitvoer(j); } catch (e) { out = ''; }
@@ -32590,6 +32593,7 @@ function nzaInfo() {
   try { i = NZA_SCHERM.info(); } catch (e) { i = { aan: true, fout: true }; }
   try { if (NZA_VRAGEN) i.vragen = NZA_VRAGEN.info(); } catch (e) { i.vragen = { fout: true }; }   // wv3156
   try { i.dubbelcheck = nzaCheckInfo(); } catch (e) { i.dubbelcheck = { fout: true }; }   // wv3157 (try: ook TDZ)
+  try { i.rechter = nzaRechterInfo(); } catch (e) { i.rechter = { fout: true }; }   // wv4376 (try: ook TDZ)
   try { if (nzaWachter) i.wachter = nzaWachter.info(); } catch (e) { i.wachter = { fout: true }; }   // wv3113: datum, exit, duur (try: ook TDZ)
   try { if (NZA_STUK) i.stukken_app = NZA_STUK.info(); } catch (e) { i.stukken_app = { fout: true }; }   // wv4223
   return i;
@@ -32752,6 +32756,135 @@ function nzaCheckRun(id, job, w, runJob, keuze, start) {
   });
 }
 // ── einde OVIS NZa Dubbelcheck ──
+// ── OVIS NZa Rechter (wv4376, 27-11-2026; David 23:07 "een druk op de knop, waarna er een evenwichtig oordeel geveld wordt, en opties als oplossingsrichting") ──
+// Bouwplan vault 01_Ontwikkeling/OVIS NZa - Rechter (bouwplan wv4376, 27-11-2026).md. Tab Rechter in Apps › NZa: de zaak naspelen als OEFENING.
+// Drie stemmen (nza-rechter.js): advocaat van de NZa en advocaat van eiser (Opus 5.5, na elkaar, elk een eigen sessie) schrijven een pleitnota uit
+// het dossier; de pod controleert hun citaten met nza.py citaat; de rechter (Fable 5.2, eigen sessie) leest beide als DATA en oordeelt per geschilpunt
+// (gegrond/ongegrond/onzeker) met toetsingskader, dictum, sterk/zwak en oplossingsrichtingen. Alle drie via de loper als socev zoals OVIS NZa zelf
+// (LOPER_ZOALS; zonder loper start er niets, nooit als claude), geen lessen, sessie vóór elke ronde gewist, alleen-lezen (geen nza.py log/gat/bewaar).
+// Geen dossierinhoud naar een andere aanbieder. Eén run tegelijk, hooguit NZA_RECHTER_PER_DAG per dag. Elke run (ook een mislukte) wordt bewaard in
+// /opt/data/ovis-nza/rechter (0700/0600, alleen de pod) met datum en dossierstand. Routes achter de app-sessie (alleen David):
+//   GET  /app/nza/rechter              runs (nieuwste boven, kort: stand, telling, oordeel per geschilpunt) + lopende run
+//   POST /app/nza/rechter              start een run (Davids knop "Speel de zaak na")
+//   POST /app/nza/rechter/run {id}     één run met de markdown (vaste kop: oefening, geen voorspelling of juridisch advies)
+// Log: alleen run-id, stap, status en tellingen; nooit tekst uit het dossier, een pleitnota of het oordeel.
+const NZA_RECHTER = (function () {
+  const p = path.join(__dirname, 'nza-rechter.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p); } catch (e) { logError('nza-rechter', new Error('laden faalde')); return null; }
+})();
+const NZA_RECHTER_SESSIES = { 'advocaat-nza': 'ovis-nza-rechter-nza', 'advocaat-eiser': 'ovis-nza-rechter-eiser', rechter: 'ovis-nza-rechter' };
+const NZA_RECHTER_MODEL = { advocaat: (!SERVER_ECHT && process.env.NZA_RECHTER_MODEL_ADV) || 'claude-opus-5-5', rechter: (!SERVER_ECHT && process.env.NZA_RECHTER_MODEL) || 'claude-fable-5-2' };
+const NZA_RECHTER_MS = { advocaat: 25 * 60 * 1000, rechter: 30 * 60 * 1000 };
+const NZA_RECHTER_PER_DAG = 3;
+const NZA_RECHTER_OPSLAG = NZA_RECHTER ? NZA_RECHTER.maakOpslag(serverPad('nza-rechter', process.env.NZA_RECHTER, '/opt/data/ovis-nza/rechter', serverProefDeel('nza/rechter'))) : null;
+let nzaRechterLopend = null;   // {id, start, stap, job}
+const nzaRechterTel = { gestart: 0, klaar: 0, mislukt: 0, laatste: null };
+function nzaRechterModelNaam(m) { const s = String(m || ''); return /fable-5-2/.test(s) ? 'Fable 5.2' : /opus-5-5/.test(s) ? 'Opus 5.5' : (s || 'onbekend model'); }
+function nzaRechterInfo() {
+  let loper = null;
+  try { loper = loperVoorRun(NZA_RECHTER_SESSIES.rechter); } catch (e) { loper = null; }
+  return { aan: !!(NZA_RECHTER && NZA_RECHTER_OPSLAG), model: NZA_RECHTER_MODEL, loper: loper, lopend: nzaRechterLopend ? { id: nzaRechterLopend.id, stap: nzaRechterLopend.stap } : null,
+    gestart: nzaRechterTel.gestart, klaar: nzaRechterTel.klaar, mislukt: nzaRechterTel.mislukt, laatste: nzaRechterTel.laatste };
+}
+// een run die op schijf "bezig" staat maar niet meer loopt, is afgebroken (herstart van de pod)
+function nzaRechterStand(r) {
+  if (r && r.status === 'bezig' && !(nzaRechterLopend && nzaRechterLopend.id === r.id)) return Object.assign({}, r, { status: 'fout', fout: 'afgebroken (de pod startte opnieuw); probeer het opnieuw' });
+  return r;
+}
+async function appNzaRechter(req, res, a, route, d) {
+  if (!NZA_RECHTER || !NZA_RECHTER_OPSLAG || !NZA_SCHERM) return appWeiger(res, 404, 'de Rechter zit niet in deze versie van de pod', 'nza-rechter ontbreekt');
+  if (!appTeller('nza', 900, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens nza');
+  try {
+    if (route === 'GET /app/nza/rechter') {
+      res._app.stil = true;
+      return appStuur(res, 200, { ok: true, runs: NZA_RECHTER_OPSLAG.lijst(30).map(nzaRechterStand), lopend: nzaRechterLopend ? { id: nzaRechterLopend.id, start: nzaRechterLopend.start, stap: nzaRechterLopend.stap } : null,
+        per_dag: NZA_RECHTER_PER_DAG, kop: NZA_RECHTER.KOP_OEFENING });
+    }
+    if (route === 'POST /app/nza/rechter/run') {
+      const id = String((d && d.id) || '');
+      if (!NZA_RECHTER.RUN_RE.test(id)) return appWeiger(res, 400, 'onbekende run', 'nza-rechter id');
+      const r = NZA_RECHTER_OPSLAG.lees(id);
+      if (!r) return appWeiger(res, 404, 'deze run staat er niet (meer)', 'nza-rechter weg');
+      res._app.stil = true;
+      return appStuur(res, 200, { ok: true, run: Object.assign(NZA_RECHTER_OPSLAG.kortVan(nzaRechterStand(r)), { md: r.md || null }) });
+    }
+    return await nzaRechterStart(res);
+  } catch (e) { logError('nza-rechter', new Error('route faalde')); return appWeiger(res, 503, 'de Rechter is nu niet te lezen; probeer het zo opnieuw', 'nza-rechter fout'); }   // geen inhoud in de log
+}
+async function nzaRechterStart(res) {
+  if (nzaRechterLopend) { res._app.stil = true; return appStuur(res, 200, { ok: true, al: true, lopend: { id: nzaRechterLopend.id, start: nzaRechterLopend.start, stap: nzaRechterLopend.stap } }); }
+  if (fs.existsSync(APP_UIT)) return appWeiger(res, 503, 'de app staat op de noodstop', 'nza-rechter noodstop');
+  if (Object.keys(NZA_RECHTER_SESSIES).some(function (k) { return !loperVoorRun(NZA_RECHTER_SESSIES[k]); })) return appWeiger(res, 503, 'de Rechter kan nu niet afgeschermd draaien; de machinekamer kijkt ernaar', 'nza-rechter geen loper');   // nooit als claude
+  const kAdv = resolveKeuze({ model: NZA_RECHTER_MODEL.advocaat }), kRe = resolveKeuze({ model: NZA_RECHTER_MODEL.rechter });
+  if (kAdv.fout || kRe.fout) return appWeiger(res, 503, 'het model voor de Rechter is nu niet beschikbaar', 'nza-rechter model');
+  const ov = await NZA_SCHERM.app({ pad: '/app/nza', methode: 'GET' });
+  const pu = await NZA_SCHERM.app({ pad: '/app/nza/punten', methode: 'GET' });
+  if (ov.status !== 200 || pu.status !== 200) return appWeiger(res, 503, 'het NZa-dossier is nu niet te lezen; probeer het zo opnieuw', 'nza-rechter dossier');
+  const ctx = NZA_RECHTER.ctxUit(ov.body, pu.body);
+  if (!ctx.geschilpunten.length) return appWeiger(res, 409, 'het verweerpuntenregister is leeg; zonder geschilpunten valt er niets na te spelen', 'nza-rechter leeg');
+  if (!appTeller('nza-rechter', NZA_RECHTER_PER_DAG, 24 * 3600000)) return appWeiger(res, 429, 'vandaag al ' + NZA_RECHTER_PER_DAG + ' keer nagespeeld; morgen weer', 'grens nza-rechter');
+  const job = crypto.randomBytes(8).toString('hex');
+  const run = { id: NZA_RECHTER.nieuwId(Date.now(), job), start: new Date().toISOString(), status: 'bezig', stap: 'advocaat-nza', stand: ctx.stand };
+  NZA_RECHTER_OPSLAG.schrijf(run);
+  nzaRechterLopend = { id: run.id, start: run.start, stap: run.stap, job: null };
+  nzaRechterTel.gestart++;
+  schrijfLog(nu() + ' nza-rechter ' + velden({ run: run.id, stukken: ctx.stand.stukken, geschilpunten: ctx.geschilpunten.length }));
+  nzaRechterSpeel(run, ctx, { advocaat: kAdv, rechter: kRe });
+  res._app.reden = 'nza-rechter ' + run.id;
+  return appStuur(res, 200, { ok: true, run: NZA_RECHTER_OPSLAG.kortVan(run), lopend: { id: run.id, start: run.start, stap: run.stap } });
+}
+function nzaRechterDraai(rol, prompt, keuzes) {
+  const sessie = NZA_RECHTER_SESSIES[rol], keuze = rol === 'rechter' ? keuzes.rechter : keuzes.advocaat;
+  const ws = DEFAULT_WS, key = sessionKey(ws, sessie);
+  const runJob = crypto.randomBytes(8).toString('hex');
+  jobs[runJob] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: sessie, runtime: keuze.runtime, max_ms: rol === 'rechter' ? NZA_RECHTER_MS.rechter : NZA_RECHTER_MS.advocaat, nza_rechter: true };
+  if (nzaRechterLopend) nzaRechterLopend.job = runJob;
+  schrijfLog(nu() + ' nza-rechter-stap ' + velden({ job: runJob, rol: rol, model: keuze.model || '(default)' }));
+  return new Promise(function (klaar) {
+    enqueue(key, function () {
+      if (key) { RUNTIMES_LIJST.forEach(function (rt) { delete chatSessions[sessieSleutel(key, rt)]; }); saveSessions(); sessieResetOp[key] = Date.now(); }   // elke ronde vers
+      return processJob(runJob, prompt, undefined, undefined, sessie, ws, keuze, undefined).then(function () {
+        const j = jobs[runJob];
+        if (j) j.opgehaald = Date.now();   // niemand haalt hem via /result op; anders wacht een uitrol er 10 min op
+        const r = Object.assign({}, (j && j.result) || {});
+        if (r.output_file) { try { r.output = fs.readFileSync(r.output_file, 'utf8'); } catch (e) { r.output = ''; } }
+        klaar({ ok: r.ok !== false, output: String(r.output || ''), model: r.model || keuze.model, error: r.ok === false ? (/bovengrens/.test(String(r.error || '')) ? 'tijd op' : 'mislukt') : '' });
+      }).catch(function () { klaar({ ok: false, output: '', error: 'mislukt' }); });
+    });
+  });
+}
+function nzaRechterSpeel(run, ctx, keuzes) {
+  const t0 = Date.now();
+  const bewaar = function () { try { NZA_RECHTER_OPSLAG.schrijf(run); } catch (e) { logError('nza-rechter', new Error('bewaren faalde')); } };
+  NZA_RECHTER.speel(ctx, {
+    draai: function (rol, prompt) { return nzaRechterDraai(rol, prompt, keuzes); },
+    citaatToets: nzaCitaatToets,
+    stap: function (s) { run.stap = s; if (nzaRechterLopend && nzaRechterLopend.id === run.id) nzaRechterLopend.stap = s; bewaar(); },
+  }).then(function (u) {
+    run.klaar = new Date().toISOString(); run.duur_s = Math.round((Date.now() - t0) / 1000); delete run.stap;
+    if (u.fout) {
+      run.status = 'fout'; run.fout = u.fout + '; probeer het opnieuw';
+      if (u.pleit) run.pleit = u.pleit;
+      nzaRechterTel.mislukt++; nzaRechterTel.laatste = { t: run.klaar, ok: false };
+      schrijfLog(nu() + ' nza-rechter-mislukt ' + velden({ run: run.id, duur_s: run.duur_s }));
+    } else {
+      run.status = 'klaar'; run.oordeel = u.oordeel; run.pleit = u.pleit; run.citaten = u.citaten;
+      run.modellen = { advocaten: nzaRechterModelNaam(u.modellen.advocaten), rechter: nzaRechterModelNaam(u.modellen.rechter) };
+      run.md = NZA_RECHTER.markdown(run);
+      const n = NZA_RECHTER.telling(u.oordeel.geschilpunten);
+      nzaRechterTel.klaar++; nzaRechterTel.laatste = { t: run.klaar, ok: true, gegrond: n.gegrond, ongegrond: n.ongegrond, onzeker: n.onzeker };
+      schrijfLog(nu() + ' nza-rechter-klaar ' + velden({ run: run.id, duur_s: run.duur_s, gegrond: n.gegrond, ongegrond: n.ongegrond, onzeker: n.onzeker, citaten_ok: u.citaten.ok, citaten: u.citaten.totaal }));
+    }
+    bewaar();
+  }).catch(function () {
+    run.status = 'fout'; run.fout = 'de run liep niet af; probeer het opnieuw'; run.klaar = new Date().toISOString(); delete run.stap;
+    nzaRechterTel.mislukt++; nzaRechterTel.laatste = { t: run.klaar, ok: false };
+    logError('nza-rechter', new Error('run faalde'));
+    bewaar();
+  }).finally(function () { if (nzaRechterLopend && nzaRechterLopend.id === run.id) nzaRechterLopend = null; });
+}
+// ── einde OVIS NZa Rechter ──
 // ── OVIS NZa fase 2: de wachter (wv3113, 15-11-2026; plan § 2 "Versheid" en § 4 fase 2; Davids Ja 15-11 09:44) ──
 // Eén ronde per dag zonder taalmodel: mk-scripts/ovis-nza/wachter.py ronde (PUC-sectorlijst huisartsenzorg, CBb-uitspraken, nza.nl-nieuws,
 // VPH/InEen, Tweede Kamer). Nieuwe openbare stukken van NZa en CBb komen in de bibliotheek en de index; nieuws en Kamerstukken alleen als
