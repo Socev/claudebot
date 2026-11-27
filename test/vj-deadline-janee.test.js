@@ -77,6 +77,6 @@ test('3C11: Ja/Nee uit de stappen (losse stappen, één stap, haakjes, dubbele p
 
 test('server.js: lijst gesorteerd vóór de knip, detail geeft ja_nee alleen bij een besluit met knoppen', function () {
   assert.match(src, /\.sort\(appVjVolgorde\(await appVjVrij\(eigen\)\)\)\.slice\(0, APP_VJ_MAX\)/);
-  assert.match(src, /ja_nee: p\.soort === 'besluit' && !sw \? appVjJaNee\(stappen\) \|\| undefined : undefined/);
+  assert.match(src, /ja_nee: p\.soort === 'besluit' && !sw (?:&& !rg )?\? appVjJaNee\(stappen\) \|\| undefined : undefined/);
   assert.match(src, /deadline: appVjDeadline\(p\) \? p\.deadline : null, deadline_reden:/);
 });

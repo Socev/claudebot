@@ -6407,6 +6407,7 @@ APP_GLIJD_ROUTES.add('POST /app/nieuws/gezien');   // wv3689: iets in het loket 
 ['POST /app/dagplan/veeg', 'POST /app/dagplan/weg', 'POST /app/dagplan/erbij'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv3906: David die zijn dag regelt
 APP_GLIJD_ROUTES.add('POST /app/briefing/punt');   // wv3685: een tik onder een briefingpunt = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/voor-jou/wachter');   // wv4124: een wachterknop is David die werkt
+APP_GLIJD_ROUTES.add('POST /app/voor-jou/regels');   // wv4195: antwoorden per regel versturen is David die antwoordt
 APP_GLIJD_ROUTES.add('POST /app/voor-jou/woord');   // wv3250: een steekwoordkeuze is David die werkt   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
 APP_GLIJD_ROUTES.add('POST /app/financien/rekening');   // wv2292: Bewerk in Saldi = David die werkt
@@ -9493,6 +9494,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   const rij = v[sleutel];
   if (!rij) return appWeiger(res, 404, 'deze vraag ken ik niet (meer); antwoord gewoon in tekst', 'onbekende vraag');
   if (rij.soort === 'voorjou' && !kaart) return appWeiger(res, 409, 'deze vraag beantwoord je op de kaart in Voor jou', 'kaartvraag via knop');   // wv404
+  if (rij.soort === 'voorjou-regels' && !(kaart && kaart.regels)) return appWeiger(res, 409, 'deze vragen beantwoord je op de kaart in Voor jou', 'regelsvraag via knop');   // wv4195
   const al = function (x) { return appStuur(res, 409, { ok: false, fout: 'al beantwoord: ' + (x.keuze === 'ja' ? 'Ja' : x.keuze === 'nee' ? 'Nee' : x.keuze === 'eigen' ? '"' + x.tekst + '"' : 'Anders') + ' ' + appKlok(x.t), beantwoord: x }); };   // wv4179
   if (appAntwoord(rij)) { res._app.reden = 'al beantwoord'; return al(appAntwoord(rij)); }
   // wv4179: een vraag met eigen knoppen beantwoord je met een van die knoppen of Anders (Ja/Nee zou niet zeggen wat David koos);
@@ -9527,6 +9529,8 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   try { v = appVragen(); } catch (e) { logError('app-vragen', e); terug(); return appWeiger(res, 503, 'vragenregister onleesbaar; vraag de machinekamer', 'vragen kapot'); }
   if (!v[sleutel]) { terug(); return appWeiger(res, 404, 'deze vraag ken ik niet (meer)', 'onbekende vraag'); }
   if (appAntwoord(v[sleutel])) { terug(); res._app.reden = 'al beantwoord'; return al(appAntwoord(v[sleutel])); }
+  // wv4195 (3C68): bundelkaart — is een van deze regels intussen via een andere verzending (ander apparaat) beantwoord, dan niet nog eens
+  if (kaart && typeof kaart.nogVrij === 'function') { const w = kaart.nogVrij(v); if (w) { terug(); res._app.reden = 'regels al beantwoord'; return appStuur(res, 409, { ok: false, fout: w, regels_bezet: true }); } }
   if (appKnopInRij(rij.kanaal) >= APP_KNOP_RIJ_MAX) { terug(); return appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol'); }   // Fable #4: na de awaits opnieuw
   const tijd = appKlok();
   const kanaalNaam = ({ hoofd: 'het hoofdkanaal', machinekamer: 'de machinekamer', 'cijfer-meester': 'de Cijfer-Meester', 'ovis-nza': 'OVIS NZa' })[rij.kanaal] ||
@@ -9538,7 +9542,8 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   const waarIn = tikOw ? (kaart ? 'in Onderweg (auto), op de Voor jou-kaart (' + kanaalNaam + '; tik op het scherm, geen vingerafdruk)' : 'in Onderweg (auto) (' + kanaalNaam + '; tik op het scherm, geen vingerafdruk)')
     : viaOw ? (kaart ? 'op de Voor jou-kaart in Onderweg (auto, stilstaand, vingerafdruk op de telefoon; ' + kanaalNaam + ')' : 'in Onderweg (auto, stilstaand, vingerafdruk op de telefoon; ' + kanaalNaam + ')')
     : kaart ? 'op de Voor jou-kaart in de app (Overzicht, ' + kanaalNaam + ')' : 'in de app (' + kanaalNaam + ')';
-  const tekst = (keuze === 'eigen'   // wv4179: een eigen knop = zijn antwoord op die vraag, nooit een Ja op een handeling
+  const tekst = kaart && kaart.regels ? kaart.regels.beurt(waarIn, tijd, gevoeligJa, hash) + (kaart.context ? '\n' + kaart.context : '')   // wv4195: één bericht met alle antwoorden
+    : (keuze === 'eigen'   // wv4179: een eigen knop = zijn antwoord op die vraag, nooit een Ja op een handeling
     ? '[KNOP] David koos ' + JSON.stringify(eigen.tekst) + ' (een van jouw eigen knoppen) op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + ', vraag-id ' + hash + '. Dit is zijn antwoord op die vraag; het is geen Ja op versturen, agenda, verwijderen of geld: daarvoor stel je een gewone Ja/Nee-vraag. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)'
     : keuze === 'anders'
     ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
@@ -9571,7 +9576,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
     return appChatLogVoor(rij.kanaal, [
       { rol: 'socev', tekst: vb ? vb.bericht : vz, ts: nu - 1 },
       { rol: 'david', ts: nu, bevestiging: appKnopBevestiging(keuze, gevoeligJa, a, !!kaart),
-        tekst: (keuze === 'eigen' ? JSON.stringify(eigen.tekst) : keuze === 'anders' ? 'Anders' : keuze === 'nee' ? (kaart && kaart.stop ? 'Stop' : 'Nee') : doorbouw ? 'Ja, en bouw door' : 'Ja') + ' (knop ' + (kaart ? 'op een Voor jou-kaart ' : '') + (tikOw ? 'in Onderweg (auto)' : viaOw ? 'in Onderweg, stilstaand' : 'in de app') + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
+        tekst: kaart && kaart.regels ? kaart.regels.log(gevoeligJa, hash) : (keuze === 'eigen' ? JSON.stringify(eigen.tekst) : keuze === 'anders' ? 'Anders' : keuze === 'nee' ? (kaart && kaart.stop ? 'Stop' : 'Nee') : doorbouw ? 'Ja, en bouw door' : 'Ja') + ' (knop ' + (kaart ? 'op een Voor jou-kaart ' : '') + (tikOw ? 'in Onderweg (auto)' : viaOw ? 'in Onderweg, stilstaand' : 'in de app') + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
           (keuze === 'anders' ? ' — toelichting: ' + appOntmasker(toel) : '') + '\n(vraag-id ' + hash + ')' }])
       .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); })
       .then(function (st) {
@@ -9592,7 +9597,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   };
   const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', job_id: jobId2, bijStart: bijStartMet, bijVerval: bijVerval, knop_sleutel: sleutel,
     upload: kaart && kaart.upload ? kaart.upload : undefined,   // wv1343: scankaart geeft Socev de scan mee (kopie)
-    tekst: (keuze === 'eigen' ? '✓ ' + eigen.tekst : keuze === 'ja' ? (doorbouw ? '✓ Ja, en bouw door' : '✓ Ja') + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? (kaart && kaart.stop ? '■ Stop' : '✗ Nee') : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
+    tekst: kaart && kaart.regels ? kaart.regels.knop : (keuze === 'eigen' ? '✓ ' + eigen.tekst : keuze === 'ja' ? (doorbouw ? '✓ Ja, en bouw door' : '✓ Ja') + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? (kaart && kaart.stop ? '■ Stop' : '✗ Nee') : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
   if (!st.job_id) {
     // niet gestart: de vraag is dan ook niet beantwoord, en de vingerafdruk niet gebruikt
     try { const w = appVragen(); if (w[sleutel]) { w[sleutel].antwoord = null; appVragenSchrijf(w); } } catch (e) { logError('app-vragen', e); }
@@ -14021,6 +14026,7 @@ async function appVoorJouDetail(req, res, a, idTekst) {
     herkomst.push({ soort: 'link', tekst: appKort(appVjGewoon(String(l.tekst || 'Gesprek openen')), 80), link: l.link });
   });
   const stappen = (Array.isArray(p.stappen) ? p.stappen : []).slice(0, 12).map(appVjStap);
+  const rg = appVjRegels(p);   // wv4195
   const sw = await appSwSetVoor(p);   // wv3250: steekwoordkeuzes per woord; dan geen Ja / Nee / Anders voor de hele rij
   let wk = null;
   try { wk = wachterKaarten ? wachterKaarten.detail(p) : null; } catch (e) { logError('wachter-kaarten', e); }   // wv4124: knoppen van de nachtwachter
@@ -14030,8 +14036,9 @@ async function appVoorJouDetail(req, res, a, idTekst) {
     knoplink: vjKnoplinkVoor(p),   // wv4192 (3C91): { tekst, url } zolang hij geldt, { tekst, verlopen } daarna; alleen hier
     meting: p.meting ? appKort(appVjGewoon(p.meting), 400) : null, laatst_gemeten: p.laatst_gemeten || null,
     bewijs: p.bewijs ? appKort(appVjGewoon(p.bewijs), 400) : null, gesloten_door: p.gesloten_door || null, gesloten_op: p.gesloten_op || null,
-    terug_ms: appVjTerugMs(p.id, nu, a.id), knop: p.soort === 'besluit' && !sw ? await appVjKnopVormDb(p, appVjKnopStand(p, rv, (await appVjAfgeleid(punten, nu)).map)) : undefined,   // wv1018, wv3692
-    ja_nee: p.soort === 'besluit' && !sw ? appVjJaNee(stappen) || undefined : undefined }));   // wv4193 (3C11): Ja/Nee-uitleg bij de knoppen
+    regels: rg ? appVjRegelsVorm(p, rg, appVjKanaal(p, rv, null)) : undefined,   // wv4195 (3C68): per regel een eigen antwoord, één Verstuur
+    terug_ms: appVjTerugMs(p.id, nu, a.id), knop: p.soort === 'besluit' && !sw && !rg ? await appVjKnopVormDb(p, appVjKnopStand(p, rv, (await appVjAfgeleid(punten, nu)).map)) : undefined,   // wv1018, wv3692
+    ja_nee: p.soort === 'besluit' && !sw && !rg ? appVjJaNee(stappen) || undefined : undefined }));   // wv4193 (3C11): Ja/Nee-uitleg bij de knoppen
 }
 // POST /app/voor-jou/keuze {id, van, keuze: gedaan|later|vervallen|terug, tot?}. Onder het invoerslot (niet in APP_SLOT_VRIJ),
 // sessie glijdt, alleen de primaire kant, 60 per uur, auditregel zonder tekst. ↩️ alleen binnen een minuut na een keuze op deze pod.
@@ -14346,6 +14353,150 @@ async function appVoorJouWoord(req, res, a, d) {
   appStuur(res, 200, { ok: true, melding: melding, alles_gekozen: !!r.j.alles_gekozen, woorden: r.j.set ? appSwPubliek(r.j.set) : undefined, punt: punt });
 }
 
+// ── wv4195 (besluitenpagina nr 368 = 3C68, David Ja 25-11-2026 22:29): bundelkaart, per regel een eigen antwoord, één Verstuur ──
+// WAAROM: twee kaarten met elk tien genummerde vragen (19-11, 20-11) bleven liggen, want David moest ze in de machinekamer uittypen; een
+// gewone besluitkaart is binnen het uur dicht. Nu: herkomst.regels (werkvoorraad.py --voor-jou "regels" → mk_voor_jou_van_wv) = 2-12
+// vragen; per regel Ja/Nee of de echte opties of Anders, onderaan één Verstuur. Wat David laat staan, blijft open op de kaart.
+// HOE: per verzending één rij in vragen.json (soort voorjou-regels {kaart, kaart_id, regels: {regel-id: {keuze, tekst, toelichting,
+// gevoelig}}}), sleutel <kaartjob>:<FNV van kaart + antwoorden>; de druk loopt door appKnop (rij, kanaal, vingerafdruk, chat_log,
+// noodstop: dan staat het antwoord weer op null en de regels weer open). Een regel telt als beantwoord als een rij van deze kaart met
+// antwoord hem bevat. Socev krijgt één bericht met alle gegeven antwoorden; de kaart gaat pas dicht als alle regels beantwoord zijn.
+// Vingerafdruk als een gekozen regel gevoelig is en de keuze geen Nee/Anders is: één vingerafdruk per verzending, per regel staat in
+// vragen.json en het bericht wat ermee bevestigd is. Regel-id = FNV van nummer + vraag + opties (Codex-ontwerpreview MOET 1: twee
+// gelijke regels nooit hetzelfde id; het script en de databank weigeren dubbele vragen ook).
+function appVjRegels(p) {
+  const h = p && p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
+  if (!p || p.soort !== 'besluit' || !Array.isArray(h.regels) || h.regels.length < 2 || h.regels.length > 12) return null;
+  const uit = [];
+  for (let i = 0; i < h.regels.length; i++) {
+    const x = h.regels[i];
+    if (!x || typeof x !== 'object' || typeof x.vraag !== 'string' || !x.vraag.trim()) return null;
+    const vraag = appKort(appSleutelMasker(x.vraag.replace(/\s+/g, ' ').trim()), 300);
+    const op = Array.isArray(x.opties) && x.opties.length >= 2 && x.opties.length <= 4 && x.opties.every(function (o) { return typeof o === 'string' && o.trim(); })
+      ? x.opties.map(function (o) { return appKort(appSleutelMasker(o.replace(/\s+/g, ' ').trim()), 40); }) : null;
+    const keuzes = op ? op.map(function (t, j) { return { id: 'o' + j, tekst: t }; }) : [{ id: 'ja', tekst: 'Ja' }, { id: 'nee', tekst: 'Nee' }];
+    const gev = x.gevoelig === true ? 'gevoelig' : h.grondwet === true ? 'grondwet' : appGevoelig(vraag + (op ? '\n' + op.join('\n') : ''));
+    uit.push({ id: appVjFnv('regel:' + i + ':' + vraag + '\n' + (op || []).join('\n')), nr: i + 1, vraag: vraag, keuzes: keuzes, gevoelig: gev !== null });
+  }
+  return uit;
+}
+function appVjRegelsTekstId(rg, kanaal) {
+  return appVjFnv(JSON.stringify(rg.map(function (r) { return [r.id, r.vraag, r.keuzes.map(function (k) { return k.tekst; }), r.gevoelig]; })) + '\n' + kanaal);
+}
+// regel-id -> gegeven antwoord (alleen rijen van deze kaart met een antwoord dat telt; zonder = de verzending ligt niet (meer) vast)
+function appVjRegelsGegeven(p, v, behalve) {
+  const uit = {};
+  Object.keys(v || {}).forEach(function (k) {
+    const r = v[k];
+    if (k === behalve || !r || r.soort !== 'voorjou-regels' || r.kaart !== p.sleutel || r.kaart_id !== p.id || !r.regels || typeof r.regels !== 'object') return;
+    const a = appAntwoord(r);
+    if (!a) return;
+    Object.keys(r.regels).forEach(function (id) {
+      const x = r.regels[id];
+      if (x && typeof x === 'object' && !uit[id]) uit[id] = { keuze: String(x.keuze || ''), tekst: String(x.tekst || ''), toelichting: x.toelichting ? String(x.toelichting) : undefined, t: a.t, vingerafdruk: !!(x.gevoelig && a.vingerafdruk) || undefined };
+    });
+  });
+  return uit;
+}
+function appVjRegelsVorm(p, rg, kanaal) {
+  let v = {}, ok = true;
+  try { v = appVragen(); } catch (e) { ok = false; }
+  const g = ok ? appVjRegelsGegeven(p, v) : {};
+  const lijst = rg.map(function (r) { return { id: r.id, nr: r.nr, vraag: r.vraag, keuzes: r.keuzes, gevoelig: r.gevoelig, antwoord: g[r.id] || undefined }; });
+  const open = lijst.filter(function (x) { return !x.antwoord; }).length;
+  const dicht = p.status !== 'open' && p.status !== 'later';
+  return { lijst: lijst, open: open, tekst_id: appVjRegelsTekstId(rg, kanaal), kanaal: kanaal, kan: ok && open > 0 && !dicht,
+    waarom_niet: !ok ? 'de knoppen zijn nu niet te gebruiken; probeer het straks' : dicht && open > 0 ? 'deze kaart is al afgehandeld' : null };
+}
+// POST /app/voor-jou/regels {id, tekst_id, antwoorden: [{regel, keuze: ja|nee|o0..o3|anders, toelichting (alleen bij anders)}]}.
+// Onder het invoerslot, sessie glijdt, alleen de primaire kant, zelfde uurteller als Voor jou; daarna precies de weg van een kaartknop.
+async function appVoorJouRegels(req, res, reg, a, s, d) {
+  const id = d.id, tekstId = String(d.tekst_id || '');
+  if (!Number.isInteger(id) || id < 1 || id > 999999999 || !/^[a-f0-9]{8}$/.test(tekstId) || !Array.isArray(d.antwoorden) || d.antwoorden.length < 1 || d.antwoorden.length > 12) return appWeiger(res, 400, 'ongeldige keuze', 'vj-regels velden');
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later opnieuw', 'rol passief');
+  if (!appTeller('voorjou', APP_VJ_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_VJ_PER_UUR + ')', 'grens voor-jou');
+  let punten;
+  try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
+  const p = punten.find(function (x) { return x.id === id; });
+  if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'vj-regels ' + id + ' weg');
+  const rg = appVjRegels(p);
+  if (!rg) return appWeiger(res, 400, 'deze kaart heeft geen losse vragen', 'vj-regels geen regels');
+  if (!/^[a-z0-9][a-z0-9_-]{1,60}$/.test(String(p.sleutel || ''))) return appWeiger(res, 409, 'deze kaart heeft een onverwachte sleutel; antwoord in het gesprek', 'vj-regels sleutel');
+  const rv = await appVjRegisterVraag(p);
+  const kanaal = appVjKanaal(p, rv, null);
+  const vorm = function () { return appVjRegelsVorm(p, rg, kanaal); };
+  if (p.status !== 'open' && p.status !== 'later') return appStuur(res, 409, { ok: false, fout: 'deze kaart is al afgehandeld', regels: vorm() });
+  if (tekstId !== appVjRegelsTekstId(rg, kanaal)) { res._app.reden = 'vj-regels tekst gewijzigd #' + id; return appStuur(res, 409, { ok: false, fout: 'de vragen zijn intussen veranderd; lees ze opnieuw', tekst_gewijzigd: true, regels: vorm() }); }
+  let v;
+  try { v = appVragen(); } catch (e) { logError('app-vragen', e); return appWeiger(res, 503, 'vragenregister onleesbaar; vraag de machinekamer', 'vragen kapot'); }
+  const gegeven = appVjRegelsGegeven(p, v), per = {}, gekozen = [];
+  for (const x of d.antwoorden) {
+    const r = x && typeof x === 'object' ? rg.find(function (y) { return y.id === String(x.regel); }) : null;
+    if (!r || per[r.id]) return appWeiger(res, 400, 'onbekende of dubbele vraag; ververs de kaart', 'vj-regels regel');
+    const kz = String(x.keuze || ''), toel = String(x.toelichting == null ? '' : x.toelichting).replace(/\r\n?/g, '\n').trim();
+    const k = kz === 'anders' ? { id: 'anders', tekst: 'Anders' } : r.keuzes.find(function (y) { return y.id === kz; });
+    if (!k) return appWeiger(res, 400, 'ongeldige keuze bij vraag ' + r.nr, 'vj-regels keuze');
+    if (kz === 'anders' && !toel) return appWeiger(res, 400, 'typ bij vraag ' + r.nr + ' wat je bedoelt', 'vj-regels anders leeg');
+    if (kz !== 'anders' && toel) return appWeiger(res, 400, 'ongeldige keuze bij vraag ' + r.nr, 'vj-regels toelichting');
+    if (toel.length > 1000) return appWeiger(res, 413, 'je tekst bij vraag ' + r.nr + ' is te lang', 'vj-regels te lang');
+    if (gegeven[r.id]) { res._app.reden = 'vj-regels al beantwoord #' + id; return appStuur(res, 409, { ok: false, fout: 'vraag ' + r.nr + ' is al beantwoord', regels: vorm() }); }
+    per[r.id] = { keuze: kz, tekst: k.tekst, toelichting: toel || undefined, gevoelig: (r.gevoelig && kz !== 'nee' && kz !== 'anders') || undefined };
+    gekozen.push(r);
+  }
+  gekozen.sort(function (x, y) { return x.nr - y.nr; });
+  const gevoelig = gekozen.some(function (r) { return per[r.id].gevoelig === true; });
+  const jobId = appVjKaartSleutel(p).job;
+  const hash = appVjFnv('regels:' + p.sleutel + ':' + p.id + ':' + JSON.stringify(gekozen.map(function (r) { return [r.id, per[r.id].keuze, per[r.id].toelichting || '']; })));
+  const sl = jobId + ':' + hash;
+  try {
+    const oud = v[sl];
+    if (!oud || !appAntwoord(oud)) {
+      v[sl] = { kanaal: kanaal, t: new Date().toISOString(), antwoord: oud ? oud.antwoord : null, gevoelig: gevoelig, soort: 'voorjou-regels', kaart: p.sleutel, kaart_id: p.id, regels: per };
+      appVragenSchrijf(v);
+    }
+  } catch (e) { logError('app-vragen', e); return appWeiger(res, 503, 'vragenregister onleesbaar; vraag de machinekamer', 'vragen kapot'); }
+  const titel = appOntmasker(appVjOpmaakWeg(p.titel), 'kaart');
+  const h = p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
+  const wv = (Array.isArray(h.wv) ? h.wv : []).filter(function (x) { return Number.isInteger(Number(x)); }).slice(0, 6).map(function (x) { return 'wv' + Number(x); });
+  const na = Object.assign({}, gegeven, per), nogOpen = rg.filter(function (r) { return !na[r.id]; }), eerder = rg.filter(function (r) { return gegeven[r.id]; });
+  const antw = function (x) { return x.keuze === 'anders' ? 'ANDERS: ' + appOntmasker(x.toelichting) : x.keuze === 'ja' ? 'JA' : x.keuze === 'nee' ? 'NEE' : JSON.stringify(appOntmasker(x.tekst, 'kaart')); };
+  const lijst = gekozen.map(function (r) { return r.nr + '. ' + JSON.stringify(appOntmasker(r.vraag, 'kaart')) + ' → ' + antw(per[r.id]) + (per[r.id].gevoelig ? ' (gevoelig)' : ''); }).join('\n');
+  const regels = {
+    beurt: function (waarIn, tijd, gevJa, vid) {
+      return '[KNOP] David beantwoordde ' + gekozen.length + ' van de ' + rg.length + ' vragen op de Voor jou-kaart ' + JSON.stringify(titel) + ' (in één keer verstuurd):\n' + lijst +
+        (nogOpen.length ? '\nNog open (niet beantwoord, blijven op de kaart staan): ' + nogOpen.map(function (r) { return r.nr; }).join(', ') + '.' : '\nDaarmee zijn alle vragen op deze kaart beantwoord.') +
+        (eerder.length ? '\nEerder al beantwoord (kreeg je in een vorige verzending): ' + eerder.map(function (r) { return r.nr; }).join(', ') + '.' : '') +
+        '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevJa ? ', met verse vingerafdruk bevestigd voor de regels met (gevoelig)' : '') + ', vraag-id ' + vid + '. Elk antwoord geldt alleen voor die ene vraag, niets meer. ' +
+        (nogOpen.length ? 'De kaart blijft open voor de rest: handel de beantwoorde vragen af; laat een wachtende werkvoorraadrij geblokkeerd, tenzij deze antwoorden genoeg zijn om verder te kunnen (geef je hem vrij, dan sluit de kaart). ' : 'De kaart gaat vanzelf op beantwoord; wacht een werkvoorraadrij op deze antwoorden, geef hem vrij of zet hem bij. ') +
+        'Staan deze vragen in 00_Systeem/Open vragen aan David.md, zet die rij(en) dan op beantwoord met deze antwoorden, tijd en kanaal "app-knop".)';
+    },
+    log: function (gevJa, vid) { return 'Antwoorden (knoppen op een Voor jou-kaart in de app' + (gevJa ? ', met verse vingerafdruk' : '') + ') op ' + JSON.stringify(titel) + ':\n' + lijst + '\n(vraag-id ' + vid + ')'; },
+    knop: '✓ ' + gekozen.length + (gekozen.length === 1 ? ' antwoord' : ' antwoorden') + (gevoelig ? ' (vingerafdruk)' : '') + ' — op de kaart: ' + titel
+  };
+  const context = '(Voor jou-kaart ' + JSON.stringify(titel) + ' (punt ' + appOntmasker(p.sleutel, 'kaart') + ')' + (rv.vraag ? ', registerrij ' + JSON.stringify(appOntmasker(rv.vraag.regSleutel, 'kaart')) : '') + (wv.length ? ', werkvoorraad ' + wv.join(', ') : '') +
+    '. David zag precies deze vragen met deze knoppen. Een agendawijziging uit deze antwoorden blijft oranje bij de Poortwachter (✅ in de app onder het volledige voorstel).)';
+  const bericht = 'Voor jou-kaart ' + JSON.stringify(titel) + ':\n' + rg.map(function (r) { return r.nr + '. ' + appOntmasker(r.vraag, 'kaart') + (r.keuzes[0].id === 'o0' ? ' (' + r.keuzes.map(function (k) { return appOntmasker(k.tekst, 'kaart'); }).join(' / ') + ')' : ''); }).join('\n');
+  const bijStart = function () {
+    // de kaart gaat pas dicht als na deze verzending alle regels beantwoord zijn (appKnop zette deze rij net op gestart)
+    let w;
+    try { w = appVragen(); } catch (e) { logError('app-vragen', e); return; }
+    const g = appVjRegelsGegeven(p, w);
+    if (!rg.every(function (r) { return g[r.id]; })) { appStaat.vjCache = null; return; }
+    const nu = Date.now();
+    appSbRpc('mk_voor_jou_status', { p_sleutel: p.sleutel, p_van: p.status, p_naar: 'gedaan', p_door: 'david', p_later_tot: null,
+      p_bewijs: 'app ' + appVjDag(appYmd(nu)) + ' ' + appKlok(new Date(nu).toISOString()) + ': David beantwoordde alle ' + rg.length + ' vragen op de kaart (laatste verzending vraag-id ' + hash + ')' + (gevoelig ? ', met verse vingerafdruk' : '') })
+      .then(function (r) { appStaat.vjCache = null; if (!r || r.ok !== true) logError('app-voor-jou', new Error('kaart ' + p.sleutel + ' niet op beantwoord: ' + (r && r.nu))); })
+      .catch(function (e) { appStaat.vjCache = null; logError('app-voor-jou', e); });
+  };
+  const nogVrij = function (w) {
+    const g = appVjRegelsGegeven(p, w, sl), bezet = gekozen.filter(function (r) { return g[r.id]; });
+    return bezet.length ? 'vraag ' + bezet.map(function (r) { return r.nr; }).join(', ') + ' is intussen al beantwoord; ververs de kaart' : null;
+  };
+  await appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: 'ja' },
+    { tekst: titel, bericht: bericht, inhoudHash: appVjInhoudHash(p), context: context, gevoelig: gevoelig, regels: regels, nogVrij: nogVrij, bijStart: bijStart });
+  if (res._app) res._app.reden = 'vj-regels #' + id + ' ' + gekozen.length + '/' + rg.length + (gevoelig ? ' (gevoelig)' : '') + ' ' + (res._app.reden || '');
+}
+
 // POST /app/voor-jou/knop {id, keuze: ja|nee|anders, toelichting} (wv404). Alleen een besluit. De druk loopt door appKnop: zelfde
 // vingerafdruk (gevoelig = versturen/verwijderen/agenda/geld in vraag of voorstel), zelfde rij en zelfde idempotentie (één antwoord
 // per vraag-id in vragen.json). Vraag-id: de gekoppelde app-vraag (herkomst.vraag) als die nog leeft, anders het eigen id van de
@@ -14362,6 +14513,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   const p = punten.find(function (x) { return x.id === id; });
   if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'voor-jou ' + id + ' weg');
   if (p.soort !== 'besluit') return appWeiger(res, 400, 'alleen een besluit heeft Ja / Nee / Anders', 'voor-jou knop geen besluit');
+  if (appVjRegels(p)) return appWeiger(res, 400, 'deze kaart beantwoord je per vraag; open hem in Voor jou', 'voor-jou knop regels');   // wv4195
   const rv = await appVjRegisterVraag(p);
   const k = appVjKnopStand(p, rv, (await appVjAfgeleid(punten, Date.now(), true)).map);   // wv1018: klussen vers (Fable MOET 3)
   if (k.beantwoord) { res._app.reden = 'voor-jou knop al beantwoord #' + id; return appStuur(res, 409, { ok: false, fout: 'al beantwoord: ' + (k.beantwoord.keuze === 'ja' ? 'Ja' : k.beantwoord.keuze === 'nee' ? 'Nee' : 'Anders') + ' ' + appKlok(k.beantwoord.t), beantwoord: k.beantwoord }); }
@@ -17648,6 +17800,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/voor-jou/wachter') return appVoorJouWachter(req, res, a, d);   // wv4124
         if (route === 'GET /app/loopt-nog') return appLooptNog(req, res);   // wv4130 (3C157)
         if (route === 'POST /app/voor-jou/knop') return appVoorJouKnop(req, res, reg, a, s, d);   // wv404
+        if (route === 'POST /app/voor-jou/regels') return appVoorJouRegels(req, res, reg, a, s, d);   // wv4195 (3C68)
         if (route === 'POST /app/te-lezen') return appTeLezenZet(req, res, a, d);   // wv2245
         if (route === 'POST /app/anders') return appAnders(req, res, reg, a, s, d);   // wv1821
         if (route.indexOf('GET /app/vandaag/actie/') === 0) return appVandaagActieDetail(req, res, a, route.slice('GET /app/vandaag/actie/'.length));
