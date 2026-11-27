@@ -83,6 +83,14 @@ test('bewaren: dagtekening en maten uit het stuk in woz_eigen; deadline-regels i
     assert.strictEqual(rg.indexOf(reg[0].regel), rg.indexOf('| 2026-03-01 | X | iets | [jij] doen | 3 | b |') + 1);
     assert.ok(rg.indexOf(reg[1].regel) < rg.indexOf('## Afgehandeld'));
     assert.strictEqual(V.deadlineErbij(n1, reg), null, 'tweede keer niets');
+    // review Codex MOET 1: verbeterde dagtekening → dezelfde sleutel, andere datum: de regel in ## Actueel wordt vervangen (niet dubbel)
+    const later = V.wozDeadlineRegels(Object.assign({}, r.vergelijk, { dagtekening: '2026-03-02', bezwaar_tot: V.bezwaarTot('2026-03-02') }), '2026-02-27');
+    const n2 = V.deadlineErbij(n1, later);
+    assert.ok(n2 && n2.includes('| 2026-04-13 |') && !n2.includes('| 2026-04-09 |'), 'termijn bijgewerkt');
+    assert.strictEqual(n2.split(`(vastgoed-woz-bezwaar-2026-${x.id})`).length, 2, 'één regel');
+    // al afgehandeld (onder ## Afgehandeld): niet opnieuw in Actueel
+    const af = reg2.replace('|---|---|---|---|---|---|\n', '|---|---|---|---|---|---|\n').replace(/(## Afgehandeld\n\n\| Datum[^\n]*\n\|---[^\n]*\n)/, '$1' + reg[0].regel + '\n' + reg[1].regel + '\n');
+    assert.strictEqual(V.deadlineErbij(af, later), null, 'afgehandeld blijft afgehandeld');
     assert.strictEqual(V.deadlineErbij('# zonder tabel\n', reg), null);
     assert.deepStrictEqual(V.wozDeadlineRegels(r.vergelijk, '2026-04-10').map((y) => y.sleutel), ['vastgoed-woz-seintje-2027'], 'termijn voorbij: alleen het seintje');
   } finally { x.weg(); }

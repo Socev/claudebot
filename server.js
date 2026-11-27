@@ -30451,12 +30451,18 @@ function vastgoedWozDeadline(v) {
   } catch (e) { logError('vastgoed-woz-deadline', new Error('register niet bijgewerkt')); return { ok: false, reden: 'register niet bij te werken' }; }
 }
 // wv4229: concept-bezwaar als Gmail-concept (David verstuurt zelf; nooit versturen)
+const VASTGOED_BEZWAAR_BEZIG = new Set();
 async function appVastgoedWozBezwaar(res, d) {
   if (!appTeller('vastgoed-woz-bezwaar', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed-woz-bezwaar');
   if (!SERVER_ECHT) return appWeiger(res, 409, 'proefserver: geen concept in Gmail', 'vastgoed bezwaar proef');
   let c;
   try { c = vastgoedApp.wozBezwaar(d || {}); } catch (e) { return appWeiger(res, e && e.status || 400, e && e.status ? e.message : 'ongeldig', 'vastgoed bezwaar ' + (e && e.status || 400)); }
-  const r = await bandjesMailConcept(c);
+  // review Codex ZOU 1: één concept tegelijk per object en jaar (twee tikken vlak na elkaar maken geen twee concepten)
+  const slot = Number(d.id) + '-' + Number(d.jaar);
+  if (VASTGOED_BEZWAAR_BEZIG.has(slot)) return appWeiger(res, 409, 'het concept wordt al gemaakt', 'vastgoed bezwaar bezig');
+  VASTGOED_BEZWAAR_BEZIG.add(slot);
+  let r;
+  try { r = await bandjesMailConcept(c); } finally { VASTGOED_BEZWAAR_BEZIG.delete(slot); }
   if (!r.ok) {
     res._app.reden = 'vastgoed bezwaar mislukt';
     return appStuur(res, r.zeker ? 502 : 504, { ok: false, onzeker: !r.zeker, fout: r.zeker ? 'Het concept kon niet in Gmail: ' + r.reden + '.' : 'Geen bevestiging van het mailluik. Kijk in Gmail bij Concepten of het er toch staat voor je het opnieuw probeert.' });

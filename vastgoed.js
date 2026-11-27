@@ -502,13 +502,24 @@ function wozBezwaarTekst(v, o) {
   return r.join('\n');
 }
 // Zet de regels onderaan de tabel onder "## Actueel". Geeft de nieuwe tekst, of null als er niets bij hoeft of de tabel niet te vinden is.
+// Review Codex MOET 1: staat de sleutel al in ## Actueel met een andere datum (David verbeterde de dagtekening), dan wordt die regel
+// vervangen door de nieuwe; zelfde datum = laten staan (met eventuele GESEIND-merktekens). Onder ## Afgehandeld: niets doen.
 function deadlineErbij(tekst, regels) {
   const t = String(tekst || '');
-  const nieuw = regels.filter((r) => !t.includes(`(${r.sleutel})`));
-  if (!nieuw.length) return null;
   const rg = t.split('\n');
   const a = rg.findIndex((r) => /^## Actueel\s*$/.test(r));
   if (a < 0) return null;
+  let b = a + 1; while (b < rg.length && !/^## /.test(rg[b])) b++;   // ## Actueel loopt tot de volgende ## -kop
+  let veranderd = false;
+  const nieuw = [];
+  for (const r of regels) {
+    const k = `(${r.sleutel})`;
+    if (!t.includes(k)) { nieuw.push(r); continue; }
+    const i = rg.findIndex((x, j) => j > a && j < b && x.startsWith('|') && x.includes(k));
+    if (i < 0) continue;   // alleen onder Afgehandeld (of elders): niet opnieuw
+    if (rg[i].slice(0, 13) !== r.regel.slice(0, 13)) { rg[i] = r.regel; veranderd = true; }
+  }
+  if (!nieuw.length) return veranderd ? rg.join('\n') : null;
   let i = a + 1;
   while (i < rg.length && !rg[i].startsWith('| Datum |')) { if (/^## /.test(rg[i])) return null; i++; }
   if (i >= rg.length) return null;
