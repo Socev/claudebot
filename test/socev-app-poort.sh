@@ -521,7 +521,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   CODE_WERK: require('./ovis-code.js').maak({ basis: path.join(W, 'ovis-code'), geheugenToets: require('./mk-tekst.js').geheugenToets }),
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   maxAgents: () => 6,   // wv3607: sinds 19-11 (max-agents.json) staat maxAgents() buiten het app-blok; zonder nep gaf /app/agents 500
-  rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100, ROL_KANT: 'olares', SPAARSTAND: false, SPAAR_STIL_TEKST: '',   // wv3873: passief-poort; wv3909: spaarstand (kant olares = uit)
+  rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100, ROL_KANT: 'olares',   // wv3873: passief-poort
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());

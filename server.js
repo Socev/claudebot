@@ -462,37 +462,8 @@ const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || '5', 10) || 5;
 // zonder geldige "tot" of verlopen = MAX_AGENTS. Een expliciete env MAX_AGENTS (toetsen) gaat altijd voor. Gemeten 19-11: podgrens 16 GB /
 // 4 cores, anon 2,3 GB, agent ± 330 MB rss.
 const MAX_AGENTS_PAD = process.env.MAX_AGENTS_PAD || '/opt/data/max-agents.json';
-// ── wv3909 (fase 1h; bouwplan 'App blijft werken als Olares plat ligt' § 4.2 punt 6): SPAARSTAND op kant vps ──
-// WAAROM. Op de R230 (uitwijk) draait de volle pod naast de databankreserve en n8n op kleinere hardware zonder GPU. Dan geldt een vaste
-// set grenzen: hooguit 1 achtergrondagent tegelijk (ook Terra telt mee), geen browser naast een agent (de agent zelf krijgt geen
-// browser-tools, een beurt alleen als er geen agent loopt; /ophalen en de winkelbrowser wachten), en de GPU-stromen (Studio, Imagine:
-// ComfyUI/FlowStudio op Olares) geven 503 "ligt stil". WhatsApp, Signal en het Outlook/Teams-meelezen starten niet in de pod (n8n en
-// apps op Olares; gemeten 25-11): daar is hier niets uit te zetten, ze staan alleen in de lijst voor /health en de app.
-// Niet op de stand-in (SOCEV_ALTIJD_PASSIEF=1): die doet al niets. /health.uitwijk.spaarstand = {aan, grenzen}.
-const SPAARSTAND = String(process.env.SOCEV_KANT || 'olares') === 'vps' && process.env.SOCEV_ALTIJD_PASSIEF !== '1';
-const SPAAR_GRENZEN = { agents: 1, terra_telt_mee: true, browser: 'niet naast een agent', gpu: ['Studio', 'Imagine'],
-  stil_buiten_pod: ['WhatsApp', 'Signal', 'meelezen Outlook/Teams'] };
-const SPAAR_STIL_TEKST = 'Dit ligt stil zolang Socev op de andere kant draait; het komt terug als Socev weer op Olares draait.';
-function spaarInfo() { return { aan: SPAARSTAND, grenzen: SPAARSTAND ? SPAAR_GRENZEN : null }; }
-// Browser dicht: in spaarstand voor elke agent, en voor al het andere zolang er een agent loopt
-function spaarBrowserDicht(isAgent) { return SPAARSTAND && (!!isAgent || agentInfo().lopend > 0); }
-// Codex r1 MOET 2: een beurt die mét browser-tools startte (geen agent liep), houdt een agent tegen tot hij klaar is (anders kon hij
-// later alsnog een browser openen naast die agent). Token → starttijd; ouder dan 3 u telt niet (vangnet als finish() nooit kwam).
-const spaarBrowserBeurten = new Map();
-// Codex r2 MOET 2: ook /ophalen en de winkelbrowser reserveren zo'n plek zolang ze lopen (in spaarstand)
-async function spaarBrowserMet(fn) {
-  const t = SPAARSTAND ? {} : null;
-  if (t) spaarBrowserBeurten.set(t, Date.now());
-  try { return await fn(); } finally { if (t) spaarBrowserBeurten.delete(t); }
-}
-function spaarBrowserBeurtLopend() {
-  const t = Date.now();
-  for (const [k, v] of spaarBrowserBeurten) { if (t - v > 3 * 3600e3) spaarBrowserBeurten.delete(k); }
-  return spaarBrowserBeurten.size;
-}
 let maxAgentsCache = { mtime: -1, max: null, tot: 0 };
 function maxAgents() {
-  if (SPAARSTAND) return SPAAR_GRENZEN.agents;   // wv3909: gaat vóór env en max-agents.json
   if (process.env.MAX_AGENTS) return MAX_AGENTS;
   let st; try { st = fs.statSync(MAX_AGENTS_PAD); } catch (e) { return MAX_AGENTS; }
   if (st.mtimeMs !== maxAgentsCache.mtime) {
@@ -1705,11 +1676,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     if (sessionId) args.push('--resume', sessionId);
     else args.push('--session-id', eigenId);
     // Beperkte agent (spraakkastje, 4-10-2026): verboden tools gelden ook onder bypassPermissions (gemeten 4-10).
-    // wv3909 (spaarstand, kant vps): geen browser-tools voor een agent, en voor een beurt niet zolang er een agent loopt
-    const verboden = [opts && opts.disallowedTools, spaarBrowserDicht(!!(opts && opts.env && opts.env[EIND_MARKER])) ? 'mcp__playwright' : ''].filter(Boolean).join(' ');
-    if (verboden) args.push('--disallowedTools', verboden);
-    const spaarToken = SPAARSTAND && verboden.split(' ').indexOf('mcp__playwright') < 0 ? {} : null;   // beurt mét browser in spaarstand
-    if (spaarToken) spaarBrowserBeurten.set(spaarToken, Date.now());
+    if (opts && opts.disallowedTools) args.push('--disallowedTools', opts.disallowedTools);
     if (opts && opts.advisor) args.push('--advisor', opts.advisor);   // wv479: alleen achtergrondagents, waarde al getoetst (ontleedAdviseur)
     args.push.apply(args, mkTekstArgs(opts));   // wv1001: welke instructiebestanden en welk geheugen (opts.tekst mk | smal)
     args.push('--', prompt);
@@ -1833,7 +1800,6 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     function finish(r) {
       if (resolved) return;
       resolved = true;
-      if (spaarToken) spaarBrowserBeurten.delete(spaarToken);   // wv3909
       clearInterval(watchdog);
       if (stappenStop) stappenStop();
       progress.deel = '';   // wv3824: na het einde telt alleen het echte antwoord (of de fout)
@@ -5219,8 +5185,7 @@ function handleRequest(req, res) {
       };
       if (typeof ophalen === 'undefined' || !ophalen) return stuur(404, { ok: false, fout: 'ophalen zit niet in deze versie van de pod' });
       if (typeof d.url !== 'string' || d.url.length > 2000) return stuur(400, { ok: false, fout: 'url ontbreekt of is te lang' });
-      if (spaarBrowserDicht(false)) return stuur(200, { ok: false, spaarstand: true, fout: 'spaarstand: geen browser terwijl er een achtergrondagent loopt; probeer het later' });   // wv3909
-      spaarBrowserMet(function () { return ophalen.haal(d.url, { pdfs: d.pdfs, geenCache: d.geen_cache === true }); }).then(function (r) { stuur(200, r); })
+      ophalen.haal(d.url, { pdfs: d.pdfs, geenCache: d.geen_cache === true }).then(function (r) { stuur(200, r); })
         .catch(function (e) { logError('ophalen', e); stuur(500, { ok: false, fout: 'ophalen faalde in de pod' }); });
     });
   }
@@ -5368,16 +5333,9 @@ function handleRequest(req, res) {
           res.writeHead(429, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ ok: false, error: 'terra-loopt', uitleg: 'er loopt al een Terra-bundel' }));
         }
-        if (SPAARSTAND && (agentInfo().lopend >= maxAgents() || spaarBrowserBeurtLopend())) {   // wv3909: in spaarstand telt Terra mee
-          res.writeHead(429, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ ok: false, error: 'max-agents', spaarstand: true, uitleg: 'Spaarstand (Socev draait op de andere kant): er loopt al een achtergrondagent (maximum ' + maxAgents() + ').' }));
-        }
-      } else if (SPAARSTAND && spaarBrowserBeurtLopend()) {   // wv3909 (Codex r1 MOET 2): geen agent naast een beurt met browser
+      } else if (agentInfo().lopend - terraLopend() >= maxAgents()) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ ok: false, error: 'max-agents', spaarstand: true, uitleg: 'Spaarstand (Socev draait op de andere kant): er loopt een beurt met browser; de agent start daarna.' }));
-      } else if (agentInfo().lopend - (SPAARSTAND ? 0 : terraLopend()) >= maxAgents()) {
-        res.writeHead(429, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ ok: false, error: 'max-agents', spaarstand: SPAARSTAND || undefined, uitleg: 'Er lopen al ' + (agentInfo().lopend - (SPAARSTAND ? 0 : terraLopend())) + ' achtergrondagents (maximum ' + maxAgents() + (SPAARSTAND ? ', spaarstand' : '') + '); wacht tot er één klaar is.' }));
+        return res.end(JSON.stringify({ ok: false, error: 'max-agents', uitleg: 'Er lopen al ' + (agentInfo().lopend - terraLopend()) + ' achtergrondagents (maximum ' + maxAgents() + '); wacht tot er één klaar is.' }));
       }
       const wsFout = workspaceFout(d.workspace);
       if (wsFout) return weigerWorkspace(res, wsFout, '/agent');
@@ -18540,10 +18498,6 @@ function handleApp(req, res) {
       // wv3873 (Codex MOET 2): de rol kan tijdens het aanleveren van een trage body gewisseld zijn; vlak vóór de route nog eens (synchroon,
       // de lease in rolPrimair() telt mee). Ruwe uploads lezen de stroom in hun route: ook die starten pas na deze controle.
       if (!rolPrimair()) { req.resume(); return appPassiefAntwoord(req, res, p); }
-      // wv3909 (spaarstand, kant vps): de GPU-stromen (Studio, Imagine) maken niets; lezen (GET) mag
-      if (SPAARSTAND && req.method === 'POST' && (p.indexOf('/app/studio/') === 0 || p.indexOf('/app/imagine/') === 0)) {
-        req.resume(); return appStuur(res, 503, { ok: false, spaarstand: true, fout: SPAAR_STIL_TEKST });
-      }
       let reg;
       try { reg = appRegister(); } catch (e) { logError('app-register', e); return appWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'register kapot'); }
       const route = req.method + ' ' + p;
@@ -32889,8 +32843,8 @@ const shopper = (function () {
   };
   const lezerScriptAlleen = lezer;
   if (lezer && winkelBrowser && winkelBrowser.info().aan) lezer = async function (url) {
-    if (!browserMag(url) || spaarBrowserDicht(false)) return lezerScriptAlleen(url);   // wv3909: spaarstand, geen browser naast een agent
-    const r = await spaarBrowserMet(function () { return winkelBrowser.lees(url); });   // wv3909: houdt in spaarstand een agent tegen
+    if (!browserMag(url)) return lezerScriptAlleen(url);
+    const r = await winkelBrowser.lees(url);
     // geen browserwinkel (bv. Tweakers, lezen: browser maar een vergelijker): het leesscript geeft zijn eigen uitleg
     return r && r.blokkade && /^browserroute alleen voor /.test(r.blokkade) ? lezerScriptAlleen(url) : r;
   };
@@ -35332,9 +35286,6 @@ function rolInfo() {
     // Kant zoals fetch-secrets.sh (image) hem toepaste; null = image van vóór stap 6d (dan geen n8n-override en het
     // Olares-tunneltoken nog in de omgeving). naar-vps eist hier 'vps' vóór de eerste beurt (review 6d #5).
     fetch_secrets_kant: process.env.FETCH_SECRETS_KANT || null,
-    warm: warmeStaat ? warmeStaat.stand() : (warmUitBijStart || null),   // wv3908: warme staat naar/van de R230 (leeftijd per soort); wv4086: {uit:true} als hij uitgezet is
-    nood: noodSpiegel ? noodSpiegel.stand() : { ingericht: false },   // wv3909: spiegel naar socev-nood (hartslag, passkeys, push, bundelhash)
-    spaarstand: spaarInfo(),   // wv3909: grenzen op kant vps
     n8n_3b: ROL_KANT === 'olares' ? { laatste_iso: u3b.laatste_iso, laatste_uitkomst: u3b.laatste_uitkomst, aanroepen: u3b.aanroepen,
       bezig: u3b.bezig, box_wacht: fs.existsSync(U3B_WACHT) } : null };
 }
@@ -35412,87 +35363,6 @@ function dbTerugRonde() {
     dbTerug.fout = j.fout ? String(j.fout).slice(0, 160) : (err ? String(err.message || err).slice(0, 120) : null);
     if (dbTerug.uitkomst !== 'geen' || vorig !== 'geen') schrijfLog(nu() + ' dbterug ' + velden({ uitkomst: dbTerug.uitkomst, id: dbTerug.id, fout: dbTerug.fout }));
   });
-}
-
-// wv3908 (fase 1c "app blijft werken", bouwplan § 4.2): warme staat naar de R230 (logica en waarom in warme-staat.js). Alleen de actieve kant
-// (rolPrimair met lease): op Olares versleuteld (age) via ssh r230 → uitwijk-warm ontvang; op kant vps onversleuteld in /opt/data/uitwijk-warm/uit
-// voor de terugweg, die de Olares-pod (passief, stand vps) ophaalt. Plus: de stand-in op de R230 draait dezelfde code en hetzelfde image.
-// app-data peilt elke 5 s (hooguit eens per 15 s een kopie), de rest elke 5 min. Nooit in de toetsen (SERVER_ECHT) en nooit op de stand-in.
-// wv4086 (David 26-11-2026 Ja, R230-overstap gestopt): uit-schakelaar. Bestaat het bestand hieronder, dan laadt de warme staat niet: geen duw naar
-// de R230, geen stand-in bijhouden, geen hartslag; /health.uitwijk.warm = {uit: true, sinds}. Weer aan: bestand weg, server.js herstarten (uitrol)
-// en machinekamer.hartslag warme_staat weer actief. Gelezen bij de start; een function (geen const) i.v.m. rolInfo() bij een vroege aanroep.
-function warmUitBestand() { return process.env.WARM_UIT_BESTAND || '/opt/data/.socev-geheim/warme-staat-uit'; }
-function warmUitStand() {   // alleen ENOENT = schakelaar afwezig; elke andere fout (EACCES, ENOTDIR, I/O) = uit (dicht bij twijfel, Codex wv4086 MOET 1)
-  try { return { uit: true, sinds: fs.statSync(warmUitBestand()).mtime.toISOString() }; }
-  catch (e) { return e && e.code === 'ENOENT' ? null : { uit: true, sinds: null, fout: String((e && e.code) || e).slice(0, 40) }; }
-}
-var warmUitBijStart = null;   // wv4086: uit-stand zoals gelezen bij de start (var: rolInfo() kan vroeg lezen)
-var warmeStaat = (function () {   // var (geen const): rolInfo() hierboven leest hem; const gaf een TDZ-fout bij een vroege aanroep
-  const p = path.join(__dirname, 'warme-staat.js');
-  if (!fs.existsSync(p) || ROL_ALTIJD_PASSIEF) return null;
-  const wu = warmUitBijStart = warmUitStand();   // bij de start gelezen; /health toont dat (herlezen zou na weghalen 'null' zeggen terwijl hij uit blijft)
-  if (wu) { schrijfLog(nu() + ' warm ' + velden({ melding: 'uitgezet (wv4086): ' + warmUitBestand(), fout: wu.fout })); return null; }
-  try {
-    return require(p).maak({
-      kant: function () { return ROL_KANT; }, primair: function () { return rolPrimair(); },
-      standVps: function () { return rol.actieve_kant === 'vps' && !!rol.gelezen && Date.now() - rol.gelezen < 30000; },
-      releaseDir: function () { return __dirname; },
-      releaseSha: function () { const b = path.basename(__dirname); return /^[0-9a-f]{7,40}$/.test(b) ? b : null; },
-      log: function (t) { schrijfLog(nu() + ' warm ' + velden({ melding: String(t).slice(0, 160) })); },
-      hartslag: function (h) { return appSbRpc('mk_hartslag_stempel', { p_component: 'warme_staat', p_gemeten_rijen: h.n, p_bevindingen: h.bevindingen }); },
-      // wv4005 (fase 1d): gegevenstabellen van n8n elk uur mee (n8n-API van deze pod; time-out ruimer dan appN8n: rijen in pagina's van 250)
-      n8nApi: async function (pad) {
-        const b = appN8nBasis(), k = process.env.N8N_API_KEY;
-        if (!b || !k) throw new Error('n8n-API niet ingesteld');
-        const r = await fetch(b + '/api/v1' + pad, { headers: { 'X-N8N-API-KEY': k, accept: 'application/json' }, signal: AbortSignal.timeout(60000) });
-        if (!r.ok) throw new Error('n8n http ' + r.status);
-        return r.json();
-      } });
-  } catch (e) { logError('warme-staat', e); return null; }
-})();
-if (warmeStaat && SERVER_ECHT === true) {
-  setInterval(function () { warmeStaat.appTik().catch(function (e) { logError('warm-app', e); }); }, 5000).unref();
-  const warmRonde = function () { warmeStaat.ronde().then(function (r) { if (r && (r.uitkomst === 'deels' || r.uitkomst === 'fout')) schrijfLog(nu() + ' warm ' + velden({ uitkomst: r.uitkomst, fout: String(r.fout || '').slice(0, 160) })); })
-    .catch(function (e) { logError('warm-ronde', e); }); };
-  setTimeout(warmRonde, 2 * 60 * 1000).unref(); setInterval(warmRonde, 5 * 60 * 1000).unref();
-}
-
-// wv3909 (fase 1f/1g, bouwplan § 4.1 punt 4/6, § 4.3; contract mk-scripts/wv3909/contract.md): spiegel naar de Worker socev-nood (logica en
-// waarom in nood-spiegel.js). Elke 60 s een hartslag; als primair de publieke passkeys, push-adressen en de bundelhash bij een wijziging
-// (peiling elke 10 s) of elke 6 u; een droge geplande wissel ('proef') krijgt op Olares een verse warme staat en de handtekening.
-// Zonder /opt/data/.socev-geheim/nood-pod.key geen enkele aanroep. Niet op de stand-in en nooit in de toetsen (SERVER_ECHT).
-function noodLsn() {   // volgnummer van de eigen databank (zelfde route als dbReserveVraag); null als het niet lukt
-  return new Promise(function (klaar) {
-    try {
-      const k = require('child_process').execFile('/app/sb-sql', [], { timeout: 8000, maxBuffer: 16 * 1024 }, function (err, uit) {
-        if (err) return klaar(null);
-        let r = null; try { r = JSON.parse(uit)[0]; } catch (e) { r = null; }
-        klaar(r && typeof r.lsn === 'string' && /^[0-9A-F]{1,8}\/[0-9A-F]{1,8}$/.test(r.lsn) ? r.lsn : null);
-      });
-      k.stdin.on('error', function () {});
-      k.stdin.end('select pg_current_wal_lsn()::text as lsn');
-    } catch (e) { klaar(null); }
-  });
-}
-var noodSpiegel = (function () {   // var: rolInfo() hierboven leest hem (zie warmeStaat)
-  const p = path.join(__dirname, 'nood-spiegel.js');
-  if (!fs.existsSync(p)) return null;
-  try {
-    const u = String(process.env.NOOD_URL || '').trim();
-    return require(p).maak({ standIn: ROL_ALTIJD_PASSIEF, url: u || undefined,
-      kant: function () { return ROL_KANT; }, primair: function () { return rolPrimair(); },
-      versie: function () { return process.env.RELEASE_SHA || process.env.IMAGE_SHA || 'onbekend'; },   // zelfde als /health.versie
-      register: appRegister, push: appPushLees, pushOk: appPushEndpointOk,
-      warmVers: warmeStaat ? function (ms) { return warmeStaat.verseRonde(ms); } : null,
-      staatSha: warmeStaat ? function () { return warmeStaat.appDataDuw(); } : null,
-      lsn: noodLsn,
-      log: function (t) { schrijfLog(nu() + ' nood ' + velden({ melding: String(t).slice(0, 160) })); } });
-  } catch (e) { logError('nood-spiegel', e); return null; }
-})();
-if (noodSpiegel && SERVER_ECHT === true && !ROL_ALTIJD_PASSIEF) {
-  const noodTik = function () { noodSpiegel.tik().catch(function (e) { logError('nood-tik', e); }); };
-  setTimeout(noodTik, 30 * 1000).unref(); setInterval(noodTik, 60 * 1000).unref();
-  setInterval(function () { Promise.resolve(noodSpiegel.peil()).catch(function (e) { logError('nood-peil', e); }); }, 10 * 1000).unref();
 }
 
 // Direct bij de processtart: het bestand van het vorige proces telt niet meer (review stap 3, #7).

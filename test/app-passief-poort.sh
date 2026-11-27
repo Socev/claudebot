@@ -7,10 +7,6 @@
 #   A  poortgeheim fout of geen Access-bewijs → 401 vóór de passief-poort (die verraadt dus niets aan een onbekende).
 #   W  stand olares (primair): /app/status zonder passief, POST /app/knop 401 'geen …' (gewone route), X-Socev-Kant olares.
 #   L  lease (rolPrimair uit de broncode geknipt): lezing 181 s oud → passief + reden 'lease verlopen'; 10 s oud → primair.
-#   S  stand-in (kant vps, SOCEV_ALTIJD_PASSIEF=1): passief; geen spaarstand, nood-spiegel stand_in (wv3909).
-#   V  volle pod kant vps, primair (wv3909, fase 1h): spaarstand aan, maxAgents 1 (ook met MAX_AGENTS=3), POST Studio/Imagine 503.
-#   B  spaarstand-browser (geknipt): agent geen mcp__playwright, beurt/ophalen/winkelbrowser niet naast een agent.
-#   T  geen 'gebruik Telegram' meer in de broncode (Telegram is geen noodingang meer, wv3909).
 # Kruisproef: KRUIS=1 bash test/app-passief-poort.sh draait P en L tegen de server.js van origin/main (verwacht: rood).
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -37,27 +33,6 @@ const toets = (n, ok, x) => { if (ok) goed++; else fout++; console.log((ok ? 'GR
   toets('L3 lezing 10 s oud: primair', rolPrimair() === true);
   rol.gelezen = 0;
   toets('L4 nooit gelezen maar rol primair: niet primair', rolPrimair() === false);
-})();
-
-// ── B: spaarstand-browser (wv3909; geknipt): dicht voor een agent en voor alles zolang er een agent loopt, alleen op kant vps ──
-(function () {
-  const i = BRON.indexOf('function spaarBrowserDicht('), j = BRON.indexOf('\n', i);
-  if (i < 0) return toets('B0 spaarBrowserDicht bestaat', false);
-  const maak = (spaar, lopend) => new Function('SPAARSTAND', 'agentInfo', BRON.slice(i, j) + '\n;return spaarBrowserDicht;')(spaar, () => ({ lopend }));
-  toets('B1 kant olares: browser nooit dicht', maak(false, 3)(true) === false && maak(false, 3)(false) === false);
-  toets('B2 spaarstand: agent zelf geen browser, beurt wel zonder agent, niet naast een agent', maak(true, 0)(true) === true && maak(true, 0)(false) === false && maak(true, 1)(false) === true);
-  toets('B3 aangesloten: --disallowedTools mcp__playwright, /ophalen en winkelbrowser', /spaarBrowserDicht\(!!\(opts && opts\.env && opts\.env\[EIND_MARKER\]\)\) \? 'mcp__playwright'/.test(BRON)
-    && /if \(spaarBrowserDicht\(false\)\) return stuur\(200/.test(BRON) && /!browserMag\(url\) \|\| spaarBrowserDicht\(false\)/.test(BRON));
-  toets('B4 beurt mét browser houdt een agent tegen tot hij klaar is (Codex r1 MOET 2)', /spaarBrowserBeurten\.set\(spaarToken/.test(BRON) && /if \(spaarToken\) spaarBrowserBeurten\.delete\(spaarToken\)/.test(BRON)
-    && /\} else if \(SPAARSTAND && spaarBrowserBeurtLopend\(\)\) \{/.test(BRON) && /agentInfo\(\)\.lopend >= maxAgents\(\) \|\| spaarBrowserBeurtLopend\(\)/.test(BRON));
-  toets('B5 /ophalen en winkelbrowser reserveren een browserplek zolang ze lopen (Codex r2 MOET 2)', /spaarBrowserMet\(function \(\) \{ return ophalen\.haal\(/.test(BRON) && /spaarBrowserMet\(function \(\) \{ return winkelBrowser\.lees\(url\)/.test(BRON));
-  (async function () {   // spaarBrowserMet geknipt: plek bezet tijdens fn, weer vrij na een fout
-    const i = BRON.indexOf('async function spaarBrowserMet('), j = BRON.indexOf('\nfunction spaarBrowserBeurtLopend(');
-    const kaart = new Map(), f = new Function('SPAARSTAND', 'spaarBrowserBeurten', BRON.slice(i, j) + '\n;return spaarBrowserMet;')(true, kaart);
-    let tijdens = -1; await f(async () => { tijdens = kaart.size; });
-    let fout = false; try { await f(async () => { throw new Error('x'); }); } catch (e) { fout = true; }
-    toets('B6 spaarBrowserMet: bezet tijdens het werk, vrij na afloop en na een fout', tijdens === 1 && kaart.size === 0 && fout);
-  })();
 })();
 
 // ── routes uit handleApp ──
@@ -98,7 +73,7 @@ nep.listen(0, '127.0.0.1', async () => {
     APP_UIT_BESTAND: D + '/au', TEL_UIT_BESTAND: D + '/tu', JOBOUT_DIR: D + '/jobout', API_LOG: D + '/api.log', SYNC_LOG: D + '/sync.log', RUNTIME_FILE: D + '/runtime.json', CODEX_HOME: D + '/codex',
     SLEUTELPORTAAL_SLEUTEL: D + '/geen.key', UITROL_MARKER: D + '/uw', ROL_BESTAND: D + '/rol', AGY_MCP_TMP: D + '/agy.json', TUNNEL_UIT_POD: '1', SUPABASE_URL: 'http://127.0.0.1:9',
     SUPABASE_SERVICE_ROLE: 'proef', SOCEV_KANT: 'olares', OFFSITE_INTERVAL_MIN: '0', AUTO_UIT_POD: '1', LESSEN_INJECTIE: '0', API_SECRET: 'proef', MAX_AGENTS: '1', PORT: String(poort),
-    SCHEIDS_URL: TEAM, SCHEIDS_LEES_SLEUTEL: 'x', APP_POORT_SECRET: 'poort-proef-' + 'p'.repeat(32), WARM_UIT_BESTAND: D + '/warm-uit-bestaat-niet' });
+    SCHEIDS_URL: TEAM, SCHEIDS_LEES_SLEUTEL: 'x', APP_POORT_SECRET: 'poort-proef-' + 'p'.repeat(32) });
   ['CLAUDE_CODE_OAUTH_TOKEN', 'SOCEV_AGENT_RUN', 'RELEASE_DIR', 'SUPABASE_MCP_TOKEN', 'SB_SQL_LOKAAL'].forEach((k) => delete env[k]);
   const uit = fs.openSync(D + '/stdout.log', 'a');
   const p = spawn(process.execPath, [SRV], { env, detached: true, stdio: ['ignore', uit, uit], cwd: path.dirname(SRV) });
@@ -137,14 +112,11 @@ nep.listen(0, '127.0.0.1', async () => {
     const h2 = await wachtRol('primair');
     toets('W0 stand olares: primair', !!h2, h2 && JSON.stringify(h2.uitwijk));
     if (h2) {
-      toets('U0 zonder uit-bestand: warme staat geladen (uitwijk.warm zonder uit)', h2.uitwijk.warm && typeof h2.uitwijk.warm === 'object' && !h2.uitwijk.warm.uit, JSON.stringify(h2.uitwijk.warm));
       toets('W0b /health uitwijk.lease_s tussen 1 en 180', h2.uitwijk.lease_s > 0 && h2.uitwijk.lease_s <= 180, h2.uitwijk.lease_s);
       const w1 = await vraag('GET', '/app/status');
       toets('W1 primair: /app/status gewoon (geen passief), X-Socev-Kant olares', w1.s === 200 && w1.j && w1.j.passief === undefined && 'koppelen_open' in w1.j && w1.kant === 'olares' && !w1.rol, w1.t);
       const w2 = await vraag('POST', '/app/knop');
       toets('W2 primair: POST /app/knop naar de gewone route (401 zonder sessie)', w2.s === 401 && !w2.rol, w2.s + ' ' + w2.t);
-      const w3 = await vraag('POST', '/app/studio/maak');
-      toets('W3 kant olares: geen spaarstand (/health en Studio niet 503 spaarstand)', h2.uitwijk.spaarstand && h2.uitwijk.spaarstand.aan === false && !(w3.j && w3.j.spaarstand), JSON.stringify(h2.uitwijk.spaarstand) + ' ' + w3.s);
     }
     // S — stand-in op de R230 (SOCEV_ALTIJD_PASSIEF=1, kant vps): ook bij stand vps passief
     try { process.kill(-p.pid, 'SIGTERM'); } catch (e) {}
@@ -157,44 +129,7 @@ nep.listen(0, '127.0.0.1', async () => {
     toets('S1 stand-in (kant vps, altijd passief) bij stand vps: passief, reden stand-in', hs && hs.uitwijk.rol === 'passief' && /altijd passief/.test(hs.uitwijk.reden) && hs.uitwijk.actieve_kant === 'vps', hs && JSON.stringify(hs.uitwijk));
     const s2 = await vraag('GET', '/app/status'), s3 = await vraag('POST', '/app/koppel/code');
     toets('S2 stand-in: /app/status passief met X-Socev-Kant vps, koppelen 409', s2.s === 200 && s2.j.passief === true && s2.kant === 'vps' && s3.s === 409, s2.t + ' ' + s3.s);
-    // wv3909: spaarstand en nood-spiegel zichtbaar in /health; de stand-in heeft geen spaarstand en geen nood-spiegel (doet niets)
-    toets('S3 stand-in: spaarstand uit, nood niet ingericht', hs && hs.uitwijk.spaarstand && hs.uitwijk.spaarstand.aan === false && hs.uitwijk.nood && hs.uitwijk.nood.ingericht === false && hs.uitwijk.nood.stand_in === true, hs && JSON.stringify([hs.uitwijk.spaarstand, hs.uitwijk.nood]));
-    // V — volle pod op de R230 (kant vps, niet de stand-in), stand vps = primair: SPAARSTAND (wv3909, fase 1h)
-    try { process.kill(-p2.pid, 'SIGTERM'); } catch (e) {}
-    await new Promise((x) => setTimeout(x, 800));
-    const p3 = spawn(process.execPath, [SRV], { env: Object.assign({}, env, { SOCEV_KANT: 'vps', MAX_AGENTS: '3' }), detached: true, stdio: ['ignore', uit, uit], cwd: path.dirname(SRV) });
-    huidig = p3.pid;
-    const hv = await wachtRol('primair');
-    toets('V1 kant vps primair: /health.uitwijk.spaarstand aan, 1 agent', !!hv && hv.uitwijk.spaarstand && hv.uitwijk.spaarstand.aan === true && hv.uitwijk.spaarstand.grenzen.agents === 1, hv && JSON.stringify(hv.uitwijk.spaarstand));
-    let ag = null; try { ag = await (await fetch(B + '/agents', { signal: AbortSignal.timeout(3000) })).json(); } catch (e) {}
-    toets('V2 spaarstand: maxAgents 1, ook met MAX_AGENTS=3', ag && ag.max_agents === 1, ag && ag.max_agents);
-    const v3 = await vraag('POST', '/app/studio/maak'), v4 = await vraag('POST', '/app/imagine/nieuw'), v5 = await vraag('GET', '/app/studio/flows');
-    toets('V3 spaarstand: POST Studio/Imagine 503 "ligt stil" (X-Socev-Kant vps), GET Studio niet', v3.s === 503 && v3.j && v3.j.spaarstand === true && v3.kant === 'vps' && v4.s === 503 && v4.j.spaarstand === true && v5.s !== 503 && !(v5.j && v5.j.spaarstand), v3.s + ' ' + v4.s + ' ' + v5.s + ' ' + v5.t);
-    toets('V4 nood-spiegel zonder sleutel: niet ingericht, geen aanroep', hv && hv.uitwijk.nood && hv.uitwijk.nood.ingericht === false && !hv.uitwijk.nood.aanroepen, hv && JSON.stringify(hv.uitwijk.nood));
-    // U — wv4086: uit-schakelaar warme staat (bestand bestaat → niet geladen, /health uitwijk.warm {uit:true, sinds}, logregel)
-    try { process.kill(-p3.pid, 'SIGTERM'); } catch (e) {}
-    await new Promise((x) => setTimeout(x, 800));
-    stand.kant = 'olares';
-    fs.writeFileSync(D + '/warm-uit', '');
-    const p4 = spawn(process.execPath, [SRV], { env: Object.assign({}, env, { WARM_UIT_BESTAND: D + '/warm-uit' }), detached: true, stdio: ['ignore', uit, uit], cwd: path.dirname(SRV) });
-    huidig = p4.pid;
-    const hu = await wachtRol('primair');
-    toets('U1 uit-bestand: /health uitwijk.warm = {uit:true, sinds}', hu && hu.uitwijk.warm && hu.uitwijk.warm.uit === true && /^\d{4}-\d\d-\d\dT/.test(hu.uitwijk.warm.sinds), hu && JSON.stringify(hu.uitwijk.warm));
-    fs.unlinkSync(D + '/warm-uit');
-    const hu2 = await health();
-    toets('U1b uit-bestand weg zonder herstart: /health blijft uit tonen (bij de start gelezen)', hu2 && hu2.uitwijk.warm && hu2.uitwijk.warm.uit === true, hu2 && JSON.stringify(hu2.uitwijk.warm));
-    fs.writeFileSync(D + '/warm-uit', '');   // U3 hieronder: warm-uit moet een bestand zijn
-    let al = ''; try { al = fs.readFileSync(D + '/api.log', 'utf8'); } catch (e) {}
-    toets('U2 uit-bestand: logregel "warm … uitgezet (wv4086)"', / warm melding=uitgezet_\(wv4086\)/.test(al), al.slice(-400));
-    // U3 — schakelaar onleesbaar (ENOTDIR: ouder is een bestand) = dicht: niet laden
-    try { process.kill(-p4.pid, 'SIGTERM'); } catch (e) {}
-    await new Promise((x) => setTimeout(x, 800));
-    const p5 = spawn(process.execPath, [SRV], { env: Object.assign({}, env, { WARM_UIT_BESTAND: D + '/warm-uit/onder-een-bestand' }), detached: true, stdio: ['ignore', uit, uit], cwd: path.dirname(SRV) });
-    huidig = p5.pid;
-    const hf = await wachtRol('primair');
-    toets('U3 schakelaar niet te lezen (ENOTDIR): toch uit, fout in /health', hf && hf.uitwijk.warm && hf.uitwijk.warm.uit === true && hf.uitwijk.warm.fout === 'ENOTDIR', hf && JSON.stringify(hf.uitwijk.warm));
   } catch (e) { toets('uitzondering', false, e && e.stack); }
-  toets('T1 geen "gebruik Telegram" / "tik daar" in de app-antwoorden van server.js', !/gebruik Telegram|staat ook in Telegram, tik daar/.test(BRON));
   console.log('── app-passief-poort: ' + goed + ' groen, ' + fout + ' rood');
   stop(fout ? 1 : 0);
 });
