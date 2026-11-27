@@ -983,7 +983,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('13u Snel vergelijken via shopper.js: score per optie; de module zelf blijft zonder score', sv2.opties[0].winkelscore.bronnen[0].bron === 'Kiyoh' && sv.opties[0].winkelscore === undefined, sv2.opties[0]);
     const src13 = fs.readFileSync('server.js', 'utf8'), b0 = src13.indexOf('const shopper = (function () {'), b1 = src13.indexOf('// ── einde OVIS Shopper ──'), bl13 = src13.slice(b0, b1);
     toets('13v server.js: GET /app/shopper/winkels vóór de id-route, stil in het app-log, scorePad shopper-winkelscore.json, script kaal en begrensd; uitrol-lijst',
-      bl13.indexOf("route === 'GET /app/shopper/winkels'") > 0 && bl13.indexOf("route === 'GET /app/shopper/winkels'") < bl13.indexOf("soort = 'zoektocht'") && /soort === 'winkels'\) && u\.status === 200\) res\._app\.stil = true/.test(bl13)
+      bl13.indexOf("route === 'GET /app/shopper/winkels'") > 0 && bl13.indexOf("route === 'GET /app/shopper/winkels'") < bl13.indexOf("soort = 'zoektocht'") && /soort === 'winkels'( \|\| soort === 'aankopen')?\) && u\.status === 200\) res\._app\.stil = true/.test(bl13)
       && /shopper-winkelscore\.json/.test(bl13) && /'winkel-score\.py'/.test(bl13) && /timeout: 180000/.test(bl13) && /env: \{ PATH: process\.env\.PATH \|\| '\/usr\/bin:\/bin', LANG: 'C\.UTF-8', HOME: '\/tmp' \}/.test(bl13)
       && /RELEASE_OPTIONEEL="[^"]*\bshopper-winkels\.js (winkel-browser\.js )?winkel-score\.py\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
     toets('13w shopper-winkels.js logt niets en kent geen sleutel', !/console\.|process\.env|eval\(/.test(fs.readFileSync('shopper-winkels.js', 'utf8')));
@@ -1498,6 +1498,79 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('18v server.js: POST winkels/aan en winkels/erbij vóór de id-routes, met de statusteller', /'POST \/app\/shopper\/winkels\/aan' \|\| route === 'POST \/app\/shopper\/winkels\/erbij'[\s\S]{0,300}shopper_status[\s\S]{0,200}shopper\.winkelAan : shopper\.winkelErbij/.test(bl18)
       && bl18.indexOf("'POST /app/shopper/winkels/aan'") < bl18.indexOf('\\/status$'));
     toets('18w shopper.js zegt niet meer dat de winkelpagina nooit geschreven wordt', !/De pagina zelf wordt nooit geschreven/.test(fs.readFileSync('shopper.js', 'utf8')));
+  }
+
+  // ── 19. wv4329 (2C70 stap 2): "Ook gekocht, buiten Shopper" — berekend uit Pakjes, Facturen en de privébank (verzonnen gegevens) ──
+  {
+    const A = S.aankopenLijst, V0 = '2026-11-27';
+    const wk = [{ naam: 'Proefzaak', domein: 'proefzaak.nl' }, { naam: 'Nepmarkt', domein: 'nepmarkt.nl' }];
+    let u = A({ vandaag: V0, winkels: wk, gekocht: [], bestellingen: [], facturen: [{ naam: 'Proefzaak B.V.', dag: '2026-11-20', eur: 49.3, entiteit: 'tolgaarde' }],
+      bank: [{ naam: 'Nepmarkt Online via Proefpay', dag: '2026-11-22', eur: 19.99 }, { naam: 'Proefsuper 123', dag: '2026-11-22', eur: 12.5 }] });
+    toets('19a verzonnen factuur + verzonnen bankregel bij bekende webwinkels = elk één regel; supermarkt (onbekend) niet', u.regels.length === 2
+      && u.regels[0].winkel === 'Nepmarkt Online via Proefpay' && u.regels[0].bedrag_eur === 19.99 && u.regels[0].bronnen.join() === 'bank'
+      && u.regels[1].bedrag_eur === 49.3 && u.regels[1].entiteit === 'tolgaarde' && u.regels[1].bronnen.join() === 'factuur', u);
+    u = A({ vandaag: V0, winkels: wk, gekocht: [{ winkel: 'Proefzaak', datum: '2026-11-19' }], bestellingen: [], facturen: [{ naam: 'Proefzaak B.V.', dag: '2026-11-20', eur: 49.3, entiteit: 'tolgaarde' }], bank: [] });
+    toets('19b dezelfde aankoop in Shopper (gekocht) en Facturen = één regel (alleen de Shopper-regel; al_in_shopper 1)', u.regels.length === 0 && u.al_in_shopper === 1, u);
+    u = A({ vandaag: V0, winkels: [], gekocht: [], bestellingen: [{ id: 'b1', winkel: 'Proefzaak', dag: '2026-11-18', domein: 'proefzaak.nl', bezorgd: true }, { id: 'b2', winkel: 'Proefzaak', dag: '2026-11-19', domein: null, bezorgd: false }],
+      facturen: [{ naam: 'Proefzaak B.V.', dag: '2026-11-19', eur: 30, entiteit: 'prive' }], bank: [{ naam: 'Proefzaak.nl', dag: '2026-11-20', eur: 30 }] });
+    toets('19c (review MOET 1) winkel- en vervoerderrij = één aankoop; factuur én betaling van die bestelling = één regel met drie bronnen', u.regels.length === 1
+      && u.regels[0].bronnen.join() === 'pakje,factuur,bank' && u.regels[0].bedrag_eur === 30 && u.regels[0].bezorgd === false && u.regels[0].dag === '2026-11-18', u);
+    u = A({ vandaag: V0, winkels: [], gekocht: [], bestellingen: [{ id: 'b1', winkel: 'Proefzaak', dag: '2026-11-10' }, { id: 'b2', winkel: 'Proefzaak', dag: '2026-11-15' }],
+      facturen: [{ naam: 'Proefzaak', dag: '2026-11-13', eur: 30, entiteit: 'prive' }], bank: [] });
+    toets('19d (review MOET 2) een factuur die in de vensters van twee bestellingen valt: geen bedrag bij beide, geen eigen regel', u.regels.length === 2 && u.regels.every((r) => r.bedrag_eur === null), u);
+    u = A({ vandaag: V0, winkels: [], gekocht: [], bestellingen: ['2026-11-01', '2026-11-03', '2026-11-05', '2026-11-07'].map((d, i) => ({ id: 'c' + i, winkel: 'Proefzaak', dag: d })), facturen: [], bank: [] });
+    toets('19e (ronde 2 MOET 2) samenvoegen hooguit 3 dagen vanaf de eerste: 1+3 en 5+7 = twee aankopen', u.regels.length === 2, u);
+    u = A({ vandaag: V0, winkels: [], gekocht: [], bestellingen: [{ id: 'd1', winkel: 'Proefzaak', dag: '2026-11-01' }, { id: 'd2', winkel: 'Proefzaak', dag: '2026-11-16' }],
+      facturen: [{ naam: 'Proefzaak', dag: '2026-11-07', eur: 40, entiteit: 'prive' }], bank: [{ naam: 'Proefzaak', dag: '2026-11-14', eur: 40 }] });
+    toets('19f (ronde 2 MOET 1) de betaling die uniek bij de tweede bestelling hoort gaat niet mee met de factuur van de eerste', u.regels.find((r) => r.dag === '2026-11-16').bedrag_eur === 40
+      && u.regels.find((r) => r.dag === '2026-11-01').bronnen.join() === 'pakje,factuur', u);
+    u = A({ vandaag: V0, winkels: [], gekocht: [], bestellingen: [{ id: 's1', winkel: 'Proefprinter', dag: '2026-11-16' }], facturen: [{ naam: 'Proefprinter EU', dag: '2026-11-09', eur: 152.75, entiteit: 'tolgaarde' }], bank: [] });
+    toets('19f2 factuur 7 dagen vóór de eerste mail (verzendmail) = dezelfde aankoop, geen tweede regel', u.regels.length === 1 && u.regels[0].bedrag_eur === 152.75, u);
+    u = A({ vandaag: V0, winkels: [], gekocht: [], bestellingen: [{ id: 'e1', winkel: 'Amazon EU SARL', dag: '2026-11-20' }, { id: 'e2', winkel: 'Amazon', dag: '2026-11-21' }, { id: 'e3', winkel: 'Info', dag: '2026-11-21' },
+      { id: 'e4', winkel: 'Oude zaak', dag: '2026-10-01' }], facturen: null, bank: null });
+    toets('19g Amazon ↔ Amazon EU SARL = dezelfde winkel; een algemene naam ("Info") telt niet; ouder dan 45 dagen niet; geen Facturen/bank = gewoon zonder bedrag', u.regels.length === 1 && u.regels[0].bedrag_eur === null, u);
+    u = A({ vandaag: V0, winkels: [{ naam: 'bol', domein: 'bol.com' }], gekocht: [], bestellingen: [], facturen: [], bank: [{ naam: 'bol.com', dag: '2026-11-24', eur: 23.99 }, { naam: 'Proefbol Shop', dag: '2026-11-24', eur: 5 }, { naam: 'Bolletje bakker', dag: '2026-11-24', eur: 3 }] });
+    toets('19h bol ↔ bol.com, maar niet Bolletje; hele woorden ("Proefbol" ≠ bol)', u.regels.length === 1 && u.regels[0].winkel === 'bol.com', u);
+    const veel = []; for (let i = 0; i < 130; i++) veel.push({ naam: 'Proefzaak', dag: '2026-11-' + String(1 + (i % 26)).padStart(2, '0'), eur: 1 + i, entiteit: 'prive' });
+    u = A({ vandaag: V0, winkels: wk, gekocht: [], bestellingen: [], facturen: veel, bank: [] });
+    toets('19i hooguit 100 regels, nieuwste eerst; alleen de velden winkel, dag, bedrag_eur, bronnen, entiteit, bezorgd', u.regels.length === 100 && u.regels[0].dag >= u.regels[99].dag
+      && Object.keys(u.regels[0]).sort().join() === 'bedrag_eur,bezorgd,bronnen,dag,entiteit,winkel', u.regels[0]);
+    // integratie: maak() met een echte pakjes.js en facturen-db.js (verzonnen rijen), bank als functie
+    const V19 = path.join(W, 'vault19'); for (const mp of S.MAPPEN) fs.mkdirSync(path.join(V19, mp[2]), { recursive: true });
+    fs.mkdirSync(path.join(V19, '00_Systeem'), { recursive: true });
+    fs.writeFileSync(path.join(V19, '00_Systeem/Shopper - favoriete winkels.md'), pagina(['type: shopper-favorieten', 'winkels:', '  - {domein: nepmarkt.nl, naam: "Nepmarkt", aan: false, categorie: [elektronica]}']));
+    fs.writeFileSync(path.join(V19, '20_Prive/Shopper', 'Shopper - 2026-11-15 - Proefkoffer.md'), pagina(['type: shopper-zoektocht', 'wens: "Proefkoffer"', 'status: gekocht', 'gezocht: 2026-11-15T09:00+01:00',
+      'gekocht: {optie: null, winkel: "Proefkofferzaak", bedrag_eur: 80, datum: "2026-11-16", opmerking: null, via: app}']));
+    const P = require('./pakjes.js'), PD = path.join(W, 'pakjes19'), pk = P.maak({ dir: PD, nu: () => Date.parse('2026-11-27T12:00:00Z') });
+    pk.bestellingen('2026-01-01T00:00:00Z');
+    const { DatabaseSync } = require('node:sqlite'), pdb = new DatabaseSync(path.join(PD, 'pakjes.sqlite'));
+    pdb.prepare("INSERT INTO zending (id, sleutel, vervoerder, winkel, eerste, bijgewerkt, bezorgd_op) VALUES ('bbbbbbbbbbb1', 'winkel:proefzaak.nl:1', 'winkel', 'Proefzaak', '2026-11-20T10:00:00.000Z', '2026-11-20T10:00:00.000Z', '2026-11-22T10:00:00.000Z')").run();
+    pdb.prepare("INSERT INTO zending (id, sleutel, vervoerder, winkel, eerste, bijgewerkt) VALUES ('bbbbbbbbbbb2', 'winkel:proefkofferzaak.nl:2', 'winkel', 'Proefkofferzaak', '2026-11-16T10:00:00.000Z', '2026-11-16T10:00:00.000Z')").run();
+    pdb.close();
+    toets('19j pakjes.bestellingen geeft nu ook bezorgd (stap 1 blijft gelijk)', pk.bestellingen('2026-01-01T00:00:00Z').find((x) => x.id === 'bbbbbbbbbbb1').bezorgd === true);
+    const F = require('./facturen-db.js'), FD = path.join(W, 'facturen19'), fdb = F.open(FD), db = fdb.db, fnu = '2026-11-21T10:00:00.000Z';
+    for (const e of ['tolgaarde', 'prive']) db.prepare('INSERT INTO entiteit (sleutel, naam) VALUES (?, ?)').run(e, 'Proef ' + e);
+    db.prepare('INSERT INTO leverancier (id, naam, genormaliseerd, aangemaakt_op) VALUES (?, ?, ?, ?)').run('c000000000000001', 'Proefzaak B.V.', 'proefzaak', fnu);
+    let fnr = 0;
+    const fac = (datum, c, pk2) => { fnr++; const h = String(fnr).padStart(15, '0'); db.prepare('INSERT INTO document (id, sha256, soort, aangemaakt_op) VALUES (?, ?, ?, ?)').run('d' + h, String(fnr).padStart(64, '2'), 'pdf', fnu);
+      db.prepare('INSERT INTO factuur (id, document, soort, leverancier, leverancier_naam, factuurdatum, incl, incl_eur, valuta, entiteit, status, patientkenmerk, aangemaakt_op, bijgewerkt_op) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run('e' + h, 'd' + h, 'factuur', 'c000000000000001', null, datum, c, c, 'EUR', 'tolgaarde', 'te_beoordelen', pk2 ? 1 : 0, fnu, fnu); };
+    fac('2026-11-21', 4930); fac('2026-11-05', 1000, 'ja');
+    F.sluit ? F.sluit(fdb) : db.close();
+    const m19 = S.maak({ vault: V19, vv: VV, nu: () => new Date('2026-11-27T12:00:00Z'), bestellingen: (s) => pk.bestellingen(s), facturenPad: () => path.join(FD, 'facturen.sqlite'),
+      bankUitgaven: async () => [{ naam: 'Nepmarkt via Proefpay', dag: '2026-11-25', eur: 12.34 }, { naam: 'Proefkofferzaak', dag: '2026-11-16', eur: 80 }] });
+    const r19 = await m19.aankopen(), b19 = r19.body;
+    toets('19k aankopen(): pakje + factuur = één regel met bedrag en entiteit; bank bij winkel uit de winkellijst (ook uit); Shopper-aankoop (pakje + bank) valt weg; factuur met patiëntkenmerk telt niet',
+      r19.status === 200 && b19.ok && b19.regels.length === 2 && b19.al_in_shopper === 1 && b19.bron.pakjes && b19.bron.facturen && b19.bron.bank
+      && b19.regels[1].winkel === 'Proefzaak' && b19.regels[1].bedrag_eur === 49.3 && b19.regels[1].bezorgd === true && b19.regels[1].bronnen.join() === 'pakje,factuur'
+      && b19.regels[0].winkel === 'Nepmarkt via Proefpay' && !JSON.stringify(b19).includes('10'), b19);
+    const m19b = S.maak({ vault: V19, vv: VV, nu: () => new Date('2026-11-27T12:00:00Z'), bestellingen: () => [], facturenPad: () => null, bankUitgaven: async () => { throw new Error('x'); } });
+    const r19b = (await m19b.aankopen()).body;
+    toets('19l Facturen weg en bank faalt: ok met bron.facturen/bank false, lege lijst', r19b.ok && r19b.bron.facturen === false && r19b.bron.bank === false && r19b.regels.length === 0, r19b);
+    const src19 = fs.readFileSync('server.js', 'utf8'), bl19 = src19.slice(src19.indexOf('async function appShopper'), src19.indexOf('// ── einde OVIS Shopper ──'));
+    toets('19m server.js: GET /app/shopper/aankopen vóór de id-route, stil in het app-log; bank via bankKind zoek (lokaal), alleen uitgaven, 5 min in het geheugen',
+      bl19.indexOf("route === 'GET /app/shopper/aankopen'") > 0 && bl19.indexOf("route === 'GET /app/shopper/aankopen'") < bl19.indexOf("soort = 'zoektocht'") && /soort === 'aankopen'\) && u\.status === 200\) res\._app\.stil = true/.test(bl19)
+      && /bankUitgaven: shopperBankUitgaven/.test(src19) && /bankKind\(\['zoek', '--van'/.test(src19) && /x\.bedrag < 0 && x\.type === 'uitgave' && !x\.intern_met/.test(src19) && /BANK_LOKAAL = \[[^\]]*'zoek'/.test(src19));
   }
 
   fs.rmSync(W, { recursive: true, force: true });

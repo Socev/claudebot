@@ -1104,11 +1104,11 @@ function maak(o) {
   // het tijdstip ervan (review ZOU 1: Shopper vergelijkt met het begin van de zoektocht) en het afzenderdomein van een winkelrij (sleutel winkel:<domein>:…). Alleen lezen; verborgen rijen tellen niet; hooguit 45 dagen terug en 300 rijen.
   function bestellingen(sinds) {
     const grens = Math.max(Date.parse(sinds) || 0, klok() - 45 * DAG);
-    return open().prepare('SELECT id, sleutel, winkel, eerste FROM zending WHERE winkel IS NOT NULL AND verborgen IS NULL AND eerste >= ? ORDER BY eerste DESC LIMIT 300')
+    return open().prepare("SELECT id, sleutel, winkel, eerste, (bezorgd_op IS NOT NULL OR geleverd_hand IS NOT NULL OR COALESCE(stand_volg, stand_mail) = 'bezorgd') AS bz FROM zending WHERE winkel IS NOT NULL AND verborgen IS NULL AND eerste >= ? ORDER BY eerste DESC LIMIT 300")
       .all(new Date(grens).toISOString()).map((z) => {
         const m = /^winkel:([a-z0-9.-]{3,100}):/.exec(String(z.sleutel || ''));
         const t = Date.parse(z.eerste);
-        return isFinite(t) ? { id: String(z.id), winkel: schoon(z.winkel, 80), dag: nlDag(t), eerste: new Date(t).toISOString(), domein: m ? m[1] : null } : null;
+        return isFinite(t) ? { id: String(z.id), winkel: schoon(z.winkel, 80), dag: nlDag(t), eerste: new Date(t).toISOString(), domein: m ? m[1] : null, bezorgd: !!z.bz } : null;   // wv4329: + bezorgd (Gekocht-lijst)
       }).filter((x) => x && x.winkel);
   }
   function sluit() { if (db) { try { db.close(); } catch (e) { /* niets */ } db = null; } }

@@ -32805,6 +32805,7 @@ function personeelsschermInfo() {
 //                                     één ronde tegelijk per zoektocht; stand in klokken/shopper-opnieuw.json (job + tijd, geen wens)
 //   POST /app/shopper/<id>/antwoord   wv4171 (2C96 h): {antwoord} op wacht_op_jou: eis erbij, wacht_op_jou weg, dan Opnieuw zoeken (6/uur)
 //   POST /app/shopper/<id>/bestelling wv4183 (2C70): {pakje, antwoord: ja|nee} op "was dit hem?" (bestelling uit Pakjes bij een optie-winkel)
+//   GET  /app/shopper/aankopen        wv4329 (2C70 stap 2): "Ook gekocht, buiten Shopper" — berekend uit Pakjes, Facturen en de privébank (alleen lezen)
 //   POST /app/shopper/winkels/aan     wv4280 (2C96 e): {domein, aan} = schakelaar in Winkels; alleen het veld aan van die winkelregel (statusteller)
 //   POST /app/shopper/winkels/erbij   wv4280 (2C96 e): {domein, naam, categorie[]} = Zet in mijn winkels; één regel erbij (statusteller)
 //   (POST …/gekocht kent sinds wv4280 ook link bij ergens anders gekocht: dan ook de sectie "## Waarom niet gevonden" op de zoektocht)
@@ -32827,6 +32828,22 @@ function personeelsschermInfo() {
 // id = 12 hex van sha256(vaultpad); shopper.js zoekt het pad zelf op (nooit een pad uit de vraag). Audit zonder wens of pad. /health.shopper:
 // aantallen en het tijdstip van de laatste lijst (geen wens, pad of bedrag). Ontbreekt shopper.js in de release: 404 en aan=false.
 let shopperBrowserInfo = function () { return { aan: false }; };   // wv2949: gevuld in het Shopper-blok hieronder
+// wv4329 (2C70 stap 2): de privé-uitgaven van de laatste weken voor Shopper › Gekocht ("Ook gekocht, buiten Shopper"). bank-lezer zoek leest
+// alleen het lokale archief (geen kluis, geen bankopvraag) en toont alleen privérekeningen; hier blijven alleen tegenpartij, dag en bedrag
+// van uitgaven over. 5 minuten in het geheugen (nooit op schijf); fout = null (de app zegt dan dat de bank nu niet te lezen is).
+let shopperBankCache = null;   // { van, tot, l }
+async function shopperBankUitgaven(van) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(van))) return null;
+  if (shopperBankCache && shopperBankCache.van === van && Date.now() < shopperBankCache.tot) return shopperBankCache.l;
+  if (typeof bankKind !== 'function') return null;
+  const r = await bankKind(['zoek', '--van', String(van), '--max', '1000'], null, 30000);
+  if (!r || r.code !== 0 || !r.j || r.j.ok !== true || !Array.isArray(r.j.posten)) return null;
+  const l = r.j.posten.filter(function (x) { return x && typeof x.bedrag === 'number' && x.bedrag < 0 && x.type === 'uitgave' && !x.intern_met; })
+    .map(function (x) { return { naam: String(x.tegenpartij || '').slice(0, 120), dag: String(x.datum || '').slice(0, 10), eur: Math.round(-x.bedrag * 100) / 100 }; })
+    .filter(function (x) { return x.naam; });
+  shopperBankCache = { van: van, tot: Date.now() + 5 * 60000, l: l };
+  return l;
+}
 const shopper = (function () {
   const p = path.join(__dirname, 'shopper.js');
   if (!fs.existsSync(p)) return null;
@@ -32950,6 +32967,7 @@ const shopper = (function () {
     // pas bij een vraag) en Davids antwoorden in de klokken-map (0600)
     bestellingen: function (sinds) { return typeof pakjes !== 'undefined' && pakjes && typeof pakjes.bestellingen === 'function' ? pakjes.bestellingen(sinds) : []; },
     bestellingPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-bestelling.json') : null,
+    bankUitgaven: shopperBankUitgaven,   // wv4329 (2C70 stap 2): privébank voor "Ook gekocht, buiten Shopper" (lokaal archief, alleen lezen)
     opnieuwPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-opnieuw.json') : null }); } catch (e) { logError('shopper', e); return null; }
 })();
 function shopperInfo() {
@@ -33000,6 +33018,7 @@ async function appShopper(req, res, a, route, d) {
       const fn = soort === 'winkel-aan' ? shopper.winkelAan : shopper.winkelErbij;
       u = typeof fn === 'function' ? fn(d) : { status: 404, body: { ok: false, fout: 'Winkels zit niet in deze versie van de pod' } };
     }
+    else if (route === 'GET /app/shopper/aankopen') { soort = 'aankopen'; u = typeof shopper.aankopen === 'function' ? await shopper.aankopen() : { status: 404, body: { ok: false, fout: 'Gekocht buiten Shopper zit niet in deze versie van de pod' } }; }   // wv4329 (de 600/uur van shopper geldt)
     else if (route === 'GET /app/shopper/winkels') { soort = 'winkels'; u = shopper.winkels ? shopper.winkels() : { status: 404, body: { ok: false, fout: 'Winkels zit niet in deze versie van de pod' } }; }   // wv2935: tab Winkels (de 600/uur van shopper geldt)
     else if ((m = /^GET \/app\/shopper\/([^/]*)$/.exec(route))) { soort = 'zoektocht'; u = shopper.zoektocht(m[1]); }   // shopper.js toetst de id zelf (12 hex, anders 400)
     else if ((m = /^POST \/app\/shopper\/([^/]*)\/status$/.exec(route))) {
@@ -33050,7 +33069,7 @@ async function appShopper(req, res, a, route, d) {
     }
     else u = { status: 404, body: { ok: false, fout: 'onbekend' } };
   } catch (e) { logError('shopper', e); return appWeiger(res, 503, 'Shopper kon de zoektochten nu niet lezen; probeer het zo opnieuw', 'shopper fout'); }
-  if ((soort === 'lijst' || soort === 'vergelijk-stand' || soort === 'winkels') && u.status === 200) res._app.stil = true;
+  if ((soort === 'lijst' || soort === 'vergelijk-stand' || soort === 'winkels' || soort === 'aankopen') && u.status === 200) res._app.stil = true;
   else res._app.reden = 'shopper ' + soort + (m ? ' ' + (/^[0-9a-f]{12}$/.test(m[1]) ? m[1] : 'ongeldig') : '') + ' ' + u.status;
   return appStuur(res, u.status, u.body);
 }

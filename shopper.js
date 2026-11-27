@@ -344,6 +344,97 @@ function bestellingVoor(z, rel, lijst, antwoorden) {
   return beste;
 }
 
+// ── wv4329 (2C70 stap 2): "Ook gekocht, buiten Shopper" — een berekende lijst uit Pakjes, Facturen en de privébank (alle drie alleen lezen,
+// niets bewaard). Ontwerp + review: Systeemoverzicht § OVIS Shopper "Ook gekocht, buiten Shopper (wv4329)".
+const AANKOOP_DAGEN = 45, MAX_AANKOPEN = 100;
+const ALGEMEEN = new Set(['info', 'verkoop', 'sales', 'service', 'klantenservice', 'customer', 'team', 'support', 'noreply', 'no reply', 'order', 'orders', 'bestelling', 'bestellingen', 'contact', 'mail', 'email', 'nieuwsbrief']);
+// De sleutels van een winkelnaam of domein: de woorden zonder rechtsvorm (sleutelVan) en, bij een domeinachtige naam, de domeinkern
+function winkelSleutels(naam, domein) {
+  const uit = [];
+  const voeg = (k) => { if (k && !ALGEMEEN.has(k) && uit.indexOf(k) < 0) uit.push(k); };
+  voeg(sleutelVan(naam));
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(String(naam || '').trim())) voeg(domeinKern(naam));
+  if (domein) voeg(domeinKern(domein));
+  return uit;
+}
+// Twee winkels zijn dezelfde als een sleutel van de een als hele woorden in de woorden van de ander staat (Amazon ↔ Amazon EU SARL)
+function zelfdeWinkel(a, b) {
+  const wa = ' ' + a.w + ' ', wb = ' ' + b.w + ' ';
+  return a.k.some((k) => wb.indexOf(' ' + k + ' ') >= 0 || b.k.indexOf(k) >= 0) || b.k.some((k) => wa.indexOf(' ' + k + ' ') >= 0);
+}
+function winkelVan(naam, domein) { return { w: woorden(naam).filter((x) => !RUIS.has(x)).join(' '), k: winkelSleutels(naam, domein) }; }
+const binnen = (dag, van, tot) => dag >= van && dag <= tot;
+// inv: { vandaag: 'JJJJ-MM-DD', bestellingen: [{id, winkel, dag, domein, bezorgd}], facturen: [{naam, dag, eur, entiteit}] | null,
+//        bank: [{naam, dag, eur}] | null, winkels: [{naam, domein}], gekocht: [{winkel, datum}] }
+// → { regels: [{winkel, dag, bedrag_eur, bronnen, entiteit, bezorgd}], al_in_shopper }
+function aankopenLijst(inv) {
+  const vandaag = inv.vandaag, van = dagPlus(vandaag, -AANKOOP_DAGEN);
+  const ok = (dag) => geldigeDag(String(dag)) && binnen(dag, van, vandaag);
+  const eur = (x) => (typeof x === 'number' && isFinite(x) && x > 0 ? Math.round(x * 100) / 100 : null);
+  // bekende winkels: de winkellijst van Shopper, de winkels uit Pakjes en die van gekochte zoektochten
+  const bekend = [];
+  for (const w of inv.winkels || []) { const x = winkelVan(w.naam || '', w.domein); if (x.k.length) bekend.push(x); if (w.domein) { const y = winkelVan(w.domein, w.domein); if (y.k.length) bekend.push(y); } }
+  // stap a: pakjes van dezelfde winkel binnen 3 dagen = één aankoop
+  const aankopen = [];
+  const pk = (inv.bestellingen || []).filter((b) => b && ok(b.dag) && tekstVeld(b.winkel, 80)).slice().sort((a, b) => (a.dag < b.dag ? -1 : a.dag > b.dag ? 1 : 0));
+  for (const b of pk) {
+    const x = winkelVan(b.winkel, b.domein);
+    if (!x.k.length) continue;
+    bekend.push(x);
+    const a = aankopen.find((y) => zelfdeWinkel(y.x, x) && dagAfstand(y.dag, b.dag) <= 3);   // review ronde 2 MOET 2: groep hooguit 3 dagen vanaf de eerste
+    if (a) { a.laatst = b.dag; a.bezorgd = a.bezorgd && b.bezorgd === true; continue; }
+    aankopen.push({ x, winkel: mapTekst(b.winkel, 80), dag: b.dag, laatst: b.dag, bedrag_eur: null, bronnen: ['pakje'], entiteit: null, bezorgd: b.bezorgd === true });
+  }
+  const gk = (inv.gekocht || []).filter((g) => g && geldigeDag(String(g.datum)) && tekstVeld(g.winkel, 80)).map((g) => ({ x: winkelVan(g.winkel), datum: g.datum })).filter((g) => g.x.k.length);
+  for (const g of gk) bekend.push(g.x);
+  const isBekend = (x) => bekend.some((y) => zelfdeWinkel(x, y));
+  const fac = (inv.facturen || []).filter((f) => f && ok(f.dag) && eur(f.eur) != null).map((f) => ({ x: winkelVan(f.naam), naam: f.naam, dag: f.dag, eur: eur(f.eur), entiteit: tekstVeld(f.entiteit, 40) || null, af: false })).filter((f) => f.x.k.length);
+  const bnk = (inv.bank || []).filter((f) => f && ok(f.dag) && eur(f.eur) != null).map((f) => ({ x: winkelVan(f.naam), naam: f.naam, dag: f.dag, eur: eur(f.eur), af: false })).filter((f) => f.x.k.length);
+  // stap b: bedrag bij een pakje — precies één factuur [dag-7, dag+7], anders precies één bankuitgave [dag-7, dag+7]; review MOET 2: alleen
+  // als de koppeling in beide richtingen uniek is (die factuur past ook bij geen andere bestelling), anders bedrag onbekend
+  const zelfdeBedrag = (p, q) => Math.abs(p - q) <= Math.max(1, Math.round(p) / 100);
+  const facBij = (a) => fac.filter((y) => zelfdeWinkel(a.x, y.x) && binnen(y.dag, dagPlus(a.dag, -7), dagPlus(a.dag, 7)));   // -7: de eerste mail is soms pas de verzendmail (gemeten 27-11)
+  const bnkBij = (a) => bnk.filter((y) => zelfdeWinkel(a.x, y.x) && binnen(y.dag, dagPlus(a.dag, -7), dagPlus(a.dag, 7)));
+  const fKand = aankopen.map(facBij), bKand = aankopen.map(bnkBij);
+  const uniek = (kand, i) => kand[i].length === 1 && kand.every((l, j) => j === i || l.indexOf(kand[i][0]) < 0);
+  aankopen.forEach((a, i) => {
+    if (fKand[i].length > 1) return;
+    if (fKand[i].length === 1) {
+      if (!uniek(fKand, i)) return;
+      const f = fKand[i][0];
+      f.af = true; a.bedrag_eur = f.eur; a.entiteit = f.entiteit; a.bronnen.push('factuur');
+      // review MOET 1: de betaling van diezelfde factuur (zelfde winkel, ≤ 7 dagen, zelfde bedrag) hoort bij deze aankoop, niet als tweede regel
+      const b = bnk.filter((y) => !y.af && zelfdeWinkel(a.x, y.x) && dagAfstand(y.dag, f.dag) <= 7 && zelfdeBedrag(f.eur, y.eur) && bKand.every((l, j) => j === i || l.indexOf(y) < 0));   // ronde 2 MOET 1
+      if (b.length) { b[0].af = true; a.bronnen.push('bank'); }
+      return;
+    }
+    if (uniek(bKand, i) && !bKand[i][0].af) { bKand[i][0].af = true; a.bedrag_eur = bKand[i][0].eur; a.bronnen.push('bank'); }
+  });
+  // Wat in de vensters van een bestelling viel maar niet uniek te koppelen was, wordt geen eigen regel (het hoort bij een bestelling)
+  fKand.concat(bKand).forEach((l) => l.forEach((y) => { y.af = true; }));
+  // stap c: facturen en bankuitgaven zonder pakje, alleen bij bekende winkels; factuur + bankuitgave zelfde winkel ≤ 7 dagen, zelfde bedrag = één
+  for (const f of fac) {
+    if (f.af || !isBekend(f.x)) continue;
+    f.af = true;
+    const a = { x: f.x, winkel: mapTekst(f.naam, 80), dag: f.dag, laatst: f.dag, bedrag_eur: f.eur, bronnen: ['factuur'], entiteit: f.entiteit, bezorgd: null };
+    const b = bnk.filter((y) => !y.af && zelfdeWinkel(f.x, y.x) && dagAfstand(y.dag, f.dag) <= 7 && zelfdeBedrag(f.eur, y.eur));
+    if (b.length) { b[0].af = true; a.bronnen.push('bank'); }
+    aankopen.push(a);
+  }
+  for (const b of bnk) {
+    if (b.af || !isBekend(b.x)) continue;
+    b.af = true;
+    aankopen.push({ x: b.x, winkel: mapTekst(b.naam, 80), dag: b.dag, laatst: b.dag, bedrag_eur: b.eur, bronnen: ['bank'], entiteit: null, bezorgd: null });
+  }
+  // stap d: wat al als gekochte zoektocht in Shopper staat valt weg (alleen het aantal)
+  let al = 0;
+  const regels = aankopen.filter((a) => {
+    if (gk.some((g) => zelfdeWinkel(a.x, g.x) && binnen(a.dag, dagPlus(g.datum, -3), dagPlus(g.datum, 7)))) { al++; return false; }
+    return !!a.winkel;
+  }).sort((p, q) => (p.dag < q.dag ? 1 : p.dag > q.dag ? -1 : 0)).slice(0, MAX_AANKOPEN)
+    .map((a) => ({ winkel: a.winkel, dag: a.dag, bedrag_eur: a.bedrag_eur, bronnen: a.bronnen, entiteit: a.entiteit, bezorgd: a.bezorgd }));
+  return { regels, al_in_shopper: al };
+}
 function ontleed(t, rel, ent, fav) {
   if (fmWaarde(t, 'type') !== 'shopper-zoektocht') return null;
   const st = String(fmWaarde(t, 'status') || '').toLowerCase();
@@ -1345,12 +1436,41 @@ function maak(o) {
     }
     return u;
   } }) : null;
+  // ── wv4329 (2C70 stap 2): GET /app/shopper/aankopen — "Ook gekocht, buiten Shopper". Pakjes (o.bestellingen), Facturen (metFacturen,
+  // alleen lezen) en de privébank (o.bankUitgaven(van) → [{naam, dag, eur}] of null; de pod leest het lokale archief) → aankopenLijst.
+  // Alleen winkel, dag, bedrag, bron, entiteit en bezorgd gaan terug; niets wordt bewaard.
+  const FAC_AANKOOP_SQL = "SELECT coalesce(l.naam, f.leverancier_naam) AS naam, coalesce(f.factuurdatum, substr(f.aangemaakt_op, 1, 10)) AS dag, f.incl_eur, f.incl, f.valuta, f.entiteit "
+    + "FROM factuur f LEFT JOIN leverancier l ON l.id = f.leverancier WHERE f.soort = 'factuur' AND f.status NOT IN ('geen_factuur') AND f.dubbel_van IS NULL "
+    + "AND coalesce(f.patientkenmerk, 0) = 0 AND coalesce(f.factuurdatum, substr(f.aangemaakt_op, 1, 10)) BETWEEN ? AND ? LIMIT 2000";
+  async function aankopen() {
+    const vandaag = nlDag(nu()), van = dagPlus(vandaag, -AANKOOP_DAGEN);
+    const bron = { pakjes: typeof o.bestellingen === 'function', facturen: false, bank: false };
+    const best = bestellingenNu();
+    const fac = metFacturen((db) => db.prepare(FAC_AANKOOP_SQL).all(van, vandaag).map((f) => {
+      const c = Number.isInteger(f.incl_eur) ? f.incl_eur : (f.valuta === 'EUR' && Number.isInteger(f.incl) ? f.incl : null);
+      return { naam: tekstVeld(f.naam, 120), dag: f.dag, eur: c == null ? null : c / 100, entiteit: f.entiteit };
+    }));
+    bron.facturen = Array.isArray(fac);
+    let bank = null;
+    if (typeof o.bankUitgaven === 'function') { try { bank = await o.bankUitgaven(van); } catch (e) { bank = null; } }
+    bron.bank = Array.isArray(bank);
+    const t = lees(FAVORIETEN);
+    const winkels = t == null ? [] : R.fmObjLijst(t, 'winkels').map((w) => ({ naam: tekstVeld(w.naam, 80), domein: tekstVeld(w.domein, 100).toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split(/[/?#]/)[0] }));
+    const gekocht = [];
+    for (const p of paden()) {
+      const x = lees(p.rel);
+      const g = x == null ? null : gekochtVan(x);
+      if (g && g.winkel && g.datum && String(fmWaarde(x, 'status') || '').toLowerCase() === 'gekocht') gekocht.push({ winkel: g.winkel, datum: g.datum });
+    }
+    const u = aankopenLijst({ vandaag, bestellingen: best, facturen: fac, bank, winkels, gekocht });
+    return { status: 200, body: { ok: true, venster_dagen: AANKOOP_DAGEN, regels: u.regels, al_in_shopper: u.al_in_shopper, bron } };
+  }
   function info() {
     const a = o.aanwijsPad ? jsonStaat(o.aanwijsPad)[maandNl()] : null;   // wv2946: aantal tikken op Zoek met Shopper deze maand (geen tekst)
     return Object.assign({ aan: true }, laatst || { op: null, zoektochten: null, open: null, onleesbaar: null, favorieten: null }, { aanwijzen_maand: Number.isInteger(a) ? a : 0 });
   }
-  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, antwoord, bedrag: bedragUitFactuur, bestelling, info, vergelijk, winkels: winkelsMod ? winkels : null, aanwijs,
+  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, antwoord, bedrag: bedragUitFactuur, bestelling, aankopen, info, vergelijk, winkels: winkelsMod ? winkels : null, aanwijs,
     winkelAan: winkelsMod ? winkelAan : null, winkelErbij: winkelsMod ? winkelErbij : null };
 }
 
-module.exports = { maak, zetWaaromSectie, waaromRegel, bestellingVoor, beginVan, kandidatenBlok, ontleed, adviesControle, eenheidStuks, poortVrij, nieuwOpdracht, POORT_FOUT, nuVan, btwVeld, zetEisenRegels, opnieuwOpdracht, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
+module.exports = { maak, aankopenLijst, zelfdeWinkel, winkelVan, zetWaaromSectie, waaromRegel, bestellingVoor, beginVan, kandidatenBlok, ontleed, adviesControle, eenheidStuks, poortVrij, nieuwOpdracht, POORT_FOUT, nuVan, btwVeld, zetEisenRegels, opnieuwOpdracht, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
