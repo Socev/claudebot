@@ -413,6 +413,34 @@ weiger('IBAN ongeldig → geweigerd', basis({ rekening: { iban: 'x' } }), /geldi
     toets('kruis: loonregel twee keer gebruiken kan niet (één-op-één)', P.koppelBewijs([ib.posten[4], Object.assign({}, ib.posten[4], { nr: 1e9 })], { loon: { label: 'x', regels: [loon.regels[0]] } }, IBAN)[1e9].soort === 'loonrun_afwijkt' && st5[ib.posten[4].nr].soort === 'loonrun');
     toets('bewijs: zonder bewijs is het afschrift byte voor byte als voorheen op de MT940', P.maakAfschrift(basis()).mt940 === r0.mt940);
   }
+  // ── wv4306 (2C93): stand per praktijk vanaf de overname = nota's + betaalmonitor van de app (bundel-kern), verzonnen praktijken ──
+  {
+    const K = await import(require('url').pathToFileURL(path.resolve('ovis-pot/kern/pot-kern.mjs')).href);
+    const nota = (id, p, nr, verval, bedrag, x) => Object.assign({ id, entiteit: 'POT', praktijk_id: p, nummer: nr, datum: verval.slice(0, 8) + '01', vervaldag: verval, soort: 'maand', periode: null, bedrag, status: 'definitief', gecrediteerd: null }, x || {});
+    const bet = (id, p, datum, bedrag, ken, x) => Object.assign({ id, bankmutatie_id: id, entiteit: 'POT', praktijk_id: p, datum, bedrag, soort: 'voorschot', kenmerken: ken ? [ken] : [], koppel: [] }, x || {});
+    const m = { notas: [
+      nota(1, 'T1', '2027001', '2027-01-15', 2100), nota(2, 'T2', '2027002', '2027-01-15', 2100), nota(3, 'T3', '2027003', '2027-01-15', 2100),
+      nota(4, 'T3', '2027004', '2027-02-15', 2100), nota(5, 'T4', '2027005', '2027-01-15', 2100, { status: 'vervallen' }),
+      nota(6, 'T5', '2027006', '2027-01-15', 2100, { status: 'gecrediteerd', gecrediteerd: JSON.stringify({ betaald: 500 }) }),
+      nota(7, 'T1', '2027007', '2027-01-15', 999, { entiteit: 'KM' }) ],
+      betalingen: [bet(11, 'T1', '2027-01-14', 2100, '2027001'), bet(12, 'T1', '2027-01-20', 2100, '2027001'), bet(13, 'T2', '2027-02-02', 2100, '2027002'),
+        bet(14, 'T3', '2027-01-10', 4200), bet(15, 'T4', '2027-01-12', 2100), bet(16, 'T5', '2027-01-03', 500), bet(17, 'T6', '2027-01-05', 300),
+        bet(18, 'T1', '2027-01-14', 999, '2027007', { entiteit: 'KM' })] };
+    const s = P.standUitMonitor(m, K, '2027-01-31', 'POT'), rij = (id) => s.rijen.find((x) => x.id === id);
+    toets('2027: op kenmerk betaald → verwacht = betaald (één termijn)', rij('T1') && rij('T1').verwacht === 210000 && rij('T1').betaald === 210000 && rij('T1').termijnen === 1, rij('T1'));
+    toets('2027: betaling na het einde van de maand telt niet → nog 2.100', rij('T2') && rij('T2').verwacht === 210000 && rij('T2').betaald === 0, rij('T2'));
+    toets('2027: februari-nota alvast betaald → vooruit (verwacht alleen t/m eind)', rij('T3') && rij('T3').verwacht === 210000 && rij('T3').betaald === 420000, rij('T3'));
+    toets('2027: vervallen nota is geen termijn; gecrediteerde alleen wat er al op betaald was', !rij('T4') && rij('T5') && rij('T5').verwacht === 50000 && rij('T5').betaald === 50000, [rij('T4'), rij('T5')]);
+    toets('2027: dubbel betaald + betaling zonder nota + vervallen → over (niet bij betaald), andere entiteit telt niet', s.over === 210000 + 210000 + 30000 && s.rijen.length === 4, s);
+    // zelfde getallen als het scherm Betalingen: betaalstatus van de kern per praktijk (verwacht_tot_nu), los nagerekend
+    const app = K.betaalstatus({ termijnen: K.termijnenUitNotas(m.notas, 'POT', 'T3'), betalingen: m.betalingen.filter((b) => b.praktijk_id === 'T3' && b.entiteit === 'POT'), peildatum: '2027-01-31' });
+    toets('2027: verwacht gelijk aan verwacht_tot_nu van de kern (scherm Betalingen)', Math.round(app.samen.verwacht_tot_nu * 100) === rij('T3').verwacht, app.samen);
+    // in het afschrift: afronding = bij, achter telt in de uitleg
+    const ib = basis(); ib.stand = { rijen: s.rijen.map((x) => ({ praktijk: 'Proefpraktijk ' + x.id, verwacht: x.verwacht, betaald: x.betaald, termijnen: x.termijnen })), noot: ['proef'] };
+    const r = P.maakAfschrift(ib);
+    toets('2027: afschrift neemt de stand over (blad 2), T2 loopt achter', r.ok && r.stand && r.stand.rijen.length === 4 && /1 praktijk loopt achter/.test(r.uitleg), r.uitleg);
+    toets('2027: lege monitor → geen rijen', P.standUitMonitor({ notas: [], betalingen: [] }, K, '2027-01-31').rijen.length === 0);
+  }
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

@@ -389,6 +389,35 @@ function standNorm(x) {
   if (!rijen.length) return null;
   return { rijen: rijen, noot: (Array.isArray(x.noot) ? x.noot : []).filter(function (n) { return typeof n === 'string'; }).slice(0, 3).map(function (n) { return n.slice(0, 220); }) };
 }
+// wv4306 (2C93, vanaf de overname): de stand per praktijk uit de nota's van OVIS POT, gerekend met de betaalmonitor van de app zelf
+// (K = pot-kern uit de bundel, m = api.monitor(db, J) van de bundel). Verwacht = de termijnen van termijnenUitNotas (vastgestelde nota's;
+// een gecrediteerde alleen voor wat er al op betaald was; vervallen telt niet) met vervaldag t/m eind. Betaald = wat betaalstatus (alleen
+// betalingen t/m eind, peildatum eind) aan die nota's toewijst, ook aan latere (= vooruit). Wat aan geen nota toe te wijzen is (dubbel, te
+// veel, praktijk zonder nota) telt niet mee en staat in `over`. Uit: { rijen: [{ id, verwacht, betaald, termijnen }] in centen, over }.
+function standUitMonitor(m, K, eind, ent) {
+  ent = ent || 'POT';
+  const c = function (x) { return Math.round(Number(x || 0) * 100); };
+  const notas = (m && Array.isArray(m.notas) ? m.notas : []).filter(function (n) { return n && n.entiteit === ent; });
+  const bet = (m && Array.isArray(m.betalingen) ? m.betalingen : []).filter(function (b) { return b && b.entiteit === ent && b.praktijk_id && String(b.datum) <= eind; });
+  const ids = [];
+  notas.concat(bet).forEach(function (x) { if (x.praktijk_id && ids.indexOf(x.praktijk_id) < 0) ids.push(x.praktijk_id); });
+  const rijen = [];
+  let over = 0;
+  ids.forEach(function (p) {
+    const t = K.termijnenUitNotas(notas, ent, p);
+    const b = bet.filter(function (x) { return x.praktijk_id === p; })
+      .map(function (x) { return { datum: x.datum, bedrag: x.bedrag, id: x.id, kenmerken: x.kenmerken, koppel: x.koppel }; });
+    if (!t.length) { over += b.reduce(function (s, x) { return s + c(x.bedrag); }, 0); return; }
+    const u = K.betaalstatus({ termijnen: t, betalingen: b, peildatum: eind });
+    const tot = u.termijnen.filter(function (x) { return x.vervaldag <= eind; });
+    const verwacht = tot.reduce(function (s, x) { return s + c(x.bedrag); }, 0);
+    const betaald = u.termijnen.reduce(function (s, x) { return s + c(x.voldaan); }, 0);
+    over += (u.overschot || []).reduce(function (s, x) { return s + c(x.bedrag); }, 0);
+    if (!tot.length && !betaald) return;
+    rijen.push({ id: p, verwacht: verwacht, betaald: betaald, termijnen: Math.max(1, tot.length) });
+  });
+  return { rijen: rijen, over: over };
+}
 // wv4157: één regel "Klopt, op deze N na" (kort: kop van de PDF) en een langere voor het scherm. Alleen aantallen en sommen.
 function uitleg(t, stand) {
   const kort = t.open === 0 ? 'Klopt: elke regel verklaard' : 'Klopt, op ' + (t.open === 1 ? 'één' : t.open) + ' na (vet bij Bewijs)';
@@ -635,4 +664,4 @@ function vergelijk(nu, toen) {
   return { vorige_maand: toen.maand, zelfde: zelfde, soorten: soorten, nieuw: nieuw.slice(0, 20), ontbreekt: weg.slice(0, 20), tekst: tekst };
 }
 
-module.exports = { maakAfschrift, mailConcept, vraagLijst, vergelijk, isCompleet, koppelBewijs, d1Sleutel, uitleg, maandNaam, laatsteDag, velden, swiftX, breek, dagEind, dagVolgorde, maakPdf, Weigering, MAANDEN };
+module.exports = { maakAfschrift, standUitMonitor, mailConcept, vraagLijst, vergelijk, isCompleet, koppelBewijs, d1Sleutel, uitleg, maandNaam, laatsteDag, velden, swiftX, breek, dagEind, dagVolgorde, maakPdf, Weigering, MAANDEN };

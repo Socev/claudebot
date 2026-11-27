@@ -17166,6 +17166,26 @@ async function potAfBewijsPraktijk(maand) {
       noot: ['Verwacht = de maandtermijnen ' + J + ' van elke praktijk zoals in OVIS POT (Davids stukken), met vervaldag t/m ' + d + '.',
         'Betaald = ontvangsten op deze rekening die in OVIS POT als voorschot ' + J + ' van die praktijk staan, geboekt t/m ' + d + '.',
         'Verschil = verwacht min betaald: positief = nog te ontvangen, negatief (-) = vooruit betaald; tot € 1 per termijn is afronding.'] };
+  } else if (J >= overname) {
+    // wv4306 (2C93): vanaf de overname komen verwacht en betaald uit de nota's van OVIS POT, met de API en rekenkern van de app zelf
+    // (bundel ovis-pot/: api.monitor + pot-kern termijnenUitNotas/betaalstatus), zodat de stand gelijk is aan het scherm Betalingen.
+    const B = await potMaandBundel();
+    const P = require(path.join(POT_AF_CODE, 'pot-afschrift.js'));
+    if (B && B.api && typeof B.api.monitor === 'function' && B.K && typeof B.K.betaalstatus === 'function' && typeof B.K.termijnenUitNotas === 'function' && typeof P.standUitMonitor === 'function') {
+      const sql = function (q, w) { return { bind: function () { return sql(q, Array.prototype.slice.call(arguments)); },
+        all: async function () { return { results: (await potDhD1([{ sql: q, params: w || [] }], POT_AF_BEWIJS_MS))[0].results }; } }; };
+      const m = await B.api.monitor({ prepare: function (q) { return sql(q, []); } }, J);
+      const s = P.standUitMonitor(m, B.K, eind, 'POT');
+      if (s.rijen.length) {
+        const d = Number(eind.slice(8, 10)) + '-' + Number(eind.slice(5, 7)) + '-' + J, eu = function (c) { return '€ ' + (c / 100).toLocaleString('nl-NL', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+        s.rijen.sort(function (x, y) { return (naam.get(String(x.id)) || String(x.id)).localeCompare(naam.get(String(y.id)) || String(y.id), 'nl'); });
+        stand = { rijen: s.rijen.slice(0, 30).map(function (x) { return { praktijk: String(naam.get(String(x.id)) || x.id).slice(0, 80), verwacht: x.verwacht, betaald: x.betaald, termijnen: x.termijnen }; }),
+          noot: ['Verwacht = de nota\'s ' + J + ' van OVIS POT aan elke praktijk (vervallen nota\'s niet; een gecrediteerde alleen voor wat er al op betaald was), met vervaldag t/m ' + d + '.',
+            'Betaald = ontvangsten op deze rekening t/m ' + d + ' die de betaalmonitor van OVIS POT aan die nota\'s toewijst (ook aan latere = vooruit)' +
+              (s.over > 100 ? '; ' + eu(s.over) + ' past bij geen nota (zie Betalingen).' : '.'),
+            'Verschil = verwacht min betaald: positief = nog te ontvangen, negatief (-) = vooruit betaald; tot € 1 per termijn is afronding.'] };
+      }
+    }
   }
   return { praktijk: { op_sleutel: op }, stand: stand };
 }
