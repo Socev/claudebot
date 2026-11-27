@@ -123,8 +123,11 @@ def db():
       create table if not exists lijkend(variant text primary key, domein text not null, fuzzer text, a text, mx text, ns text, eerst text, laatst text);
       create table if not exists voetafdruk(naam text not null, site text not null, url text, cat text, uitslag text, bekeken text, eerst_raak text,
         primary key(naam, site));''')
-    if 'graaf' not in [r[1] for r in c.execute('pragma table_info(zoekvraag)')]:
+    kol = [r[1] for r in c.execute('pragma table_info(zoekvraag)')]
+    if 'graaf' not in kol:
         c.execute('alter table zoekvraag add column graaf text')
+    if 'sleutel' not in kol:
+        c.execute('alter table zoekvraag add column sleutel text')   # wv4156 (2C94 c): welk bewaard antwoord bij deze zoekvraag hoort
     nu = datetime.datetime.now(datetime.timezone.utc)
     c.execute('delete from cache where tijd < ?', ((nu - datetime.timedelta(days=CACHE_DAGEN)).isoformat(),))
     oud = (nu - datetime.timedelta(days=LOG_DAGEN)).isoformat()
@@ -3641,6 +3644,8 @@ def zoek(v):
     sleutel = hashlib.sha256(('%s|%s|%s|%s|%s|%s' % (VERSIE, ingang, term.lower(), pt['niveau'], v.get('beelden') is not False,
                                                      ''.join(k for k in sorted(SLEUTEL_ENV) if sleutel_er(k)))).encode()).hexdigest()
     cachebaar = ingang in ZOEK
+    if cachebaar:
+        c.execute('update zoekvraag set sleutel = ? where id = ?', (sleutel, zid))
     rij = None if v.get('vers') or NEP or not cachebaar else c.execute('select tijd, json from cache where sleutel = ?', (sleutel,)).fetchone()
     beelden = v.get('beelden') is not False
     ctx = Ctx(pt['niveau'], beelden, wie)
@@ -3683,7 +3688,123 @@ def zoek(v):
               json.dumps(graaf, ensure_ascii=False) if graaf and graaf.get('knopen') else None, zid))
     c.commit()
     return {'ok': True, 'id': zid, 'ingang': ingang, 'term': term, 'doel': doel, 'doel_tekst': doel_tekst, 'wie': wie,
-            'poort': pt, 'cache': bool(rij), 'kaarten': kaarten, 'kern': kern, 'extern': ext, 'logboek': ctx.log, 'versie': VERSIE, 'graaf': graaf}
+            'poort': pt, 'cache': bool(rij), 'kaarten': kaarten, 'kern': kern, 'extern': ext, 'logboek': ctx.log, 'versie': VERSIE, 'graaf': graaf,
+            'kort': in_het_kort(ingang, kern, kaarten)}
+
+
+# ---------------------------------------------------------------- in het kort (wv4156, 2C94 a)
+# Bovenaan elk antwoord: een paar feiten uit kern en de kaartjes, en alle let-op-regels bij elkaar. Geen cijfer, geen stoplicht: alleen
+# wat er staat; het oordeel blijft bij David. Ontbreekt een feit, dan staat het er niet (nooit "geen faillissement" uit stilte).
+def leeftijd_tekst(iso, nu=None):
+    try:
+        d = datetime.date.fromisoformat(str(iso or '')[:10])
+    except ValueError:
+        return None
+    dagen = ((nu or datetime.date.today()) - d).days
+    if dagen < 0:
+        return None
+    if dagen < 61:
+        return '%d dag%s' % (dagen, '' if dagen == 1 else 'en')
+    if dagen < 730:
+        return '%d maanden' % (dagen // 30)
+    return '%d jaar' % (dagen // 365)
+
+
+def velden_van(kaarten, titel):
+    k = next((k for k in kaarten if isinstance(k, dict) and k.get('titel') == titel), None)
+    return {a: b for a, b in (k.get('velden') or []) if b not in (None, '')} if k else {}
+
+
+def in_het_kort(ingang, kern, kaarten, nu=None):
+    kern = kern if isinstance(kern, dict) else {}
+    kaarten = [k for k in kaarten or [] if isinstance(k, dict)]
+    f = []
+
+    def bij(t):
+        t = str(t or '').strip()
+        if t and t not in f:
+            f.append(t[:140])
+    if ingang == 'bedrijf':
+        hr = velden_van(kaarten, 'Handelsregister')
+        bij(', '.join(str(x) for x in (kern.get('naam'), kern.get('rechtsvorm')) if x))
+        if kern.get('kvk'):
+            bij('KvK %s%s' % (kern['kvk'], ' (uit de incassant-ID)' if kern.get('kvk_uit') else ''))
+        if hr.get('Status'):
+            bij('status: %s' % hr['Status'])
+        oud = leeftijd_tekst(kern.get('geregistreerd'), nu)
+        if oud:
+            bij('domein %s oud' % oud)
+        n = kern.get('facturen_aantal')
+        if isinstance(n, int) and n > 0:
+            fv = velden_van(kaarten, 'Wat wij er zelf van weten (Facturen)')
+            eerst = str(fv.get('Eerste / laatste') or '').split(' / ')[0]
+            bij('%d betaling%s in Facturen%s' % (n, '' if n == 1 else 'en', (' sinds %s' % eerst[:4]) if re.match(r'\d{4}', eerst) else ''))
+        elif any(k.get('klein') == 'Geen betalingen gevonden in Facturen.' for k in kaarten):
+            bij('nog nooit aan betaald (Facturen)')
+        if hr.get('Opgericht (volgens Liza)'):
+            bij('opgericht %s' % hr['Opgericht (volgens Liza)'])
+    elif ingang == 'adres':
+        bij(kern.get('adres'))
+        if kern.get('bouwjaar'):
+            bij('bouwjaar %s' % kern['bouwjaar'])
+        if isinstance(kern.get('adressen_in_pand'), int) and kern['adressen_in_pand'] > 1:
+            bij('%d adressen in het pand' % kern['adressen_in_pand'])
+    elif ingang == 'telefoon' and kern:
+        bij(', '.join(str(x) for x in (kern.get('soort'), kern.get('gebied')) if x and x != 'onbekend'))
+        if kern.get('geldig') is False:
+            bij('geen geldig nummer')
+    elif ingang == 'kenteken':
+        kv = velden_van(kaarten, 'Kenteken')
+        bij(' '.join(str(kv[x]) for x in ('Merk', 'Model') if kv.get(x)))
+        for lab in ('Kleur', 'Eerste toelating', 'APK geldig tot'):
+            if kv.get(lab):
+                bij('%s %s' % (lab.lower(), kv[lab]))
+    elif ingang == 'mail' and kern:
+        if kern.get('afzenderdomein'):
+            bij('afzenderdomein %s' % kern['afzenderdomein'])
+        bij(' · '.join('%s %s' % (a.upper(), kern[a]) for a in ('spf', 'dkim', 'dmarc') if kern.get(a)))
+        if isinstance(kern.get('signalen'), int):
+            bij('%d signa%s' % (kern['signalen'], 'al' if kern['signalen'] == 1 else 'len'))
+    let = []
+    for k in kaarten:
+        t = str(k.get('let') or '').strip()
+        if t and t not in let:
+            let.append(t[:300])
+        if k.get('titel') == 'Wat wij er zelf van weten (Facturen)' and dict(k.get('velden') or []).get('Nieuw IBAN'):
+            t = 'Facturen: dit is een nieuw IBAN; eerst nabellen op een nummer dat je al kende.'
+            if t not in let:
+                let.append(t)
+    return {'feiten': f[:5], 'let': let[:10]}
+
+
+def bewaard(zid, sl=None):
+    """Het bewaarde antwoord van één zoekvraag uit het logboek (wv4156, 2C94 c): uit de cache, zonder nieuwe zoekvraag en zonder aanroep
+    naar buiten. Niet (meer) bewaard (30 dagen, poort dicht, mailkop, bestand) = ok False met reden; dan zoekt David opnieuw."""
+    SLEUTELS.clear()
+    if isinstance(sl, dict):
+        SLEUTELS.update({k: sl[k] for k in SLEUTEL_ENV if isinstance(sl.get(k), str)})
+    c = db()
+    c.row_factory = sqlite3.Row
+    z = c.execute('select * from zoekvraag where id = ?', (int(zid),)).fetchone()
+    if not z:
+        return {'ok': False, 'fout': 'onbekende zoekvraag'}
+    if z['ingang'] not in ZOEK:
+        return {'ok': False, 'fout': 'niet bewaard', 'reden': 'van een %s bewaart OSINT geen antwoord' % ('mailkop' if z['ingang'] == 'mail' else 'bestand' if z['ingang'] == 'bestand' else 'eigen ronde'),
+                'ingang': z['ingang'], 'term': z['term']}
+    sleutel = z['sleutel'] or hashlib.sha256(('%s|%s|%s|%s|%s|%s' % (VERSIE, z['ingang'], z['term'].lower(), z['poort'], z['wie'] == 'david',
+                                                                     ''.join(k for k in sorted(SLEUTEL_ENV) if sleutel_er(k)))).encode()).hexdigest()
+    rij = c.execute('select tijd, json from cache where sleutel = ?', (sleutel,)).fetchone()
+    if not rij:
+        return {'ok': False, 'fout': 'niet bewaard', 'reden': 'dit antwoord is niet meer bewaard', 'ingang': z['ingang'], 'term': z['term']}
+    u = json.loads(rij['json'])
+    kaarten = zonder_intern(herstel_google(Ctx('niets', False, z['wie']), u.get('kaarten') or []))   # Google-foto nooit uit de cache, en hier niet opnieuw ophalen
+    a = [dict(r) for r in c.execute('select bron, soort, host, naar_buiten, status, ms from aanroep where zoek_id = ? order by id', (z['id'],))]
+    if z['poort'] != 'alles':
+        kaarten.insert(0, kaartje('Poort', 'OVIS OSINT-poort', let='Deze zoekvraag ging niet naar openbare bronnen (%s).' % z['poort_reden']))
+    return {'ok': True, 'id': z['id'], 'ingang': z['ingang'], 'term': z['term'], 'doel': z['doel'], 'doel_tekst': z['doel_tekst'], 'wie': z['wie'],
+            'poort': {'niveau': z['poort'], 'reden': z['poort_reden']}, 'cache': True, 'bewaard': True, 'bewaard_op': rij['tijd'], 'kaarten': kaarten,
+            'kern': u.get('kern') or {}, 'extern': sum(1 for r in a if r['soort'] == 'extern' and r['status'] != 'poort dicht'), 'logboek': a,
+            'versie': VERSIE, 'graaf': u.get('graaf'), 'kort': in_het_kort(z['ingang'], u.get('kern'), kaarten)}
 
 
 def grafiek(n=40):
@@ -3730,7 +3851,7 @@ def info():
 
 
 def main(a):
-    if not a or a[0] not in ('zoek', 'logboek', 'info', 'instelling', 'grafiek', 'lijkend', 'vastgoed'):
+    if not a or a[0] not in ('zoek', 'logboek', 'info', 'instelling', 'grafiek', 'lijkend', 'vastgoed', 'bewaard'):
         sys.exit('gebruik: osint.py zoek (json op stdin) | logboek [n] | info | instelling (json op stdin: {} = lezen, {zet: {...}}) | grafiek [n] | lijkend | vastgoed (json op stdin)')
     if a[0] == 'zoek':
         try:
@@ -3752,6 +3873,12 @@ def main(a):
         except ValueError:
             v = None
         r = vastgoed(v) if isinstance(v, dict) else {'ok': False, 'fout': 'geen json'}
+    elif a[0] == 'bewaard':   # wv4156: osint.py bewaard <id> (sleutels als json op stdin, zoals zoek)
+        try:
+            v = json.loads(sys.stdin.read() or '{}')
+        except ValueError:
+            v = {}
+        r = bewaard(a[1], (v or {}).get('sleutels') if isinstance(v, dict) else None) if len(a) > 1 and a[1].isdigit() and len(a[1]) <= 9 else {'ok': False, 'fout': 'geen id'}
     elif a[0] == 'grafiek':
         r = grafiek(a[1] if len(a) > 1 and a[1].isdigit() else 40)
     elif a[0] == 'lijkend':

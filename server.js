@@ -17112,7 +17112,7 @@ function handleApp(req, res) {
         if (/^GET \/app\/besluiten\/app\/[a-z0-9-]{2,30}$/.test(route)) return typeof appBesluiten === 'function' ? appBesluiten(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'besluiten');   // wv3714: rapportboek van één app (OVIS Code)
         if (route === 'GET /app/energie' || route === 'POST /app/energie/nu') return typeof appEnergie === 'function' ? appEnergie(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'energie');   // wv3586: OVIS Energie (Homey + Tibber, alleen lezen)
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
-        if (route === 'GET /app/osint' || route === 'POST /app/osint/zoek' || route === 'POST /app/osint/bestand' || route === 'GET /app/osint/instelling' || route === 'POST /app/osint/instelling' || route === 'GET /app/osint/grafiek') return typeof appOsint === 'function' ? appOsint(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'osint');   // wv2698: + bestand, instelling, grafiek   // wv2694: OVIS OSINT (logboek, zoeken)
+        if (route === 'GET /app/osint' || route === 'POST /app/osint/zoek' || route === 'POST /app/osint/bestand' || route === 'GET /app/osint/instelling' || route === 'POST /app/osint/instelling' || route === 'GET /app/osint/grafiek' || /^GET \/app\/osint\/bewaard\/\d{1,9}$/.test(route)) return typeof appOsint === 'function' ? appOsint(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'osint');   // wv2698: + bestand, instelling, grafiek   // wv2694: OVIS OSINT (logboek, zoeken)
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
@@ -30511,6 +30511,14 @@ async function appOsint(req, res, a, route, d) {
     res._app.reden = 'osint instelling ' + (zet ? 'zet' : 'lees');
     return appStuur(res, r.ok ? 200 : 503, r);
   }
+  if (route.indexOf('GET /app/osint/bewaard/') === 0) {
+    // wv4156 (2C94 c): tik in het logboek = het bewaarde antwoord, zonder nieuwe zoekvraag en zonder aanroep naar buiten
+    if (!appTeller('osint_lijst', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens osint lijst');
+    const id = route.slice('GET /app/osint/bewaard/'.length);
+    const r = await osintRun(['bewaard', id], { sleutels: await osintSleutels() });
+    res._app.reden = 'osint bewaard ' + (r.ok ? 'ja' : String(r.fout || 'fout').slice(0, 20));
+    return appStuur(res, r.ok ? 200 : (r.fout === 'niet bewaard' || r.fout === 'onbekende zoekvraag' ? 404 : 503), r);
+  }
   if (route === 'GET /app/osint/grafiek') {
     if (!appTeller('osint_lijst', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens osint lijst');
     const r = await osintRun(['grafiek', '60']);
@@ -30523,9 +30531,40 @@ async function appOsint(req, res, a, route, d) {
   if (route === 'POST /app/osint/bestand' && ing !== 'bestand') return appWeiger(res, 400, 'alleen voor een bestand', 'osint bestand ingang');
   if (route === 'POST /app/osint/bestand' && typeof (d || {}).bestand === 'string' && d.bestand.length > 14 * 1024 * 1024) return appWeiger(res, 413, 'bestand te groot (hooguit 10 MB)', 'osint bestand groot');
   if (route === 'POST /app/osint/zoek' && ing === 'bestand') return appWeiger(res, 400, 'een bestand gaat via /app/osint/bestand', 'osint bestand route');
+  if (route === 'POST /app/osint/bestand' && d && d.bron != null) {
+    // wv4156 (2C94 e): een bestand dat al op de pod staat (Bestanden), zonder upload. Alleen lezen; de pod geeft osint.py een kopie in het geheugen.
+    const g = osintBestandUitBron(d.bron);
+    if (!g.ok) return appWeiger(res, g.status, g.fout, 'osint bestand bron');
+    d = { ingang: 'bestand', bestand: g.inhoud.toString('base64'), naam: g.naam };
+  }
   const r = await osintZoekMetSleutels(osintInvoer(d || {}, 'david'));
   res._app.reden = 'osint zoek ' + String(r.ingang || '?').slice(0, 10) + ' ' + String((r.poort && r.poort.niveau) || 'fout').slice(0, 8) + ' extern ' + (Number(r.extern) || 0) + (r.cache ? ' cache' : '');
   return appStuur(res, r.ok ? 200 : (r.fout === 'lege zoekterm' || r.fout === 'onbekende ingang' ? 400 : 503), r);
+}
+// wv4156 (2C94 e): bron {soort: 'bestand', job, n} = een bestand uit Bestanden (app-bestanden; een verwijzing naar een agentbestand volgt
+// appBestandPad). Hooguit 10 MB, geen koppelingen volgen. Mailbijlage en Facturen volgen in een eigen stap.
+const OSINT_BRON_MAX = 10 * 1024 * 1024;
+function osintBestandUitBron(bron) {
+  const b = bron && typeof bron === 'object' ? bron : {};
+  if (b.soort !== 'bestand') return { ok: false, status: 400, fout: 'onbekende bron' };
+  if (!APP_JOB_RE.test(String(b.job || '')) || !Number.isInteger(b.n) || b.n < 0 || b.n > 999) return { ok: false, status: 400, fout: 'onbekend bestand' };
+  const m = appBewaardVan(String(b.job));
+  const x = m && Array.isArray(m.bestanden) ? m.bestanden.find(function (y) { return y && y.n === b.n; }) : null;
+  const abs = x ? appBestandPad(m, x) : null;
+  if (!abs) return { ok: false, status: 404, fout: 'dit bestand staat niet (meer) in Bestanden' };
+  let fd = null;
+  try {
+    fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return { ok: false, status: 404, fout: 'dit bestand staat niet (meer) in Bestanden' };
+    if (st.size > OSINT_BRON_MAX) return { ok: false, status: 413, fout: 'bestand te groot (hooguit 10 MB)' };
+    if (st.size === 0) return { ok: false, status: 400, fout: 'leeg bestand' };
+    const inhoud = Buffer.alloc(st.size);
+    let gelezen = 0;
+    while (gelezen < st.size) { const n = fs.readSync(fd, inhoud, gelezen, st.size - gelezen, gelezen); if (!n) break; gelezen += n; }
+    return { ok: true, inhoud: inhoud.subarray(0, gelezen), naam: String(x.naam || 'bestand').slice(0, 120) };
+  } catch (e) { return { ok: false, status: 404, fout: 'dit bestand staat niet (meer) in Bestanden' }; }
+  finally { if (fd !== null) try { fs.closeSync(fd); } catch (e) { /* al dicht */ } }
 }
 async function smalOsint(d, socev) {
   if (!fs.existsSync(OSINT_SCRIPT)) return { status: 404, j: { ok: false, fout: 'OSINT zit niet in deze versie van de pod' } };
