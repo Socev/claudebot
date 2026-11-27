@@ -411,6 +411,25 @@ const medischDomein = (id) => { const b = MEDISCH_BRONNEN.find((x) => x.id === i
 // (patroon medisch/week); daarvoor alleen in het app-voorbeeld. QR_PX = breedte op het doek (1920×1080; ± 15 cm op een tv van 55 inch).
 const QR_RIJ = 'personeelsscherm-qr';
 const QR_ZIN = 'QR-code naar het artikel: naast een medisch bericht (NHG, LHV, RIVM) en bij een infoscherm met een openbare bron';
+// ── wv4209 (besluitenpagina nr 919 = L19 en nr 920 = L20, David Ja 25-11-2026 met verse vingerafdruk) ──
+// (1) Mededelingen: David zet zelf een punt in Komende weken (tekst, datum, eventueel tijd) via Apps › OVIS Scherm › + Mededeling; server.js eist
+//     een verse vingerafdruk (zijn knop per bericht; registerrij personeelsscherm-vast: "eigen schermpunten van David"). Bewaard in <dir>/punten.json
+//     (dat de module sinds fase 1 al las), label Praktijk; weg na de datum; hooguit 28 dagen vooruit. Socev kan er een voorstellen
+//     (POST /smal/personeelsscherm/voorstel): dat staat in de app als voorstel en komt pas op de tv als David het met zijn vingerafdruk overneemt.
+// (2) Feestdagen in Komende weken, en per vaste bron (scherm-id van de weekset) de keuze "mag vanzelf": schermen van zo'n bron komen zonder
+//     knop per set op de tv (set.vanzelf in infoschermen.json; zelfde vorm- en inhoudsregels als een infoscherm). Beide alleen met een EIGEN
+//     registerrij VANZELF_RIJ (naast de basisrij, met INFO_ZIN voor de schermen); daarvoor alleen als proef in de app. Elke bron staat uit tot
+//     David hem in de app aanzet (vingerafdruk); uitzetten werkt meteen, zonder vingerafdruk.
+const MEDEDELING_MAX = 12, MEDEDELING_TITEL_MAX = 80, MEDEDELING_DAGEN = 28, VOORSTEL_MAX = 5, VOORSTEL_BEWAAR_MS = 7 * 24 * UUR;
+const VANZELF_RIJ = 'personeelsscherm-vanzelf';
+const FEEST_ZIN = 'Komende weken: ook de landelijke feestdagen (alleen naam en datum)';
+const VANZELF_ZIN = 'Infoschermen van een vaste bron die David in de app op «mag vanzelf» zette';
+const VASTE_BRONNEN = [
+  { id: 'wijk', naam: 'Uit de wijk', uitleg: 'nieuwsbrief wijk en regio van Huisartsen Eemland' },
+  { id: 'nieuws', naam: 'In het nieuws', uitleg: 'LHV, NHG, NZa, VWS en Huisartsen Eemland' },
+  { id: 'wor', naam: 'Welzijn op Recept', uitleg: 'Welzijn op Recept in Leusden' },
+];
+const APP_LINK = 'https://app.socev.dev/?app=personeelsscherm';
 const QR_PX = 132;
 const MEDISCH_MS = UUR, MEDISCH_OUD_MS = 30 * 24 * UUR, MEDISCH_N = 12, MEDISCH_PER_BLAD = 3, MEDISCH_S = 25, MEDISCH_TEKST_MAX = 220, MEDISCH_BEWAAR = 80;
 const BELANGRIJK_MS = 21 * 24 * UUR, BELANGRIJK_DAVID_MS = 28 * 24 * UUR, BELANGRIJK_N = 6;
@@ -733,7 +752,19 @@ function weekBeeld(w, t) {
       artsen: (Array.isArray(d.artsen) ? d.artsen : []).map((y) => ({ naam: String(y.naam), wanneer: String(y.wanneer) })) };
   }) };
 }
-function agendaPunten(rijen, vandaag, eigen) {
+// wv4209: feestdagen in Komende weken (alleen met de eigen rij): Eerste en Tweede … op één regel, op de eerste dag
+function feestPunten(vandaag, dagen) {
+  const uit = [];
+  for (let k = 0; k <= dagen; k++) {
+    const d = plusDag(vandaag, k), n = feestdag(d);
+    if (!n) continue;
+    const v = uit[uit.length - 1], m = /^Tweede (.+)$/.exec(n);
+    if (v && m && v.naam === 'Eerste ' + m[1] && plusDag(v.datum, 1) === d) { v.titel = 'Eerste en Tweede ' + m[1]; v.naam = n; continue; }
+    uit.push({ datum: d, titel: n, naam: n });
+  }
+  return uit;
+}
+function agendaPunten(rijen, vandaag, eigen, feest) {
   const uit = [];
   for (const r0 of rijen) {
     const r = tijdlijnRij(r0);
@@ -751,6 +782,7 @@ function agendaPunten(rijen, vandaag, eigen) {
     const tijd = /^\d{2}:\d{2}$/.test(e.tijd || '') ? e.tijd : 'hele dag';
     uit.push({ datum: e.datum, sort: e.datum + (tijd === 'hele dag' ? '00:00' : tijd), titel: t, tijd, label: 'Praktijk' });
   }
+  if (feest) for (const f of feestPunten(vandaag, AGENDA_DAGEN)) uit.push({ datum: f.datum, sort: f.datum + '00:00', titel: f.titel, tijd: 'hele dag', label: 'Feestdag' });
   return uit.sort((a, b) => (a.sort < b.sort ? -1 : a.sort > b.sort ? 1 : 0)).slice(0, 6)
     .map((a) => { const d = datumDelen(a.datum); return { wd: d.wd, dg: d.dg, mn: d.mn, titel: a.titel, tijd: a.tijd, label: a.label }; });
 }
@@ -813,6 +845,34 @@ function setGeldig(set, vragen) {
 // wv3020: vaste id per goedgekeurd scherm (set-sleutel + letterlijke inhoud): aan/uit in de app hangt eraan; een gewijzigde tekst = ander id
 function schermId(sleutel, sc) {
   return crypto.createHash('sha256').update(JSON.stringify([String(sleutel), sc.kop, sc.intro, sc.punten, sc.bron, sc.tot].concat(sc.bron_url ? [sc.bron_url] : []))).digest('hex').slice(0, 16);
+}
+// wv4209: één mededeling (David in de app, of een voorstel van Socev) gecontroleerd; { fout } of { titel, datum, tijd }
+function mededelingNorm(x, vandaag) {
+  const titel = aanvraagTekst(x && x.titel);
+  if (titel.length < 2) return { fout: 'Schrijf wat er op het scherm moet.' };
+  if (titel.length > MEDEDELING_TITEL_MAX) return { fout: 'Houd het korter (hooguit ' + MEDEDELING_TITEL_MAX + ' tekens).' };
+  const datum = String((x && x.datum) || '');
+  if (!echteDatum(datum)) return { fout: 'Kies een datum.' };
+  if (datum < vandaag) return { fout: 'Die datum is al voorbij.' };
+  if (datum > plusDag(vandaag, MEDEDELING_DAGEN)) return { fout: 'Hooguit vier weken vooruit.' };
+  const tijd = x.tijd == null || x.tijd === '' ? null : String(x.tijd);
+  if (tijd !== null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(tijd)) return { fout: 'Schrijf de tijd als 16:30, of laat hem leeg.' };
+  return { titel, datum, tijd };
+}
+const mededelingId = (m) => crypto.createHash('sha256').update(JSON.stringify([m.titel.toLowerCase(), m.datum, m.tijd || ''])).digest('hex').slice(0, 12);
+// wv4209: schermen van een vaste bron uit set.vanzelf, alleen als David die bron in de app aanzette (aan[id].op) vóór of op de setdag; zelfde vorm-
+// en inhoudsregels als een infoscherm (infoNorm, einddatum ≤ set + 28, punt binnen zijn scherm). Een ongeldig scherm valt alleen zelf weg.
+function vanzelfGeldig(set, aan) {
+  if (!set || typeof set !== 'object' || !echteDatum(set.set) || !Array.isArray(set.vanzelf) || set.vanzelf.length > INFO_SET_MAX) return [];
+  const uit = [];
+  for (const sc of set.vanzelf) {
+    const id = String((sc && sc.id) || ''), a = aan && typeof aan === 'object' ? aan[id] : null;
+    if (!VASTE_BRONNEN.some((b) => b.id === id) || !a || !Number.isFinite(Number(a.op)) || ymd(Number(a.op)) > set.set) continue;
+    const x = infoNorm(sc);
+    if (!x || x.tot < set.set || x.tot > plusDag(set.set, INFO_DAGEN_MAX) || x.punten.some((y) => y.tot !== undefined && (y.tot < set.set || y.tot > x.tot))) continue;
+    uit.push(Object.assign({ set: set.set, bron_id: id }, x));
+  }
+  return uit;
 }
 // ── extra pagina aanvragen (wv3020) ──
 // David typt in de app "Nieuwe pagina over …"; de pod zet één werkvoorraadrij (herkomst david) met deze vaste opdracht en zijn woorden
@@ -930,8 +990,9 @@ function maak(o) {
     const uit = [];
     for (const set of Array.isArray(j && j.sets) ? j.sets : []) {
       let g = null; try { g = setGeldig(set, vr); } catch (e) { g = null; }
-      if (!g) continue;
-      for (const x of g) if (x.set <= vandaag && x.tot >= vandaag) uit.push(Object.assign({ id: schermId(set.sleutel, x), sleutel: set.sleutel }, x));
+      if (g) for (const x of g) if (x.set <= vandaag && x.tot >= vandaag) uit.push(Object.assign({ id: schermId(set.sleutel, x), sleutel: set.sleutel }, x));
+      // wv4209: schermen van een bron die David op 'mag vanzelf' zette (alleen met de eigen rij); id op 'vanzelf:<setdag>'
+      if (vanzelfMag()) for (const x of vanzelfGeldig(set, vanzelfAan())) if (x.set <= vandaag && x.tot >= vandaag) uit.push(Object.assign({ id: schermId('vanzelf:' + set.set, x), sleutel: 'vanzelf' }, x));
     }
     // wv4141 (2C55): nieuw vervangt oud — per kop (zonder hoofdletters) telt alleen het scherm uit de nieuwste set (gelijke datum: de laatste in
     // het bestand); de rest is vervangen. Bepaald vóór het uit-filter (Codex MOET 1): zet David het nieuwe uit, dan komt het oude niet terug.
@@ -1013,7 +1074,14 @@ function maak(o) {
     if (s && s.week && s.week.vol && !volleNaamMag()) return null;
     return weekBeeld(s && s.week, t);
   }
-  function eigenPunten() { try { const j = JSON.parse(fs.readFileSync(path.join(dir, 'punten.json'), 'utf8')); return Array.isArray(j) ? j : []; } catch (e) { return []; } }
+  const puntenPad = path.join(dir, 'punten.json');
+  function eigenPunten() { try { const j = JSON.parse(fs.readFileSync(puntenPad, 'utf8')); return Array.isArray(j) ? j : []; } catch (e) { return []; } }
+  // wv4209: punten.json alleen hier geschreven (0600, atomair); verlopen punten gaan er bij elke schrijfbeurt uit
+  function puntenSchrijf(lijst) { const tmp = puntenPad + '.' + process.pid + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(lijst, null, 1), { mode: 0o600 }); fs.renameSync(tmp, puntenPad); }
+  // wv4209: eigen rij voor feestdagen en 'mag vanzelf' (naast de basisrij; schermen ook alleen met INFO_ZIN in de basisrij)
+  const feestMag = () => toestemming() && rijMag(FEEST_ZIN, VANZELF_RIJ);
+  const vanzelfMag = () => toestemming() && infoMag() && rijMag(VANZELF_ZIN, VANZELF_RIJ);
+  const vanzelfAan = () => { const v = leesStand().vanzelf; return v && typeof v === 'object' ? v : {}; };
   async function weerVers(s, t) {
     if (s.weer && s.weer_op && t - s.weer_op < WEER_MS) return s.weer;
     if (typeof o.weer !== 'function') return null;
@@ -1037,7 +1105,8 @@ function maak(o) {
     const inhoud = {
       datum: vandaag,
       weer: weer || null,
-      agenda: rijen ? agendaPunten(rijen, vandaag, eigenPunten()) : (Array.isArray(oud.agenda) ? oud.agenda : []),
+      agenda: rijen ? agendaPunten(rijen, vandaag, eigenPunten(), feestMag()) : (Array.isArray(oud.agenda) ? oud.agenda : []),
+      feest_tv: feestMag(),   // wv4209: rij erbij/weg = meteen opnieuw verzamelen
       artsen: aan ? (rijen ? artsenVandaag(rijen, vandaag, meds, vol) : (oud.datum === vandaag && Array.isArray(oud.artsen) && !!oud.volle_naam === vol ? oud.artsen : [])) : null,
       jarig: aan ? jarigen(meds, vandaag) : null,
       jarig_dag: aan ? jarigDag(meds, vandaag) : null,   // wv4141
@@ -1202,6 +1271,72 @@ function maak(o) {
     }
     return { status: 200, body: { ok: true, id, vast: !!vast } };
   }
+  // ── wv4209: mededelingen, voorstellen van Socev en 'mag vanzelf' ──
+  // na een wijziging meteen opnieuw verzamelen en publiceren; lukt dat niet, dan doet de volgende tik het (inhoud_op terug)
+  async function herbouw(t, wat) {
+    try { await verzamel(t); await publiceer(); return null; }
+    catch (e) { fout('personeelsscherm-publiceer', new Error(String(e && e.message).slice(0, 80))); wijzig((x) => { x.inhoud_op = 0; }); return wat + ', maar de tv is nog niet bijgewerkt; dat probeer ik binnen 5 minuten opnieuw.'; }
+  }
+  const voorstellenNu = (s, t) => (Array.isArray(s.mededeling_voorstellen) ? s.mededeling_voorstellen : []).filter((v) => v && t - Number(v.op) < VOORSTEL_BEWAAR_MS && v.datum >= ymd(t));
+  // POST mededeling: {titel, datum, tijd?} = nieuw (David; server.js eiste de verse vingerafdruk), {voorstel: id} = voorstel van Socev overnemen
+  // (idem), {voorstel: id, laat: true} = voorstel laten liggen, {weg: id} = van het scherm halen (beide zonder vingerafdruk: haalt alleen weg)
+  let mededelingBezig = false;
+  async function mededelingZet(b) {
+    b = b && typeof b === 'object' ? b : {};
+    const t = nu(), vandaag = ymd(t);
+    if (b.voorstel != null && b.laat === true) {
+      const id = String(b.voorstel); let weg = false;
+      wijzig((s) => { const v = Array.isArray(s.mededeling_voorstellen) ? s.mededeling_voorstellen : []; s.mededeling_voorstellen = v.filter((x) => { const h = x && x.id === id; weg = weg || h; return !h; }); });
+      return weg ? { status: 200, body: { ok: true, voorstel: id, laat: true } } : { status: 404, body: { ok: false, fout: 'Dit voorstel staat er niet (meer).' } };
+    }
+    if (mededelingBezig) return { status: 409, body: { ok: false, fout: 'Er wordt net iets op het scherm gezet; probeer het zo opnieuw.' } };
+    mededelingBezig = true;
+    try {
+      let lijst = eigenPunten().filter((x) => x && echteDatum(x.datum) && x.datum >= vandaag);
+      if (b.weg != null) {
+        const id = String(b.weg), n = lijst.length;
+        lijst = lijst.filter((x) => x.id !== id);
+        if (lijst.length === n) return { status: 404, body: { ok: false, fout: 'Deze mededeling staat niet (meer) op het scherm.' } };
+        puntenSchrijf(lijst);
+        const w = await herbouw(t, 'Weggehaald');
+        return w ? { status: 503, body: { ok: false, fout: w } } : { status: 200, body: { ok: true, weg: id } };
+      }
+      let bron = b, door = 'david', vid = null;
+      if (b.voorstel != null) {
+        vid = String(b.voorstel);
+        bron = voorstellenNu(leesStand(), t).find((x) => x.id === vid);
+        if (!bron) return { status: 404, body: { ok: false, fout: 'Dit voorstel staat er niet (meer).' } };
+        door = 'socev';
+      }
+      const m = mededelingNorm(bron, vandaag);
+      if (m.fout) return { status: 400, body: { ok: false, fout: m.fout } };
+      const id = mededelingId(m), al = lijst.some((x) => x.id === id);
+      if (!al && lijst.length >= MEDEDELING_MAX) return { status: 409, body: { ok: false, fout: 'Er staan al ' + MEDEDELING_MAX + ' mededelingen klaar; haal er eerst een weg.' } };
+      if (!al) { lijst.push({ id, titel: m.titel, datum: m.datum, tijd: m.tijd, op: t, door }); lijst.sort((x, y) => (x.datum + (x.tijd || '')).localeCompare(y.datum + (y.tijd || ''))); puntenSchrijf(lijst); }
+      if (vid) wijzig((s) => { s.mededeling_voorstellen = (Array.isArray(s.mededeling_voorstellen) ? s.mededeling_voorstellen : []).filter((x) => x && x.id !== vid); });
+      const w = al ? null : await herbouw(t, 'Opgeslagen');
+      return w ? { status: 503, body: { ok: false, fout: w, opgeslagen: true } } : { status: 200, body: { ok: true, id, al } };
+    } finally { mededelingBezig = false; }
+  }
+  // /smal/personeelsscherm/voorstel (server.js, Socev-sleutel of machinekamer): alleen bewaren als voorstel; nooit op de tv zonder Davids tik
+  function voorstel(b) {
+    const t = nu(), m = mededelingNorm(b || {}, ymd(t));
+    if (m.fout) return { status: 400, j: { ok: false, fout: m.fout } };
+    const id = mededelingId(m);
+    wijzig((s) => { const v = voorstellenNu(s, t).filter((x) => x.id !== id); s.mededeling_voorstellen = v.slice(-(VOORSTEL_MAX - 1)).concat([{ id, titel: m.titel, datum: m.datum, tijd: m.tijd, op: t }]); });
+    const d = datumDelen(m.datum);
+    return { status: 200, j: { ok: true, id, link: APP_LINK, op_scherm: d.wd + ' ' + d.dg + ' ' + d.mn + ' · ' + (m.tijd || 'hele dag') + ' · ' + m.titel + ' (Praktijk)',
+      uitleg: 'Staat als voorstel in Apps › OVIS Scherm; het komt pas op de tv als David het daar met zijn vingerafdruk overneemt.' } };
+  }
+  // POST vanzelf {bron, aan}: aan = server.js eiste de verse vingerafdruk; uit = meteen, zonder
+  async function vanzelfZet(bronRuw, aan) {
+    const bron = String(bronRuw == null ? '' : bronRuw);
+    if (!VASTE_BRONNEN.some((x) => x.id === bron)) return { status: 400, body: { ok: false, fout: 'Onbekende bron.' } };
+    const t = nu();
+    wijzig((s) => { const v = s.vanzelf && typeof s.vanzelf === 'object' ? s.vanzelf : {}; if (aan) { if (!v[bron]) v[bron] = { op: t }; } else delete v[bron]; s.vanzelf = v; });
+    if (vanzelfMag()) { const w = await herbouw(t, aan ? 'Aangezet' : 'Uitgezet'); if (w) return { status: 503, body: { ok: false, fout: w } }; }
+    return { status: 200, body: { ok: true, bron, aan: !!aan } };
+  }
   let aanvraagBezig = false;
   async function aanvraag(ruw) {
     const tekst = aanvraagTekst(ruw);
@@ -1275,6 +1410,25 @@ function maak(o) {
     }
     let sets = [], vr = {};
     try { const j = JSON.parse(infoBestand() || '{}'); sets = Array.isArray(j.sets) ? j.sets : []; vr = JSON.parse(fs.readFileSync(vragenPad, 'utf8')); } catch (e) { /* stand blijft wacht */ }
+    // wv4209: een set die op Davids Ja wacht (hooguit 7 dagen oud) en schermen van een bron op 'mag vanzelf' zonder de eigen rij: als proef
+    // (voorbeeld zoals op de tv, geen aan-knop), zodat de vrijdagkaart naar Apps › OVIS Scherm kan wijzen in plaats van alles uit te schrijven
+    if (toestemming() && infoMag()) {
+      const vb = (sc) => bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [sc], jarig_dag: null, nieuws: null, medisch: null, qr: true }), toon: 1 });
+      const al = new Set(lijst.map((x) => x.id));
+      for (const set of sets) {
+        let g = null, k = null; try { g = setGeldig(set, vr); k = g ? null : setKaart(set); } catch (e) { g = null; k = null; }
+        if (k && set.set >= plusDag(vandaag, -7) && /^wv\d{1,7}$/.test(String(set.sleutel || ''))) for (const x of k.schermen) {
+          if (x.tot < vandaag) continue;
+          const id = schermId(set.sleutel, x); if (al.has(id)) continue; al.add(id);
+          lijst.push({ id, soort: 'info', titel: x.kop + ' · wacht op je Ja', looptijd_s: INFO_S, van: set.set, tot: x.tot, proef: true, concept: true, aan: false, uit: false, html: vb(Object.assign({ set: set.set }, x)) });
+        }
+        if (!vanzelfMag()) for (const x of vanzelfGeldig(set, vanzelfAan())) {
+          if (x.tot < vandaag) continue;
+          const id = schermId('vanzelf:' + set.set, x); if (al.has(id)) continue; al.add(id);
+          lijst.push({ id, soort: 'info', titel: x.kop + ' · mag vanzelf (nog niet op de tv)', looptijd_s: INFO_S, van: set.set, tot: x.tot, proef: true, aan: false, uit: false, html: vb(x) });
+        }
+      }
+    }
     const aanvragen = (s.aanvragen || []).filter((a) => a && t - a.op < AANVRAAG_BEWAAR_MS).slice(-10).reverse().map((a) => {
       const bij = sets.filter((x) => x && String(x.aanvraag || '') === 'wv' + a.wv);
       let geldig = false; try { geldig = bij.some((x) => !!setGeldig(x, vr)); } catch (e) { geldig = false; }
@@ -1426,6 +1580,10 @@ function maak(o) {
       },
       voorbeeld_html: s.html || '',
       ...appSchermen(s, nu()),   // wv3020
+      // wv4209: Davids mededelingen (komende), open voorstellen van Socev en de keuze 'mag vanzelf' per vaste bron
+      mededelingen: eigenPunten().filter((x) => x && echteDatum(x.datum) && x.datum >= ymd(nu())).map((x) => ({ id: String(x.id || ''), titel: String(x.titel || ''), datum: x.datum, tijd: x.tijd || null, door: x.door === 'socev' ? 'socev' : 'david' })),
+      voorstellen: voorstellenNu(s, nu()).map((x) => ({ id: x.id, titel: x.titel, datum: x.datum, tijd: x.tijd || null, op: x.op })),
+      vanzelf: { rij: vanzelfMag(), feestdagen: feestMag(), bronnen: VASTE_BRONNEN.map((b) => ({ id: b.id, naam: b.naam, uitleg: b.uitleg, aan: !!vanzelfAan()[b.id], sinds: vanzelfAan()[b.id] ? Number(vanzelfAan()[b.id].op) : null })) },
     };
   }
 
@@ -1438,6 +1596,8 @@ function maak(o) {
     if (methode === 'POST' && pad === '/app/personeelsscherm/info') return infoZet(body && body.id, !!(body && body.aan === true));   // wv3020
     if (methode === 'POST' && pad === '/app/personeelsscherm/aanvraag') return aanvraag(body && body.tekst);   // wv3020
     if (methode === 'POST' && pad === '/app/personeelsscherm/medisch') return medischZet(body && body.id, !!(body && body.vast === true));   // wv3154
+    if (methode === 'POST' && pad === '/app/personeelsscherm/mededeling') return mededelingZet(body);   // wv4209
+    if (methode === 'POST' && pad === '/app/personeelsscherm/vanzelf') return vanzelfZet(body && body.bron, !!(body && body.aan === true));   // wv4209
     return { status: 404, body: { ok: false, fout: 'onbekend' } };
   }
 
@@ -1452,7 +1612,7 @@ function maak(o) {
       || !!(s.inhoud && s.inhoud.volle_naam) !== (toestemming() && volleNaamMag()) || s.info_sha !== infoBestandSha(ymd(t))   // wv3015: rij of vrijgave gewijzigd = meteen
       || (toestemming() && nieuwsActief() && !nieuwsBinnenKwartier(s, t)) || (!!(s.inhoud && s.inhoud.nieuws) && !(toestemming() && nieuwsActief()))
       || (toestemming() && !medischBinnenUur(s, t)) || !!(s.inhoud && s.inhoud.medisch_tv) !== (toestemming() && medischMag())
-      || !!(s.inhoud && s.inhoud.qr_tv) !== (toestemming() && qrMag())) {   // wv4208: QR-rij erbij/weg = meteen   // wv3154: elk uur; zin erbij/weg = meteen   // wv3023: nieuws elk kwartier; zin weg of uit = meteen
+      || !!(s.inhoud && s.inhoud.qr_tv) !== (toestemming() && qrMag()) || !!(s.inhoud && s.inhoud.feest_tv) !== feestMag()) {   // wv4209: feestdagenrij erbij/weg = meteen   // wv4208: QR-rij erbij/weg = meteen   // wv3154: elk uur; zin erbij/weg = meteen   // wv3023: nieuws elk kwartier; zin weg of uit = meteen
       try { const i = await verzamel(t); nieuw = inhoudSha(i) !== s.inhoud_sha; } catch (e) { fout('personeelsscherm-inhoud', new Error(String(e && e.message).slice(0, 80))); }
       s = leesStand();
     }
@@ -1503,9 +1663,10 @@ function maak(o) {
       bronnen: s.inhoud ? s.inhoud.bronnen || null : null };   // alleen tellingen, nooit namen
   }
 
-  return { app, tik, info, publiceer, open, koppel, intrek, leeg, leesD1, appStand, verzamel, toestemming, infoSchermen, infoKandidaten, infoZet, aanvraag, medischZet };
+  return { app, tik, info, publiceer, open, koppel, intrek, leeg, leesD1, appStand, verzamel, toestemming, infoSchermen, infoKandidaten, infoZet, aanvraag, medischZet, mededelingZet, voorstel, vanzelfZet };
 }
 
 module.exports = { maak, bouwHtml, D1_SCHEMA, inWerktijd, inSchermtijd, inhoudVenster, QR_RIJ, QR_ZIN, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
+  VANZELF_RIJ, VANZELF_ZIN, FEEST_ZIN, VASTE_BRONNEN, MEDEDELING_DAGEN,   // wv4209
   VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, JARIG_ID, WEEK_RIJ, WEEK_ZIN, WEEK_ID, MEDISCH_ZIN, MEDISCH_RIJ, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN,
-  _t: { qrMatrix, qrSvg, openbareUrl, paasZondag, feestdagen, feestdag, weekMaandag, weekRooster, weekBeeld, medischTekst, medischItems, medischBijwerken, medischBeeld, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, artsenVandaag, jarigen, jarigDag, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };
+  _t: { qrMatrix, qrSvg, openbareUrl, paasZondag, feestdagen, feestdag, weekMaandag, weekRooster, weekBeeld, medischTekst, medischItems, medischBijwerken, medischBeeld, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, feestPunten, mededelingNorm, vanzelfGeldig, artsenVandaag, jarigen, jarigDag, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };

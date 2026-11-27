@@ -1468,3 +1468,120 @@ test('wv4208 infoscherm met openbare bron: bron_url op Davids kaart en in de cod
   const h2 = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 3600000, leeg: false, inhoud: { agenda: [], qr: false, info: [Object.assign({ set: SET.set }, met.schermen[0])] } });
   assert.doesNotMatch(h2, /class="qr"/, 'zonder qr-vlag (geen rij) geen code');
 });
+
+// ── wv4209 (nr 919 = L19, nr 920 = L20): mededelingen, voorstel van Socev, feestdagen en 'mag vanzelf' per vaste bron (verzonnen gegevens) ──
+const VZ_TEKST = [PS.FEEST_ZIN + ', berekend door de pod. ' + PS.VANZELF_ZIN + ' (proef), zonder knop per set.'];
+function fase4209(o = {}) {
+  const f = fase2(Object.assign({ set: null }, o));
+  const rijen = [{ id: 'personeelsscherm-vast', status: 'aan', tekst: NIEUW.map((x) => x + ' ' + PS.INFO_ZIN) }];
+  if (o.vz !== false) rijen.push({ id: PS.VANZELF_RIJ, status: o.vzStatus || 'aan', tekst: o.vzTekst || VZ_TEKST });
+  fs.writeFileSync(path.join(f.vault, 'register.json'), JSON.stringify({ rijen }));
+  if (o.sets) fs.writeFileSync(path.join(f.dir, 'infoschermen.json'), JSON.stringify({ sets: o.sets }));
+  return f;
+}
+const post = (m, wat, body) => m.app({ pad: '/app/personeelsscherm/' + wat, methode: 'POST', body });
+const stand4209 = async (m) => (await m.app({ pad: '/app/personeelsscherm', methode: 'GET' })).body;
+
+test('wv4209 mededeling: David zet een punt in Komende weken (label Praktijk), dubbel = al; grenzen; weghalen; weg na de datum', async () => {
+  const f = fase4209({ vz: false });
+  let r = await post(f.m, 'mededeling', { titel: 'Proefborrel om half vijf', datum: '2026-11-20', tijd: '16:30' });
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body)); assert.strictEqual(r.body.al, false);
+  let h = html(f.D);
+  assert.match(h, /Proefborrel om half vijf<\/div><div class="sub">16:30<\/div><\/div><span class="chip">Praktijk<\/span>/);
+  assert.strictEqual((fs.statSync(path.join(f.dir, 'punten.json')).mode & 0o777), 0o600);
+  let st = await stand4209(f.m);
+  assert.deepStrictEqual(st.mededelingen.map((x) => [x.titel, x.datum, x.tijd, x.door]), [['Proefborrel om half vijf', '2026-11-20', '16:30', 'david']]);
+  r = await post(f.m, 'mededeling', { titel: 'proefborrel om half vijf', datum: '2026-11-20', tijd: '16:30' });
+  assert.strictEqual(r.body.al, true, 'zelfde tekst (hoofdletters tellen niet), datum en tijd = geen tweede');
+  for (const [b, w] of [[{ titel: 'x', datum: '2026-11-20' }, 'te kort'], [{ titel: 'a'.repeat(81), datum: '2026-11-20' }, 'te lang'], [{ titel: 'Proef', datum: '2026-11-15' }, 'voorbij'],
+    [{ titel: 'Proef', datum: '2026-12-15' }, '> 28 dagen'], [{ titel: 'Proef', datum: '2026-11-31' }, 'geen datum'], [{ titel: 'Proef', datum: '2026-11-20', tijd: '25:00' }, 'tijd']]) {
+    r = await post(f.m, 'mededeling', b); assert.strictEqual(r.status, 400, w);
+  }
+  r = await post(f.m, 'mededeling', { titel: 'Proefdag zonder tijd', datum: '2026-11-17' });
+  assert.strictEqual(r.status, 200); assert.match(html(f.D), /Proefdag zonder tijd<\/div><div class="sub">hele dag/);
+  const id = (await stand4209(f.m)).mededelingen.find((x) => x.titel === 'Proefborrel om half vijf').id;
+  r = await post(f.m, 'mededeling', { weg: id }); assert.strictEqual(r.status, 200);
+  assert.doesNotMatch(html(f.D), /Proefborrel/); assert.strictEqual((await post(f.m, 'mededeling', { weg: id })).status, 404);
+  // de dag na de datum: weg van het scherm en uit de lijst in de app
+  f.zet(Date.parse('2026-11-18T09:00:00Z'));
+  const i = await f.m.verzamel(f.nu());
+  assert.ok(!i.agenda.some((a) => /Proefdag/.test(a.titel))); assert.deepStrictEqual((await stand4209(f.m)).mededelingen, []);
+});
+
+test('wv4209 voorstel van Socev: alleen bewaard, niet op de tv; pas na Davids overnemen erop; laten liggen; onbekend/ongeldig', async () => {
+  const f = fase4209({ vz: false });
+  let v = f.m.voorstel({ titel: 'Proeflunch met het team', datum: '2026-11-19', tijd: '12:30' });
+  assert.strictEqual(v.status, 200); assert.strictEqual(v.j.link, 'https://app.socev.dev/?app=personeelsscherm'); assert.match(v.j.op_scherm, /12:30 · Proeflunch met het team \(Praktijk\)/);
+  await f.m.verzamel(f.nu()); await f.m.publiceer();
+  assert.doesNotMatch(html(f.D), /Proeflunch/, 'kruisproef: voorstel staat niet op de tv');
+  let st = await stand4209(f.m); assert.strictEqual(st.voorstellen.length, 1); assert.deepStrictEqual(st.mededelingen, []);
+  let r = await post(f.m, 'mededeling', { voorstel: v.j.id });
+  assert.strictEqual(r.status, 200); assert.match(html(f.D), /Proeflunch met het team/);
+  st = await stand4209(f.m); assert.deepStrictEqual(st.voorstellen, []); assert.strictEqual(st.mededelingen[0].door, 'socev');
+  v = f.m.voorstel({ titel: 'Proefvoorstel dat blijft liggen', datum: '2026-11-19' });
+  r = await post(f.m, 'mededeling', { voorstel: v.j.id, laat: true }); assert.strictEqual(r.status, 200);
+  assert.deepStrictEqual((await stand4209(f.m)).voorstellen, []); assert.doesNotMatch(html(f.D), /blijft liggen/);
+  assert.strictEqual((await post(f.m, 'mededeling', { voorstel: 'abc' })).status, 404);
+  assert.strictEqual(f.m.voorstel({ titel: 'Proef', datum: '2026-11-01' }).status, 400);
+  for (let k = 0; k < 7; k++) f.m.voorstel({ titel: 'Proefvoorstel ' + k, datum: '2026-11-19' });
+  assert.strictEqual((await stand4209(f.m)).voorstellen.length, 5, 'hooguit vijf open voorstellen');
+});
+
+test('wv4209 feestdagen: alleen met de eigen rij, Eerste en Tweede op één regel (kruisproef zonder rij)', async () => {
+  assert.deepStrictEqual(PS._t.feestPunten('2026-12-20', 14).map((x) => [x.datum, x.titel]), [['2026-12-25', 'Eerste en Tweede Kerstdag'], ['2027-01-01', 'Nieuwjaarsdag']]);
+  assert.deepStrictEqual(PS._t.feestPunten('2027-03-26', 5).map((x) => x.titel), ['Eerste en Tweede Paasdag']);
+  assert.deepStrictEqual(PS._t.feestPunten('2026-12-26', 3).map((x) => x.titel), ['Tweede Kerstdag'], 'alleen de tweede dag nog in het venster');
+  const t = Date.parse('2026-12-14T09:00:00Z');
+  let f = fase4209({}); let i = await f.m.verzamel(t);
+  assert.deepStrictEqual(i.agenda.filter((a) => a.label === 'Feestdag').map((a) => [a.dg, a.titel]), [['25', 'Eerste en Tweede Kerstdag'], ['1', 'Nieuwjaarsdag']]);
+  await f.m.publiceer(); assert.match(html(f.D), /Eerste en Tweede Kerstdag<\/div><div class="sub">hele dag<\/div><\/div><span class="chip">Feestdag/);
+  for (const [w, o] of [['geen rij', { vz: false }], ['rij uit', { vzStatus: 'uit' }], ['rij zonder de zin', { vzTekst: [PS.VANZELF_ZIN] }]]) {
+    f = fase4209(o); i = await f.m.verzamel(t); assert.ok(!i.agenda.some((a) => a.label === 'Feestdag'), w);
+  }
+});
+
+const VZ_SCHERM = { id: 'wijk', kop: 'Proefwijk', intro: 'Verzonnen inleiding.', punten: [{ titel: 'Punt W', tekst: 'Tekst W.' }], bron: 'Verzonnen nieuwsbrief 16-11', tot: '2026-12-01' };
+test('wv4209 mag vanzelf: bron uit = niets; aan (vanaf de setdag) = op de tv zonder Ja; uit = meteen weg; kruisproeven', async () => {
+  const set = { set: '2026-11-16', vanzelf: [VZ_SCHERM, Object.assign({}, VZ_SCHERM, { id: 'onbekend', kop: 'Proefonbekend' }), Object.assign({}, VZ_SCHERM, { id: 'nieuws', kop: 'Proefnieuws', punten: [{ titel: 'Mail', tekst: 'iemand@voorbeeld.nl' }] })] };
+  let f = fase4209({ sets: [set] });
+  assert.deepStrictEqual((await f.m.verzamel(f.nu())).info, [], 'standaard uit');
+  let r = await post(f.m, 'vanzelf', { bron: 'wijk', aan: true }); assert.strictEqual(r.status, 200);
+  assert.deepStrictEqual(f.m.infoSchermen('2026-11-16').map((x) => x.kop), ['Proefwijk']);
+  assert.match(html(f.D), /Proefwijk/); assert.doesNotMatch(html(f.D), /Proefonbekend|iemand@/);
+  assert.strictEqual((await post(f.m, 'vanzelf', { bron: 'nieuws', aan: true })).status, 200);
+  assert.deepStrictEqual(f.m.infoSchermen('2026-11-16').map((x) => x.kop), ['Proefwijk'], 'scherm met een mailadres valt weg, de rest blijft');
+  let st = await stand4209(f.m);
+  assert.deepStrictEqual(st.vanzelf.bronnen.map((b) => [b.id, b.aan]), [['wijk', true], ['nieuws', true], ['wor', false]]); assert.strictEqual(st.vanzelf.rij, true);
+  r = await post(f.m, 'vanzelf', { bron: 'wijk', aan: false }); assert.strictEqual(r.status, 200);
+  assert.doesNotMatch(html(f.D), /Proefwijk/); assert.deepStrictEqual(f.m.infoSchermen('2026-11-16'), []);
+  assert.strictEqual((await post(f.m, 'vanzelf', { bron: 'anders', aan: true })).status, 400);
+  // set van vóór het aanzetten telt niet (standaard uit voor wat er al lag)
+  f = fase4209({ sets: [Object.assign({}, set, { set: '2026-11-13' })] }); await post(f.m, 'vanzelf', { bron: 'wijk', aan: true });
+  assert.deepStrictEqual(f.m.infoSchermen('2026-11-16'), [], 'set van vóór het aanzetten');
+  // zonder de eigen rij: niet op de tv, wel als proef in de app; zonder INFO_ZIN in de basisrij ook niet
+  for (const [w, o] of [['geen rij', { vz: false }], ['rij zonder de zin', { vzTekst: [PS.FEEST_ZIN] }]]) {
+    f = fase4209(Object.assign({ sets: [set] }, o)); await post(f.m, 'vanzelf', { bron: 'wijk', aan: true });
+    assert.deepStrictEqual(f.m.infoSchermen('2026-11-16'), [], w); await f.m.publiceer(); assert.doesNotMatch(html(f.D), /Proefwijk/, w);
+    st = await stand4209(f.m); const p = st.schermen.find((x) => /Proefwijk/.test(x.titel));
+    assert.ok(p && p.proef && /mag vanzelf \(nog niet op de tv\)/.test(p.titel) && /Proefwijk/.test(p.html), w + ': proef in de app');
+  }
+  // nieuw vervangt oud: zelfde kop als een goedgekeurd scherm uit een oudere set
+  f = fase4209({ sets: [SET, { set: '2026-11-16', vanzelf: [Object.assign({}, VZ_SCHERM, { kop: 'Proefinfo een' })] }], vragen: jaVoor(SET) }); await post(f.m, 'vanzelf', { bron: 'wijk', aan: true });
+  const k = f.m.infoKandidaten('2026-11-16').map((x) => [x.kop, x.sleutel, x.vervangen]);
+  assert.deepStrictEqual(k, [['Proefinfo een', 'wv9001', true], ['Proefinfo twee', 'wv9001', false], ['Proefinfo een', 'vanzelf', false]]);
+  // de kaart van een set met een vanzelf-deel is dezelfde (hash gelijk): het vanzelf-deel staat nooit op de kaart
+  assert.strictEqual(PS._t.kaartHash(PS._t.setKaart(Object.assign({}, SET, { vanzelf: [VZ_SCHERM] })).kaart), PS._t.kaartHash(PS._t.setKaart(SET).kaart));
+});
+
+test('wv4209 voorbeeld van een set die op Davids Ja wacht: in de app als proef (geen aan-knop), niet op de tv; na de Ja gewoon', async () => {
+  let f = fase4209({ sets: [SET], vz: false });
+  let st = await stand4209(f.m);
+  const c = st.schermen.filter((x) => x.concept);
+  assert.deepStrictEqual(c.map((x) => x.titel), ['Proefinfo een · wacht op je Ja', 'Proefinfo twee · wacht op je Ja']);
+  assert.ok(c.every((x) => x.proef && /Proefinfo/.test(x.html))); await f.m.publiceer(); assert.doesNotMatch(html(f.D), /Proefinfo/);
+  f = fase4209({ sets: [SET], vz: false, vragen: jaVoor(SET) }); st = await stand4209(f.m);
+  assert.deepStrictEqual(st.schermen.filter((x) => x.concept), []); assert.ok(st.schermen.some((x) => x.titel === 'Proefinfo een' && !x.proef));
+  // ouder dan 7 dagen: geen voorbeeld meer
+  f = fase4209({ sets: [SET], vz: false }); f.zet(Date.parse('2026-11-21T09:00:00Z')); st = await stand4209(f.m);
+  assert.deepStrictEqual(st.schermen.filter((x) => x.concept), []);
+});
