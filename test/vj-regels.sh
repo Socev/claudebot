@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Toetst wv4195 (besluitenpagina nr 368 = 3C68): een Voor jou-kaart met meerdere vragen (herkomst.regels) krijgt per regel een eigen antwoord
 # en onderaan één Verstuur (POST /app/voor-jou/regels). Het echte appVoorJouRegels + appKnop in een vm, met verzonnen kaart en register:
-# (A) puur: appVjRegels (Ja/Nee of opties, gevoelig, ids uniek), tekst_id;
+# (A) puur: appVjVraagRegels (Ja/Nee of opties, gevoelig, ids uniek), tekst_id;
 # (B) proefkaart met tien regels: zes beantwoorden -> één beurt met zes antwoorden, vier blijven open, kaart blijft open; nog eens dezelfde
 #     regel = 409; gevoelige regel Ja zonder vingerafdruk = 403, met = 200 en "(gevoelig)"; Anders zonder tekst = 400; tekst gewijzigd = 409;
 #     noodstop (verval) = regels weer open; laatste regels -> kaart op gedaan; gewone kaartknop en /app/knop weigeren een regelskaart;
@@ -39,7 +39,7 @@ const fn = function (n) { return pak(new RegExp('\\n(?:async )?function ' + n + 
     appSbRpc: async function (naam, body) { rpc.push({ naam, body }); return { ok: true }; },
     appStartBeurt: function (a, kanaal, tekst, meta) { const id = meta.job_id; jobs[id] = { status: 'pending' };
       setTimeout(function () { if (verval) { meta.bijVerval(); prompts.push({ verval: true }); return; } Promise.resolve().then(meta.bijStart).then(function (st) { prompts.push({ kanaal: kanaal, prompt: tekst + (st || ''), tekst: meta.tekst }); }); }, 3); return { job_id: id }; } });
-  vm.runInContext(src.slice(k1, k2) + '\n' + hulp + '\n' + src.slice(b1, b2) + ';globalThis.__r = { appVjRegels, appVjRegelsTekstId, appVjRegelsVorm, appVoorJouRegels };', c);
+  vm.runInContext(src.slice(k1, k2) + '\n' + hulp + '\n' + src.slice(b1, b2) + ';globalThis.__r = { appVjVraagRegels, appVjRegelsTekstId, appVjRegelsVorm, appVoorJouRegels };', c);
   const R = c.__r;
   // (A) puur
   const VR = ['Mag de weekpagina korter?', 'Mag de ochtendregel om 07:00?', 'Welke kleur voor de kop?', 'Zal ik de mail aan Jan versturen?', 'Mag Socev de muziek zachter zetten?',
@@ -47,12 +47,12 @@ const fn = function (n) { return pak(new RegExp('\\n(?:async )?function ' + n + 
   const kaart = { id: 77, sleutel: 'wv9901', soort: 'besluit', status: 'open', titel: 'Instellingen app — 10 vragen?', waarom: 'proef', stappen: [], waar: 'overal', deadline: null, prive: false,
     herkomst: { wv: [9901], regels: VR.map(function (v, i) { return i === 2 ? { vraag: v, opties: ['Blauw', 'Groen', 'Grijs'] } : { vraag: v }; }) } };
   punten = [kaart];
-  const rg = R.appVjRegels(kaart);
+  const rg = R.appVjVraagRegels(kaart);
   toets('A1 tien regels; Ja/Nee standaard, regel 3 met de drie opties', rg && rg.length === 10 && rg[0].keuzes.map(k => k.id).join() === 'ja,nee' && rg[2].keuzes.map(k => k.id + '=' + k.tekst).join() === 'o0=Blauw,o1=Groen,o2=Grijs', rg && rg[2]);
-  toets('A2 ids uniek, ook bij twee gelijke vragen (Codex MOET 1)', new Set(rg.map(r => r.id)).size === 10 && (function () { const x = R.appVjRegels({ soort: 'besluit', herkomst: { regels: [{ vraag: 'Zelfde?' }, { vraag: 'Zelfde?' }] } }); return x[0].id !== x[1].id; })());
+  toets('A2 ids uniek, ook bij twee gelijke vragen (Codex MOET 1)', new Set(rg.map(r => r.id)).size === 10 && (function () { const x = R.appVjVraagRegels({ soort: 'besluit', herkomst: { regels: [{ vraag: 'Zelfde?' }, { vraag: 'Zelfde?' }] } }); return x[0].id !== x[1].id; })());
   toets('A3 verstuurvraag is gevoelig, de rest niet', rg[3].gevoelig === true && rg.filter(r => r.gevoelig).length === 1, rg.map(r => r.gevoelig));
-  toets('A4 geen besluit / één regel / kapotte regel = geen regels', R.appVjRegels(Object.assign({}, kaart, { soort: 'doen' })) === null && R.appVjRegels({ soort: 'besluit', herkomst: { regels: [{ vraag: 'Een?' }] } }) === null && R.appVjRegels({ soort: 'besluit', herkomst: { regels: [{ vraag: 'Een?' }, { v: 1 }] } }) === null);
-  toets('A5 grondwet-kaart: elke regel gevoelig', R.appVjRegels({ soort: 'besluit', herkomst: { grondwet: true, regels: [{ vraag: 'Een?' }, { vraag: 'Twee?' }] } }).every(r => r.gevoelig));
+  toets('A4 geen besluit / één regel / kapotte regel = geen regels', R.appVjVraagRegels(Object.assign({}, kaart, { soort: 'doen' })) === null && R.appVjVraagRegels({ soort: 'besluit', herkomst: { regels: [{ vraag: 'Een?' }] } }) === null && R.appVjVraagRegels({ soort: 'besluit', herkomst: { regels: [{ vraag: 'Een?' }, { v: 1 }] } }) === null);
+  toets('A5 grondwet-kaart: elke regel gevoelig', R.appVjVraagRegels({ soort: 'besluit', herkomst: { grondwet: true, regels: [{ vraag: 'Een?' }, { vraag: 'Twee?' }] } }).every(r => r.gevoelig));
   const tid = R.appVjRegelsTekstId(rg, 'machinekamer');
   // (B) proefkaart
   const stuur = async function (antw, extra) { const res = { _app: {} }; await R.appVoorJouRegels({}, res, {}, { id: 'pixel', soort: 'mee' }, {}, Object.assign({ id: 77, tekst_id: tid, antwoorden: antw }, extra || {})); return res; };
@@ -97,14 +97,14 @@ const fn = function (n) { return pak(new RegExp('\\n(?:async )?function ' + n + 
     st && st.body.p_naar === 'gedaan' && st.body.p_door === 'david' && /David beantwoordde alle 10 vragen op de kaart/.test(st.body.p_bewijs), { st, p: prompts[3] });
   // twee apparaten tegelijk: dezelfde regel in twee verschillende verzendingen; de tweede wint niet (nogVrij na de awaits)
   const kaart2 = JSON.parse(JSON.stringify(kaart)); kaart2.id = 78; kaart2.sleutel = 'wv9902'; punten = [kaart2];
-  const rg2 = R.appVjRegels(kaart2), tid2 = R.appVjRegelsTekstId(rg2, 'machinekamer');
+  const rg2 = R.appVjVraagRegels(kaart2), tid2 = R.appVjRegelsTekstId(rg2, 'machinekamer');
   const s2 = async function (antw) { const res = { _app: {} }; await R.appVoorJouRegels({}, res, {}, { id: 'pc' }, {}, { id: 78, tekst_id: tid2, antwoorden: antw }); return res; };
   const [x1, x2] = await Promise.all([s2([{ regel: rg2[0].id, keuze: 'ja' }]), s2([{ regel: rg2[0].id, keuze: 'nee' }, { regel: rg2[1].id, keuze: 'ja' }])]);
   toets('B15 tegelijk dezelfde regel vanaf twee apparaten: één 200, één 409', [x1.status, x2.status].sort().join() === '200,409', [x1.status, x2.status, x1.j, x2.j]);
   // (C) bron
   toets('C1 route en glijdroute geregistreerd', /route === 'POST \/app\/voor-jou\/regels'\) return appVoorJouRegels\(req, res, reg, a, s, d\)/.test(src) && /APP_GLIJD_ROUTES\.add\('POST \/app\/voor-jou\/regels'\)/.test(src));
   toets('C2 detail geeft regels en dan geen Ja/Nee-knop of Ja/Nee-uitleg', /regels: rg \? appVjRegelsVorm\(p, rg, appVjKanaal\(p, rv, null\)\) : undefined/.test(src) && /knop: p\.soort === 'besluit' && !sw && !rg \?/.test(src) && /ja_nee: p\.soort === 'besluit' && !sw && !rg \?/.test(src));
-  toets('C3 gewone kaartknop en /app/knop weigeren een regelskaart', /if \(appVjRegels\(p\)\) return appWeiger\(res, 400, 'deze kaart beantwoord je per vraag/.test(src) && /rij\.soort === 'voorjou-regels' && !\(kaart && kaart\.regels\)/.test(src));
+  toets('C3 gewone kaartknop en /app/knop weigeren een regelskaart', /if \(appVjVraagRegels\(p\)\) return appWeiger\(res, 400, 'deze kaart beantwoord je per vraag/.test(src) && /rij\.soort === 'voorjou-regels' && !\(kaart && kaart\.regels\)/.test(src));
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
 })().catch(function (e) { console.log('ROOD  onverwacht: ' + (e && e.stack || e)); process.exit(1); });

@@ -14106,7 +14106,7 @@ async function appVoorJouDetail(req, res, a, idTekst) {
     herkomst.push({ soort: 'link', tekst: appKort(appVjGewoon(String(l.tekst || 'Gesprek openen')), 80), link: l.link });
   });
   const stappen = (Array.isArray(p.stappen) ? p.stappen : []).slice(0, 12).map(appVjStap);
-  const rg = appVjRegels(p);   // wv4195
+  const rg = appVjVraagRegels(p);   // wv4195
   const sw = await appSwSetVoor(p);   // wv3250: steekwoordkeuzes per woord; dan geen Ja / Nee / Anders voor de hele rij
   let wk = null;
   try { wk = wachterKaarten ? wachterKaarten.detail(p) : null; } catch (e) { logError('wachter-kaarten', e); }   // wv4124: knoppen van de nachtwachter
@@ -14478,7 +14478,7 @@ async function appVoorJouWoord(req, res, a, d) {
 // Vingerafdruk als een gekozen regel gevoelig is en de keuze geen Nee/Anders is: één vingerafdruk per verzending, per regel staat in
 // vragen.json en het bericht wat ermee bevestigd is. Regel-id = FNV van nummer + vraag + opties (Codex-ontwerpreview MOET 1: twee
 // gelijke regels nooit hetzelfde id; het script en de databank weigeren dubbele vragen ook).
-function appVjRegels(p) {
+function appVjVraagRegels(p) {   // wv4194: hernoemd; appVjRegels(s, n) bestaat al (Todoist-tekst) en won als latere declaratie
   const h = p && p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
   if (!p || p.soort !== 'besluit' || !Array.isArray(h.regels) || h.regels.length < 2 || h.regels.length > 12) return null;
   const uit = [];
@@ -14533,7 +14533,7 @@ async function appVoorJouRegels(req, res, reg, a, s, d) {
   try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
   const p = punten.find(function (x) { return x.id === id; });
   if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'vj-regels ' + id + ' weg');
-  const rg = appVjRegels(p);
+  const rg = appVjVraagRegels(p);
   if (!rg) return appWeiger(res, 400, 'deze kaart heeft geen losse vragen', 'vj-regels geen regels');
   if (!/^[a-z0-9][a-z0-9_-]{1,60}$/.test(String(p.sleutel || ''))) return appWeiger(res, 409, 'deze kaart heeft een onverwachte sleutel; antwoord in het gesprek', 'vj-regels sleutel');
   const rv = await appVjRegisterVraag(p);
@@ -14679,7 +14679,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   const p = punten.find(function (x) { return x.id === id; });
   if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'voor-jou ' + id + ' weg');
   if (p.soort !== 'besluit') return appWeiger(res, 400, 'alleen een besluit heeft Ja / Nee / Anders', 'voor-jou knop geen besluit');
-  if (appVjRegels(p)) return appWeiger(res, 400, 'deze kaart beantwoord je per vraag; open hem in Voor jou', 'voor-jou knop regels');   // wv4195
+  if (appVjVraagRegels(p)) return appWeiger(res, 400, 'deze kaart beantwoord je per vraag; open hem in Voor jou', 'voor-jou knop regels');   // wv4195
   const rv = await appVjRegisterVraag(p);
   const k = appVjKnopStand(p, rv, (await appVjAfgeleid(punten, Date.now(), true)).map);   // wv1018: klussen vers (Fable MOET 3)
   if (k.beantwoord) { res._app.reden = 'voor-jou knop al beantwoord #' + id; return appStuur(res, 409, { ok: false, fout: 'al beantwoord: ' + (k.beantwoord.keuze === 'ja' ? 'Ja' : k.beantwoord.keuze === 'nee' ? 'Nee' : 'Anders') + ' ' + appKlok(k.beantwoord.t), beantwoord: k.beantwoord }); }
