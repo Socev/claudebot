@@ -18653,7 +18653,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
         if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag|medisch|mededeling|vanzelf)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
         if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
-        if (route === 'GET /app/vastgoed' || route === 'GET /app/vastgoed/kelder' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar|gezien|kelder-pdf|project-concept)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking; wv4229: + concept-bezwaar
+        if (route === 'GET /app/vastgoed' || route === 'GET /app/vastgoed/kelder' || /^GET \/app\/vastgoed\/foto\/[0-9a-f-]{36}$/.test(route) || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar|gezien|kelder-pdf|project-concept)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking; wv4229: + concept-bezwaar
         if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk' || route === 'GET /app/nza/punten' || route === 'GET /app/nza/scorekaart' || route === 'POST /app/nza/zittingsmap') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen); wv3676: tab Punten
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
         if (route === 'GET /app/beleggen/strateeg' || route === 'GET /app/beleggen/strateeg/backtest' || route === 'POST /app/beleggen/strateeg/stand' || route === 'POST /app/beleggen/strateeg/idee') return typeof appStrateeg === 'function' ? appStrateeg(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'strateeg');   // wv3993: Strateeg (fictief)
@@ -32172,7 +32172,10 @@ const vastgoedApp = (function () {
         if (typeof appN8nRijen !== 'function' || typeof WK_TABEL === 'undefined') return { rijen: null };
         const rijen = await appN8nRijen(WK_TABEL.correspondentie.n8n, { type: 'or', filters: [{ columnName: 'status', condition: 'eq', value: 'wacht' }, { columnName: 'status', condition: 'eq', value: 'gemeld' }] }, 400);
         return { rijen: rijen, volledig: rijen.length < 400 };
-      } });
+      },
+      // wv4353 (L43 stap 2): bouwfoto's uit één Immich-album per project (alleen lezen, miniaturen; de witte lijst in immich.js is de grens)
+      fotos: typeof immichMl !== 'undefined' && immichMl ? { albums: function () { return immichMl.albums(); }, albumFotos: function (id, max) { return immichMl.albumFotos(id, max); },
+        beeld: function (id) { return immichMl.beeld(id, 'klein'); } } : null });
   } catch (e) { logError('vastgoed', new Error('laden faalde')); return null; }
 })();
 // wv3102: WOZ-beschikking. Klaarstaande bestanden alleen in het geheugen (token → bestand), 15 min, hooguit 4, per apparaat.
@@ -32301,6 +32304,15 @@ async function appVastgoedProjectConcept(res, d) {
 }
 async function appVastgoed(req, res, a, route, d) {
   if (!vastgoedApp) return appWeiger(res, 404, 'Vastgoed zit niet in deze versie van de pod', 'vastgoed ontbreekt');
+  // wv4353: een miniatuur van een bouwfoto (eigen teller: één opening = tientallen miniaturen); de module geeft alleen ids die nu op een kaart staan
+  if (/^GET \/app\/vastgoed\/foto\//.test(route)) {
+    if (!appTeller('vastgoed-foto', 1500, 3600000)) return appWeiger(res, 429, 'te veel foto\'s dit uur', 'grens vastgoed-foto');
+    let f;
+    try { f = await vastgoedApp.app({ pad: route.replace(/^GET /, ''), methode: 'GET' }); }
+    catch (e) { logError('vastgoed-foto', new Error('foto faalde')); return appWeiger(res, 503, 'de foto kon nu niet geladen worden', 'vastgoed foto fout'); }
+    res._app.stil = f.status === 200; if (f.status !== 200) res._app.reden = String(f.reden || 'vastgoed foto').slice(0, 80);
+    return appStuur(res, f.status, f.body);
+  }
   if (!appTeller('vastgoed', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed');
   if (route === 'POST /app/vastgoed/project-concept') {
     try { return await appVastgoedProjectConcept(res, d); }

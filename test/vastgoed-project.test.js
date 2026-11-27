@@ -124,3 +124,126 @@ test('GET /app/vastgoed geeft projecten; nieuw stuk verschijnt en verdwijnt; mai
     assert.strictEqual(u2.projecten[0].wachter.ok, false); assert.strictEqual(u2.projecten[0].wachtpunten.length, 2);
   } finally { fs.rmSync(t, { recursive: true, force: true }); }
 });
+
+// ── wv4353 (L43 stap 2): bouwfoto's op datum (Immich-album, verzonnen) en de opleverlijst na afloop (verzonnen afgeronde pagina) ──
+const U = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const ALBUMS = [
+  { id: U(1), naam: '2014 Bouw huis (ML)', omschrijving: 'memorylane:0123456789abcdef', aantal: 22 },
+  { id: U(2), naam: 'Kelder bouw', omschrijving: '', aantal: 9 },
+  { id: U(3), naam: 'Kelderbar Proefstad', omschrijving: '', aantal: 4 },
+  { id: U(4), naam: 'Vakantie', omschrijving: '', aantal: 30 },
+];
+const FOTOS = [
+  { id: U(101), dag: '2027-03-01', beeld: true }, { id: U(102), dag: '2027-03-01', beeld: true }, { id: U(103), dag: '2027-03-01', beeld: false },
+  ...Array.from({ length: 8 }, (_, i) => ({ id: U(110 + i), dag: '2027-04-15', beeld: true })), { id: U(130), dag: null, beeld: true },
+];
+FOTOS.totaal = 40;
+test('pkAlbum: vast op de pagina, anders het enige eigen album met het projectwoord (nooit MemoryLane, nooit bij twee treffers)', () => {
+  assert.strictEqual(V.pkAlbum(ALBUMS, '---\nstatus: lopend\n---\n', 'Kelder').album.id, U(2), 'los woord kelder; kelderbar en ML niet');
+  assert.strictEqual(V.pkAlbum(ALBUMS, '---\nfotoalbum: "vakantie"\n---\n', 'Kelder').album.id, U(4), 'vast gaat voor, hoofdletterongevoelig');
+  const weg = V.pkAlbum(ALBUMS, '---\nfotoalbum: Bestaat niet\n---\n', 'Kelder');
+  assert.strictEqual(weg.album, null); assert.strictEqual(weg.zoek, 'Bestaat niet');
+  assert.strictEqual(V.pkAlbum(ALBUMS, '---\nfotoalbum: 2014 Bouw huis (ML)\n---\n', 'Kelder').album, null, 'ook vast nooit een MemoryLane-album');
+  const twee = V.pkAlbum(ALBUMS.concat([{ id: U(5), naam: 'kelder fase 2', omschrijving: '', aantal: 1 }]), '', 'Kelder');
+  assert.strictEqual(twee.album, null); assert.deepStrictEqual(twee.meer, ['Kelder bouw', 'kelder fase 2']);
+  const geen = V.pkAlbum([ALBUMS[0]], '', 'Kelder');
+  assert.strictEqual(geen.album, null); assert.strictEqual(geen.voorstel, 'Bouw kelder');
+});
+test('pkFotoDagen: per dag, nieuwste eerst, hooguit zes miniaturen per dag, video telt mee zonder miniatuur, totaal uit Immich', () => {
+  const d = V.pkFotoDagen(FOTOS, FOTOS.totaal);
+  assert.deepStrictEqual(d.dagen.map((x) => [x.dag, x.aantal, x.video, x.ids.length]), [['2027-04-15', 8, 0, 6], ['2027-03-01', 3, 1, 2]]);
+  assert.strictEqual(d.totaal, 40); assert.strictEqual(d.gelezen, 12); assert.strictEqual(d.beperkt, true, 'meer in het album dan gelezen');
+  assert.strictEqual(d.zonder_dag, 1); assert.strictEqual(d.eerste, '2027-03-01'); assert.strictEqual(d.laatste, '2027-04-15');
+  assert.ok(!d.dagen[1].ids.includes(U(103)), 'video geen miniatuur');
+  const veel = V.pkFotoDagen(Array.from({ length: 20 }, (_, i) => ({ id: U(200 + i), dag: `2027-05-${String(i + 1).padStart(2, '0')}`, beeld: true })), 20);
+  assert.strictEqual(veel.dagen.length, 12); assert.strictEqual(veel.aantal_dagen, 20); assert.strictEqual(veel.beperkt, false);
+});
+const WONING_O = {
+  feiten: [{ groep: 'bag', veld: 'Gebruiksoppervlakte (BAG)', waarde: '150 m²', opgehaald: '2027-05-01T08:00:00Z' },
+    { groep: 'ep', veld: 'Registratiedatum', waarde: '2019-05-02' }, { groep: 'ep', veld: 'Energieklasse', waarde: 'A' }],
+  reeksen: [{ reeks: 'woz', peildatum: '2026-01-01', waarde: 700000 }, { reeks: 'taxatie-na', peildatum: '2019-03-01', waarde: 650000 }],
+  stukken: [{ soort: 'taxatie', datum: '2019-03-01', naam: 'oud' }] };
+const POLIS = { bedrag: 500000, stukken: [{ datum: '2026' }] };
+test('opleverLijst: alleen een expliciete opleverdatum vergelijkt; polis nooit "staat erin"; oude taxatie-na telt niet', () => {
+  const md = '---\nstatus: afgerond\nopgeleverd: 10-4-2027\noppervlakte_na: 180 m²\n---\n# Kelder\n';
+  const l = V.opleverLijst({ md, woning: WONING_O, polis: POLIS });
+  assert.strictEqual(l.datum, '2027-04-10');
+  const st = Object.fromEntries(l.punten.map((p) => [p.punt, p.staat]));
+  assert.deepStrictEqual(st, { 'Nieuwe oppervlakte': 'wacht', WOZ: 'wacht', Energielabel: 'te doen', 'Herbouwwaarde opstalverzekering': 'te doen', 'Taxatie na verbouwing': 'te doen' });
+  assert.match(l.punten[1].tekst, /WOZ 2028/); assert.match(l.punten[3].tekst, /€ 500\.000/);
+  const na = { feiten: [{ groep: 'bag', veld: 'Gebruiksoppervlakte (BAG)', waarde: '180 m²' }, { groep: 'ep', veld: 'Registratiedatum', waarde: '2027-06-01' }],
+    reeksen: [{ reeks: 'woz', peildatum: '2027-01-01', waarde: 800000 }, { reeks: 'taxatie-na', peildatum: '2027-05-01', waarde: 900000 }], stukken: [] };
+  const l2 = V.opleverLijst({ md, woning: na, polis: { bedrag: 500000, stukken: [{ datum: '2028' }] } });
+  assert.deepStrictEqual(l2.punten.map((p) => p.staat), ['staat erin', 'controleren', 'staat erin', 'controleren', 'staat erin'], 'WOZ en polis alleen controleren');
+  const zonder = V.opleverLijst({ md: '---\nstatus: afgerond\n---\n# Kelder\n', woning: na, polis: null, gezien_af: '2027-04-12' });
+  assert.strictEqual(zonder.datum, null, 'de waargenomen dag is geen opleverdatum');
+  assert.ok(zonder.punten.filter((p) => p.punt !== 'Herbouwwaarde opstalverzekering').every((p) => p.staat !== 'staat erin'), 'zonder datum niets afgevinkt');
+  assert.strictEqual(zonder.gezien_af, '2027-04-12');
+});
+test('projectKaarten: afgerond bouwproject alleen kort na de oplevering (datum op de pagina of eerder als lopend gezien)', () => {
+  const af = '---\nstatus: afgerond\nopgeleverd: 10-4-2027\n---\n# Kelder — verbouwplan\n';
+  const oud = '---\ntags: [verbouwing]\nstatus: afgerond\nupdated: 2027-04-01\n---\n# Verbouwing 2018-2019\n';
+  const basis = { kostte: null, kern: null, cw: [], bekendmakingen: [], adres: null, stukken: [], woning: WONING_O, polis: POLIS };
+  let r = V.projectKaarten(Object.assign({ vandaag: '2027-05-01', paginas: [{ pad: PAD, md: af }, { pad: '20_Prive/Huis/Oud.md', md: oud }] }, basis));
+  assert.strictEqual(r.length, 1, 'oud project zonder datum: geen kaart'); assert.strictEqual(r[0].af, true); assert.strictEqual(r[0].oplevering.punten.length, 5);
+  r = V.projectKaarten(Object.assign({ vandaag: '2028-07-01', paginas: [{ pad: PAD, md: af }] }, basis));
+  assert.strictEqual(r.length, 0, 'na 425 dagen weg');
+  r = V.projectKaarten(Object.assign({ vandaag: '2027-05-01', paginas: [{ pad: '20_Prive/Huis/Oud.md', md: oud }], af: { '20_Prive/Huis/Oud.md': '2027-04-20' } }, basis));
+  assert.strictEqual(r.length, 1, 'eerder als lopend gezien → kaart'); assert.strictEqual(r[0].oplevering.datum, null);
+  r = V.projectKaarten(Object.assign({ vandaag: '2027-05-01', paginas: [{ pad: PAD, md: KELDER }] }, basis));
+  assert.strictEqual(r[0].af, false); assert.strictEqual(r[0].oplevering, null, 'lopend: geen opleverlijst');
+});
+test('GET: bouwfoto\'s op de kaart, fotoroute alleen voor ids op de kaart, Immich weg = kaart blijft; lopend → afgerond gezien; Socev-kern', async () => {
+  const t = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-fotos-'));
+  try {
+    const v = M.maakVault(path.join(t, 'vault'));
+    fs.writeFileSync(path.join(v, PAD), KELDER);
+    let dag = new Date('2027-04-01T10:00:00Z'), weg = false, lijstKeer = 0;
+    const gevraagd = [];
+    const fotos = { albums: async () => { if (weg) throw new Error('weg'); return ALBUMS; },
+      albumFotos: async (id, max) => { lijstKeer++; gevraagd.push([id, max]); return FOTOS; },
+      beeld: async (id, maat) => ({ mime: 'image/jpeg', data: Buffer.from('jpeg-' + id + '-' + maat) }) };
+    const m = V.maak({ map: path.join(t, 'map'), vault: v, bronnen: M.nepBronnen(), nu: () => dag, fotos });
+    let u = (await m.app({ pad: '/app/vastgoed', methode: 'GET' })).body;
+    const f = u.projecten[0].fotos;
+    assert.strictEqual(f.ok, true); assert.strictEqual(f.album.naam, 'Kelder bouw'); assert.strictEqual(f.hoe, 'naam'); assert.strictEqual(f.totaal, 40);
+    assert.deepStrictEqual(gevraagd, [[U(2), 1000]]);
+    const ok = await m.app({ pad: '/app/vastgoed/foto/' + U(110), methode: 'GET' });
+    assert.strictEqual(ok.status, 200); assert.strictEqual(ok.body.mime, 'image/jpeg');
+    assert.strictEqual(Buffer.from(ok.body.data, 'base64').toString(), 'jpeg-' + U(110) + '-klein', 'altijd de miniatuur');
+    assert.strictEqual((await m.app({ pad: '/app/vastgoed/foto/' + U(116), methode: 'GET' })).status, 404, 'zevende van de dag staat niet op de kaart');
+    assert.strictEqual((await m.app({ pad: '/app/vastgoed/foto/' + U(103), methode: 'GET' })).status, 404, 'video niet');
+    assert.strictEqual((await m.app({ pad: '/app/vastgoed/foto/' + U(999), methode: 'GET' })).status, 404, 'ander id niet');
+    assert.strictEqual((await m.app({ pad: '/app/vastgoed/foto/..%2f', methode: 'GET' })).status, 404);
+    await m.app({ pad: '/app/vastgoed', methode: 'GET' });
+    assert.strictEqual(lijstKeer, 1, 'fotolijst 15 min uit het geheugen');
+    // Socev-kern: kort, zonder mailadressen of foto-ids
+    const g = await m.gesprek({ opdracht: 'kern' });
+    const pk = g.body.projecten[0];
+    assert.strictEqual(pk.naam, 'Kelder'); assert.strictEqual(pk.wacht.wat, 'Eerste schatting van de kosten'); assert.ok(pk.wacht.dagen > 100);
+    assert.deepStrictEqual(pk.fotos, { album: 'Kelder bouw', aantal: 40, laatste: '2027-04-15' });
+    assert.ok(!/@|0000-4000/.test(JSON.stringify(g.body.projecten)), 'geen mailadres of foto-id');
+    // Immich weg: kaart blijft, foto's niet te lezen
+    weg = true; dag = new Date('2027-04-01T11:00:00Z');
+    u = (await m.app({ pad: '/app/vastgoed', methode: 'GET' })).body;
+    assert.strictEqual(u.projecten.length, 1); assert.strictEqual(u.projecten[0].fotos.ok, false); assert.strictEqual(u.projecten[0].wachtpunten.length, 2);
+    assert.strictEqual((await m.app({ pad: '/app/vastgoed/foto/' + U(110), methode: 'GET' })).status, 404, 'kaart zonder foto\'s → route dicht');
+    // de pagina gaat van lopend naar afgerond (zonder datum): de kaart blijft met de opleverlijst, gezien_af = vandaag
+    weg = false; dag = new Date('2027-04-12T10:00:00Z');
+    fs.writeFileSync(path.join(v, PAD), KELDER.replace('status: lopend', 'status: afgerond'));
+    u = (await m.app({ pad: '/app/vastgoed', methode: 'GET' })).body;
+    assert.strictEqual(u.projecten.length, 1); assert.strictEqual(u.projecten[0].af, true);
+    assert.strictEqual(u.projecten[0].oplevering.gezien_af, '2027-04-12'); assert.strictEqual(u.projecten[0].oplevering.datum, null);
+    const g2 = await m.gesprek({ opdracht: 'kern' });
+    assert.strictEqual(g2.body.projecten[0].af, true); assert.strictEqual(g2.body.projecten[0].oplevering.open.length, 5);
+    // een andere pod/map die hem nooit lopend zag: geen kaart
+    const m2 = V.maak({ map: path.join(t, 'map2'), vault: v, bronnen: M.nepBronnen(), nu: () => dag, fotos });
+    assert.strictEqual((await m2.app({ pad: '/app/vastgoed', methode: 'GET' })).body.projecten.length, 0);
+    // zonder Immich-koppeling: fotos.ok false, route 404
+    const m3 = V.maak({ map: path.join(t, 'map3'), vault: v, bronnen: M.nepBronnen(), nu: () => dag });
+    fs.writeFileSync(path.join(v, PAD), KELDER);
+    const u3 = (await m3.app({ pad: '/app/vastgoed', methode: 'GET' })).body;
+    assert.strictEqual(u3.projecten[0].fotos.ok, false);
+    assert.strictEqual((await m3.app({ pad: '/app/vastgoed/foto/' + U(110), methode: 'GET' })).status, 404);
+  } finally { fs.rmSync(t, { recursive: true, force: true }); }
+});

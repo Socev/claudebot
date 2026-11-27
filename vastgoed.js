@@ -891,7 +891,17 @@ function gesprekUit(ov, b, basis) {
       if (o.soort === 'garagebox') u.vve = o.vve || null;
       return u;
     });
-    return { status: 200, body: { ok: true, opdracht, objecten, geld_stand: ov.geld || null } };
+    // wv4353 (L43 stap 2): de projectkaart kort, zodat Socev "waar wacht de kelder op?" kan beantwoorden (geen mailadressen, geen foto-ids)
+    const projecten = Array.isArray(ov.projecten) ? ov.projecten.map((p) => {
+      const w = (p.wachtpunten || [])[0] || null;
+      const f = p.fotos && p.fotos.ok && p.fotos.album ? { album: p.fotos.album.naam, aantal: p.fotos.totaal, laatste: p.fotos.laatste } : null;
+      const open = p.oplevering ? p.oplevering.punten.filter((x) => x.staat !== 'staat erin') : null;
+      return { naam: p.naam, af: !!p.af, stand: p.stand || null, stand_op: p.stand_op || null,
+        wacht: w ? { wat: w.wat, wie: w.wie || null, sinds: w.sinds, dagen: w.dagen } : null, wachtpunten: (p.wachtpunten || []).length, fotos: f,
+        oplevering: open ? { datum: p.oplevering.datum, open: open.map((x) => ({ punt: x.punt, staat: x.staat, tekst: x.tekst })) } : null,
+        link: gesprekLink(basis, (act.find((o) => o.soort === 'woning') || {}).sleutel || 'woning', 'overzicht') };
+    }) : null;
+    return { status: 200, body: { ok: true, opdracht, objecten, projecten, geld_stand: ov.geld || null } };
   }
   if (opdracht === 'tab') {
     const o = gesprekObject(ov, b.object);
@@ -1446,11 +1456,12 @@ function pkBouwproject(md) {
   return tags.some((x) => PK_BOUW.test(x)) || /\b(verbouw\w*|kelder|aanbouw|uitbouw|renovatie)\b/i.test(titel(String(md || '')) || '');
 }
 function pkWoord(naam) { const w = gesprekNorm(naam).split(/[^a-z0-9]+/).find((x) => x.length >= 4); return w || null; }
-// x: { vandaag, paginas: [{ pad, md }], kostte (won.kostte), kern (won.geld_kern), cw (rijen | null), bekendmakingen, buurt_op, adres, stukken }
+// x: { vandaag, paginas: [{ pad, md }], kostte (won.kostte), kern (won.geld_kern), cw (rijen | null), bekendmakingen, buurt_op, adres, stukken,
+//      wv4353: woning ({ feiten, reeksen, stukken }), polis, af ({ pad: dag waarop de pod hem voor het eerst afgerond zag }) }
 function projectKaarten(x) {
   const vandaag = x.vandaag, uit = [];
   for (const p of x.paginas || []) {
-    const l = looptUit(p.md, p.pad);
+    const l = looptUit(p.md, p.pad) || afUit(p.md, p.pad, (x.af || {})[p.pad] || null, vandaag);   // wv4353: ook kort na de oplevering
     if (!l || !pkBouwproject(p.md)) continue;
     const woord = pkWoord(l.naam);
     const besluit = (() => { const a = String(p.md || '').split(/\n\s*\n/).filter((z) => /^\*\*(Besluit|Open|Volgende stap|Wacht)\b/.test(z.trim())); return a.length ? isoUitNl(a[a.length - 1].split('\n')[0]) : null; })();
@@ -1465,10 +1476,109 @@ function projectKaarten(x) {
       .map((s) => ({ naam: String(s.naam).replace(/\.\w{2,4}$/, '').slice(0, 160), pad: s.pad, datum: s.datum || null, soort: s.soort || null })) : [];
     uit.push({ naam: l.naam, pagina: l.pagina, kelder: l.kelder, sinds: l.sinds, stand: l.stand, stand_op: besluit || l.sinds,
       wachtpunten, wachter: x.cw ? { ok: true } : { ok: false, reden: x.cw_reden || 'de mailwachter is nu niet te lezen' },
-      geld: pkGeld(v, x.kern), vergunning: { eigen: pkVergunning(x.bekendmakingen, x.adres, vandaag), buurt_op: x.buurt_op || null }, stukken });
+      geld: pkGeld(v, x.kern), vergunning: { eigen: pkVergunning(x.bekendmakingen, x.adres, vandaag), buurt_op: x.buurt_op || null }, stukken,
+      af: !!l.af, oplevering: l.af ? opleverLijst({ md: p.md, woning: x.woning, polis: x.polis, gezien_af: (x.af || {})[p.pad] || null }) : null });
   }
-  uit.sort((a, b) => (b.kelder - a.kelder) || String(b.sinds || '').localeCompare(String(a.sinds || '')));
+  uit.sort((a, b) => (a.af - b.af) || (b.kelder - a.kelder) || String(b.sinds || '').localeCompare(String(a.sinds || '')));
   return uit;
+}
+// ── wv4353 (L43 stap 2): bouwfoto's op datum en de opleverlijst na afloop ──
+// Foto's: de afspraak is één Immich-album per project. Welk album: frontmatter `fotoalbum: "<naam>"` op de projectpagina, anders het ENIGE
+// eigen album (geen MemoryLane-album) waarvan de naam het projectwoord als los woord bevat (review Codex ZOU 1: bij twee of meer treffers niets
+// kiezen, alleen noemen). De pod maakt zelf geen album en deelt niets.
+const PK_FOTO_DAGEN = 12, PK_FOTO_PER_DAG = 6, PK_FOTO_MAX = 1000, PK_FOTO_MS = 15 * 60 * 1000, PK_OPLEVER_DAGEN = 425;
+const PK_AF = /^(afgerond|opgeleverd|klaar)$/i;
+const PK_ML_ALBUM = /memorylane:[0-9a-f]{16}/;
+function pkAlbum(albums, md, naam) {
+  const eigen = (albums || []).filter((a) => a && typeof a.id === 'string' && typeof a.naam === 'string' && !PK_ML_ALBUM.test(a.omschrijving || ''));
+  const vast = String(frontVeld(md, 'fotoalbum') || '').trim();
+  if (vast) {
+    const a = eigen.find((x) => x.naam.trim().toLowerCase() === vast.toLowerCase());
+    return a ? { album: a, hoe: 'vast' } : { album: null, hoe: 'vast', zoek: vast.slice(0, 80) };
+  }
+  const woord = pkWoord(naam);
+  const voorstel = woord ? 'Bouw ' + woord : null;
+  if (!woord) return { album: null, hoe: 'naam', voorstel };
+  const raak = eigen.filter((a) => gesprekNorm(a.naam).split(/[^a-z0-9]+/).includes(woord));
+  if (raak.length === 1) return { album: raak[0], hoe: 'naam' };
+  return { album: null, hoe: 'naam', voorstel, meer: raak.length > 1 ? raak.map((a) => a.naam.slice(0, 80)).slice(0, 5) : undefined };
+}
+// fotos: [{ id, dag, beeld }] uit immich.albumFotos (oudste eerst); totaal = aantal in het hele album (Immich-bakken, ook boven de grens).
+// → nieuwste dag eerst, hooguit PK_FOTO_DAGEN dagen met elk hooguit PK_FOTO_PER_DAG miniaturen (alleen foto's; video's tellen alleen mee).
+function pkFotoDagen(fotos, totaal) {
+  const l = Array.isArray(fotos) ? fotos : [];
+  const per = new Map();
+  let zonder = 0;
+  for (const f of l) {
+    if (!f || typeof f.id !== 'string') continue;
+    if (!isoVeilig(f.dag || '')) { zonder++; continue; }
+    if (!per.has(f.dag)) per.set(f.dag, { dag: f.dag, aantal: 0, video: 0, ids: [] });
+    const d = per.get(f.dag);
+    d.aantal++;
+    if (f.beeld === false) d.video++;
+    else if (d.ids.length < PK_FOTO_PER_DAG) d.ids.push(f.id);
+  }
+  const dagen = [...per.values()].sort((a, b) => b.dag.localeCompare(a.dag));
+  const tot = Math.max(Number.isFinite(totaal) ? totaal : 0, l.length);
+  return { totaal: tot, gelezen: l.length, beperkt: tot > l.length, zonder_dag: zonder, eerste: dagen.length ? dagen[dagen.length - 1].dag : null,
+    laatste: dagen.length ? dagen[0].dag : null, aantal_dagen: dagen.length, dagen: dagen.slice(0, PK_FOTO_DAGEN) };
+}
+// De opleverdatum: alleen een expliciete datum op de projectpagina telt voor vergelijkingen (review Codex MOET 2).
+function pkOpleverDatum(md) { for (const v of ['opgeleverd', 'afgerond', 'oplevering']) { const d = datumUit(frontVeld(md, v) || ''); if (d) return d; } return null; }
+const pkM2 = (t) => { const m = /(\d{1,4}(?:[.,]\d+)?)\s*(?:m²|m2|vierkante meter)/i.exec(String(t || '')) || /^\s*(\d{1,4}(?:[.,]\d+)?)\s*$/.exec(String(t || '')); return m ? Number(m[1].replace(',', '.')) : null; };
+const pkEuro = (n) => '€ ' + Math.round(n).toLocaleString('nl-NL');
+// Puur. x: { md, woning: { feiten, reeksen, stukken }, polis: { bedrag, stukken: [{ naam, datum }] } | null, gezien_af }
+// → { datum (expliciet) | null, gezien_af, punten: [{ punt, staat: 'staat erin' | 'controleren' | 'wacht' | 'te doen', tekst }] }
+// Niets in de agenda, geen mail: alleen wat er moet gebeuren.
+function opleverLijst(x) {
+  const D = pkOpleverDatum(x.md), w = x.woning || {}, feiten = w.feiten || [], reeksen = w.reeksen || [], stukken = w.stukken || [];
+  const feit = (groep, veld) => feiten.find((f) => (f.groep || null) === groep && f.veld === veld) || null;
+  const zonderD = 'Zet de opleverdatum op de projectpagina (opgeleverd: dag-maand-jaar), dan kijkt Vastgoed of het al in het dossier staat.';
+  const punten = [];
+  // 1. Oppervlakte (BAG)
+  const bag = feit('bag', 'Gebruiksoppervlakte (BAG)'), bagM2 = bag ? pkM2(bag.waarde) : null, na = pkM2(frontVeld(x.md, 'oppervlakte_na'));
+  const bagOp = bag && bag.opgehaald ? String(bag.opgehaald).slice(0, 10) : null;
+  if (bagM2 === null) punten.push({ punt: 'Nieuwe oppervlakte', staat: 'controleren', tekst: 'De oppervlakte uit de BAG is nog niet opgehaald; ververs de openbare gegevens van het huis.' });
+  else if (na !== null && Math.abs(na - bagM2) <= 1) punten.push({ punt: 'Nieuwe oppervlakte', staat: 'staat erin', tekst: `De BAG zegt ${bagM2} m², gelijk aan de nieuwe oppervlakte.` });
+  else if (na !== null) punten.push({ punt: 'Nieuwe oppervlakte', staat: 'wacht', tekst: `De BAG zegt nog ${bagM2} m²; nieuw is ${na} m². Na de gereedmelding past de gemeente de BAG aan. Staat het er over een paar maanden nog niet in, vraag het de gemeente.` });
+  else punten.push({ punt: 'Nieuwe oppervlakte', staat: 'controleren', tekst: `De BAG zegt nu ${bagM2} m²${bagOp ? ` (opgehaald ${bagOp})` : ''}. Zet de nieuwe oppervlakte op de projectpagina (oppervlakte_na: … m²), dan vergelijkt Vastgoed het vanzelf.` });
+  // 2. WOZ: de WOZ van jaar J heeft waardepeildatum 1-1-(J-1) en toestand 1-1-J; die van jaar(D)+1 is de eerste met de verbouwing
+  if (!D) punten.push({ punt: 'WOZ', staat: 'controleren', tekst: zonderD });
+  else {
+    const j = Number(D.slice(0, 4)) + 1;
+    const woz = reeksen.filter((r) => r.reeks === 'woz' && isoVeilig(r.peildatum || '') && Number(r.peildatum.slice(0, 4)) >= j - 1).sort((a, b) => a.peildatum.localeCompare(b.peildatum))[0];
+    punten.push(woz ? { punt: 'WOZ', staat: 'controleren', tekst: `De WOZ ${Number(woz.peildatum.slice(0, 4)) + 1} staat erin (${pkEuro(woz.waarde)}). Kijk of de verbouwing is meegenomen; zo niet, dan kun je bezwaar maken.` }
+      : { punt: 'WOZ', staat: 'wacht', tekst: `De WOZ ${j} moet de verbouwing meenemen (de toestand op 1 januari ${j} telt). Die komt eind februari ${j}; Vastgoed vergelijkt hem dan.` });
+  }
+  // 3. Energielabel (EP-online)
+  const reg = feit('ep', 'Registratiedatum'), regD = reg ? datumUit(reg.waarde) : null, klasse = feit('ep', 'Energieklasse');
+  if (!D) punten.push({ punt: 'Energielabel', staat: 'controleren', tekst: regD ? `Het label is geregistreerd op ${regD}. ${zonderD}` : zonderD });
+  else if (regD && regD >= D) punten.push({ punt: 'Energielabel', staat: 'staat erin', tekst: `Nieuw label${klasse ? ' ' + String(klasse.waarde).slice(0, 10) : ''}, geregistreerd op ${regD}.` });
+  else punten.push({ punt: 'Energielabel', staat: 'te doen', tekst: `${regD ? `Het label is van ${regD}, van vóór de verbouwing. ` : 'Er is nog geen label gevonden. '}Laat een nieuw label opnemen als je wilt dat het klopt (nodig bij verkopen of verhuren).` });
+  // 4. Herbouwwaarde opstalverzekering: een nieuwere polis bewijst niets over het verzekerde bedrag (review Codex MOET 1) → nooit 'staat erin'
+  const p = x.polis || null, nu = p && p.bedrag ? ` Nu verzekerd: ${pkEuro(p.bedrag)}.` : '';
+  const nieuwer = D && p ? (p.stukken || []).filter((s) => s && s.datum && (s.datum.length === 4 ? Number(s.datum) > Number(D.slice(0, 4)) : s.datum >= D)).sort((a, b) => String(b.datum).localeCompare(String(a.datum)))[0] : null;
+  if (nieuwer) punten.push({ punt: 'Herbouwwaarde opstalverzekering', staat: 'controleren', tekst: `Er is een opstalpolis van ${nieuwer.datum}. Kijk of het verzekerde bedrag de verbouwing meeneemt.${nu}` });
+  else punten.push({ punt: 'Herbouwwaarde opstalverzekering', staat: 'te doen', tekst: `Geef de verbouwing door aan je opstalverzekeraar, zodat de herbouwwaarde klopt.${nu}` });
+  // 5. Taxatie na verbouwing: alleen een taxatie (reeks of stuk) met datum op of na de oplevering (review Codex MOET 4)
+  if (!D) punten.push({ punt: 'Taxatie na verbouwing', staat: 'controleren', tekst: zonderD });
+  else {
+    const r = reeksen.filter((z) => (z.reeks === 'taxatie-na' || z.reeks === 'taxatie') && isoVeilig(z.peildatum || '') && z.peildatum >= D).sort((a, b) => b.peildatum.localeCompare(a.peildatum))[0];
+    const s = stukken.filter((z) => z.soort === 'taxatie' && isoVeilig(z.datum || '') && z.datum >= D).sort((a, b) => b.datum.localeCompare(a.datum))[0];
+    punten.push(r ? { punt: 'Taxatie na verbouwing', staat: 'staat erin', tekst: `Taxatie van ${r.peildatum}: ${pkEuro(r.waarde)}. Dat is de nieuwe basis.` }
+      : s ? { punt: 'Taxatie na verbouwing', staat: 'controleren', tekst: `Er is een taxatierapport van ${s.datum}; zet de waarde op de woningpagina, dan telt hij als nieuwe basis.` }
+      : { punt: 'Taxatie na verbouwing', staat: 'te doen', tekst: 'Laat een taxatie na de verbouwing maken als nieuwe basis voor de hypotheek en je overwaarde.' });
+  }
+  return { datum: D, gezien_af: x.gezien_af || null, punten };
+}
+// Een afgerond bouwproject houdt zijn kaart tot PK_OPLEVER_DAGEN na de oplevering: met een expliciete datum, of (alleen om te tonen, nooit om
+// mee te vergelijken) de dag waarop de pod hem voor het eerst afgerond zag terwijl hij hem eerder als lopend kende.
+function afUit(md, pagina, gezienAf, vandaag) {
+  if (!PK_AF.test(frontVeld(md, 'status') || '')) return null;
+  const d = pkOpleverDatum(md) || gezienAf || null;
+  if (!d || !isoVeilig(d) || pkDagen(d, vandaag) === null || pkDagen(d, vandaag) > PK_OPLEVER_DAGEN) return null;
+  const naam = (titel(md) || String(pagina).split('/').pop().replace(/\.md$/, '')).replace(/\s+[—–]\s+.*$/, '').trim();
+  return { naam: naam.slice(0, 80), pagina, sinds: d, stand: 'Opgeleverd', kelder: /^Kelder\b/i.test(naam), af: true };
 }
 // Vaste tekst voor het mailconcept (geen taalmodel); David verstuurt zelf.
 function projectConceptTekst(p, w) {
@@ -1483,6 +1593,8 @@ function maak(o) {
   const dbPad = path.join(map, 'vastgoed.sqlite');
   const bronnen = typeof o.bronnen === 'function' ? o.bronnen : null;
   const wachter = typeof o.wachter === 'function' ? o.wachter : null;   // wv4231: open rijen van de Correspondentie-Wachter → { rijen, volledig }
+  // wv4353: Immich (alleen lezen): { albums(), albumFotos(id, max), beeld(id, 'klein') } — de witte lijst in immich.js blijft de grens
+  const fotoBron = o.fotos && typeof o.fotos.albums === 'function' && typeof o.fotos.albumFotos === 'function' && typeof o.fotos.beeld === 'function' ? o.fotos : null;
   const nu = typeof o.nu === 'function' ? o.nu : () => new Date();
   const bankPad = o.bank || null, tibberPad = o.tibber || null;   // fase 2: alleen lezen (bank-archief transacties.sqlite, tibber.sqlite)
   function mappen() { if (!fs.existsSync(map)) fs.mkdirSync(map, { recursive: true, mode: 0o700 }); try { fs.chmodSync(map, 0o700); } catch (e) { /* niet van ons */ } }
@@ -2023,18 +2135,76 @@ function maak(o) {
     for (const n of namen) { try { uit.push({ pad: `${HUIS}/${n}`, md: fs.readFileSync(path.join(huis, n), 'utf8') }); } catch (e) { /* weg */ } }
     return uit;
   }
+  // wv4353: albums en fotolijsten 15 min in het geheugen; fotoIds = de miniaturen die nu op een kaart staan (alleen die mag de fotoroute geven)
+  let albumCache = null;
+  const fotoCache = new Map();
+  let fotoIds = new Set();
+  async function projectFotos(md, naam) {
+    if (!fotoBron) return { ok: false, reden: 'Immich is op deze pod niet gekoppeld' };
+    try {
+      if (!albumCache || nu().getTime() - albumCache.t >= PK_FOTO_MS) albumCache = { t: nu().getTime(), l: await fotoBron.albums() };
+      const k = pkAlbum(albumCache.l, md, naam);
+      if (!k.album) return Object.assign({ ok: true, album: null }, k, { album: null });
+      let c = fotoCache.get(k.album.id);
+      if (!c || nu().getTime() - c.t >= PK_FOTO_MS) {
+        const l = await fotoBron.albumFotos(k.album.id, PK_FOTO_MAX);
+        c = { t: nu().getTime(), d: pkFotoDagen(l, l && Number.isFinite(l.totaal) ? l.totaal : k.album.aantal) };
+        fotoCache.set(k.album.id, c);
+      }
+      return Object.assign({ ok: true, album: { naam: k.album.naam.slice(0, 80) }, hoe: k.hoe }, c.d);
+    } catch (e) { albumCache = null; return { ok: false, reden: 'Immich is nu niet te lezen' }; }
+  }
+  // De opstalpolis: het bedrag uit de verzekeringenpagina (regel met Opstal + "verzekerd bedrag"), de polisstukken alleen op naam en datum.
+  function polisLees() {
+    let bedrag = null, stukken = [];
+    try {
+      const md = fs.readFileSync(path.join(vault, '20_Prive', 'Verzekeringen.md'), 'utf8');
+      const r = md.split('\n').find((l) => /opstal/i.test(l) && /verzekerd bedrag/i.test(l));
+      if (r) bedrag = euroUit(r.slice(r.search(/verzekerd bedrag/i)));
+    } catch (e) { /* geen pagina */ }
+    try {
+      stukken = fs.readdirSync(path.join(vault, '20_Prive', 'Bronnen', 'Verzekeringen')).filter((n) => /opstal/i.test(n)).slice(0, 50)
+        .map((n) => { const m = /^[^-]*-\s*(\d{4}(?:-\d{2}-\d{2})?)\s*-/.exec(n); return { datum: m ? m[1] : null }; }).filter((z) => z.datum);
+    } catch (e) { /* geen map */ }
+    return bedrag || stukken.length ? { bedrag, stukken } : null;
+  }
+  // Welke bouwprojecten de pod als lopend kende en wanneer hij ze voor het eerst afgerond zag (meta project_af; alleen tonen, nooit vergelijken)
+  function afBijwerken(paginas, vandaag) {
+    let st = {};
+    metDb((db) => { if (db) { try { st = JSON.parse(metaLees(db, 'project_af') || '{}') || {}; } catch (e) { st = {}; } } }, false);
+    let anders = false;
+    for (const p of paginas) {
+      if (!pkBouwproject(p.md)) continue;
+      const s = frontVeld(p.md, 'status') || '', r = st[p.pad] || {};
+      if (/^(lopend|loopt)$/i.test(s)) { if (r.lopend !== vandaag || r.af_op) { st[p.pad] = { lopend: vandaag }; anders = true; } }
+      else if (PK_AF.test(s) && r.lopend && !r.af_op) { st[p.pad] = { lopend: r.lopend, af_op: vandaag }; anders = true; }
+    }
+    if (anders) { try { metDb((db) => { metaZet(db, 'project_af', JSON.stringify(st)); }, true); } catch (e) { /* volgende keer */ } }
+    return Object.fromEntries(Object.entries(st).filter(([, r]) => r && r.af_op).map(([k, r]) => [k, r.af_op]));
+  }
   async function projectenVan(u) {
     const won = (u.objecten || []).find((x) => x.soort === 'woning' && !x.weg_op);
     if (!won) return [];
-    const paginas = huisPaginas().filter((p) => /^(lopend|loopt)$/i.test(frontVeld(p.md, 'status') || ''));
+    const vandaag = nlVandaag(nu());
+    const alle = huisPaginas();
+    const af = afBijwerken(alle, vandaag);
+    const paginas = alle.filter((p) => /^(lopend|loopt)$/i.test(frontVeld(p.md, 'status') || '') || PK_AF.test(frontVeld(p.md, 'status') || ''));
     if (!paginas.length) return [];
     const bm = metDb((db) => {
       if (!db || !db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bekendmaking'").get()) return { rijen: [], op: null };
       return { rijen: db.prepare('SELECT id, datum, titel, url FROM bekendmaking WHERE object = ? ORDER BY datum DESC LIMIT 500').all(won.sleutel), op: buurtStand(db).straal_op || null };
     }, false);
     const cw = await cwRijen();
-    const k = projectKaarten({ vandaag: nlVandaag(nu()), paginas, kostte: won.kostte, kern: won.geld_kern, cw: cw.rijen, cw_reden: cw.reden,
-      bekendmakingen: bm.rijen, buurt_op: bm.op, adres: won.adres, stukken: won.stukken });
+    const k = projectKaarten({ vandaag, paginas, kostte: won.kostte, kern: won.geld_kern, cw: cw.rijen, cw_reden: cw.reden,
+      bekendmakingen: bm.rijen, buurt_op: bm.op, adres: won.adres, stukken: won.stukken,
+      woning: { feiten: won.feiten, reeksen: won.reeksen, stukken: won.stukken }, polis: paginas.some((p) => PK_AF.test(frontVeld(p.md, 'status') || '')) ? polisLees() : null, af });
+    const ids = new Set();
+    for (const p of k) {
+      const md = (paginas.find((x) => x.pad === p.pagina) || {}).md || '';
+      p.fotos = await projectFotos(md, p.naam);
+      for (const d of (p.fotos && p.fotos.dagen) || []) for (const id of d.ids) ids.add(id);
+    }
+    fotoIds = ids;
     const gezet = metDb((db) => { if (!db) return {}; try { return JSON.parse(metaLees(db, 'project_concept') || '{}') || {}; } catch (e) { return {}; } }, false);
     for (const p of k) {
       if (cw.rijen && !cw.volledig) p.wachter = { ok: true, onvolledig: true };
@@ -2082,6 +2252,15 @@ function maak(o) {
       if (post && pad === '/app/vastgoed/aanroepen') return { status: 200, body: aanroepLijst(), reden: 'vastgoed aanroepen' };
       if (!post && pad === '/app/vastgoed/kelder') { const d = kelder(); return { status: 200, body: d, reden: 'vastgoed kelder' }; }   // wv4182
       if (post && pad === '/app/vastgoed/gezien') return { status: 200, body: gezien(), reden: 'vastgoed gezien' };
+      // wv4353: één miniatuur van een bouwfoto als { mime, data (base64) }; alleen een id dat nu op een projectkaart staat, nooit het origineel
+      const fm = !post && /^\/app\/vastgoed\/foto\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(pad);
+      if (fm) {
+        if (!fotoBron || !fotoIds.has(fm[1])) return { status: 404, body: { ok: false, fout: 'deze foto staat niet op een projectkaart' }, reden: 'vastgoed foto onbekend' };
+        const b = await fotoBron.beeld(fm[1], 'klein');
+        const mime = b && /^image\/(jpeg|png|webp)$/.test(String(b.mime || '')) ? b.mime : null;
+        if (!b || !mime || !Buffer.isBuffer(b.data)) return { status: 503, body: { ok: false, fout: 'de foto kon nu niet geladen worden' }, reden: 'vastgoed foto fout' };
+        return { status: 200, body: { ok: true, mime, data: b.data.toString('base64') }, reden: 'vastgoed foto' };
+      }
       return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'vastgoed onbekend' };
     } catch (e) {
       if (e instanceof Fout) return { status: e.status, body: { ok: false, fout: e.message }, reden: 'vastgoed ' + e.status };
@@ -2136,4 +2315,4 @@ function maak(o) {
 module.exports = { maak, geldKern, leesWoning, leesBox, leesDossierMap, dossierstand, indicatie, soortStuk, euroUit, datumUit, bagSoort, SCHEMA_VERSIE,
   leesHypotheek, hypotheekReeksen, laatsteStand, leesKelder, kelderDossier, kelderMd, kenmerken, kenmerkenMetOud, vergelijk, wijzigingBericht, buurtNieuw, leesKosten, leesBetaald, leesBouwkosten, tegenSleutel, kostteUit, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink,
   looptUit, toekomstUit, alvUit, wozBinnenkort, nuEnBinnenkort, binnenkortRegels, binnenkortNodig, binnenkortErbij,
-  leesWachtpunten, projectKaarten, projectConceptTekst, pkVergunning, pkEigenBekendmaking, pkGeld };
+  leesWachtpunten, projectKaarten, projectConceptTekst, pkAlbum, pkFotoDagen, opleverLijst, pkOpleverDatum, afUit, pkVergunning, pkEigenBekendmaking, pkGeld };
