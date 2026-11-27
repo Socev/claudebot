@@ -532,7 +532,13 @@ function maak(io) {
       try { a = await io.concept(body); } catch (e) { fout('voorwerk-gmail', e); return { status: 502, j: { ok: false, fout: 'Gmail is even niet bereikbaar; probeer het zo opnieuw' } }; }
       const j = a && a.j;
       // wv2729: het mailconcept-luik weigert sinds wv2728 een tweede concept in dezelfde draad (409); zeg dat in gewone taal
-      if (a && a.status === 409 && isObj(j) && j.ok === false) return { status: 409, j: { ok: false, bestaat_al: true, fout: 'Er staat al een concept in deze Gmail-draad. Gooi dat eerst weg in Gmail en tik dan opnieuw.' } };
+      if (a && a.status === 409 && isObj(j) && j.ok === false) {
+        // wv4107 (nr 473 = 3C173): is het oude concept een eigen, onbewerkt Socev-concept (en staat de registerrij aan), dan een kaart "vervangen?"
+        let vk = null;
+        if (typeof io.vervangKaart === 'function') { try { vk = await io.vervangKaart(draad, body); } catch (e) { fout('voorwerk-vervang', e); vk = null; } }
+        if (vk && vk.ok) return { status: 409, j: { ok: false, bestaat_al: true, vervang_kaart: true, fout: 'Er staat al een concept in deze Gmail-draad, nog precies zoals Socev het maakte. In Voor jou staat de knop om het te vervangen door deze versie.' } };
+        return { status: 409, j: { ok: false, bestaat_al: true, fout: 'Er staat al een concept in deze Gmail-draad. Gooi dat eerst weg in Gmail en tik dan opnieuw.' } };
+      }
       if (!a || a.status !== 200 || !isObj(j) || j.ok !== true || typeof j.concept_id !== 'string') return { status: 502, j: { ok: false, fout: 'het concept kwam niet in Gmail (' + (a ? a.status : 'geen antwoord') + ')' } };
       const td = typeof j.thread_id === 'string' ? j.thread_id : '';
       open().prepare('UPDATE voorwerk SET gmail_tijd = ?, gmail_id = ?, gmail_draad = ? WHERE postvak = ? AND draad = ? AND besluit = ?').run(iso(), j.concept_id.slice(0, 80), td.slice(0, 40), PV, draad, r.besluit);
@@ -540,6 +546,8 @@ function maak(io) {
         io.register({ aangemaakt: iso(), concept_id: j.concept_id, thread_id: td || draad, aan, onderwerp, hash: crypto.createHash('sha256').update(tekst).digest('hex'),
           tekens: tekst.length, bron: 'mail-voorwerk', aangepast: tekst !== str(r.concept, 6000), cc: ccLijst.length, van: ont ? ont.van_adres : '' });
       } catch (e) { fout('voorwerk-register', e); }
+      // wv4107 (nr 406 = 3C106): de concepttekst 30 dagen op de pod, om na verzending te vergelijken met wat David echt verstuurde
+      if (typeof io.bewaar === 'function') { try { io.bewaar({ concept_id: j.concept_id, draad: td || draad, aan: aanLijst.join(', '), cc: ccLijst.join(', '), onderwerp, tekst, bron: 'mail-voorwerk' }); } catch (e) { fout('voorwerk-bewaar', e); } }
       // De app toont `aan` letterlijk ("Staat als concept …, aan <aan>. Kijk de ontvangers na"): daarom staan cc, afzendadres en wie wegviel erin
       const extra = [];
       if (ccLijst.length) extra.push('cc ' + ccLijst.join(', '));

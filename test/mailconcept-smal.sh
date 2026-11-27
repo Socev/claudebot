@@ -12,7 +12,7 @@ let fout = 0;
 function toets(naam, ok, extra) { console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (extra ? '  [' + extra + ']' : '')); if (!ok) fout++; }
 const slaap = (ms) => new Promise((r) => setTimeout(r, ms));
 ['home', 'vault', 'repo', 'io', 'jobout'].forEach((m) => fs.mkdirSync(path.join(d, m), { recursive: true }));
-['server.js', 'mail-ontvangers.js', 'voorwerk-poort.js'].forEach((f) => fs.copyFileSync(f, path.join(d, f)));
+['server.js', 'mail-ontvangers.js', 'voorwerk-poort.js', 'concept-leer.js', 'vault-veilig.js'].forEach((f) => fs.copyFileSync(f, path.join(d, f)));
 const poort = vrijePoort(), sbPoort = vrijePoort();
 // nep-Supabase: alleen de rolstand (actieve kant = olares), anders blijft de pod passief en weigert /smal
 const sb = http.createServer((req, res) => { res.setHeader('content-type', 'application/json');
@@ -22,7 +22,7 @@ const env = Object.assign({}, process.env, {
   HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'), APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'), APP_DATA_DIR: path.join(d, 'app-data'), APP_UIT_BESTAND: path.join(d, 'app-uit'), TEL_UIT_BESTAND: path.join(d, 'tel-uit'),
   JOBOUT_DIR: path.join(d, 'jobout'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'),
   RUNTIME_FILE: path.join(d, 'runtime.json'), CODEX_HOME: path.join(d, 'codex'), SLEUTELPORTAAL_SLEUTEL: path.join(d, 'geen.key'),
-  UITROL_MARKER: path.join(d, 'uitrol-wacht'), ROL_BESTAND: path.join(d, 'rol'), AGY_MCP_TMP: path.join(d, 'agy-mcp.json'), TUNNEL_UIT_POD: '1',
+  UITROL_MARKER: path.join(d, 'uitrol-wacht'), CONCEPT_LEER_DIR: path.join(d, 'concept-leer'), CONCEPT_LEER_REGISTER: path.join(d, 'geen-register.json'), ROL_BESTAND: path.join(d, 'rol'), AGY_MCP_TMP: path.join(d, 'agy-mcp.json'), TUNNEL_UIT_POD: '1',
   SUPABASE_URL: 'http://127.0.0.1:' + sbPoort, SUPABASE_SERVICE_ROLE: 'proef', SOCEV_KANT: 'olares',
   OFFSITE_INTERVAL_MIN: '0', AUTO_UIT_POD: '1', LESSEN_INJECTIE: '0', API_SECRET: 'proef', MAX_AGENTS: '1', PORT: String(poort)
 });
@@ -58,6 +58,16 @@ function post(pad, body) {
     toets('draad: geen hex = 400', r.st === 400, r.st);
     r = await post('/smal/mailconcept', { secret: 'proef', opdracht: 'draad', draad: 'aa11bb22cc33dd44' });
     toets('draad: luik weg = 502 met gewone taal', r.st === 502 && /loop de ontvangers zelf na/.test(r.j.fout), r.st);
+    // wv4107 (nr 406/473): registerregel door de pod + tekst 30 dagen op de pod; vervangen zonder registerrij = geen kaart
+    fs.mkdirSync(path.join(d, 'vault', '01_Ontwikkeling', '0b-werkmap'), { recursive: true });
+    r = await post('/smal/mailconcept', { secret: 'proef', opdracht: 'register', concept_id: 'r1234567890', draad: 'aa11bb22cc33dd44', aan: 'x@voorbeeld.invalid', onderwerp: 'Re: Proef', concept: 'Hoi,\n\nVerzonnen proeftekst.\n\nGroet,\nDavid', bijlagen: ['a.pdf'] });
+    const reg = (function () { try { return fs.readFileSync(path.join(d, 'vault', '01_Ontwikkeling', '0b-werkmap', 'conceptregister.jsonl'), 'utf8'); } catch (e) { return ''; } })();
+    toets('register: 200, regel met hash en bijlage, tekst bewaard', r.st === 200 && r.j.bewaard === true && /"concept_id":"r1234567890"/.test(reg) && /"bijlagen":\["a.pdf"\]/.test(reg) && reg.indexOf('Verzonnen') < 0, JSON.stringify(r.j) + reg.slice(0, 200));
+    toets('register: tekst op de pod (0600)', (fs.statSync(path.join(d, 'concept-leer', 'concepten.sqlite')).mode & 0o777) === 0o600);
+    r = await post('/smal/mailconcept', { secret: 'proef', opdracht: 'register', concept_id: 'x', draad: 'aa11bb22cc33dd44', concept: 'Hoi daar' });
+    toets('register: geen concept-id = 400', r.st === 400, r.st);
+    r = await post('/smal/mailconcept', { secret: 'proef', opdracht: 'vervang', draad: 'aa11bb22cc33dd44', aan: 'x@voorbeeld.invalid', onderwerp: 'Re: Proef', concept: 'Nieuwe versie, verzonnen.' });
+    toets('vervang: zonder registerrij geen kaart (uit)', r.st === 200 && r.j.kaart === false && r.j.reden === 'uit', JSON.stringify(r.j));
     r = await post('/smal/mailconcept', { secret: 'proef', opdracht: 'stuur' });
     toets('onbekende opdracht = 400 (geen concept maken)', r.st === 400, r.st);
   } finally { try { process.kill(-p.pid, 'SIGKILL'); } catch (e) {} sb.close(); }

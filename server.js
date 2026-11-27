@@ -4861,6 +4861,7 @@ function handleRequest(req, res) {
       mail_app: { aan: typeof mailApp !== 'undefined' && !!mailApp, auto_voorwerk: typeof mailVoorwerkAuto === 'function' ? mailVoorwerkAuto() : null },   // wv3077: OVIS Mail fase 1
       mail_sluit: typeof mailSluitInfo === 'function' ? mailSluitInfo() : { aan: false },   // wv3091: OVIS Mail fase 2 (sluitcontrole; alleen tellingen)
       gmail_opdracht: typeof gmailOpdrachtInfo === 'function' ? gmailOpdrachtInfo() : { aan: false },   // wv4105: Socev-labels in Gmail (tellingen, geen inhoud)
+      concept_leer: typeof conceptLeerInfo === 'function' ? conceptLeerInfo() : { module: false },   // wv4107: leren van aangepaste concepten + vervangen (alleen aantallen)
       mail_voorwerk: typeof mailVoorwerkInfo === 'function' ? mailVoorwerkInfo() : { aan: false },   // wv2455: voorwerk bij vragen in Mail (tellingen, geen inhoud)   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
       tabula: typeof tabulaInfo === 'function' ? tabulaInfo() : { aan: false },
@@ -14263,6 +14264,21 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
         bijVerval: function () { try { zl.bijVerval(); } catch (e) { logError('zoek-snel-leer-knop', e); } } });
     await knopZl;
     if (res._app) res._app.reden = 'voor-jou knop #' + id + ' zoek-snel-leer ' + (res._app.reden || '');
+    return;
+  }
+  // wv4107 (nr 406/473): de weekkaart van de mailstem ("Mailconcepten — voortaan zo: …?") en de vervangkaart ("… oude verwijderen en vervangen?").
+  // Alleen uit de eigen tabel van concept-leer.js; de pod schrijft de regel of vervangt het concept zelf bij de start (vervangen alleen bij een Ja met
+  // verse vingerafdruk), en draait de regel terug als de druk vervalt. Socev krijgt geen mailtekst.
+  let cl = null;
+  try { cl = !pot && !bs && !ib && !ov && !ss && !hr && !zl && conceptLeer ? (conceptLeer.knop(p.sleutel, keuze, d.toelichting) || conceptLeer.vervangKnop(p.sleutel, keuze)) : null; } catch (e) { logError('concept-leer-knop', e); cl = null; }
+  if (cl) {
+    const clStart = bijStart;
+    const knopCl = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
+      { tekst: tekst, bericht: bericht, inhoudHash: inhoudHash, context: context + cl.context, gevoelig: k.gevoelig,
+        bijStart: function (kz, g) { try { cl.bijStart(kz, g); } catch (e) { logError('concept-leer-knop', e); } return clStart(kz, g); },
+        bijVerval: function () { try { cl.bijVerval(); } catch (e) { logError('concept-leer-knop', e); } } });
+    await knopCl;
+    if (res._app) res._app.reden = 'voor-jou knop #' + id + ' concept-leer ' + (res._app.reden || '');
     return;
   }
   // wv3821: de kaart van "Zoek het uit" (Gevonden — onthouden? / Niet gevonden — verder laten zoeken?). Alleen uit het eigen bestand; Ja op
@@ -24495,7 +24511,39 @@ async function mailconceptSmal(d) {
     if (draad && !gelezen) f.regel += ' (De draad was niet te lezen: alleen de stukken en je ondertekening telden.)';
     return { status: 200, j: Object.assign({ ok: true, draad_gelezen: gelezen, stukken: stukken.length }, f) };
   }
-  return { status: 400, j: { ok: false, fout: "opdracht 'draad' of 'feiten'" } };
+  // wv4107 (nr 406 = 3C106): registerregel (hash, zoals de skill) door de pod + concepttekst 30 dagen op de pod
+  if (d.opdracht === 'register') {
+    const id = String(d.concept_id || ''), td = draad;
+    const tekst = typeof d.concept === 'string' ? d.concept : '';
+    if (!/^r-?[0-9]{5,25}$/.test(id) || !td) return { status: 400, j: { ok: false, fout: 'concept_id (r…) en draad (thread_id uit het webhookantwoord) zijn verplicht' } };
+    if (tekst.trim().length < 5) return { status: 400, j: { ok: false, fout: 'concept ontbreekt' } };
+    const bijl = (Array.isArray(d.bijlagen) ? d.bijlagen : []).slice(0, 10).map(function (x) { return String(x).slice(0, 120); });
+    const regel = { aangemaakt: new Date().toISOString(), concept_id: id, thread_id: td, aan: String(d.aan || '').slice(0, 500), onderwerp: String(d.onderwerp || '').slice(0, 300),
+      hash: crypto.createHash('sha256').update(tekst).digest('hex'), tekens: tekst.length };
+    if (bijl.length) regel.bijlagen = bijl;
+    if (typeof d.outdir_bestand === 'string' && d.outdir_bestand) regel.outdir_bestand = d.outdir_bestand.slice(0, 120);
+    try { potVzRegister(regel); } catch (e) { logError('mailconcept-register', e); return { status: 500, j: { ok: false, fout: 'registerregel niet geschreven; schrijf hem zelf zoals de skill zegt' } }; }
+    let b = { ok: false, fout: 'module ontbreekt' };
+    if (conceptLeer) { try { b = conceptLeer.bewaar({ concept_id: id, draad: td, aan: regel.aan, cc: String(d.cc || '').slice(0, 1000), onderwerp: regel.onderwerp, tekst, bron: 'chat', bijlagen: bijl.length }); } catch (e) { logError('concept-leer-bewaar', e); b = { ok: false, fout: 'bewaren mislukt' }; } }
+    return { status: 200, j: { ok: true, register: true, bewaard: !!b.ok, bewaard_tot: b.bewaard_tot || null, regel: b.ok ? 'In het register; de tekst blijft 30 dagen op de pod om te zien wat David eraan verandert.' : 'In het register (tekst niet bewaard: ' + (b.fout || '?') + ').' } };
+  }
+  // wv4107 (nr 473 = 3C173): na een 409 van de webhook. Eigen, onbewerkt concept + registerrij aan → kaart "vervangen?" (alleen de pod handelt na Davids Ja)
+  if (d.opdracht === 'vervang') {
+    if (!draad) return { status: 400, j: { ok: false, fout: 'draad ontbreekt' } };
+    const body = { aan: String(d.aan || ''), cc: String(d.cc || ''), van: String(d.van || ''), onderwerp: String(d.onderwerp || ''), bericht: typeof d.concept === 'string' ? d.concept : '' };
+    let k;
+    try { k = await conceptVervangKaart(draad, body); } catch (e) { logError('concept-vervang', e); k = { ok: false, reden: 'fout' }; }
+    const zin = { uit: 'Vervangen staat (nog) uit.', bewerkt: 'Het oude concept is bewerkt (of anders dan wat Socev maakte): niet vervangen.', geen_eigen: 'Het oude concept is niet van Socev (of ouder dan 30 dagen).',
+      meer_concepten: 'Er staan meer concepten in de draad.', bijlagen: 'Er hangt een bijlage aan (het oude of het nieuwe concept): niet vervangen.', onleesbaar: 'De draad was niet te lezen.', geen_concept: 'Er staat geen concept meer in de draad: zet het nieuwe gewoon met de webhook.' };
+    return { status: 200, j: k.ok ? { ok: true, kaart: true, regel: 'In Voor jou staat nu de knop "oude verwijderen en vervangen?". De nieuwe tekst ook in de chat zetten.' }
+      : { ok: true, kaart: false, reden: k.reden, regel: (zin[k.reden] || 'Geen kaart (' + k.reden + ').') + ' Zet de nieuwe tekst in de chat, zoals de skill zegt.' } };
+  }
+  if (d.opdracht === 'vervang-stand') {
+    if (!draad || !conceptLeer) return { status: 400, j: { ok: false, fout: 'draad ontbreekt' } };
+    const st = conceptLeer.vervangStand(draad);
+    return { status: 200, j: Object.assign({ ok: true }, st) };
+  }
+  return { status: 400, j: { ok: false, fout: "opdracht 'draad', 'feiten', 'register', 'vervang' of 'vervang-stand'" } };
 }
 const mailVoorwerk = (function () {
   const p = path.join(__dirname, 'mailvoorwerk.js');
@@ -24511,6 +24559,8 @@ const mailVoorwerk = (function () {
       correcties: function () { return String(VV().lees(path.join(VAULT, '00_Systeem', 'Mailstem - correcties van David.md'), 'utf8', { max: 262144 }) || ''); },   // nr 318, wv4095: alleen de prompt, niet de poort
       concept: function (body) { return potVzConcept(body); },
       register: function (regel) { return potVzRegister(regel); },
+      bewaar: function (d) { return conceptLeer ? conceptLeer.bewaar(d) : null; },   // wv4107 (nr 406): concepttekst 30 d op de pod
+      vervangKaart: function (draad, body) { return conceptVervangKaart(draad, body); },   // wv4107 (nr 473): kaart "vervangen?" bij een eigen, onbewerkt concept
       versie: mailVoorwerkVersie, verwerkers: mailVoorwerkVerwerkers,
       onderzoek: fs.existsSync(path.join(__dirname, 'voorwerk-lees.js')) ? voorwerkOnderzoek : null });
   } catch (e) { logError('mailvoorwerk', e); return null; }
@@ -24535,6 +24585,85 @@ if (mailVoorwerk && SERVER_ECHT) {
   setInterval(function () { if (rolPrimair()) mailVoorwerk.tik().catch(function (e) { logError('voorwerk-tik', e); }); }, 5 * 60000).unref();
 }
 // ── einde wv2455 voorwerk ──
+// ── wv4107 (besluitenpagina nr 406 = 3C106 en nr 473 = 3C173, David Ja 25-11-2026 21:46/21:48): leren van Davids aanpassingen + "vervangen?" ──
+// Logica en waarom in concept-leer.js; ontwerp + Codex-ontwerpreview: mk-scripts/wv4107/ontwerp.md. Hier de koppeling: opslag in
+// CONCEPT_LEER_DIR (buiten de vault, 0600), het lees-luik (mail_gesprek), het conceptregister + uitkomstbestand naast het register (vault-veilig),
+// het correctiebestand van de mailstem (nr 318; alleen de pod schrijft daar bij Davids Ja), de schakelaar voor vervangen = registerrij
+// mailconcept-vervang op aan in toestemmingen.json, en de n8n-vervangstap (workflow-id in CONCEPT_LEER_DIR/vervang.json; ontbreekt = uit).
+const CONCEPT_LEER_DIR = process.env.CONCEPT_LEER_DIR || '/opt/data/concept-leer';
+const CONCEPT_LEER_REGISTER = process.env.CONCEPT_LEER_REGISTER || '/opt/data/mk-scripts/toestemmingen.json';
+const conceptLeer = (function () {
+  const p = path.join(__dirname, 'concept-leer.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const CL = require(p);
+    return CL.maak({ dir: CONCEPT_LEER_DIR, fout: logError, log: function (r) { schrijfLog(nu() + ' ' + r); },
+      gesprek: mailGesprekLees,
+      uitkomst: function (regel) { VV().voegToe(path.join(VAULT, '01_Ontwikkeling', '0b-werkmap', 'conceptregister-uitkomst.jsonl'), JSON.stringify(regel) + '\n', { maak: true }); },
+      register: function (regel) { return potVzRegister(regel); },
+      correcties: { wijzig: function (fn) { return VV().wijzig(path.join(VAULT, '00_Systeem', 'Mailstem - correcties van David.md'), fn); } },
+      registerAan: function () {
+        try { const r = JSON.parse(fs.readFileSync(CONCEPT_LEER_REGISTER, 'utf8')); return !!(r && Array.isArray(r.rijen) && r.rijen.some(function (x) { return x && x.id === CL.VERVANG_RIJ && x.status === 'aan'; })); }
+        catch (e) { return false; }   // onleesbaar = uit
+      },
+      vervang: conceptVervangLuik });
+  } catch (e) { logError('concept-leer', e); return null; }
+})();
+// De n8n-vervangstap (AI - Mailconcept vervangen): eerst het nieuwe concept in de draad, dan pas het oude weg (zie concept-leer.js vervangVoer).
+async function conceptVervangLuik(body) {
+  const geheim = process.env.N8N_WEBHOOK_MAILCONCEPT;
+  let wf = '';
+  try { wf = String(JSON.parse(fs.readFileSync(path.join(CONCEPT_LEER_DIR, 'vervang.json'), 'utf8')).workflow || ''); } catch (e) { wf = ''; }
+  if (!geheim || !/^[A-Za-z0-9]{8,40}$/.test(wf)) throw new Error('vervangluik niet ingericht');
+  const tekst = JSON.stringify(Object.assign({ secret: geheim }, body));
+  for (let poging = 0; poging < 2; poging++) {
+    const url = await appWebhookUrl(wf, null, 'conceptVervangUrl', poging > 0);
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: tekst, signal: AbortSignal.timeout(60000) });
+    if (r.status === 404 && poging === 0) continue;
+    let j = null; try { j = await r.json(); } catch (e) { j = null; }
+    return { status: r.status, j: j };
+  }
+  return { status: 404, j: null };
+}
+// Kaart "vervangen?" zetten (spoed: David vroeg er net om). → { ok, reden }
+async function conceptVervangKaart(draad, body) {
+  if (!conceptLeer) return { ok: false, reden: 'module' };
+  const k = await conceptLeer.vervangKaart(draad, body);
+  if (!k.ok) return k;
+  const r = await appSbRpc('mk_voor_jou_zet', { p: k.kaart });
+  appStaat.vjCache = null;
+  if (!r || !r.sleutel) return { ok: false, reden: 'kaart niet gezet' };
+  schrijfLog(nu() + ' mailconcept-vervang kaart ' + velden({ sleutel: k.sleutel }));
+  return { ok: true, sleutel: k.sleutel };
+}
+// Weekkaart met een stijlvoorstel (hooguit één per ISO-week, alleen bij een patroon).
+async function conceptLeerKaart() {
+  if (!conceptLeer) return null;
+  const lijst = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
+  const status = {};
+  ((lijst && lijst.punten) || []).forEach(function (x) { status[x.sleutel] = x.status; });
+  const k = conceptLeer.kaart(status);
+  if (!k.kaart) return { reden: k.reden };
+  const r = await appSbRpc('mk_voor_jou_zet', { p: k.kaart });
+  appStaat.vjCache = null;
+  if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet');
+  conceptLeer.kaartGezet(k.bevries);
+  schrijfLog(nu() + ' mailstem-leer kaart ' + velden({ sleutel: k.bevries.sleutel, aantal: k.bevries.aantal }));
+  return { gezet: k.bevries.sleutel };
+}
+const conceptLeerStaat = { laatste: null, tel: null, kaart: null };
+if (conceptLeer && SERVER_ECHT) {
+  setInterval(function () {
+    const uur = Number(new Date().toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false })) % 24;
+    if (!rolPrimair() || uur < 7 || uur >= 22) return;
+    conceptLeer.ronde().then(function (t) {
+      conceptLeerStaat.laatste = new Date().toISOString(); conceptLeerStaat.tel = t;
+      if (t && t.gekeken) schrijfLog(nu() + ' concept-leer ronde ' + velden(t));
+      return conceptLeerKaart().then(function (k) { conceptLeerStaat.kaart = k; });
+    }).catch(function (e) { logError('concept-leer', e); });
+  }, 60 * 60000).unref();
+}
+function conceptLeerInfo() { if (!conceptLeer) return { module: false }; try { return Object.assign({ module: true, ronde: conceptLeerStaat }, conceptLeer.health()); } catch (e) { return { fout: true }; } }
 // ── wv4105 (besluitenpagina nr 162 = 2C62): Socev-labels in Gmail. Logica en waarom in gmail-opdracht.js; ontwerp + Codex-ontwerpreview:
 // mk-scripts/wv4105/ontwerp.md. Hier de koppeling: het lees-luik (alleen mail_zoeken), POST /agent op deze pod (vaste socev:-labels, chat 40687,
 // zoals Shopper), het agentregister, het conceptregister van de skill (alleen lezen) en de Jev-scores van MailMan. Schakelaar
