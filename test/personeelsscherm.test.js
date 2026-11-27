@@ -279,11 +279,11 @@ function fase1(o = {}) {
   ];
   const weer = { current: { temp: 6.4, weather: [{ id: 801, description: 'licht bewolkt' }] }, daily: [{ dt: 1763290800, temp: { max: 8.5, min: 3.4 } }, { dt: 1763377200, temp: { max: 7 }, weather: [{ id: 800 }] }] };
   const z = opzet(o);
-  const tel = { tijdlijn: 0, weer: 0, nieuws: 0, medisch: 0, medisch_bron: [] };
+  const tel = { tijdlijn: 0, weer: 0, nieuws: 0, medisch: 0, medisch_bron: [], medisch_team: 0 };
   const m = PS.maak({ dir: z.dir, vault, registerPad: reg, vragenPad, d1: z.D.d1, cf: z.C.cf, nu: z.nu, melding: async () => {}, fout: () => {},
     tijdlijn: async (van, tot) => { tel.tijdlijn++; tel.van = van; if (o.tijdlijnFaalt || tel.faalt) throw new Error('weg'); return rijen.filter((r) => String(r.eind_datum || r.begin_datum) >= van); },   /* wv4149: zoals de RPC vanaf 'van' */ weer: async () => { tel.weer++; return weer; },
     nieuws: o.nieuws ? async () => { tel.nieuws++; return o.nieuws(); } : undefined, nieuwsTimeoutMs: o.nieuwsTimeoutMs,   // wv3023
-    medisch: o.medisch ? async (b) => { tel.medisch++; tel.medisch_bron.push(b); return o.medisch(b); } : undefined });   // wv3154
+    medisch: o.medisch ? async (b) => { if ((PS.MEDISCH_BRONNEN.find((x) => x.id === b) || {}).team) tel.medisch_team++; else tel.medisch++; tel.medisch_bron.push(b); return o.medisch(b); } : undefined });   // wv3154; wv4210: teambronnen apart geteld
   return Object.assign(z, { m, zetReg, tel, vault, vragenPad });
 }
 const html = (D) => { const r = D.sq.prepare('SELECT bytes FROM envelop WHERE id = 1').get(); return JSON.parse(Buffer.from(r.bytes, 'base64')).html; };
@@ -1586,4 +1586,122 @@ test('wv4209 voorbeeld van een set die op Davids Ja wacht: in de app als proef (
   // ouder dan 7 dagen: geen voorbeeld meer
   f = fase4209({ sets: [SET], vz: false }); f.zet(Date.parse('2026-11-21T09:00:00Z')); st = await stand4209(f.m);
   assert.deepStrictEqual(st.schermen.filter((x) => x.concept), []);
+});
+
+// ── wv4210 (nr 922 = L22): nieuws voor het hele team (NVDA, NVvPO, Thuisarts), 'voor wie' en Davids eigen zin; verzonnen feeds ──
+const TEAM_TEKST = ['Nieuws voor het hele team: ook berichten van NVDA (doktersassistenten), NVvPO (praktijkondersteuners) en Thuisarts (alleen kop, één à twee zinnen, bron en datum).'];
+const MED_NVDA = () => [
+  { titel: 'Proefoproep: denk mee over de cao voor doktersassistenten', ms: MT0 - 7 * 3600000, tekst: '<![CDATA[<p>De NVDA zoekt proefleden. Meld je aan voor de commissie. Wat [&#8230;]</p><p>The post <a href="https://www.nvda.nl/x/">Proef</a> appeared first on <a href="https://www.nvda.nl">NVDA</a>.</p>]]>' },
+  { titel: 'Proefworkshop telefoontriage in Zwolle', ms: MT0 - 2 * DAG },
+];
+const MED_NVVPO = () => [{ titel: 'Proefblog: emoties in de huisartsenpraktijk', ms: MT0 - 8 * 3600000, tekst: '<![CDATA[]]>' }];
+const MED_THUIS = () => [{ titel: 'Proeftips bij keelpijn', ms: MT0 - 3 * DAG, tekst: 'Drink regelmatig water. Neem bij veel pijn paracetamol.' }];
+function teamOpzet(o = {}) {
+  const f = medOpzet(o);
+  Object.assign(f.feeds, { nvda: () => mrss(MED_NVDA()), nvvpo: () => mrss(MED_NVVPO()), thuisarts: () => mrss(MED_THUIS()) });
+  const reg = path.join(f.vault, 'register.json');
+  f.zetTeam = (status = 'aan', tekst = TEAM_TEKST, med = 'aan') => fs.writeFileSync(reg, JSON.stringify({ rijen: [{ id: 'personeelsscherm-vast', status: 'aan', tekst: NIEUW }]
+    .concat(med ? [{ id: PS.MEDISCH_RIJ, status: med, tekst: MED_TEKST }] : []).concat(status ? [{ id: PS.TEAM_RIJ, status, tekst }] : []) }));
+  if (o.team !== false) f.zetTeam(o.team || 'aan');
+  return f;
+}
+const TEAMKOP = /NVDA|NVvPO|Thuisarts|Proefoproep|Proefworkshop|Proefblog|Proeftips/;
+
+test('wv4210 teambronnen: NVDA-staart eraf, NVvPO zonder tekst = alleen kop; voorVan en eigenZin', () => {
+  const B = (id) => PS.MEDISCH_BRONNEN.find((b) => b.id === id);
+  const n = PS._t.medischItems(mrss(MED_NVDA()), B('nvda'), MT0);
+  assert.strictEqual(n[0].tekst, 'De NVDA zoekt proefleden. Meld je aan voor de commissie.');
+  assert.doesNotMatch(JSON.stringify(n), /appeared first|The post/);
+  const p = PS._t.medischItems(mrss(MED_NVVPO()), B('nvvpo'), MT0);
+  assert.deepStrictEqual([p.length, p[0].tekst], [1, '']);
+  assert.deepStrictEqual(['nhg', 'lhv', 'rivm', 'nvda', 'nvvpo', 'thuisarts'].map((b) => PS._t.voorVan({ bron: b })), ['artsen', 'artsen', 'iedereen', 'assistentes', 'poh', 'iedereen']);
+  assert.strictEqual(PS._t.voorVan({ bron: 'lhv', voor: 'iedereen' }), 'iedereen'); assert.strictEqual(PS._t.voorVan({ bron: 'lhv', voor: 'onzin' }), 'artsen');
+  const Z = PS._t.eigenZin;
+  assert.strictEqual(Z('  Dit geldt voor ons\nvanaf januari  '), 'Dit geldt voor ons vanaf januari');
+  assert.deepStrictEqual([Z(''), Z('   '), Z(null), Z(undefined)], ['', '', '', '']);
+  for (const fout of ['x'.repeat(121), 'Zie www.voorbeeld.invalid', 'Mail a@b.invalid', 'Kijk https://x.invalid', '<b>vet</b>', 42, {}]) assert.strictEqual(Z(fout), null, String(fout));
+  assert.strictEqual(Z('é'.repeat(120)), 'é'.repeat(120));
+});
+
+test('wv4210 zonder teamrij: teambronnen opgehaald voor het app-voorbeeld, niet op de tv; oude tv-pagina bit-gelijk (kruisproef)', async () => {
+  const oud = medOpzet(); await oud.m.tik(); const hOud = html(oud.D);
+  for (const [w, o] of [['geen teamrij', { team: false }], ['teamrij uit', { team: 'uit' }]]) {
+    const f = teamOpzet(o); await f.m.tik();
+    assert.strictEqual(f.tel.medisch_team, 3, w + ': drie teambronnen opgehaald');
+    const h = html(f.D);
+    assert.doesNotMatch(h, TEAMKOP, w + ': niet op de tv'); assert.doesNotMatch(h, /class="mvoor"|class="mz"|Voor het hele team/, w);
+    assert.strictEqual(medPaneel(h, 'Medisch nieuws'), medPaneel(hOud, 'Medisch nieuws'), w + ': Medisch nieuws ongewijzigd');
+    assert.strictEqual(medPaneel(h, 'Belangrijk'), medPaneel(hOud, 'Belangrijk'), w + ': Belangrijk ongewijzigd');
+    assert.strictEqual(f.m.info().medisch.team, false);
+    const st = await f.m.appStand(), md = st.schermen.find((x) => x.id === PS.MEDISCH_ID), bl = st.schermen.find((x) => x.id === PS.BELANGRIJK_ID);
+    assert.match(md.html, /Proefblog: emoties/, w + ': wel in het app-voorbeeld'); assert.match(md.html, /voor POH&#39;s|voor POH's/);
+    assert.strictEqual(bl.titel, 'Belangrijk (LHV, NHG)');
+    assert.ok(md.berichten.every((x) => x.team_proef === true));
+    assert.strictEqual(md.berichten.find((x) => x.bron === 'NVDA').voor, 'assistentes');
+  }
+  // teamrij zonder de medische rij: ook niets
+  const g = teamOpzet(); g.zetTeam('aan', TEAM_TEKST, false); g.zet(MT0 + 60000); await g.m.tik(); assert.doesNotMatch(html(g.D), /paneel med/);
+  assert.strictEqual(g.m.info().medisch.team, false);
+  // teamrij zonder de zin
+  const k = teamOpzet(); k.zetTeam('aan', ['Nieuws voor het team.']); k.zet(MT0 + 60000); await k.m.tik(); assert.doesNotMatch(html(k.D), TEAMKOP);
+});
+
+test('wv4210 met teamrij: teambronnen op de tv, hooguit 4 per bron, voor wie bij elk bericht, NVDA-cao op Belangrijk; rij weg = meteen terug', async () => {
+  const f = teamOpzet();
+  // LHV met 6 berichten deze maand: hooguit 4 op Medisch nieuws
+  f.feeds.lhv = () => mrss(MED_LHV().concat([1, 2, 3, 4].map((k) => ({ titel: 'Extra LHV-proefbericht ' + k, ms: MT0 - k * 3600000 - 1800000 }))));
+  await f.m.tik();
+  const h = html(f.D), mn = medPaneel(h, 'Medisch nieuws'), bl = medPaneel(h, 'Belangrijk');
+  assert.match(mn, /Voor het hele team/); assert.match(mn, /Proefblog: emoties/); assert.match(mn, /Proeftips bij keelpijn/); assert.match(mn, /Proefworkshop telefoontriage/);
+  assert.match(mn, /<span class="chip a">NVvPO<\/span><span>16 nov<\/span><span class="mvoor">voor POH&#39;s<\/span>|<span class="mvoor">voor POH's<\/span>/);
+  assert.ok((mn.match(/class="mvoor"/g) || []).length === koppen(mn).length, 'voor wie bij elk bericht');
+  const lhv = koppen(mn).filter((k) => /LHV|Extra LHV/.test(k)); assert.ok(lhv.length <= 4, 'LHV hooguit 4: ' + lhv.length);
+  assert.ok(koppen(bl).includes('Proefoproep: denk mee over de cao voor doktersassistenten'), 'NVDA-oproep op Belangrijk');
+  assert.match(bl, /<span class="mvoor">voor assistentes<\/span>/); assert.match(bl, /LHV · NHG · NVDA/);
+  assert.deepStrictEqual([f.m.info().medisch.team, (await f.m.appStand()).schermen.find((x) => x.id === PS.BELANGRIJK_ID).titel], [true, 'Belangrijk']);
+  // rij uit: volgende tik zonder teambronnen, oude koppen terug
+  f.zetTeam('uit'); f.zet(MT0 + 5 * 60000); await f.m.tik();
+  assert.doesNotMatch(html(f.D), TEAMKOP); assert.doesNotMatch(html(f.D), /class="mvoor"/);
+});
+
+test('wv4210 voor wie kiezen en eigen zin: alleen bij een bericht dat David vasthoudt; loslaten haalt de zin weg; ongeldig = 400', async () => {
+  const f = teamOpzet(); await f.m.tik();
+  const zet = (body) => f.m.app({ pad: '/app/personeelsscherm/medisch', methode: 'POST', body });
+  const st = await f.m.appStand();
+  const nw = st.schermen.find((x) => x.id === PS.MEDISCH_ID).berichten.find((x) => x.kop === 'LHV-proefbericht over regeldruk');
+  // zin bij een bericht dat niet vastgehouden wordt: 409
+  assert.strictEqual((await zet({ id: nw.id, zin: 'Geldt voor ons vanaf januari' })).status, 409);
+  assert.strictEqual((await zet({ id: nw.id, vast: true })).status, 200);
+  assert.strictEqual((await zet({ id: nw.id, zin: 'Geldt voor ons vanaf januari', voor: 'iedereen' })).status, 200);
+  let bl = medPaneel(html(f.D), 'Belangrijk');
+  const blok = (bl.split('<div class="mb').find((x) => x.includes('LHV-proefbericht over regeldruk')) || '');
+  assert.match(blok, /<span class="mvoor">voor iedereen<\/span>[\s\S]*LHV-proefbericht over regeldruk<\/div><div class="mz">Geldt voor ons vanaf januari<\/div>/, blok.slice(0, 600));
+  // ongeldig
+  for (const b of [{ id: nw.id, voor: 'patiënten' }, { id: nw.id, zin: 'Zie www.voorbeeld.invalid' }, { id: nw.id, zin: 'x'.repeat(121) }]) assert.strictEqual((await zet(b)).status, 400, JSON.stringify(b).slice(0, 60));
+  assert.match(medPaneel(html(f.D), 'Belangrijk'), /Geldt voor ons vanaf januari/, 'ongeldig verandert niets');
+  // voor terug naar de standaard, zin weg ('' zonder vingerafdruk)
+  assert.strictEqual((await zet({ id: nw.id, voor: null })).status, 200);
+  assert.strictEqual((await zet({ id: nw.id, zin: '' })).status, 200);
+  bl = medPaneel(html(f.D), 'Belangrijk'); assert.doesNotMatch(bl, /Geldt voor ons|class="mz"/);
+  // zin terug, loslaten = zin weg; opnieuw vasthouden zonder zin
+  await zet({ id: nw.id, zin: 'Bespreken we dinsdag' });
+  assert.match(html(f.D), /Bespreken we dinsdag/);
+  await zet({ id: nw.id, vast: false });
+  assert.doesNotMatch(html(f.D), /Bespreken we dinsdag/);
+  await zet({ id: nw.id, vast: true });
+  assert.doesNotMatch(html(f.D), /Bespreken we dinsdag/, 'oude zin komt niet terug');
+  const b2 = (await f.m.appStand()).schermen.find((x) => x.id === PS.BELANGRIJK_ID).berichten.find((x) => x.id === nw.id);
+  assert.deepStrictEqual([b2.zin, b2.voor, b2.vast], [null, 'artsen', true]);
+  // zonder teamrij: zin bewaard maar niet op de tv
+  await zet({ id: nw.id, zin: 'Alleen in de app' });
+  f.zetTeam(false); f.zet(MT0 + 5 * 60000); await f.m.tik();
+  assert.doesNotMatch(html(f.D), /Alleen in de app|class="mz"/);
+  assert.strictEqual((await f.m.appStand()).schermen.find((x) => x.id === PS.BELANGRIJK_ID).berichten.find((x) => x.id === nw.id).zin, 'Alleen in de app');
+});
+
+test('wv4210 bouwHtml: zin en voor wie worden ge-escaped; zonder team geen mvoor', () => {
+  const h = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 1, leeg: false, inhoud: { agenda: [], medisch: { team: true, nieuws: [], belangrijk: [{ bron: 'nvda', kop: 'Kop', tekst: 't', ms: MT0, tot: MT0 + DAG, voor: 'assistentes', zin: 'Zin <script>x</script> & "y"' }] } }, toon: 1 });
+  assert.match(h, /<div class="mz">Zin &lt;script&gt;x&lt;\/script&gt; &amp; &quot;y&quot;<\/div>/); assert.match(h, /voor assistentes/);
+  const g = PS.bouwHtml({ gemaakt: MT0, houdbaar_tot: MT0 + 1, leeg: false, inhoud: { agenda: [], medisch: { nieuws: [], belangrijk: [{ bron: 'lhv', kop: 'Kop', tekst: 't', ms: MT0, tot: MT0 + DAG, voor: 'onzin' }] } }, toon: 1 });
+  assert.doesNotMatch(g, /class="mvoor"/);
 });

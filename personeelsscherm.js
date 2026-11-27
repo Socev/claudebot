@@ -198,13 +198,15 @@ for(i=0;i<V.length;i++){V[i].classList.toggle('aan',V[i]===a);var B=V[i].querySe
       + (bladen.length ? bladen.map((bl, b) => `<div class="blad${b === 0 ? ' aan' : ''}">${bl.map((x) => {
         const br = (MEDISCH_BRONNEN.find((y) => y.id === x.bron) || { naam: '' }).naam;
         const q = qrBij(x.url, medischDomein(x.bron));
-        return `<div class="mb${q ? ' mq' : ''}"><div class="mi"><div class="mm"><span class="chip a">${esc(br)}</span><span>${esc(mdDatum(x.ms))}</span>${Number.isFinite(x.tot) ? `<span class="mtot">blijft staan tot ${esc(mdDatum(x.tot))}</span>` : ''}</div>`
-          + `<div class="mk">${esc(x.kop)}</div>${x.tekst ? `<div class="mt">${esc(x.tekst)}</div>` : ''}</div>${q}</div>`;
+        const vw = typeof x.voor === 'string' && VOOR_WIE[x.voor] ? `<span class="mvoor">voor ${esc(VOOR_WIE[x.voor])}</span>` : '';   // wv4210
+        return `<div class="mb${q ? ' mq' : ''}"><div class="mi"><div class="mm"><span class="chip a">${esc(br)}</span><span>${esc(mdDatum(x.ms))}</span>${vw}${Number.isFinite(x.tot) ? `<span class="mtot">blijft staan tot ${esc(mdDatum(x.tot))}</span>` : ''}</div>`
+          + `<div class="mk">${esc(x.kop)}</div>${x.zin ? `<div class="mz">${esc(x.zin)}</div>` : ''}${x.tekst ? `<div class="mt">${esc(x.tekst)}</div>` : ''}</div>${q}</div>`;
       }).join('')}</div>`).join('') : `<div class="niets">${leegTekst}</div>`)
       + `<div class="voet">${voet}</div></section>`;
   };
-  const medHtml = (mdN ? mdPaneel(mdN, ++plek, 'Medisch nieuws', 'NHG · LHV · RIVM', 'Bron: nieuwsberichten van NHG, LHV en RIVM · elk uur bijgewerkt', 'Nog geen berichten van de afgelopen 30 dagen binnen.') : '')
-    + (mdB ? mdPaneel(mdB, ++plek, 'Belangrijk', 'LHV · NHG', 'Blijft enkele weken staan · bron: LHV en NHG', 'Nu geen belangrijke berichten. Een bericht van LHV of NHG over een standaard, cao, tarief, subsidie of oproep komt hier vanzelf; jij kunt er een vastzetten.') : '');
+  const mdTeam = !!(md && md.team);   // wv4210: met de teamrij een bredere kop en bronregel
+  const medHtml = (mdN ? mdPaneel(mdN, ++plek, 'Medisch nieuws', mdTeam ? 'Voor het hele team' : 'NHG · LHV · RIVM', mdTeam ? 'Bron: NHG, LHV, RIVM, NVDA, NVvPO en Thuisarts · elk uur bijgewerkt' : 'Bron: nieuwsberichten van NHG, LHV en RIVM · elk uur bijgewerkt', 'Nog geen berichten van de afgelopen 30 dagen binnen.') : '')
+    + (mdB ? mdPaneel(mdB, ++plek, 'Belangrijk', mdTeam ? 'LHV · NHG · NVDA' : 'LHV · NHG', mdTeam ? 'Blijft enkele weken staan · bron: LHV, NHG en NVDA' : 'Blijft enkele weken staan · bron: LHV en NHG', mdTeam ? 'Nu geen belangrijke berichten. Een bericht van LHV, NHG of NVDA over een standaard, cao, tarief, subsidie of oproep komt hier vanzelf; jij kunt er een vastzetten.' : 'Nu geen belangrijke berichten. Een bericht van LHV of NHG over een standaard, cao, tarief, subsidie of oproep komt hier vanzelf; jij kunt er een vastzetten.') : '');
   // wv4141 (2C55): stipjes (k van n) in plaats van "Info k/n"; sc.lab (alleen app-voorbeeld) = tekst, sc.stip = [k, n] (app-voorbeeld)
   const stip = (k, n) => n > 1 ? `<span class="stip" aria-label="${k + 1} van ${n}">${Array.from({ length: n }, (_, m) => `<i${m === k ? ' class="op"' : ''}></i>`).join('')}</span>` : '';
   const ptDatum = (d) => { const x = datumDelen(d); return x.dg + ' ' + x.mn; };
@@ -244,7 +246,8 @@ html,body{margin:0;height:100%;background:#fff;color:#5B5C60;font-family:'Libera
 .nws{display:flex;align-items:baseline;gap:24px;padding:16px 0;border-bottom:2px solid #D9DADC}.nt{flex:none;width:100px;font-size:30px;font-weight:bold;color:#88898C;white-space:nowrap}
 .nk{flex:1;min-width:0;font-size:39px;font-weight:bold;color:#3E3F42;line-height:1.2;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .med .blad{display:none;flex-direction:column}.med .blad.aan{display:flex}.mb{padding:12px 0 14px;border-bottom:2px solid #D9DADC;min-width:0}
-.mm{display:flex;align-items:center;gap:18px;font-size:26px;font-weight:bold;color:#88898C}.mm .chip{font-size:20px;padding:3px 12px}.mtot{margin-left:auto;color:#ED1C24}
+.mm{display:flex;align-items:center;gap:18px;font-size:26px;font-weight:bold;color:#88898C}.mm .chip{font-size:20px;padding:3px 12px}.mtot{margin-left:auto;color:#ED1C24}.mvoor{color:#3E3F42}
+.mz{font-size:30px;font-weight:bold;line-height:1.25;margin-top:8px;color:#ED1C24}.mz+.mt{-webkit-line-clamp:2}
 .mk{font-size:38px;font-weight:bold;color:#3E3F42;line-height:1.18;margin-top:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .mt{font-size:29px;line-height:1.28;margin-top:6px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .stip{display:inline-flex;gap:12px;align-items:center}.stip i{display:inline-block;width:18px;height:18px;border-radius:50%;border:3px solid #ED1C24}.stip i.op{background:#ED1C24}
@@ -404,7 +407,19 @@ function nieuwsGeldig(n, t) {
 const MEDISCH_ZIN = 'Medisch nieuws: berichten van NHG, LHV en RIVM uit hun openbare nieuwsfeeds (alleen kop';
 // eigen registerrij (kort genoeg om op Davids kaart helemaal te passen: de app toont per stap 400 tekens); alleen geldig naast personeelsscherm-vast
 const MEDISCH_RIJ = 'personeelsscherm-medisch';
-const MEDISCH_BRONNEN = [{ id: 'nhg', naam: 'NHG', vast: true, domein: 'nhg.org' }, { id: 'lhv', naam: 'LHV', vast: true, domein: 'lhv.nl' }, { id: 'rivm', naam: 'RIVM', vast: false, alleenZorg: true, domein: 'rivm.nl' }];
+// wv4210 (nr 922 = L22, David Ja 25-11-2026 met verse vingerafdruk): nieuws voor het hele team. Gemeten 27-11 vanaf de pod (openbare RSS,
+// robots staat het toe): NVDA /feed/ (doktersassistenten, ± 6 per maand, ook cao), NVvPO /feed/ (praktijkondersteuners, blog, alleen kop,
+// ± 3 per maand) en Thuisarts /rss.xml (NHG voor patiënten, ± 2 per maand). LV POH-GGZ en Huisartsen Eemland: geen DNS/feed → niet erbij,
+// niet nabouwen met scrapen. team = alleen op de tv met de eigen rij TEAM_RIJ (TEAM_ZIN); daarvoor alleen in het app-voorbeeld.
+// voor = standaard 'voor wie' per bron; David kan het per bericht kiezen (VOOR_WIE), alleen zichtbaar met TEAM_RIJ.
+const MEDISCH_BRONNEN = [{ id: 'nhg', naam: 'NHG', vast: true, domein: 'nhg.org', voor: 'artsen' }, { id: 'lhv', naam: 'LHV', vast: true, domein: 'lhv.nl', voor: 'artsen' }, { id: 'rivm', naam: 'RIVM', vast: false, alleenZorg: true, domein: 'rivm.nl', voor: 'iedereen' },
+  { id: 'nvda', naam: 'NVDA', vast: true, domein: 'nvda.nl', voor: 'assistentes', team: true }, { id: 'nvvpo', naam: 'NVvPO', vast: false, domein: 'nvvpo.nl', voor: 'poh', team: true },
+  { id: 'thuisarts', naam: 'Thuisarts', vast: false, domein: 'thuisarts.nl', voor: 'iedereen', team: true }];
+const TEAM_ZIN = 'Nieuws voor het hele team: ook berichten van NVDA (doktersassistenten), NVvPO (praktijkondersteuners) en Thuisarts';
+const TEAM_RIJ = 'personeelsscherm-team';
+const VOOR_WIE = { artsen: 'artsen', assistentes: 'assistentes', poh: "POH's", iedereen: 'iedereen' };
+const TEAM_PER_BRON = 4, EIGEN_ZIN_MAX = 120;
+const medischBron = (id) => MEDISCH_BRONNEN.find((b) => b.id === id) || null;
 // wv4208: de QR-code van een medisch bericht wijst alleen naar de eigen site van die bron (domein; ook www.)
 const medischDomein = (id) => { const b = MEDISCH_BRONNEN.find((x) => x.id === id); return b ? [b.domein] : []; };
 // wv4208 (nr 921 = L21): QR-code naast een medisch bericht en bij een infoscherm met een openbare bron, op de tv alleen met een EIGEN registerrij
@@ -450,7 +465,7 @@ function schoonTekst(ruw) {
 // "Lees meer/het artikel …" en een afgebroken staart ([…]) eraf; een adres of link erin = geen samenvatting (alleen de kop)
 function medischTekst(ruw) {
   let s = schoonTekst(ruw).replace(/\s*(\[(…|\.\.\.)\]|…)\s*$/, ' …');
-  s = s.replace(/\s*\bLees (het|meer|verder|hier|alles|de|ook)\b[\s\S]*$/i, '').trim();
+  s = s.replace(/\s*\bLees (het|meer|verder|hier|alles|de|ook)\b[\s\S]*$/i, '').replace(/\s*\bThe post\b[\s\S]*\bappeared first on\b[\s\S]*$/, '').trim();   // wv4210: WordPress-staart (NVDA)
   if (!s || NIEUWS_WEG.test(s)) return '';
   const zinnen = s.match(/[^.!?…]+[.!?]+["”’)]*(?=\s|$)/g) || [];
   let uit = '';
@@ -496,16 +511,31 @@ function medischBijwerken(st, bronId, items, t) {
   const uit = {}; for (const id of ids) uit[id] = m[id];
   return Object.assign({}, st || {}, { items: uit });
 }
-// wat er nu op de twee pagina's hoort: { nieuws: [...≤12], belangrijk: [...≤6] }; vast = niet ook op Medisch nieuws
-function medischBeeld(st, t) {
+// wat er nu op de twee pagina's hoort: { nieuws: [...≤12], belangrijk: [...≤6] }; vast = niet ook op Medisch nieuws.
+// wv4210: team = ook de teambronnen, hooguit TEAM_PER_BRON per bron op Medisch nieuws (zodat niet 9 van de 12 van één bron komen), en per
+// bericht 'voor wie' + Davids eigen zin (alleen zolang hij het vasthoudt). Zonder team precies het oude beeld.
+function medischBeeld(st, t, team) {
   const m = st && st.items && typeof st.items === 'object' ? st.items : {};
-  const alle = Object.keys(m).map((id) => Object.assign({ id }, m[id])).filter((x) => x && typeof x.kop === 'string' && x.kop && Number.isFinite(x.ms) && MEDISCH_BRONNEN.some((b) => b.id === x.bron));
+  const alle = Object.keys(m).map((id) => Object.assign({ id }, m[id])).filter((x) => x && typeof x.kop === 'string' && x.kop && Number.isFinite(x.ms) && MEDISCH_BRONNEN.some((b) => b.id === x.bron && (team || !b.team)));
   const vast = alle.filter((x) => Number.isFinite(x.vast_tot) && x.vast_tot > t)
     .sort((a, b) => (Number(b.door === 'david') - Number(a.door === 'david')) || b.ms - a.ms).slice(0, BELANGRIJK_N);
   const vastIds = new Set(vast.map((x) => x.id));
-  const nieuws = alle.filter((x) => !vastIds.has(x.id) && t - x.ms <= MEDISCH_OUD_MS).sort((a, b) => b.ms - a.ms).slice(0, MEDISCH_N);
-  const kaal = (x, metTot) => Object.assign({ bron: x.bron, kop: x.kop, tekst: x.tekst || '', ms: x.ms }, metTot ? { tot: x.vast_tot } : {}, typeof x.url === 'string' && x.url ? { url: x.url } : {});
+  const perBron = {};
+  const nieuws = alle.filter((x) => !vastIds.has(x.id) && t - x.ms <= MEDISCH_OUD_MS).sort((a, b) => b.ms - a.ms)
+    .filter((x) => !team || (perBron[x.bron] = (perBron[x.bron] || 0) + 1) <= TEAM_PER_BRON).slice(0, MEDISCH_N);
+  const kaal = (x, metTot) => Object.assign({ bron: x.bron, kop: x.kop, tekst: x.tekst || '', ms: x.ms }, metTot ? { tot: x.vast_tot } : {}, typeof x.url === 'string' && x.url ? { url: x.url } : {},
+    team ? { voor: voorVan(x) } : {}, team && metTot && x.door === 'david' && typeof x.zin === 'string' && x.zin ? { zin: x.zin } : {});
   return { nieuws: nieuws.map((x) => kaal(x, false)), belangrijk: vast.map((x) => kaal(x, true)) };
+}
+// wv4210: 'voor wie' van een bewaard bericht: Davids keuze, anders de standaard van de bron
+function voorVan(x) { return x && Object.prototype.hasOwnProperty.call(VOOR_WIE, x.voor) ? x.voor : ((medischBron(x && x.bron) || {}).voor || 'iedereen'); }
+// wv4210: Davids eigen zin bij een vastgehouden bericht: één regel platte tekst, ≤ 120 tekens, geen adres of link; '' = weg; null = ongeldig
+function eigenZin(ruw) {
+  if (ruw == null) return '';
+  if (typeof ruw !== 'string' || ruw.length > 1000) return null;
+  const z = ruw.replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!z) return '';
+  return [...z].length > EIGEN_ZIN_MAX || NIEUWS_WEG.test(z) || /[<>]/.test(z) ? null : z;
 }
 function ymd(ms) { return amsDelen(ms).datum; }
 function plusDag(datum, n) { const d = new Date(datum + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
@@ -1035,6 +1065,7 @@ function maak(o) {
   // ── medisch nieuws (wv3154) ──
   // ophalen zodra de basisrij aan staat (ook vóór de Ja: dan alleen als proef in de app); op de tv alleen met MEDISCH_ZIN en niet uit
   const medischMag = () => toestemming() && rijMag(MEDISCH_ZIN, MEDISCH_RIJ);   // eigen rij, en alleen naast de basisrij
+  const teamMag = () => medischMag() && rijMag(TEAM_ZIN, TEAM_RIJ);   // wv4210: eigen rij, alleen naast de medische en de basisrij
   const medischBinnenUur = (s, t) => !!s.medisch_poging && t >= s.medisch_poging && t - s.medisch_poging < MEDISCH_MS;
   // hooguit elk uur één ronde langs de bronnen (ook een mislukte telt); een bron die faalt houdt zijn bewaarde berichten (gedateerd, ≤ 30 dagen)
   async function medischVers(t) {
@@ -1061,8 +1092,8 @@ function maak(o) {
   // wat de tv mag tonen: alleen met de registerzin en per pagina niet uitgezet (altijd opnieuw tegen de bewaarde lijst en de klok)
   function medischOpTv(s, t) {
     if (!toestemming() || !medischMag()) return null;
-    const u = uitLijst(), b = medischBeeld(s.medisch, t);
-    const m = { nieuws: u[MEDISCH_ID] ? [] : b.nieuws, belangrijk: u[BELANGRIJK_ID] ? [] : b.belangrijk };
+    const team = teamMag(), u = uitLijst(), b = medischBeeld(s.medisch, t, team);
+    const m = Object.assign({ nieuws: u[MEDISCH_ID] ? [] : b.nieuws, belangrijk: u[BELANGRIJK_ID] ? [] : b.belangrijk }, team ? { team: true } : {});
     return m.nieuws.length || m.belangrijk.length ? m : null;
   }
   // ── weekpagina (wv4149) ──
@@ -1121,6 +1152,7 @@ function maak(o) {
     // wv3154: wat er nu op de tv zou staan (voor de vergelijking: nieuw bericht, verlopen, zin erbij/weg = nieuwe envelop)
     inhoud.medisch = medischOpTv(leesStand(), t);
     inhoud.medisch_tv = aan && medischMag();
+    if (aan && teamMag()) inhoud.team_tv = true;   // wv4210: rij erbij/weg = nieuwe envelop (zonder rij geen veld: inhoud-sha gelijk)
     inhoud.qr_tv = aan && qrMag();   // wv4208: rij erbij/weg = nieuwe envelop
     inhoud.bronnen.medisch = inhoud.medisch ? inhoud.medisch.nieuws.length + inhoud.medisch.belangrijk.length : 0;
     // wv4149: weekrooster bewaard zodra de basisrij aan is (proef in de app); tijdlijn mislukt = het oude alleen als het dezelfde week is.
@@ -1249,21 +1281,38 @@ function maak(o) {
   }
   // wv3154: David houdt een bericht vast op Belangrijk (28 dagen vanaf nu) of laat het los (ook een bericht dat de regel koos). Alleen een
   // bericht dat al in de bewaarde lijst staat: dus nooit nieuwe tekst, alleen hoe lang openbare tekst blijft staan. Geen vingerafdruk.
-  async function medischZet(idRuw, vast) {
+  // wv4210: body.voor (artsen|assistentes|poh|iedereen, of null = standaard van de bron) en body.zin (Davids eigen regel; server.js eist een
+  // verse vingerafdruk voor een niet-lege zin, '' haalt weg) passen alleen dat aan, niet het vasthouden. Een zin alleen bij een bericht dat
+  // David zelf vasthoudt; loslaten haalt de zin weg, opnieuw vasthouden na het verlopen ook.
+  async function medischZet(idRuw, vast, body) {
     const id = String(idRuw == null ? '' : idRuw);
     if (!/^[0-9a-f]{16}$/.test(id)) return { status: 400, body: { ok: false, fout: 'Onbekend bericht.' } };
     if (!toestemming()) return { status: 409, body: { ok: false, fout: 'Het OVIS Scherm toont nu geen berichten.' } };
+    const b = body && typeof body === 'object' ? body : {};
+    const heeft = (k) => Object.prototype.hasOwnProperty.call(b, k);
+    const aanpas = heeft('voor') || heeft('zin');
+    if (heeft('voor') && b.voor !== null && !Object.prototype.hasOwnProperty.call(VOOR_WIE, b.voor)) return { status: 400, body: { ok: false, fout: 'Kies artsen, assistentes, POH\'s of iedereen.' } };
+    const zin = heeft('zin') ? eigenZin(b.zin) : undefined;
+    if (zin === null) return { status: 400, body: { ok: false, fout: 'Eén korte zin (hooguit 120 tekens), zonder link of adres.' } };
     const t = nu();
-    let gevonden = false;
+    let gevonden = false, nietVast = false;
     wijzig((s) => {
       const x = s.medisch && s.medisch.items ? s.medisch.items[id] : null;
       if (!x) return;
       gevonden = true;
-      if (vast) Object.assign(x, { vast_tot: t + BELANGRIJK_DAVID_MS, door: 'david', los: false });
-      else Object.assign(x, { vast_tot: null, door: null, los: true });
+      if (aanpas) {
+        if (zin && !(x.door === 'david' && Number.isFinite(x.vast_tot) && x.vast_tot > t)) { nietVast = true; return; }
+        if (heeft('voor')) { if (b.voor === null) delete x.voor; else x.voor = b.voor; }
+        if (zin !== undefined) { if (zin) x.zin = zin; else delete x.zin; }
+        return;
+      }
+      const nogVast = x.door === 'david' && Number.isFinite(x.vast_tot) && x.vast_tot > t;
+      if (vast) { Object.assign(x, { vast_tot: t + BELANGRIJK_DAVID_MS, door: 'david', los: false }); if (!nogVast) delete x.zin; }
+      else { Object.assign(x, { vast_tot: null, door: null, los: true }); delete x.zin; }
     });
     if (!gevonden) return { status: 404, body: { ok: false, fout: 'Dit bericht staat niet (meer) in de lijst.' } };
-    if (!medischMag()) return { status: 200, body: { ok: true, id, vast: !!vast } };   // proef: nog niet op de tv, dus niets te publiceren
+    if (nietVast) return { status: 409, body: { ok: false, fout: 'Houd het bericht eerst vast; dan kun je er een eigen zin bij zetten.' } };
+    if (!medischMag() || (aanpas && !teamMag())) return { status: 200, body: { ok: true, id, vast: !!vast } };   // proef: nog niet op de tv (voor wie/zin alleen met de teamrij)   // proef: nog niet op de tv, dus niets te publiceren
     try { await publiceer(); }
     catch (e) {
       fout('personeelsscherm-publiceer', new Error(String(e && e.message).slice(0, 80)));
@@ -1388,16 +1437,18 @@ function maak(o) {
     }
     // wv3154: Medisch nieuws en Belangrijk; vóór de Ja (geen registerzin) alleen als proef: niet op de tv, wel het voorbeeld en de berichtenlijst
     if (toestemming() && (typeof o.medisch === 'function' || medischMag())) {   // pod zonder ophaler en zonder zin: geen lege proefpagina's
-      const mag = medischMag(), b = medischBeeld(s.medisch, t), opT = mag ? (inh.medisch || { nieuws: [], belangrijk: [] }) : { nieuws: [], belangrijk: [] };
+      const mag = medischMag(), team = teamMag(), b = medischBeeld(s.medisch, t, true), opT = mag ? (inh.medisch || { nieuws: [], belangrijk: [] }) : { nieuws: [], belangrijk: [] };
       const m = s.medisch && s.medisch.items ? s.medisch.items : {};
       const lijstVan = (sel) => Object.keys(m).map((id) => Object.assign({ id }, m[id])).filter(sel).sort((a, c) => c.ms - a.ms).slice(0, 20)
-        .map((x) => ({ id: x.id, bron: (MEDISCH_BRONNEN.find((y) => y.id === x.bron) || { naam: '' }).naam, kop: x.kop, ms: x.ms, vast: Number.isFinite(x.vast_tot) && x.vast_tot > t, tot: Number.isFinite(x.vast_tot) && x.vast_tot > t ? x.vast_tot : null, door: x.door || null }));
+        .map((x) => ({ id: x.id, bron: (MEDISCH_BRONNEN.find((y) => y.id === x.bron) || { naam: '' }).naam, kop: x.kop, ms: x.ms, vast: Number.isFinite(x.vast_tot) && x.vast_tot > t, tot: Number.isFinite(x.vast_tot) && x.vast_tot > t ? x.vast_tot : null, door: x.door || null,
+          voor: voorVan(x), zin: typeof x.zin === 'string' && x.zin ? x.zin : null, team: !!(medischBron(x.bron) || {}).team, team_proef: !team }));   // wv4210
+      // wv4210: het voorbeeld toont altijd het teambeeld (proef tot de teamrij er is; team_proef in de berichtenlijst)
       const vb = (md, toon) => bouwHtml({ gemaakt: s.gemaakt || t, houdbaar_tot: t + HOUDBAAR_MS, leeg: false, logoSvg: null, inhoud: Object.assign({}, inh, { info: [], jarig_dag: null, nieuws: null, medisch: md, qr: true }), toon });   // wv4208: QR in het voorbeeld (proef tot de rij er is)
       lijst.push({ id: MEDISCH_ID, soort: 'info', titel: 'Medisch nieuws', looptijd_s: MEDISCH_S, van: null, tot: null, proef: !mag, aan: opT.nieuws.length > 0, uit: !!u[MEDISCH_ID],
-        html: vb({ nieuws: b.nieuws, belangrijk: null, leeg_tonen: true }, 1),
+        html: vb({ nieuws: b.nieuws, belangrijk: null, leeg_tonen: true, team: true }, 1),
         berichten: lijstVan((x) => !(Number.isFinite(x.vast_tot) && x.vast_tot > t) && t - x.ms <= MEDISCH_OUD_MS) });
-      lijst.push({ id: BELANGRIJK_ID, soort: 'info', titel: 'Belangrijk (LHV, NHG)', looptijd_s: MEDISCH_S, van: null, tot: null, proef: !mag, aan: opT.belangrijk.length > 0, uit: !!u[BELANGRIJK_ID],
-        html: vb({ nieuws: null, belangrijk: b.belangrijk, leeg_tonen: true }, 1),
+      lijst.push({ id: BELANGRIJK_ID, soort: 'info', titel: team ? 'Belangrijk' : 'Belangrijk (LHV, NHG)', looptijd_s: MEDISCH_S, van: null, tot: null, proef: !mag, aan: opT.belangrijk.length > 0, uit: !!u[BELANGRIJK_ID],
+        html: vb({ nieuws: null, belangrijk: b.belangrijk, leeg_tonen: true, team: true }, 1),
         berichten: lijstVan((x) => Number.isFinite(x.vast_tot) && x.vast_tot > t) });
     }
     for (const x of kand) {
@@ -1595,7 +1646,7 @@ function maak(o) {
     if (methode === 'POST' && pad === '/app/personeelsscherm/leeg') return leeg(!!(body && body.aan === true));
     if (methode === 'POST' && pad === '/app/personeelsscherm/info') return infoZet(body && body.id, !!(body && body.aan === true));   // wv3020
     if (methode === 'POST' && pad === '/app/personeelsscherm/aanvraag') return aanvraag(body && body.tekst);   // wv3020
-    if (methode === 'POST' && pad === '/app/personeelsscherm/medisch') return medischZet(body && body.id, !!(body && body.vast === true));   // wv3154
+    if (methode === 'POST' && pad === '/app/personeelsscherm/medisch') return medischZet(body && body.id, !!(body && body.vast === true), body);   // wv3154; wv4210: voor/zin
     if (methode === 'POST' && pad === '/app/personeelsscherm/mededeling') return mededelingZet(body);   // wv4209
     if (methode === 'POST' && pad === '/app/personeelsscherm/vanzelf') return vanzelfZet(body && body.bron, !!(body && body.aan === true));   // wv4209
     return { status: 404, body: { ok: false, fout: 'onbekend' } };
@@ -1611,7 +1662,7 @@ function maak(o) {
     if (!s.inhoud_op || t - s.inhoud_op >= INHOUD_MS || ymd(s.inhoud_op) !== ymd(t) || (s.inhoud && s.inhoud.persoonsvakken) !== toestemming()
       || !!(s.inhoud && s.inhoud.volle_naam) !== (toestemming() && volleNaamMag()) || s.info_sha !== infoBestandSha(ymd(t))   // wv3015: rij of vrijgave gewijzigd = meteen
       || (toestemming() && nieuwsActief() && !nieuwsBinnenKwartier(s, t)) || (!!(s.inhoud && s.inhoud.nieuws) && !(toestemming() && nieuwsActief()))
-      || (toestemming() && !medischBinnenUur(s, t)) || !!(s.inhoud && s.inhoud.medisch_tv) !== (toestemming() && medischMag())
+      || (toestemming() && !medischBinnenUur(s, t)) || !!(s.inhoud && s.inhoud.medisch_tv) !== (toestemming() && medischMag()) || !!(s.inhoud && s.inhoud.team_tv) !== (toestemming() && teamMag())   // wv4210
       || !!(s.inhoud && s.inhoud.qr_tv) !== (toestemming() && qrMag()) || !!(s.inhoud && s.inhoud.feest_tv) !== feestMag()) {   // wv4209: feestdagenrij erbij/weg = meteen   // wv4208: QR-rij erbij/weg = meteen   // wv3154: elk uur; zin erbij/weg = meteen   // wv3023: nieuws elk kwartier; zin weg of uit = meteen
       try { const i = await verzamel(t); nieuw = inhoudSha(i) !== s.inhoud_sha; } catch (e) { fout('personeelsscherm-inhoud', new Error(String(e && e.message).slice(0, 80))); }
       s = leesStand();
@@ -1654,7 +1705,7 @@ function maak(o) {
         nieuws: s.inhoud.nieuws && Array.isArray(s.inhoud.nieuws.items) ? s.inhoud.nieuws.items.length : 0 } : null,   // wv3023: alleen het aantal koppen
       nieuws_mag: nieuwsMag(), nieuws_uit: !!uitLijst()[NIEUWS_ID], nieuws_poging: s.nieuws_poging ? iso(s.nieuws_poging) : null,
       // wv3154: alleen aantallen en per bron of de laatste ronde lukte
-      medisch: { mag: medischMag(), uit: !!uitLijst()[MEDISCH_ID], belangrijk_uit: !!uitLijst()[BELANGRIJK_ID], poging: s.medisch_poging ? iso(s.medisch_poging) : null,
+      medisch: { mag: medischMag(), team: teamMag(), uit: !!uitLijst()[MEDISCH_ID], belangrijk_uit: !!uitLijst()[BELANGRIJK_ID], poging: s.medisch_poging ? iso(s.medisch_poging) : null,
         bewaard: s.medisch && s.medisch.items ? Object.keys(s.medisch.items).length : 0,
         op_tv: s.inhoud && s.inhoud.medisch ? { nieuws: s.inhoud.medisch.nieuws.length, belangrijk: s.inhoud.medisch.belangrijk.length } : null,
         bronnen: s.medisch && s.medisch.bronnen ? Object.fromEntries(Object.entries(s.medisch.bronnen).map(([k, v]) => [k, { ok: v && v.ok ? iso(v.ok) : null, n: v && Number.isFinite(v.n) ? v.n : 0, fout: v && v.fout ? iso(v.fout) : null }])) : null },
@@ -1668,5 +1719,5 @@ function maak(o) {
 
 module.exports = { maak, bouwHtml, D1_SCHEMA, inWerktijd, inSchermtijd, inhoudVenster, QR_RIJ, QR_ZIN, HOUDBAAR_MS, OPNIEUW_MS, TOKEN_NAAM, HOST, REGISTER_RIJ,
   VANZELF_RIJ, VANZELF_ZIN, FEEST_ZIN, VASTE_BRONNEN, MEDEDELING_DAGEN,   // wv4209
-  VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, JARIG_ID, WEEK_RIJ, WEEK_ZIN, WEEK_ID, MEDISCH_ZIN, MEDISCH_RIJ, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN,
-  _t: { qrMatrix, qrSvg, openbareUrl, paasZondag, feestdagen, feestdag, weekMaandag, weekRooster, weekBeeld, medischTekst, medischItems, medischBijwerken, medischBeeld, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, feestPunten, mededelingNorm, vanzelfGeldig, artsenVandaag, jarigen, jarigDag, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };
+  VOLLE_NAAM_ZIN, INFO_ZIN, NIEUWS_ZIN, NIEUWS_ID, JARIG_ID, WEEK_RIJ, WEEK_ZIN, WEEK_ID, MEDISCH_ZIN, MEDISCH_RIJ, MEDISCH_ID, BELANGRIJK_ID, MEDISCH_BRONNEN, TEAM_ZIN, TEAM_RIJ, VOOR_WIE,
+  _t: { qrMatrix, qrSvg, openbareUrl, paasZondag, feestdagen, feestdag, weekMaandag, weekRooster, weekBeeld, medischTekst, medischItems, medischBijwerken, medischBeeld, voorVan, eigenZin, rssItems, nieuwsKop, nieuwsKoppen, nieuwsGeldig, agendaPunten, feestPunten, mededelingNorm, vanzelfGeldig, artsenVandaag, jarigen, jarigDag, leesMedewerkers, weerBeeld, dagdeel, frontmatter, infoNorm, stapTekst, kaartHash, fnv, setKaart, setGeldig, schermId, aanvraagOpdracht, aanvraagTekst } };

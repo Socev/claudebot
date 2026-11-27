@@ -31907,10 +31907,10 @@ const personeelsscherm = (function () {
         for await (const d of r.body) { n += d.length; if (n > 2 * 1024 * 1024) throw new Error('nieuws te groot'); delen.push(Buffer.from(d)); }
         return Buffer.concat(delen).toString('utf8');
       },
-      // wv3154: medisch nieuws (openbare RSS van NHG, LHV en RIVM, zonder sleutel); vaste adressen hier, de module vraagt hooguit elk uur
+      // wv3154: medisch nieuws (openbare RSS van NHG, LHV en RIVM, zonder sleutel; wv4210: ook NVDA, NVvPO en Thuisarts, gemeten 27-11: 200 + rss); vaste adressen hier, de module vraagt hooguit elk uur
       // en neemt alleen kop, één à twee zinnen samenvatting en datum. Geen doorsturing, hooguit 2 MB, 15 s; een fout noemt alleen de status.
       medisch: async function (bron) {
-        const url = { nhg: 'https://www.nhg.org/feed/?post_type=news', lhv: 'https://www.lhv.nl/feed/?post_type=news', rivm: 'https://www.rivm.nl/nieuws/rss.xml' }[bron];
+        const url = { nhg: 'https://www.nhg.org/feed/?post_type=news', lhv: 'https://www.lhv.nl/feed/?post_type=news', rivm: 'https://www.rivm.nl/nieuws/rss.xml', nvda: 'https://www.nvda.nl/feed/', nvvpo: 'https://nvvpo.nl/feed/', thuisarts: 'https://www.thuisarts.nl/rss.xml' }[bron];
         if (!url) throw new Error('onbekende bron');
         const r = await fetch(url, { redirect: 'error', headers: { 'User-Agent': 'socev-personeelsscherm/1', accept: 'application/rss+xml, application/xml, text/xml' }, signal: AbortSignal.timeout(15000) });
         if (r.status !== 200) throw new Error('medisch gaf HTTP ' + r.status);
@@ -31967,6 +31967,12 @@ async function appPersoneelsscherm(req, res, a, route, d, s) {
   // wv4209: een mededeling op het scherm zetten (eigen tekst of een voorstel van Socev overnemen) en een bron op 'mag vanzelf' zetten = Davids knop:
   // verse vingerafdruk. Weghalen, een voorstel laten liggen en 'mag vanzelf' uitzetten niet (haalt alleen weg).
   if ((wat === 'mededeling' && !(d && (d.weg != null || (d.voorstel != null && d.laat === true)))) || (wat === 'vanzelf' && d && d.aan === true)) {   // Codex MOET 1: laat alleen mét voorstel
+    if (!appTeller('personeelsscherm-sleutel', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens personeelsscherm-sleutel');
+    if (!appVersOk(a, s)) { res._app.reden = 'personeelsscherm ' + wat + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
+    s.vers_tot = 0;
+  }
+  // wv4210: een eigen zin bij een bericht op Belangrijk = Davids tekst op de tv: verse vingerafdruk. Weghalen ('' of null) en 'voor wie' kiezen niet.
+  if (wat === 'medisch' && d && typeof d.zin === 'string' && d.zin.trim() !== '') {   // wv4210 vingerafdruk
     if (!appTeller('personeelsscherm-sleutel', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens personeelsscherm-sleutel');
     if (!appVersOk(a, s)) { res._app.reden = 'personeelsscherm ' + wat + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
     s.vers_tot = 0;

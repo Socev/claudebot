@@ -27,9 +27,9 @@ echo "$B" | grep -qF "if (wat === 'info' && d && d.aan === true) {" && echo "$B"
   || { echo "ROOD  server.js: infoscherm aan zonder verse vingerafdruk"; f=1; }
 echo "$B" | grep -qF "p_prompt: mkBlokVoor(o.prompt)" && echo "$B" | grep -qF "appSbRpc('mk_werkvoorraad_herkomst', { p_id: z.id, p_herkomst: 'david' }" \
   || { echo "ROOD  server.js: aanvraag zonder grondwet-blok of herkomst david"; f=1; }
-# wv3154: medisch nieuws alleen van de drie vaste openbare feeds, zonder doorsturing en met groottegrens
+# wv3154: medisch nieuws alleen van de vaste openbare feeds (wv4210: zes), zonder doorsturing en met groottegrens
 M=$(echo "$B" | awk '/medisch: async function \(bron\) \{/,/^      \},$/')
-echo "$M" | grep -qF "{ nhg: 'https://www.nhg.org/feed/?post_type=news', lhv: 'https://www.lhv.nl/feed/?post_type=news', rivm: 'https://www.rivm.nl/nieuws/rss.xml' }[bron]" \
+echo "$M" | grep -qF "{ nhg: 'https://www.nhg.org/feed/?post_type=news', lhv: 'https://www.lhv.nl/feed/?post_type=news', rivm: 'https://www.rivm.nl/nieuws/rss.xml', nvda: 'https://www.nvda.nl/feed/', nvvpo: 'https://nvvpo.nl/feed/', thuisarts: 'https://www.thuisarts.nl/rss.xml' }[bron]" \
   && echo "$M" | grep -qF "redirect: 'error'" && echo "$M" | grep -qF "if (n > 2 * 1024 * 1024) throw new Error('medisch te groot')" \
   || { echo "ROOD  server.js: medisch nieuws niet alleen van de vaste feeds, of met doorsturing / zonder groottegrens"; f=1; }
 # wv4209: mededeling op het scherm / voorstel overnemen en 'mag vanzelf' aan alleen met verse vingerafdruk; Socev-voorstel via de smalle route
@@ -40,6 +40,10 @@ grep -qF "return personeelsscherm.voorstel({ titel: d.titel, datum: d.datum, tij
 node -e "const s=require('fs').readFileSync('server.js','utf8'); const m=/if \\(\\((wat === 'mededeling' && .*?)\\) \\{   \\/\\/ Codex MOET 1/.exec(s); if(!m) process.exit(1);
 const f=new Function('wat','d','return (('+m[1]+');'); const g=[[{titel:'x',datum:'d',laat:true},true],[{titel:'x',datum:'d'},true],[{voorstel:'a'},true],[{voorstel:'a',laat:true},false],[{weg:'a'},false],[{laat:true},true],[null,true]];
 process.exit(g.every(([d,v])=>f('mededeling',d)===v)&&f('vanzelf',{aan:true})===true&&f('vanzelf',{aan:false})===false?0:1)" || { echo "ROOD  server.js: vingerafdrukvoorwaarde mededeling/vanzelf klopt niet"; f=1; }
+# wv4210: eigen zin bij een bericht alleen met verse vingerafdruk (weghalen en 'voor wie' zonder); voorwaarde zelf uitgerekend
+node -e "const s=require('fs').readFileSync('server.js','utf8'); const m=/if \\((wat === 'medisch' && .*?)\\) \\{   \\/\\/ wv4210 vingerafdruk\n(.*)\n(.*)/.exec(s); if(!m || !m[3].includes('if (!appVersOk(a, s))')) process.exit(1);
+const f=new Function('wat','d','return ('+m[1]+');'); const g=[[{id:'a',zin:'Geldt vanaf januari'},true],[{id:'a',zin:'  '},false],[{id:'a',zin:''},false],[{id:'a',zin:null},false],[{id:'a',voor:'poh'},false],[{id:'a',vast:true},false],[null,false],[{id:'a',zin:'x',voor:'poh'},true]];
+process.exit(g.every(([d,v])=>!!f('medisch',d)===v)&&!f('info',{zin:'x'})?0:1)" || { echo "ROOD  server.js: eigen zin (medisch) zonder verse vingerafdruk"; f=1; }
 [ $f = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS"
 node --test test/personeelsscherm.test.js 2>&1 | tail -n 12 | grep -E "^# (pass|fail)"; node --test test/personeelsscherm.test.js >/dev/null 2>&1 || { echo "ROOD  test/personeelsscherm.test.js"; f=1; }
 exit $f
