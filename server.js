@@ -13828,7 +13828,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten).
   // wv926 (Fable-diffreview #1): alleen op GET /app/voor-jou/kanaal (sinds wv946 de enige weg van de app); /app/voor-jou blijft zoals main.
   // wv3967: wat nog op een vast moment wacht (kaarten; in het kanaal ook de uitgestelde machinekamer-vragen), met het eerstvolgende moment
-  const wachtend = eigen.filter(function (p) { return appVjWacht(p, nu); });
+  const wachtend = eigen.filter(function (p) { return appVjWacht(p, nu) && !(split && appVjIsSocev(p)); });   // wv4366 (Codex MOET 1): Socev zelf telt niet
   const wacht = { n: wachtend.length, moment: null, tekst: null };
   const basisAntwoord = { ok: true, punten: lijst, later: later, afgehandeld: afgehandeld, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5),
     bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null, wacht: wacht, splitsing: split };

@@ -83,12 +83,12 @@ test('isSocev op de herkomstvormen uit de databank', function () {
   assert.deepStrictEqual(M.SOCEV_BRONNEN, ['wv', 'register', 'manager', 'grondwet']);
 });
 
-test('databank en pod: dezelfde Socev-regel (wv4366)', function () {
+test('databank en pod: dezelfde Socev-regel (wv4366)', { skip: !fs.existsSync('/opt/data/mk-scripts/wv4366/nieuw.sql') }, function () {
   const sql = fs.readFileSync('/opt/data/mk-scripts/wv4366/nieuw.sql', 'utf8');
   M.SOCEV_BRONNEN.forEach(function (b) { assert.ok(sql.includes("'" + b + "'"), b); });
   assert.match(sql, /\(h->'werk'\) = 'true'::jsonb/);
   assert.match(sql, /n_mk \+ mk_erbij < 5/);
-}, { skip: !fs.existsSync('/opt/data/mk-scripts/wv4366/nieuw.sql') });
+});
 
 test('databank en pod gebruiken dezelfde momenten en dag-modules', function () {
   const sql = fs.readFileSync('/opt/data/mk-scripts/wv3967/nieuw.sql', 'utf8');
@@ -129,6 +129,7 @@ test('server.js: route geeft wacht en bundel, momentstap via mk_voor_jou_moment,
   assert.match(src, /socev: split && appVjIsSocev\(p\) \? true : undefined/);
   assert.match(src, /wacht: wacht, splitsing: split \}/);
   assert.match(src, /appVjZichtbaar\(p, vandaag\) && !\(split && appVjIsSocev\(p\)\)/);
+  assert.match(src, /appVjWacht\(p, nu\) && !\(split && appVjIsSocev\(p\)\)/);   // Codex MOET 1
   assert.match(src, /appSbRpc\('mk_voor_jou_moment', \{ p_moment: new Date\(m\)\.toISOString\(\) \}\)/);
   assert.match(src, /mkKlussen: false, momentSinds: vjMoment \? vjMoment\.laatsteMoment\(nu\) : null/);
   const u = fs.readFileSync(path.join(wortel, 'uitrol.sh'), 'utf8');
