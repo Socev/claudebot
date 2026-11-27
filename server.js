@@ -10365,6 +10365,41 @@ function appBriefingVorm(x) {
   }).slice(0, APP_BRIEFING_REGELS).map(function (r) { return appKort(appBriefingPlat(r.replace(/^[-*]\s+/, '• ')), 200); });
   return { job_id: x.job_id, t: x.t, dag: appYmd(Date.parse(x.t)), kop: kop, regels: regels };
 }
+// wv4161 (besluitenpagina nr 427 = 3C127, David Ja 25-11-2026): het ochtendbericht zodra David wakker wordt, 07:00 als vangnet. n8n
+// Opmaak zet onder de vroege versie letterlijk de slotregel hieronder; die regel is het kenmerk. Puur: geeft de berichten die samen de
+// briefing van de dag zijn, oudste eerst — de jongste briefing, en staat er dezelfde dag een vroege versie vóór (en is de jongste zelf
+// geen vroege versie), die ervoor. Andere eerdere briefings van die dag (handmatige herhaling) blijven er zoals vroeger buiten.
+const BRIEFING_VROEG_RE = /De rest van je ochtendbericht volgt om 07:00\./;
+function appBriefingIsBericht(x) {
+  return !!(x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse !== 'stil' && x.ok !== false && /^[a-f0-9]{16}$/.test(String(x.job_id || '')) && String(x.antwoord || '').trim());
+}
+function appBriefingDelen(l) {
+  let i = l.length - 1;
+  for (; i >= 0; i--) if (appBriefingIsBericht(l[i])) break;
+  if (i < 0) return [];
+  const laatste = l[i];
+  // een vroege versie zelf, of een volledig bericht (eigen kop De drie van vandaag: de rij briefing_vroeg kwam om 07:00 niet aan) staat alleen
+  if (BRIEFING_VROEG_RE.test(String(laatste.antwoord)) || /^\s*\*\*\s*De drie van vandaag\s*\*\*:?\s*$/im.test(String(laatste.antwoord))) return [laatste];
+  const dag = appYmd(Date.parse(laatste.t));
+  for (let j = i - 1; j >= 0; j--) {
+    const x = l[j];
+    if (!appBriefingIsBericht(x)) continue;
+    if (appYmd(Date.parse(x.t)) !== dag) break;
+    if (BRIEFING_VROEG_RE.test(String(x.antwoord))) return [x, laatste];
+  }
+  return [laatste];
+}
+// Na het schrijven van een vroege versie in het hoofdkanaal: één rij bron 'briefing_vroeg' (datum vandaag, upsert op bron) in ochtend_buffer.
+// Dat is het bewijs voor de run van 07:00 dat David de vroege versie heeft (Codex-ontwerpreview MOET 1): alleen dan schrijft die de
+// aanvulling, anders het volledige bericht. Lukt de rij niet, dan komt om 07:00 het volledige bericht (dubbel bovenaan, nooit iets kwijt).
+async function appBriefingVroegRij(dag, tekst) {
+  const t = new Date(), hm = t.toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' });
+  const filter = { type: 'and', filters: [{ columnName: 'bron', condition: 'eq', value: 'briefing_vroeg' }] };
+  const body = { filter: filter, data: { bron: 'briefing_vroeg', datum: dag, tekst: 'om ' + hm + '\n' + String(tekst).slice(0, 12000) }, returnData: true };
+  const poging = function () { return appN8nZend('POST', '/data-tables/' + APP_MELD_TABEL + '/rows/upsert', body); };
+  await poging().catch(function () { return new Promise(function (ok) { setTimeout(ok, 2000); }).then(poging); });
+  schrijfLog(berichtLogTijd() + ' briefing-vroeg rij ' + velden({ dag: dag, tijd: hm }));
+}
 // wv3770: het laden van de jongste briefing (tekst + stem van dezelfde dag) is gedeeld met /tel/uit?lijst=dagbericht (Onderweg).
 // Geeft b (of null als er geen is); gooit bij een leesfout.
 async function appBriefingLaad() {
@@ -10375,9 +10410,15 @@ async function appBriefingLaad() {
   if (c && c.mtime === st.mtimeMs && c.size === st.size) return c.b;
   let b = null;
   const l = await appLogLees('hoofd');
-  for (let i = l.length - 1; i >= 0; i--) {
-    const x = l[i];
-    if (x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse !== 'stil' && x.ok !== false && /^[a-f0-9]{16}$/.test(String(x.job_id || '')) && String(x.antwoord || '').trim()) { b = appBriefingVorm(x); b.tekst = appMoetBericht(x.antwoord); b.p = appBriefingPuntenVan(b.tekst, b.dag); break; }
+  // wv4161 (3C127): wordt David vóór 06:50 wakker, dan komt eerst een korte vroege versie en om 07:00 de aanvulling; samen zijn ze de
+  // briefing van de dag (kop, voorvertoning en sprong van de vroege versie; tekst en punten van beide). Eén bericht = zoals altijd.
+  const delen = appBriefingDelen(l);
+  if (delen.length) {
+    const x = delen[0];
+    b = appBriefingVorm(x);
+    b.tekst = delen.length === 1 ? appMoetBericht(x.antwoord) : appMoetBericht(delen.map(function (d) { return String(d.antwoord).trim(); }).join('\n\n'));
+    if (delen.length > 1) b.delen = delen.length;
+    b.p = appBriefingPuntenVan(b.tekst, b.dag);
   }
   // wv594: de gesproken briefing (stille 🔊-regel, bron briefing) van dezelfde dag, jongste eerst; het bestand zoekt de route per verzoek op
   const stem = [];
@@ -20282,6 +20323,10 @@ async function berichtNieuw(res, d) {
   if ((bron === 'actielijst' || bron === 'briefing') && appStaat.vandaag) appStaat.vandaag.data = null;
   res._log = { bericht: id, kanaal: doelKanaal, bron: bron, klasse: klasse, soort: soort, agenda: ag ? ag.soort : undefined, op_kaart: opKaart ? opKaart.sleutel : undefined,
     autovragen: autov ? autov.vragen.length + (autov.fouten.length ? '/' + autov.fouten.length + ' fout' : '') : undefined };   // wv4016
+  if (bron === 'briefing' && doelKanaal === 'hoofd' && klasse !== 'stil' && typeof BRIEFING_VROEG_RE !== 'undefined' && BRIEFING_VROEG_RE.test(tekst)) {   // wv4161
+    const vrDag = appYmd(nu);
+    setTimeout(function () { appBriefingVroegRij(vrDag, tekst).catch(function (e) { logError('briefing-vroeg', e); }); }, 0);
+  }
   if (autov && autov.vragen.length && bron === 'briefing' && doelKanaal === 'hoofd') {
     const avDag = appYmd(nu);
     setTimeout(function () { briefingAutovragenZet(autov, tekst, avDag).catch(function (e) { logError('briefing-autovragen', e); }); }, 0);
