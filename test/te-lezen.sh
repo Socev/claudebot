@@ -196,6 +196,34 @@ toets('14p server.js: socev-spreekt mét klusnummer = antwoord (seintje); eindre
     && f('machinekamer', 'socev-spreekt', 'normaal', false, false, undefined, SJ) === 'archief' && f('hoofd', 'socev-spreekt', 'normaal', true, false, undefined, SJ) === 'vraag'
     && f('hoofd', 'socev-spreekt', 'stil', false, false, undefined, SJ) === 'archief' && f('hoofd', 'socev-spreekt', 'normaal', false, false, undefined, 'geen-klus') === 'archief');
 }
+// ── 15. wv4181 (3C44): bestanden van het bericht gaan mee; (3C89): archief van 15 dagen met volle tekst ──
+{
+  const lang = 'Rapport over de proefmolen. ' + 'x'.repeat(9000);
+  const b1 = beurt('bericht', NU - 2 * U, { bestanden: ['plan.md', 'tabel.csv', 7, ''], antwoord: 'Hier zijn twee bestanden.' });
+  const b2 = beurt('knop', NU - 3 * U, { bestanden: ['brief.docx'] });
+  const s1 = { t: iso(NU - U), job_id: job(), soort: 'socev', bron: 'socev-spreekt', agent_job: 'c0c0c0c0c0c0c0c0', antwoord: 'Uitkomst: klaar.', ok: true, bestanden: ['uitzoek.pdf'] };
+  const u15 = T.uit({ per: { hoofd: [s1, b1, b2], machinekamer: [] }, klussen: {}, staat: {}, tabs: {}, vraag, nu: NU, mkKlussen: false });
+  const p1 = u15.punten.find((p) => p.job_id === b1.job_id), p2 = u15.punten.find((p) => p.job_id === b2.job_id), p3 = u15.punten.find((p) => p.job_id === s1.job_id);
+  toets('15a punt met twee bestanden: twee namen (rommel eruit), bestanden_socev false bij een beurt', p1 && JSON.stringify(p1.bestanden) === '["plan.md","tabel.csv"]' && p1.bestanden_socev === false, p1);
+  toets('15b knopantwoord met bestand komt erin met zijn bestand; Socev-klus: bestanden_socev true', p2 && p2.bestanden[0] === 'brief.docx' && p3 && p3.bestanden_socev === true && p3.bestanden[0] === 'uitzoek.pdf');
+  toets('15c hooguit ' + T.BESTANDEN_MAX + ' namen per punt', T.uit({ per: { hoofd: [beurt('bericht', NU - U, { bestanden: Array.from({ length: 30 }, (_, i) => 'f' + i + '.md') })], machinekamer: [] }, klussen: {}, staat: {}, tabs: {}, vraag, nu: NU }).punten[0].bestanden.length === T.BESTANDEN_MAX);
+  // archief: een agentrapport van 5 dagen terug (zou vandaag niet meer in Te lezen komen: mkKlussen false) dat David toen afvinkte
+  const oud = rap(A1, NU - 5 * D, { antwoord: '🤖 Agentrapport — proefmolen\n\n' + lang });
+  const heel = rap(A1, NU - 20 * D, { antwoord: 'te oud vinkje' });
+  const niet = rap(A1, NU - 4 * D, { antwoord: 'nooit afgevinkt' });
+  const tg = beurt('telegram', NU - 2 * D, {});
+  const staat15 = { sinds: iso(NU - 25 * D), gezien: { [oud.job_id]: iso(NU - 5 * D + U), [heel.job_id]: iso(NU - 16 * D), [tg.job_id]: iso(NU - D), [b1.job_id]: iso(NU - U) } };
+  const per15 = { hoofd: [b1, tg], machinekamer: [oud, heel, niet] };
+  const a15 = T.archief({ per: per15, staat: staat15, nu: NU });
+  toets('15d archief: alles wat binnen 15 dagen is afgevinkt (ook buiten het venster van vandaag), geen telegram, geen ouder vinkje, niet-afgevinkt niet', a15.map((x) => x.job_id).join() === [b1.job_id, oud.job_id].join(), a15.map((x) => x.job_id));
+  const ao = a15.find((x) => x.job_id === oud.job_id);
+  toets('15e archief: volle tekst (geen afkap op 600 of 6000), soort klus, gezien-tijd, sleutel t:', ao && ao.bericht.length > 9000 && ao.afgekapt === false && ao.soort === 'klus' && ao.gezien === staat15.gezien[oud.job_id] && ao.sleutel === 't:' + oud.job_id);
+  toets('15f archief: antwoord-soort met van en bestanden', a15[0].soort === 'antwoord' && a15[0].van && a15[0].bestanden.length === 2);
+  const u15b = T.uit({ per: per15, klussen: {}, staat: staat15, tabs: {}, vraag, nu: NU, mkKlussen: false });
+  toets('15g uit geeft archief_n (aantal in het archief), los van de afgevinkt-lijst van 20', u15b.archief_n === 2, u15b.archief_n);
+  const Sx = fs.readFileSync('server.js', 'utf8');
+  toets('15h route GET /app/te-lezen/archief bestaat en is niet slot-vrij', /route === 'GET \/app\/te-lezen\/archief'\) return appTeLezenArchief/.test(Sx) && !/APP_SLOT_VRIJ = new Set\(\[[^\]]*archief/.test(Sx));
+}
 // ── 10. koppeling in server.js en de release ──
 const S = fs.readFileSync('server.js', 'utf8'), UR = fs.readFileSync('uitrol.sh', 'utf8');
 toets('10a route POST /app/te-lezen bestaat en glijdt (David die leest), niet in APP_SLOT_VRIJ', /route === 'POST \/app\/te-lezen'\) return appTeLezenZet/.test(S) && /'POST \/app\/aanwezig', 'POST \/app\/te-lezen'\]\)/.test(S) && !/APP_SLOT_VRIJ = new Set\(\[[^\]]*te-lezen/.test(S));

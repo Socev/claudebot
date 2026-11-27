@@ -54,6 +54,14 @@ function knopTelt(x) {
   return x.ok === false || (Array.isArray(x.bestanden) && x.bestanden.length > 0);
 }
 function tijd(x) { const t = Date.parse(x); return isFinite(t) ? t : NaN; }
+// wv4181 (besluitenpagina nr 344 = 3C44, David Ja 25-11-2026 22:26): de bestanden van het bericht (namen uit het app-log, zoals het gesprek
+// ze toont) gaan mee met het punt; de app zet ze als knop onder het punt en opent ze in de Lezer met ‹ › door alle bestanden van die klus.
+// bestanden_socev: een bericht van Socev zelf (nummer = plek + 1 in app-bestanden), anders een beurt (de app zoekt het nummer op naam).
+const BESTANDEN_MAX = 20;
+function bestandNamen(b) {
+  if (!Array.isArray(b)) return [];
+  return b.filter(function (n) { return typeof n === 'string' && n.trim() && n.length <= 255; }).slice(0, BESTANDEN_MAX);
+}
 
 // wv4175 (3C75): de slotregel van een agentrapport. De LAATSTE regel "Voor David: …" buiten codeblokken, alleen als hij met een van de vier
 // vaste woorden begint (vrije tekst geeft nooit een merkje). {merk: niets|probeer|wacht|mislukt, plek: 'App › plek' | null} of null.
@@ -184,18 +192,10 @@ function uit(o) {
       if (!soort) return;
       if (x.soort === 'bericht' || x.soort === 'knop') van = kort(x.tekst, VAN_MAX) || null;
       gehad[x.job_id] = 1;
-      // wv4175 (3C75): het merkje. Mislukt als de beurt mislukte; anders de slotregel van de agent (register), anders uit de tekst zelf
-      // (agentrapport-david en een rapport uit de machinekamer zijn de rapporttekst); een gewone beurt van David krijgt er geen.
-      let slot = null;
-      if (x.ok === false) slot = { merk: 'mislukt', plek: null };
-      else if (x.soort === 'socev') {
-        const aj = String(x.agent_job || '');
-        slot = slotNorm(x.slot);   // server.js zet het merkje van de klus in de logregel (/bericht)
-        if (!slot && JOB_RE.test(aj) && typeof o.slotVan === 'function') { try { slot = slotNorm(o.slotVan(aj)); } catch (e) { slot = null; } }
-        if (!slot) slot = slotregel(antwoord);
-      }
+      const slot = slotVoor(x, antwoord, o);
       const p = { sleutel: 't:' + x.job_id, soort: soort, bewaard: bewaard, kanaal: kanaal, job_id: x.job_id, t: new Date(t).toISOString(),
         titel: titel, van: van, knop: x.soort === 'knop', ok: x.ok !== false, socev: socev, merk: slot ? slot.merk : null, plek: slot ? slot.plek : null,
+        bestanden: bestandNamen(x.bestanden), bestanden_socev: x.soort === 'socev',   // wv4181 (3C44)
         bericht: antwoord.length > BERICHT_MAX ? antwoord.slice(0, BERICHT_MAX) + '\n\n…' : antwoord, afgekapt: antwoord.length > BERICHT_MAX };
       const g = staat.gezien[x.job_id];
       if (g) afgevinkt.push(Object.assign(p, { gezien: g })); else punten.push(p);
@@ -209,7 +209,50 @@ function uit(o) {
     nieuw: punten.filter(function (p) { return !inBeeld[p.sleutel]; }).length,
     // diffreview wv2245 MOET 2: welke berichten bewaard zijn (het gesprek toont dan ★ Bewaard, ook na herladen en op een ander apparaat)
     bewaard: Object.keys(staat.bewaard).sort(),
-    afgevinkt: afgevinkt.slice(0, AFGEVINKT_MAX).map(function (p) { return { sleutel: p.sleutel, soort: p.soort, kanaal: p.kanaal, job_id: p.job_id, t: p.t, titel: p.titel, van: p.van, knop: p.knop, gezien: p.gezien, socev: p.socev, merk: p.merk, plek: p.plek, bericht: p.bericht.slice(0, 600) }; }) };
+    afgevinkt: afgevinkt.slice(0, AFGEVINKT_MAX).map(function (p) { return { sleutel: p.sleutel, soort: p.soort, kanaal: p.kanaal, job_id: p.job_id, t: p.t, titel: p.titel, van: p.van, knop: p.knop, gezien: p.gezien, socev: p.socev, merk: p.merk, plek: p.plek, bericht: p.bericht.slice(0, 600) }; }),
+    // wv4181 (3C89): hoeveel er in het archief van Afgevinkt staat (15 dagen); de app haalt het archief zelf op met GET /app/te-lezen/archief
+    archief_n: archief(o, false).length };
+}
+// wv4175 (3C75): het merkje. Mislukt als de beurt mislukte; anders de slotregel van de agent (register), anders uit de tekst zelf
+// (agentrapport-david en een rapport uit de machinekamer zijn de rapporttekst); een gewone beurt van David krijgt er geen.
+function slotVoor(x, antwoord, o) {
+  if (x.ok === false) return { merk: 'mislukt', plek: null };
+  if (x.soort !== 'socev') return null;
+  const aj = String(x.agent_job || '');
+  let slot = slotNorm(x.slot);   // server.js zet het merkje van de klus in de logregel (/bericht)
+  if (!slot && JOB_RE.test(aj) && typeof o.slotVan === 'function') { try { slot = slotNorm(o.slotVan(aj)); } catch (e) { slot = null; } }
+  return slot || slotregel(antwoord);
+}
+
+// wv4181 (besluitenpagina nr 389 = 3C89, David Ja 25-11-2026 22:26): Afgevinkt als leesarchief. Alles wat David in de afgelopen 15 dagen
+// (HOUD_MS: zo lang bewaart te-lezen.json de afgevinkte ids) op gezien zette en nog in het app-log staat (30 dagen), ongeacht of het vandaag
+// nog in Te lezen zou komen: een vinkje bewijst dat het er stond (of als dag-bericht met Weg uit Moet iets ging, wv2560). Volledige tekst
+// (tot ARCHIEF_TEKST_MAX; de app toont het ter plekke en zoekt erin), nieuwste vinkje eerst. metTekst false = alleen tellen (voor archief_n).
+const ARCHIEF_TEKST_MAX = 30000;
+const ARCHIEF_MAX = 1500;
+function archief(o, metTekst) {
+  const nu = o.nu, staat = staatNorm(o.staat, nu), uitk = [], gehad = {};
+  KANALEN.forEach(function (kanaal) {
+    ((o.per && o.per[kanaal]) || []).forEach(function (x) {
+      if (!x || !JOB_RE.test(String(x.job_id || '')) || gehad[x.job_id]) return;
+      const g = staat.gezien[x.job_id];
+      if (!g || x.soort === 'telegram' || x.soort === 'zoek') return;
+      const t = tijd(x.t), antwoord = String(x.antwoord || '');
+      if (!isFinite(t) || t > nu + 60000 || !antwoord.trim()) return;
+      const soort = x.soort === 'socev' ? 'klus' : x.soort === 'bericht' || x.soort === 'knop' ? 'antwoord' : null;
+      if (!soort) return;
+      gehad[x.job_id] = 1;
+      if (metTekst === false) { uitk.push({ gezien: g }); return; }
+      const bew = staat.bewaard[x.job_id], slot = slotVoor(x, antwoord, o);
+      uitk.push({ sleutel: 't:' + x.job_id, soort: soort, bewaard: !!bew && bew.kanaal === kanaal, kanaal: kanaal, job_id: x.job_id, t: new Date(t).toISOString(),
+        titel: null, van: soort === 'antwoord' ? kort(x.tekst, VAN_MAX) || null : null, knop: x.soort === 'knop', ok: x.ok !== false,
+        socev: socevKlus(x, kanaal), merk: slot ? slot.merk : null, plek: slot ? slot.plek : null, gezien: g,
+        bestanden: bestandNamen(x.bestanden), bestanden_socev: x.soort === 'socev',
+        bericht: antwoord.length > ARCHIEF_TEKST_MAX ? antwoord.slice(0, ARCHIEF_TEKST_MAX) + '\n\n…' : antwoord, afgekapt: antwoord.length > ARCHIEF_TEKST_MAX });
+    });
+  });
+  uitk.sort(function (p, q) { return q.gezien.localeCompare(p.gezien); });
+  return uitk.slice(0, ARCHIEF_MAX);
 }
 function rang(p) { return p.merk === 'mislukt' || p.merk === 'probeer' || p.socev ? 0 : 1; }
 // De agentklussen waarvan server.js de herkomst moet opvragen (machinekamer, bron agentrapport, binnen het venster).
@@ -221,5 +264,5 @@ function klusJobs(per, nu) {
   return Array.from(s).sort();
 }
 
-module.exports = { slotregel: slotregel, slotNorm: slotNorm, socevKlus: socevKlus, MERKEN: MERKEN, uit: uit, zet: zet, zetVeel: zetVeel, VEEL_MAX: VEEL_MAX, staatNorm: staatNorm, klusTelt: klusTelt, knopTelt: knopTelt, klusJobs: klusJobs,
+module.exports = { archief: archief, HOUD_MS: HOUD_MS, BESTANDEN_MAX: BESTANDEN_MAX, slotregel: slotregel, slotNorm: slotNorm, socevKlus: socevKlus, MERKEN: MERKEN, uit: uit, zet: zet, zetVeel: zetVeel, VEEL_MAX: VEEL_MAX, staatNorm: staatNorm, klusTelt: klusTelt, knopTelt: knopTelt, klusJobs: klusJobs,
   AUTO_MS: AUTO_MS, BEWAAR_OUD_MS: BEWAAR_OUD_MS, BEWAAR_MS: BEWAAR_MS, LOG_MS: LOG_MS, MAX: MAX, JOB_RE: JOB_RE };

@@ -13615,6 +13615,17 @@ async function appTeLezen(a, moet, nu) {
   // gezien-david.json onleesbaar: dan geen tabtijden, dus antwoorden die David misschien al zag; zeg dat (de app toont geen getal)
   return Object.assign(uit, { fout: klussen === null ? 'de rapporten van je klussen zijn nu niet te lezen' : null, gezien_bekend: !!g });
 }
+// wv4181 (besluitenpagina nr 389 = 3C89): GET /app/te-lezen/archief — Afgevinkt als leesarchief: alles wat David de afgelopen 15 dagen
+// afvinkte, met de volle tekst (te-lezen.js archief). Alleen op verzoek (als David Afgevinkt opent), niet in de poll van Voor jou.
+async function appTeLezenArchief(req, res) {
+  if (!teLezenMod || typeof teLezenMod.archief !== 'function') return appWeiger(res, 404, 'onbekend', 'te-lezen archief');
+  let per, staat;
+  try { per = await appTeLezenPer(); staat = appTeLezenStaat(); } catch (e) { logError('te-lezen', e); return appWeiger(res, 503, 'het archief is nu niet te lezen; probeer het zo opnieuw', 'te-lezen archief'); }
+  const items = teLezenMod.archief({ per: per, staat: staat, nu: Date.now(),
+    slotVan: function (job) { const e = agentsReg && Object.prototype.hasOwnProperty.call(agentsReg, job) ? agentsReg[job] : null; return e && e.slot ? e.slot : null; } });
+  if (res._app) res._app.reden = 'te-lezen archief ' + items.length;
+  appStuur(res, 200, { items: items, dagen: Math.round(teLezenMod.HOUD_MS / 86400000) });
+}
 // POST /app/te-lezen {job_id, kanaal, actie: gezien|terug|bewaar|niet-bewaren}. Onder het invoerslot (David die werkt); geen inhoud in
 // de audit. Op een vaste plek niets uit het hoofdkanaal (zoals Moet iets). Bewaren alleen van een bericht dat in dat gesprek staat.
 async function appTeLezenZet(req, res, a, d) {
@@ -17802,6 +17813,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/voor-jou/knop') return appVoorJouKnop(req, res, reg, a, s, d);   // wv404
         if (route === 'POST /app/voor-jou/regels') return appVoorJouRegels(req, res, reg, a, s, d);   // wv4195 (3C68)
         if (route === 'POST /app/te-lezen') return appTeLezenZet(req, res, a, d);   // wv2245
+        if (route === 'GET /app/te-lezen/archief') return appTeLezenArchief(req, res);   // wv4181 (3C89)
         if (route === 'POST /app/anders') return appAnders(req, res, reg, a, s, d);   // wv1821
         if (route.indexOf('GET /app/vandaag/actie/') === 0) return appVandaagActieDetail(req, res, a, route.slice('GET /app/vandaag/actie/'.length));
         if (route === 'GET /app/sleutels') return appSleutels(req, res, a);
