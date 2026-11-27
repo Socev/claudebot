@@ -30,7 +30,8 @@ h=0
 W=$(awk '/── OVIS NZa fase 2: de wachter \(wv3113/,/── einde OVIS NZa wachter ──/' server.js)
 echo "$W" | grep -qF "naam: 'ovis-nza-wachter', hartslag: 'ovis-nza-wachter'" || { echo "ROOD  wachter: geen dagronde met hartslag ovis-nza-wachter"; h=1; }
 echo "$W" | grep -qF "venster: { van: [7, 50], tot: [9, 50] }" || { echo "ROOD  wachter: venster niet 07:50-09:50 (buiten de stille uren)"; h=1; }
-echo "$W" | grep -qF "!onderhoud.stand().aan" || { echo "ROOD  wachter: draait ook in de onderhoudsstand"; h=1; }
+# wv3884: sinds nzaWachterMag (puur, eigen toets in nza-wachter-klok.sh) staat de onderhoudstoets daarin; beide vormen tellen
+{ echo "$W" | grep -qF "!onderhoud.stand().aan" || { echo "$W" | grep -qF "function nzaWachterMag(stand, loopt) { return !stand.aan &&" && echo "$W" | grep -qF "nzaWachterMag(onderhoud.stand()"; }; } || { echo "ROOD  wachter: draait ook in de onderhoudsstand"; h=1; }
 echo "$W" | grep -qF "if (!nzaWachter || !SERVER_ECHT || !rolPrimair()) return;" || { echo "ROOD  wachter: tikt ook buiten de echte, primaire pod"; h=1; }
 echo "$W" | grep -qF "argv: ['python3', '-I', script, 'ronde']" || { echo "ROOD  wachter: ander commando"; h=1; }
 grep -qF "wacht: serverPad('nza-wacht'" server.js || { echo "ROOD  scherm: wachtmap niet doorgegeven"; h=1; }
@@ -52,7 +53,7 @@ grep -qF "if (!NZA_VRAGEN || !NZA_VRAGEN.bestaat(d.draad)) return appWeiger(res,
 grep -qF "if (draad) { const dp = nzaDoorvraagPrompt(draad, promptTekst);" server.js || { echo "ROOD  appBeurt: draadcontext niet in de prompt"; v=1; }
 grep -qF "draad: (kanaal === 'ovis-nza' && meta.draad) || undefined } };" server.js || { echo "ROOD  appStartBeurt: draad niet in j.app"; v=1; }
 grep -qF "draad: j.app.draad || undefined };   // wv3156" server.js || { echo "ROOD  beurt-lopend: draad ontbreekt"; v=1; }
-grep -qF "open: j.app.open || undefined, draad: j.app.draad || undefined });" server.js || { echo "ROOD  app-log: draad ontbreekt"; v=1; }
+grep -qF "open: j.app.open || undefined, draad: j.app.draad || undefined" server.js || { echo "ROOD  app-log: draad ontbreekt"; v=1; }
 grep -qF "draad: x.kanaal === 'ovis-nza' && typeof x.draad === 'string'" server.js || { echo "ROOD  opvang na herstart: draad ontbreekt"; v=1; }
 grep -qF "if (j.app.kanaal === 'ovis-nza' && NZA_VRAGEN) {" server.js || { echo "ROOD  appNaBeurt: antwoord niet naar de draden"; v=1; }
 grep -qF ".catch(function () { logError('nza-vragen', new Error('opslaan na beurt faalde')); });" server.js || { echo "ROOD  appNaBeurt: opslaan niet fail-open"; v=1; }

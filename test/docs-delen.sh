@@ -416,9 +416,11 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
   toets('5 D1-id ingevuld (geen plaatshouder meer)', !/__DOCS_D1_ID__/.test(src) && /const DOCS_D1_ID = process\.env\.DOCS_D1_ID \|\| '[0-9a-f-]{36}';/.test(src));
   const vm = require('vm');
   // wv2118: sinds wv2114 staat het MemoryLane-deelblok binnen het docs-knipsel; dat blok toetst test/memorylane-delen.sh, hier eruit
+  // wv3884: sinds wv4115 (e35a3c7) heet de kop '// ── MemoryLane (wv2114'; zonder treffer bleef het blok in het knipsel (SERVER_ECHT, intake)
   // wv2453: idem de blokken Tripper, Calendar en Shopper (eigen toetsen; Tripper brak dit knipsel sinds wv2136 met appStaat)
   // wv3004: sindsdien kwamen GHAWA, Beleggen, Personeelsscherm, Pakjes en OSINT erbij (GHAWA brak het met appStaat): knip elk blok
   // '// ── OVIS …' t/m '// ── einde OVIS … ──' generiek weg; elk heeft een eigen toets
+  // wv3884: idem '// ── Apps › …' (Gambia, wv3950: serverPad) t/m '// ── einde Apps › … ──'
   // wv3167: idem het Promedico-blok (wv3143, appStaat; eigen toets test/promedico-*.sh) — brak dit knipsel sinds d9b2364
   const hb = src.indexOf('// ── Second Brain (wv832'), he = src.indexOf('// ── einde secondbrain');
   const db0 = src.indexOf('// ── OVIS Docs › Delen (wv1382'), de = src.indexOf('// ── einde docs delen');
@@ -432,8 +434,8 @@ toets('BSN-masker (echte appBsnMasker): streepjesvorm gezien, telefoonnummer met
     SMAL_CF_BASIS: 'https://cf', SMAL_CF_ACCOUNT: 'acc', appTeller: () => true, appVersOk: (a, s) => s.vers === true,
     appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Date, Promise, JSON, String, Number, Array, Object, Math, Buffer, Map, Set,
     AbortSignal, encodeURIComponent, fetch: async (url, o) => { fetchLog.push({ url, o }); return { status: 200, json: async () => fetchAntw(url, o) }; } });
-  vm.runInContext((/^const APP_VAST_BEHEER_DICHT = [^\n]*\n/m.exec(src)[0] + /^function appVastBeheerDicht\(a\) \{[^\n]*\n/m.exec(src)[0]) + src.slice(hb, he) + '\n' + src.slice(db0, de).replace(/\/\/ ── MemoryLane delen \(wv2114[\s\S]*?\/\/ ── einde MemoryLane delen ──\n/, '')
-    .replace(/^\/\/ ── OVIS (?!Docs)[^\n]*\n[\s\S]*?^\/\/ ── einde OVIS [^\n]*──\n/gm, '')
+  vm.runInContext((/^const APP_VAST_BEHEER_DICHT = [^\n]*\n/m.exec(src)[0] + /^function appVastBeheerDicht\(a\) \{[^\n]*\n/m.exec(src)[0]) + src.slice(hb, he) + '\n' + src.slice(db0, de).replace(/\/\/ ── MemoryLane (?:delen )?\(wv2114[\s\S]*?\/\/ ── einde MemoryLane delen ──\n/, '')
+    .replace(/^\/\/ ── (?:OVIS (?!Docs)|Apps › )[^\n]*\n[\s\S]*?^\/\/ ── einde (?:OVIS|Apps ›) [^\n]*──\n/gm, '')
     .replace(/^\/\/ ── Promedico-laag in Calendar \(wv3143\) ──\n[\s\S]*?^\/\/ ── einde Promedico-laag ──\n/m, '') + ';globalThis.__dd = { docsDelen, appDocs, docsDelenInfo, docsCf, docsAccess, docsAccessBodyOk };', ctx, { filename: 'server.js#docs' });
   toets('5 koppeling laadt (docsDelen aan)', !!ctx.__dd.docsDelen && ctx.__dd.docsDelenInfo().aan === true, ctx.__dd.docsDelenInfo());
   let res = { _app: {} };

@@ -370,8 +370,10 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
       setImmediate(() => { ee.stdout.emit('data', st.kind.uit); ee.emit('exit', st.kind.code); });
       return ee;
     };
-    const fn = new Function('require', 'path', 'fs', 'crypto', 'spawn', 'logError', 'schrijfLog', 'nu', 'serverPad', 'serverProefDeel', 'appSbRpc', 'VV', 'VAULT', 'SERVER_ECHT', 'rolPrimair', '__dirname', 'st', 'onderhoud',
-      src.slice(b, e).replace('if (ovis && SERVER_ECHT) { setTimeout', 'if (false) { setTimeout') +
+    const fn = new Function('require', 'path', 'fs', 'crypto', 'spawn', 'logError', 'schrijfLog', 'nu', 'serverPad', 'serverProefDeel', 'appSbRpc', 'VV', 'VAULT', 'SERVER_ECHT', 'rolPrimair', '__dirname', 'st', 'onderhoud', 'zoekSnelLeerKaart',   // wv3884: de zoek-leerkaart (wv3743) staat sinds 21-11 in de nachtronde
+      // wv3884: de storingsdienst (wv3712, eigen toets test/storingsdienst*.sh) staat tussen zijn knipmarkers in dit blok; hier als 'module ontbreekt'
+      src.slice(b, e).replace('if (ovis && SERVER_ECHT) { setTimeout', 'if (false) { setTimeout')
+        .replace(/\/\* storingsdienst:begin \*\/[\s\S]*?\/\* storingsdienst:einde \*\//, 'const storingsdienst = null; function storingsdienstVoorKaart() { return null; } function storingsdienstInfo() { return { module: false }; } async function storingsdienstTik() {}') +
       '\novisAms = function () { return st.klok; };\nreturn { ovisTik, ovisInfo, ovisStartScript, ovisStaatLees, ovis };');
     const fouten_ = [];
     const nepRpc = async function (f, body) { st.rpc.push(f);
@@ -380,7 +382,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
       if (f === 'sb_identifier_te_bevestigen') return [];   // wv1789: feitkaart (geen feiten)
       throw new Error('?'); };
     const k = fn(require, path, fs, require('crypto'), nepSpawn, (w, x) => fouten_.push(w + ' ' + (x && x.message)), () => {}, () => 'nu',
-      (n, env, echt, proef) => path.join(dir, n), (d) => path.join(dir, d), nepRpc, () => require('./vault-veilig.js'), path.join(dir, 'vault'), true, () => st.primair, process.cwd(), st, { stand: () => ({ aan: !!st.onderhoud }) });
+      (n, env, echt, proef) => path.join(dir, n), (d) => path.join(dir, d), nepRpc, () => require('./vault-veilig.js'), path.join(dir, 'vault'), true, () => st.primair, process.cwd(), st, { stand: () => ({ aan: !!st.onderhoud }) }, async () => null);
     st.onderhoud = true; await k.ovisTik();
     toets('6 onderhoudsstand (wv1271): geen nachtronde, geen tik', st.spawns.length === 0 && st.rpc.length === 0);
     st.onderhoud = false;

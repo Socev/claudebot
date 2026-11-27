@@ -693,7 +693,9 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     /APP_GLIJD_ROUTES\.add\('POST \/app\/zoek-snel'\)/.test(src) && /'zoek-snel': \[\][,}]/.test(src) && /zoek_snel: typeof zoekSnelInfo === 'function' \? zoekSnelInfo\(\)/.test(src));
   const slotVrij = /const APP_SLOT_VRIJ = new Set\(\[([^\]]*)\]\)/.exec(src);
   toets('6 niet in APP_SLOT_VRIJ (vaste plek: onder het invoerslot)', slotVrij && slotVrij[1].indexOf('zoek-snel') < 0);
-  toets('6 bijStart in het hoofdkanaal geeft de zoekregels mee', /: kanaal === 'hoofd' \? function \(\) \{ return typeof zoekSnelStaart === 'function' \? zoekSnelStaart\(\) : ''; \} : undefined \}\);/.test(src));
+  // wv3884: sinds wv3931 (7ee2ce0, tweede startpad weg) loopt bijStart in het hoofdkanaal alleen via appHoofdStart (wv2965), die Zoek snel meeneemt
+  toets('6 bijStart in het hoofdkanaal geeft de zoekregels mee', /const chatlogBijStart = kanaal === 'hoofd';/.test(src) && /: chatlogBijStart \? function \(\) \{ return appHoofdStart\(/.test(src) &&
+    /function appHoofdStart\([^)]*\) \{[\s\S]{0,1200}?const zoek = Promise\.resolve\(\)\.then\(function \(\) \{ return typeof zoekSnelStaart === 'function' \? zoekSnelStaart\(\) : ''; \}\)[\s\S]{0,200}?return Promise\.all\(\[rij, zoek, log\]\)/.test(src));
   toets('6 wv3446: elk apparaat zoekt de hele vault, geen afscherm-schakelaar meer', /zoekSnel\.zoek\(vraag, \{\}\)/.test(src) && !/APP_VAST_AFSCHERMEN|appAfscherm/.test(src));
   toets('6 nieuw-telling slaat soort zoek over', /if \(x\.soort === 'zoek'\) return;/.test(src));
   toets('6 Antwoord hierop en gesprek-zoeken kennen Zoek snel', /if \(x\.soort === 'zoek'\) return 'Zoek snel';   \/\/ wv1252\n  return 'je antwoord';/.test(src) && /if \(x\.soort === 'zoek'\) return 'Zoek snel';   \/\/ wv1252\n  return null;/.test(src));

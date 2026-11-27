@@ -22,7 +22,7 @@ toets('1c soort altijd een van de vier', W.WERKERS.every((w) => W.SOORTEN.indexO
 toets('1d model altijd ingevuld', W.WERKERS.every((w) => typeof w.model === 'string' && w.model.length > 0), W.WERKERS.filter((w) => !w.model).map((w) => w.id));
 toets('1e trigger n8n of pod(-tijdklok) of tikker', W.WERKERS.every((w) => ['n8n', 'pod', 'pod-tijdklok', 'tikker'].indexOf(w.trigger) >= 0));
 toets('1f werker buiten n8n draagt een roostertekst', W.WERKERS.filter((w) => !w.n8n).every((w) => w.rooster));
-const mids = new Set(M.MANAGERS.map((m) => m.id));
+const mids = new Set(M.MANAGERS.map((m) => m.id).concat((M.DELEN || []).map((d) => d.id)));   // wv3884: sinds wv4116 is 'ui' een deel van de Design Manager (DELEN), geen eigen manager
 toets('1g manager-verwijzing bestaat in managers.js', W.WERKERS.filter((w) => w.manager).every((w) => mids.has(w.manager)));
 toets('1h elke manager uit managers.js staat in het register', M.MANAGERS.every((m) => W.WERKERS.some((w) => w.manager === m.id)));
 toets('1i overig is kanaal, luik of jimmy', W.OVERIG.every((w) => ['kanaal', 'luik', 'jimmy'].indexOf(w.soort) >= 0));

@@ -1,6 +1,8 @@
 'use strict';
 // wv2991: OVIS Personeelsscherm fase 0 — personeelsscherm.js met een nep-D1 (node:sqlite, zelfde schema) en een nep-Cloudflare-API.
 // Verzonnen gegevens; geen netwerk. PS_MODULE=<pad> toetst een andere kopie (kruisproef).
+// wv3884: het schermscript op de tv rekent met de klok van de tv (Nederlandse tijd); de CI-runner staat op UTC, dus de toets zet dezelfde zone.
+process.env.TZ = 'Europe/Amsterdam';
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');

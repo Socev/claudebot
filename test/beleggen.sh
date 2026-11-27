@@ -23,7 +23,7 @@ B=$(awk '/── OVIS Beleggen \(wv2982/,/── einde OVIS Beleggen ──/' se
 if echo "$B" | grep -nE "logError\([^)]*(e\.message|String\(e|d\.|u\.body)"; then echo "ROOD  server.js: Beleggen logt inhoud"; f=1; fi
 [ $f = 0 ] && echo "GROEN koppeling: server.js, uitrol.sh, APP_IDS"
 # wv3756: /smal/beleggen — grens in SMAL_GRENS, route in smalActie, alleen de bekende velden door (de secret niet), fout zonder inhoud
-grep -qE "^const SMAL_GRENS = \{.*\bbeleggen: [0-9]+ \}" server.js || { echo "ROOD  server.js: beleggen niet in SMAL_GRENS"; f=1; }
+grep -qE "^const SMAL_GRENS = \{.*\bbeleggen: [0-9]+( \}|,)" server.js || { echo "ROOD  server.js: beleggen niet in SMAL_GRENS"; f=1; }
 grep -qF "if (actie === 'beleggen') return beleggenSmal(d);" server.js || { echo "ROOD  server.js: /smal/beleggen niet in smalActie"; f=1; }
 node -e '
 const fs = require("fs"); const s = fs.readFileSync("server.js", "utf8");
