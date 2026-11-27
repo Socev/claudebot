@@ -145,6 +145,8 @@ test('Codex MOET 1: bedragen/percentages zonder bron of niet op de plek gemarkee
   // zonder link in de zin, maar het getal staat op een plek uit de bronnenlijst van het geschilpunt: geen markering
   const t2 = await R.getallenPoort('De nac is € 202.476. Verzonnen € 99.999.', c, [['bob-2026', '3']]);
   assert.ok(!t2.includes('202.476.' + R.MARK_GETAL_ZONDER) && t2.includes('99.999.' + R.MARK_GETAL_ZONDER), t2);
+  const t3 = await R.getallenPoort('Schik op 150.000 euro. Of EUR 120.000. Veel: ' + Array.from({ length: 25 }, (x, i) => '€ ' + (1000 + i)).join(', ') + '.', c, [['bob-2026', '3']]);
+  assert.strictEqual(t3.split(R.MARK_GETAL_ZONDER).length - 1, 3, t3);
 });
 
 test('Codex MOET 3: afgekeurd citaat in dictum, sterk en richtingen ter plekke gemarkeerd (ook in de markdown)', async () => {

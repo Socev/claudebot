@@ -225,16 +225,18 @@ function getalNorm(s) { return String(s || '').replace(/(\d)[. \u00a0](?=\d{3}(?
 function getallen(s) {
   const t = getalNorm(s), uit = [];
   let m;
-  const re = /€\s*(\d[\d,]*)|(\d+(?:,\d+)?)\s*(?:%|procent)/g;
-  while ((m = re.exec(t)) && uit.length < 10) { const g = { getal: (m[1] || m[2]).replace(/,$/, ''), toon: m[0].trim() }; if (!uit.some(function (x) { return x.getal === g.getal; })) uit.push(g); }
+  // Codex ronde 2: ook "EUR 150.000" en "150.000 euro"; geen stille grens (boven MAX_GETALLEN telt de zin als niet nagerekend)
+  const re = /(?:€|\bEUR)\s*(\d[\d,]*)|(\d[\d,]*)\s*(?:euro|EUR)\b|(\d+(?:,\d+)?)\s*(?:%|procent)/gi;
+  while ((m = re.exec(t))) { const g = { getal: (m[1] || m[2] || m[3]).replace(/,$/, ''), toon: m[0].trim() }; if (!uit.some(function (x) { return x.getal === g.getal; })) uit.push(g); }
   return uit;
 }
 function staatErIn(getal, tekst) { return new RegExp('(^|[^\\d,])' + getal.replace(/[,]/g, '\\,') + '(?!\\d|,\\d)').test(getalNorm(tekst)); }
 const MARK_GETAL_ZONDER = ' [pod: niet nagerekend]';
+const MAX_GETALLEN = 20;   // per zin
 // extra = [[stuk, plek]] uit de bronnenlijst van het geschilpunt (of van alle geschilpunten): ook daar mag het getal staan
 async function getallenPoort(tekst, c, extra) {
   const t = String(tekst || '');
-  if (!/€\s*\d|\d\s*(%|procent)/.test(t)) return t;
+  if (!/€\s*\d|\bEUR\s*\d|\d\s*(%|procent|euro\b|EUR\b)/i.test(t)) return t;
   // links eerst vervangen door een plaatshouder, zodat "p. 3" in een bronlink geen zinseinde is
   const links0 = [];
   const met = t.replace(new RegExp(NZA_LINK_RE.source, 'g'), function (x) { links0.push(x); return '\u0000' + (links0.length - 1) + '\u0000'; });
@@ -249,6 +251,7 @@ async function getallenPoort(tekst, c, extra) {
     const re = new RegExp(NZA_LINK_RE.source, 'g');
     while ((m = re.exec(z)) && links.length < 4) { try { const q = new URLSearchParams(m[2]); const s = q.get('stuk') || '', pl = plekVan(q.get('plek') || ''); if (STUK_RE.test(s) && pl) links.push([s, pl]); } catch (e) { /* geen link */ } }
     c.tel.getallen += gs.length;
+    if (gs.length > MAX_GETALLEN) { uit.push(z + MARK_GETAL_ZONDER); continue; }
     const alle = links.concat((extra || []).filter(function (e) { return !links.some(function (l) { return l[0] === e[0] && l[1] === e[1]; }); }));
     if (!alle.length) { uit.push(z + MARK_GETAL_ZONDER); continue; }
     const teksten = [];
