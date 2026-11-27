@@ -83,6 +83,9 @@ const MAAND = { januari: 1, februari: 2, maart: 3, april: 4, mei: 5, juni: 6, ju
 
 class Fout extends Error { constructor(status, tekst) { super(tekst); this.status = status; } }
 const nuIso = () => new Date().toISOString();
+const isoVeilig = (x) => { try { return isoGoed(x); } catch (e) { return false; } };   // wv4228: isoGoed gooit bij maand 13 / dag 40
+const isoZeker = (d, m, j) => { try { return iso(d, m, j); } catch (e) { return null; } };
+const nlVandaag = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);   // wv4228
 const nlDag = (x) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(x || '')); return m ? `${Number(m[3])}-${Number(m[2])}-${m[1]}` : String(x || ''); };
 const isoGoed = (x) => typeof x === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(x) && new Date(x + 'T12:00:00Z').toISOString().slice(0, 10) === x;
 
@@ -1098,6 +1101,103 @@ function buurtNieuw(r, gezien) {
   return uit;
 }
 
+// ── wv4228 (besluitenpagina nr 940 = L40): "Nu en binnenkort" bovenaan Vastgoed — Loopt nu, Binnenkort, Nieuw ──
+// Puur. Bronnen: de huispagina's (status lopend → Loopt nu; "## Toekomstige data" en ALV-data → Binnenkort), de rentevaste datum uit geld_kern
+// en de WOZ (seintje eind februari, of de bezwaartermijn van een bevestigde beschikking). Binnenkort = vandaag t/m BK_HORIZON_JAAR vooruit.
+const BK_HORIZON_JAAR = 10, BK_MAX = 6, LOOPT_MAX = 4;
+const BK_WOORD = { energielabel: /energielabel/i, alv: /\bALV\b|ledenvergadering/i, rentevast: /rentevast|renteherziening/i, woz: /\bWOZ\b/ };
+function laatsteZin(t) { const z = String(t || '').split(/(?<=[.!?])\s+(?=[A-Z0-9"“(])/).map((s) => s.trim()).filter(Boolean); return z.length ? z[z.length - 1] : null; }
+function looptUit(md, pagina) {
+  if (!/^(lopend|loopt)$/i.test(frontVeld(md, 'status') || '')) return null;
+  const naam = (titel(md) || String(pagina).split('/').pop().replace(/\.md$/, '')).replace(/\s+[—–]\s+.*$/, '').trim();
+  const upd = frontVeld(md, 'updated');
+  // de laatste alinea die met **Besluit, **Open:, **Volgende stap of **Wacht begint: de laatste zin daarvan is "waar het nu op wacht"
+  const alineas = String(md || '').split(/\n\s*\n/).filter((a) => /^\*\*(Besluit|Open|Volgende stap|Wacht)\b/.test(a.trim()));
+  const stand = alineas.length ? laatsteZin(kaalMd(alineas[alineas.length - 1].replace(/^\*\*(Open|Volgende stap|Wacht)[^*]*\*\*:?\s*/, ''))) : null;
+  return { naam: naam.slice(0, 80), pagina, sinds: isoVeilig(upd || '') ? upd : null, stand: stand ? stand.slice(0, 240) : null, kelder: /^Kelder\b/i.test(naam) };
+}
+function toekomstUit(md, object) {   // "## Toekomstige data" → "- **6-11-2028:** tekst"
+  const s = kopSectie(md, /^##\s+Toekomstige data/i);
+  if (!s) return [];
+  const uit = [];
+  for (const r of opsomming(s.tekst)) {
+    const m = /^(\d{1,2})-(\d{1,2})-(\d{4}):?\s*(.+)$/.exec(r);
+    const d = m && isoZeker(Number(m[1]), Number(m[2]), Number(m[3]));
+    if (!d) continue;
+    const tekst = m[4].replace(/^[a-z]/, (c) => c.toUpperCase()).split(/(?<=\.)\s+/)[0].slice(0, 200);
+    uit.push({ datum: d, tekst, soort: BK_WOORD.energielabel.test(tekst) ? 'energielabel' : 'toekomst', object });
+  }
+  return uit;
+}
+function alvUit(md, object) {   // een zin met ALV/ledenvergadering en een datum d-m-jjjj (ook een vooraankondiging); per datum één keer
+  const uit = [];
+  for (const zin of kaalMd(String(md || '').replace(/^---[\s\S]*?\n---\n/, '')).split(/(?<=[.!?])\s+/)) {
+    if (!BK_WOORD.alv.test(zin)) continue;
+    const m = /\b(\d{1,2})-(\d{1,2})-(\d{4})\b/.exec(zin);
+    const d = m && isoZeker(Number(m[1]), Number(m[2]), Number(m[3]));
+    if (!d || uit.some((x) => x.datum === d)) continue;
+    const uur = /\bom\s+(\d{1,2}[:.]\d{2})\b/.exec(zin);
+    uit.push({ datum: d, tekst: `${/digita/i.test(zin) ? 'Digitale ALV' : 'ALV'} van de VvE van de garageboxen${uur ? ', ' + uur[1].replace('.', ':') + ' uur' : ''}`, soort: 'alv', object });
+  }
+  return uit;
+}
+function wozBinnenkort(vandaag, eigen) {   // eigen: [{ object, naam, jaar, dagtekening }] (bevestigde beschikkingen)
+  const uit = [];
+  for (const w of eigen || []) {
+    const tot = bezwaarTot(w.dagtekening);
+    if (tot && tot >= vandaag) uit.push({ datum: tot, tekst: `Bezwaar tegen de WOZ ${w.jaar} van ${w.naam} kan tot en met deze dag`, soort: 'woz-bezwaar', object: w.object });
+  }
+  const j0 = Number(vandaag.slice(0, 4));
+  const j = vandaag <= `${j0}-03-31` && !(eigen || []).some((w) => w.soort === 'woning' && Number(w.jaar) === j0) ? j0 : j0 + 1;
+  uit.push({ datum: `${j}-02-28`, wanneer: `eind februari ${j}`, tekst: `WOZ-beschikkingen ${j} staan klaar bij de gemeente; bezwaar kan zes weken na de dagtekening`, soort: 'woz', jaar: j, object: 'woning' });
+  return uit;
+}
+// paginas: [{ pad, md, object? }]; kern = geld_kern van de woning; eigen = bevestigde WOZ-beschikkingen; nieuw = wijzigingen sinds je vorige bezoek
+function nuEnBinnenkort(x) {
+  const vandaag = x.vandaag, tot = `${Number(vandaag.slice(0, 4)) + BK_HORIZON_JAAR}${vandaag.slice(4)}`;
+  const loopt = [], bk = [];
+  for (const p of x.paginas || []) {
+    const l = looptUit(p.md, p.pad); if (l) loopt.push(l);
+    bk.push(...toekomstUit(p.md, p.object || null));
+    if (/garage|box/i.test(p.pad)) bk.push(...alvUit(p.md, p.object || null));
+  }
+  const rv = x.kern && x.kern.rentevast;
+  if (rv && isoVeilig(rv.datum || '')) bk.push({ datum: rv.datum, tekst: 'De rentevaste periode van de hypotheek loopt af (eerste deel)', soort: 'rentevast', object: 'woning' });
+  bk.push(...wozBinnenkort(vandaag, x.eigen));
+  const gezien = new Set();
+  const binnenkort = bk.filter((b) => b.datum >= vandaag && b.datum <= tot).sort((a, b) => a.datum.localeCompare(b.datum))
+    .filter((b) => { const k = b.soort + b.datum; if (gezien.has(k)) return false; gezien.add(k); return true; }).slice(0, BK_MAX);
+  loopt.sort((a, b) => (b.kelder - a.kelder) || String(b.sinds || '').localeCompare(String(a.sinds || '')));
+  return { loopt: loopt.slice(0, LOOPT_MAX), binnenkort, nieuw: (x.nieuw || []).length, nieuw_aantal: Number.isInteger(x.nieuw_aantal) ? x.nieuw_aantal : (x.nieuw || []).length };
+}
+// Regels voor het deadline-register (zelfde vorm en idempotentie als wozDeadlineRegels; deadlineErbij zet ze). De WOZ gebruikt de sleutel van
+// het seintje (wv4229), de bezwaartermijn zet woz-bewaar zelf. Een regel die er al met de hand staat (zelfde datum en hetzelfde woord, ook onder
+// Afgehandeld) komt er niet nog eens bij: binnenkortNodig.
+const BK_ACTIE = {
+  energielabel: ['[jij] alleen nodig als je gaat verkopen of verhuren: dan een nieuw label laten opnemen', 60],
+  alv: ['[jij] beslissen of je meedoet of iemand een volmacht geeft', 14],
+  rentevast: ['[jij] op tijd een renteaanbod vragen en vergelijken', 120],
+  toekomst: ['[jij] nagaan of er iets moet gebeuren', 30],
+};
+function binnenkortRegels(binnenkort) {
+  const cel = (t) => String(t).replace(/\|/g, '/').replace(/\s+/g, ' ').trim();
+  const uit = [];
+  for (const b of binnenkort || []) {
+    if (b.soort === 'woz') { uit.push({ sleutel: `vastgoed-woz-seintje-${b.jaar}`, regel: wozSeintjeRegel(b.jaar), datum: `${b.jaar}-03-31`, soort: 'woz' }); continue; }
+    const a = BK_ACTIE[b.soort]; if (!a) continue;
+    const sl = `vastgoed-${b.soort}-${b.datum}`;
+    uit.push({ sleutel: sl, datum: b.datum, soort: b.soort, regel: `| ${b.datum} | Privé / Huis | **${cel(b.tekst).replace(/\.$/, '')} (${NL_DAG(b.datum)}).** Staat ook in Apps › Vastgoed › Binnenkort. | ${a[0]} | ${a[1]} | Vastgoed (${sl}) |` });
+  }
+  return uit;
+}
+function binnenkortNodig(tekst, regels) {
+  const rg = String(tekst || '').split('\n').filter((r) => r.startsWith('|'));
+  return regels.filter((r) => {
+    const w = BK_WOORD[r.soort];
+    return !(w && rg.some((x) => x.startsWith(`| ${r.datum} |`) && !x.includes(`(${r.sleutel})`) && w.test(x)));
+  });
+}
+
 function maak(o) {
   const map = o.map, vault = o.vault;
   const dbPad = path.join(map, 'vastgoed.sqlite');
@@ -1373,9 +1473,12 @@ function maak(o) {
       const gezienOp = meta('gezien_op');
       const metUrl = heeftW && !!db.prepare("SELECT 1 FROM pragma_table_info('wijziging') WHERE name = 'url'").get();   // wv4226: alleen-lezen vóór de migratie
       const nieuw = heeftW ? db.prepare(`SELECT op, object, soort, tekst${metUrl ? ', url' : ''} FROM wijziging WHERE op > ? ORDER BY id DESC LIMIT 20`).all(gezienOp || '').map((z) => (z.url ? z : { op: z.op, object: z.object, soort: z.soort, tekst: z.tekst })) : [];
+      const nieuwAantal = heeftW ? db.prepare('SELECT COUNT(*) AS n FROM wijziging WHERE op > ?').get(gezienOp || '').n : 0;   // wv4228: de teller op de tegel
+      const wozEigen = db.prepare("SELECT 1 FROM pragma_table_info('woz_eigen') WHERE name = 'dagtekening'").get()
+        ? db.prepare('SELECT o.sleutel AS object, o.naam AS naam, o.soort AS soort, w.jaar AS jaar, w.dagtekening AS dagtekening FROM woz_eigen w JOIN object o ON o.id = w.object').all() : [];
       let ronde = null; try { ronde = JSON.parse(meta('ronde') || 'null'); } catch (e) { ronde = null; }
       return { ok: true, objecten, prijsindex: index ? { laatste: index.laatste, jaren: index.jaren } : null, aanroepen: { n: aanroepen.n, laatst: aanroepen.laatst },
-        nieuw, gezien_op: gezienOp, ronde: ronde ? { dag: ronde.dag || null, op: ronde.op || null } : null, kelder_pdf_op: meta('kelder_pdf_op'),
+        nieuw, nieuw_aantal: nieuwAantal, woz_eigen: wozEigen, gezien_op: gezienOp, ronde: ronde ? { dag: ronde.dag || null, op: ronde.op || null } : null, kelder_pdf_op: meta('kelder_pdf_op'),
         rubrieken: RUBRIEKEN, stuk_soorten: STUK_SOORT, geld: { hypotheek: kaal2(geld.hypotheek), verbouwing: kaal2(geld.verbouwing), bank: kaal2(geld.bank), tibber: kaal2(geld.tibber), holding: kaal2(geld.holding) } };
     }, false);
   }
@@ -1595,6 +1698,7 @@ function maak(o) {
           const oud = actief.map((x) => (x.dossier_op ? new Date(x.dossier_op).getTime() : 0)).reduce((a, b) => Math.min(a, b), Infinity);
           if (!actief.length || nu().getTime() - oud > GELD_DAG_MS) { try { leesDossier(); u = overzicht(); } catch (e) { /* de vorige stand blijft */ } }
         }
+        try { u.nu_binnenkort = nuBinnenkortVan(u); } catch (e) { u.nu_binnenkort = null; }   // wv4228: een fout hier laat de rest van het scherm staan
         return { status: 200, body: u, reden: 'vastgoed overzicht' };
       }
       if (post && pad === '/app/vastgoed/dossier') { const t = leesDossier(); return { status: 200, body: { ok: true, gelezen: t }, reden: 'vastgoed dossier gelezen' }; }
@@ -1624,6 +1728,24 @@ function maak(o) {
         buurt: (() => { try { const b = JSON.parse((db.prepare("SELECT waarde FROM meta WHERE sleutel = 'buurt'").get() || {}).waarde || 'null'); const t = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bekendmaking'").get() ? n('bekendmaking') : 0; return b ? { straal_op: b.straal_op || null, gemeente_op: b.gemeente_op || null, mislukt_op: b.straal_mislukt || b.gemeente_mislukt || null, bekendmakingen: t } : { bekendmakingen: t }; } catch (e) { return null; } })(), kelder_pdf_op: (db.prepare("SELECT waarde FROM meta WHERE sleutel = 'kelder_pdf_op'").get() || {}).waarde || null };
     }, false);
   }
+  // wv4228 (L40): Loopt nu / Binnenkort / Nieuw. Leest de huispagina's vers (± 20 kleine bestanden; alleen lezen) en rekent met het overzicht.
+  function nuBinnenkortVan(u) {
+    const huis = path.join(vault, HUIS);
+    let namen = []; try { namen = fs.readdirSync(huis).filter((n) => n.endsWith('.md') && !n.startsWith('.')).sort().slice(0, 200); } catch (e) { return null; }
+    const perPad = new Map((u.objecten || []).filter((x) => !x.weg_op).map((x) => [x.dossier, x.sleutel]));
+    const paginas = [];
+    for (const n of namen) { let md = ''; try { md = fs.readFileSync(path.join(huis, n), 'utf8'); } catch (e) { continue; } const pad = `${HUIS}/${n}`; paginas.push({ pad, md, object: perPad.get(pad) || null }); }
+    const won = (u.objecten || []).find((x) => x.soort === 'woning');
+    return nuEnBinnenkort({ vandaag: nlVandaag(nu()), paginas, kern: won && won.geld_kern, eigen: u.woz_eigen || [], nieuw: u.nieuw, nieuw_aantal: u.nieuw_aantal });
+  }
+  // wv4228: alleen het aantal voor de teller op de tegel (licht: geen dossier, geen vault)
+  function nieuwAantal() {
+    return metDb((db) => {
+      if (!db || !db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wijziging'").get()) return 0;
+      const g = (db.prepare("SELECT waarde FROM meta WHERE sleutel = 'gezien_op'").get() || {}).waarde || '';
+      return db.prepare('SELECT COUNT(*) AS n FROM wijziging WHERE op > ?').get(g).n;
+    }, false);
+  }
   // wv4227 (L39): Socev in het gewone gesprek. Haalt het overzicht via exact dezelfde weg als GET /app/vastgoed (zelfde cijfers als het
   // scherm, ook de herlezing van een dossier ouder dan een dag) en kent alleen leesopdrachten; ververs, beelden, woz en dossier zijn hier niet.
   async function gesprek(b) {
@@ -1633,8 +1755,9 @@ function maak(o) {
     if (u.status !== 200) return { status: u.status, body: { ok: false, fout: (u.body && u.body.fout) || 'Vastgoed is nu niet te lezen' } };
     return gesprekUit(u.body, x);
   }
-  return { app, info, leesDossier, ververs, overzicht, kelder, ronde, rondeDag, meldingOpen, meldingVerstuurd, kelderPdfGezet, gezien, wozHerken, wozControle, wozVastleggen, wozVergelijk, wozBezwaar, wozConceptGezet, gesprek };
+  return { app, info, leesDossier, ververs, overzicht, kelder, ronde, rondeDag, meldingOpen, meldingVerstuurd, kelderPdfGezet, gezien, wozHerken, wozControle, wozVastleggen, wozVergelijk, wozBezwaar, wozConceptGezet, gesprek, nieuwAantal };
 }
 
 module.exports = { maak, geldKern, leesWoning, leesBox, leesDossierMap, dossierstand, indicatie, soortStuk, euroUit, datumUit, bagSoort, SCHEMA_VERSIE,
-  leesHypotheek, hypotheekReeksen, laatsteStand, leesKelder, kelderDossier, kelderMd, kenmerken, kenmerkenMetOud, vergelijk, wijzigingBericht, buurtNieuw, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink };
+  leesHypotheek, hypotheekReeksen, laatsteStand, leesKelder, kelderDossier, kelderMd, kenmerken, kenmerkenMetOud, vergelijk, wijzigingBericht, buurtNieuw, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink,
+  looptUit, toekomstUit, alvUit, wozBinnenkort, nuEnBinnenkort, binnenkortRegels, binnenkortNodig };

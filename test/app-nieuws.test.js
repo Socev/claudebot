@@ -159,6 +159,7 @@ function laadBlok(o) {
     facturenRoutes: o.facturenRoutes, facturenOpen: function () { return {}; }, rolPrimair: function () { return true; },
     pakjes: o.pakjes, pakjesGekocht: function () { return []; }, pakjesOnderwerpen: function () { return {}; },
     beleggenApp: o.beleggenApp || null, SERVER_ECHT: false, setInterval: setInterval,   // wv3815
+    vastgoedApp: o.vastgoedApp || null,   // wv4228: de teller van Vastgoed (aantal nieuw sinds Davids vorige bezoek)
     ovisAms: o.ovisAms || function () { return { datum: '2026-11-22', uur: 6, min: 50, klok: '2026-11-22 06:50' }; },
     schrijfLog: function (r) { (o.log || []).push(r); }, nu: function () { return 'NU'; },
     appN8nZend: o.zend || function () { throw new Error('geen n8n in de toets'); }, APP_MELD_TABEL: 'TABEL',
@@ -176,6 +177,7 @@ test('serverblok: schaduw schrijft de regel, routes tonen hem, gezien haalt hem 
     facturenRoutes: { rolVoor: function () { return { soort: 'eigenaar' }; }, app: function (fdb, v) { assert.strictEqual(v.pad, '/app/facturen'); return { status: 200, j: { ok: true, tellers: { beoordelen: 3, signalen: 2, wachtrij: 9 } } }; } },
     pakjes: { lijst: function () { return { status: 200, body: { ok: true, lopend: [{ stand: 'vandaag' }, { stand: 'onderweg' }] } }; } },
     beleggenApp: { app: function (v) { assert.strictEqual(v.pad, '/app/beleggen/teller'); return { status: 200, body: { ok: true, totaal: 4 } }; } },
+    vastgoedApp: { nieuwAantal: function () { return 2; } },
   });
   b.x.loketSchaduw('geld', VANDAAG, 'Verzonnen geldregel.');
   b.x.loketSchaduw('onbekend', VANDAAG, 'x');   // onbekende bron: gelogd, niets geschreven, geen gooi
@@ -187,11 +189,11 @@ test('serverblok: schaduw schrijft de regel, routes tonen hem, gezien haalt hem 
   assert.strictEqual((fs.statSync(path.join(b.dir, 'app-nieuws.json')).mode & 0o777).toString(8), '600');
   assert.strictEqual(b.fouten.length, 1);
   await b.x.appNieuwsTellersRoute({ url: '/app/nieuws/tellers' }, nepRes(), { id: 'a1' });
-  assert.deepStrictEqual(b.antwoorden.pop(), [200, { ok: true, tellers: { facturen: 5, pakjes: 1, beleggen: 4 }, fout: null }]);
+  assert.deepStrictEqual(b.antwoorden.pop(), [200, { ok: true, tellers: { facturen: 5, pakjes: 1, beleggen: 4, vastgoed: 2 }, fout: null }]);
   await b.x.appNieuwsRoute({ url: '/app/nieuws' }, nepRes(), { id: 'a1' });
   let a = b.antwoorden.pop();
   assert.strictEqual(a[0], 200);
-  assert.deepStrictEqual(a[1].regels.map(function (r) { return r.sleutel; }).sort(), ['beleggen/open', 'facturen/te-doen', 'financien/geld', 'pakjes/vandaag']);
+  assert.deepStrictEqual(a[1].regels.map(function (r) { return r.sleutel; }).sort(), ['beleggen/open', 'facturen/te-doen', 'financien/geld', 'pakjes/vandaag', 'vastgoed/nieuw']);
   await b.x.appNieuwsGezienRoute({}, nepRes(), { id: 'a1' }, { sleutels: [{ sleutel: 'financien/geld', versie: 1 }] });
   assert.deepStrictEqual(b.antwoorden.pop(), [200, { ok: true, gezet: 1 }]);
   await b.x.appNieuwsRoute({ url: '/app/nieuws' }, nepRes(), { id: 'a1' });

@@ -10607,6 +10607,10 @@ async function loketTellersVerversen(a) {
       else fouten.push('beleggen');
     }
   } catch (e) { fouten.push('beleggen'); logError('app-nieuws-teller', new Error('beleggen-teller faalde')); }
+  // wv4228 (L40): Vastgoed telt wat nieuw is sinds Davids vorige bezoek (dezelfde wijzigingen als het blok Nieuw); na een bezoek 0
+  try {
+    if (typeof vastgoedApp !== 'undefined' && vastgoedApp && typeof vastgoedApp.nieuwAantal === 'function') zet.push({ app: 'vastgoed', onderwerp: 'nieuw', laan: 'teller', aantal: vastgoedApp.nieuwAantal(), doel: { scherm: 'vastgoed' } });
+  } catch (e) { fouten.push('vastgoed'); logError('app-nieuws-teller', new Error('vastgoed-teller faalde')); }
   appNieuwsStand.tellersFout = fouten.length ? fouten : null;
   for (const m of zet) { try { await loketMeld(m); } catch (e) { logError('app-nieuws-teller', e); } }
 }
@@ -31679,6 +31683,7 @@ async function appVastgoed(req, res, a, route, d) {
   let u;
   try { u = await vastgoedApp.app({ pad: route.replace(/^(GET|POST) /, ''), methode: post ? 'POST' : 'GET', body: post ? (d || {}) : undefined }); }
   catch (e) { logError('vastgoed', new Error('route faalde')); return appWeiger(res, 503, 'Vastgoed is nu niet te lezen; probeer het zo opnieuw', 'vastgoed fout'); }   // geen inhoud in de log
+  if (u.status === 200 && route === 'POST /app/vastgoed/gezien' && AN) loketMeld({ app: 'vastgoed', onderwerp: 'nieuw', laan: 'teller', aantal: 0 }).catch(function () {});   // wv4228: de tegel meteen op nul
   if (u.status === 200 && !post) res._app.stil = true; else res._app.reden = String(u.reden || 'vastgoed').slice(0, 80);
   return appStuur(res, u.status, u.body);
 }
@@ -31730,6 +31735,29 @@ async function vastgoedKelderPdf() {
   vastgoedTikStand.pdf = new Date().toISOString();
   return { ok: true, naam: naam + '.pdf' };
 }
+// wv4228 (besluitenpagina nr 940 = L40): de data uit Binnenkort (ALV, energielabel, rentevast, WOZ-seintje, toekomstige data van de woning) ook
+// in het deadline-register (00_Systeem/Deadlines.md, ## Actueel) en zo in OVIS Calendar. Idempotent op een sleutel in de kolom Bron; een regel die
+// er al met de hand staat (zelfde datum en hetzelfde woord) komt er niet bij. Geen bedragen. Eens per dag vanuit de tik.
+let vastgoedRegisterDag = null;
+async function vastgoedBinnenkortRegister(dag) {
+  try {
+    const V = require(path.join(__dirname, 'vastgoed.js'));
+    const u = await vastgoedApp.app({ pad: '/app/vastgoed', methode: 'GET' });
+    const nb = u && u.status === 200 && u.body && u.body.nu_binnenkort;
+    if (!nb) return { ok: false, reden: 'overzicht niet te lezen' };
+    const regels = V.binnenkortRegels(nb.binnenkort);
+    if (!regels.length) return { ok: true, gezet: 0 };
+    let gezet = 0, tabel = true;
+    VV().wijzig(dlRegister(), function (t) {
+      const nodig = V.binnenkortNodig(t, regels);
+      const n = nodig.length ? V.deadlineErbij(t, nodig) : null;
+      if (n === null && nodig.some(function (r) { return String(t).indexOf('(' + r.sleutel + ')') < 0; })) tabel = false;
+      gezet = n === null ? 0 : nodig.filter(function (r) { return String(t).indexOf('(' + r.sleutel + ')') < 0; }).length;
+      return n;
+    }, { grendel: 5 });
+    return tabel ? { ok: true, gezet: gezet } : { ok: false, reden: 'tabel Actueel niet gevonden' };
+  } catch (e) { logError('vastgoed-register', new Error('register niet bijgewerkt')); return { ok: false, reden: 'register niet bij te werken' }; }
+}
 async function vastgoedTik(o) {
   const x = o || {};
   if (!vastgoedApp || typeof vastgoedApp.ronde !== 'function' || vastgoedTikBezig) return { ok: false };
@@ -31747,6 +31775,7 @@ async function vastgoedTik(o) {
       vastgoedTikStand.ronde = { nulpunt: !!r.nulpunt, wijzigingen: r.wijzigingen, opgehaald: r.opgehaald };   // alleen aantallen (geen log: test/vastgoed.sh)
       if (r.pdf_nodig) { const p = await vastgoedKelderPdf(); if (p.ok) vastgoedApp.kelderPdfGezet(r.kelder_hash); }
     }
+    if (vastgoedRegisterDag !== dag) { const rg = await vastgoedBinnenkortRegister(dag); if (rg.ok) vastgoedRegisterDag = dag; vastgoedTikStand.register = { dag: dag, ok: !!rg.ok, gezet: rg.gezet || 0, reden: rg.reden || null }; }   // wv4228
     const m = vastgoedApp.meldingOpen();
     if (m && m.tekst && m.sleutel) {
       const b = await (x.bericht || berichtIntern)({ kanaal: 'hoofd', bron: 'vastgoed', klasse: 'normaal', soort: 'dag', tekst: m.tekst, sleutel: 'vastgoed-' + m.sleutel });
