@@ -42,6 +42,30 @@ const SIGNAAL_UITLEG = {
   'nacontrole los op Opus': 'Een nameting draaide los op Opus in plaats van gebundeld op Sonnet.',
 };
 const SIGNAAL_VOLGORDE = ['eindcontext > 300k', 'duur > 120 min', 'afgebroken op de bovengrens', 'nacontrole los op Opus'];
+// wv4177 (besluitenpagina nr 145 = 2C45, nr 173 = 2C73): "procent van je week" als hoofdmaat. De verdeling van een abonnementsweek
+// in vier delen (agents / vaste routines / jouw gesprekken / overig) en de vier Claude-modellen. Bron: tank_per_dag in de
+// samenvatting (rapport.mjs: tankpunten = lijstbedrag x modelgewicht / usd_per_punt, dagelijks getoetst tegen de weekmeter).
+const WEEK_GROEPEN = [
+  { id: 'agents', naam: 'Agents', soorten: ['werkvoorraad-agent', 'socev-agent'] },
+  { id: 'routines', naam: 'Vaste routines', soorten: ['routine', 'manager'] },
+  { id: 'gesprekken', naam: 'Jouw gesprekken', soorten: ['gesprek-hoofd', 'gesprek-machinekamer'] },
+  { id: 'overig', naam: 'Overig', soorten: null },   // Cijfer-Meester, proefsessies, oud
+];
+function weekGroepVan(soort) {
+  const g = WEEK_GROEPEN.find(function (x) { return x.soorten && x.soorten.indexOf(soort) >= 0; });
+  return g ? g.id : 'overig';
+}
+const MODELLEN = ['Opus', 'Fable', 'Sonnet', 'Haiku'];
+const NL_DAG = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam' });
+const NL_TIJD = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+function dagErna(d) { const t = new Date(d + 'T12:00:00Z'); t.setUTCDate(t.getUTCDate() + 1); return t.toISOString().slice(0, 10); }
+// Eerste hele dag van de week die eindigt op de reset: de Nederlandse dag van (reset - 7 dagen); begint de week na 12:00, dan de
+// dag erna (de telling is per hele dag; het randje telt bij de vorige week).
+function weekVan(resetT) {
+  const s = new Date(resetT - 7 * 86400000);
+  const d = NL_DAG.format(s);
+  return Number(NL_TIJD.format(s).slice(0, 2)) >= 12 ? dagErna(d) : d;
+}
 
 function getal(v) { const n = Number(v); return v == null || v === '' || !isFinite(n) ? null : n; }
 function rond(n, d) { if (n == null) return null; const f = Math.pow(10, d == null ? 2 : d); return Math.round(n * f) / f; }
@@ -181,6 +205,12 @@ function maak(opt) {
     const socevGemeten = s.socev_gemeten === true;
     if (!socevGemeten && !soorten.some(function (r) { return r.soort === 'socev-agent'; }))
       soorten.push({ soort: 'socev-agent', naam: SOORT_NAAM['socev-agent'], groep: 'overig', eur: null, usd: null, tokens: null, calls: null, aandeel: null, niet_gemeten: true });
+    // wv4177: tankpunten per dag (de staaf krijgt ze in het venstertje)
+    const puntenDag = Object.create(null);
+    (Array.isArray(s.per_dag) ? s.per_dag : []).slice(0, DAGEN_MAX).forEach(function (r) {
+      const tp = getal(r && r.tankpunten);
+      if (r && DATUM.test(String(r.datum)) && tp != null) puntenDag[String(r.datum)] = rond(tp, 1);
+    });
     const perDag = (Array.isArray(s.per_dag_soort) ? s.per_dag_soort : []).slice(0, DAGEN_MAX).filter(function (r) { return r && DATUM.test(String(r.datum)); }).map(function (r) {
       const delen = {};
       GROEPEN.forEach(function (g) { delen[g.id] = 0; });
@@ -188,7 +218,7 @@ function maak(opt) {
       Object.keys(rs).slice(0, SOORTEN_MAX).forEach(function (k) { const v = getal(rs[k]); if (v != null) delen[groepVan(k)] += v; });
       let som = 0;
       Object.keys(delen).forEach(function (k) { delen[k] = rond(delen[k], 2); som += delen[k]; });
-      return { datum: String(r.datum), eur: rond(som, 2), delen: delen };
+      return { datum: String(r.datum), eur: rond(som, 2), delen: delen, punten: heeft(puntenDag, String(r.datum)) ? puntenDag[String(r.datum)] : null };
     }).sort(function (a, b) { return a.datum < b.datum ? -1 : 1; });
     const duurste = (Array.isArray(s.duurste_klussen) ? s.duurste_klussen : []).slice(0, 10).filter(function (k) { return k && typeof k === 'object'; })
       .map(function (k) { const x = klusUit(k, dpe); delete x.eur_ruw; return x; });
@@ -263,9 +293,82 @@ function maak(opt) {
       groepen: GROEPEN.map(function (g) { return { id: g.id, naam: g.naam }; }),
       soorten: soorten, per_dag: perDag, duurste: duurste, signalen: signalen, routines: routines,
       dagen: dagenMetKlussen(), tank: o && o.tank ? o.tank : null,
+      week: weekUit(s, o && o.tank, o && o.nu != null ? o.nu : Date.now()), modellen: modellenUit(s, o && o.tank, o && o.nu != null ? o.nu : Date.now()),
+      meting_tot: metingTot(s.gegenereerd_op),
       bron: 'tokenboekhouding', niet_gemeten: (socevGemeten ? [] : ['Agents en andere runs van Socev zelf (zijn sessiemap is voor de meting niet leesbaar)'])
         .concat(['Cowork-cloudsessies, modelaanroepen vanuit n8n en lokale modellen op Olares']),
     };
+  }
+
+  // wv4177: de dag en tijd tot waar de meting telt (de staaf van die dag is nog niet af)
+  function metingTot(g) {
+    const t = typeof g === 'string' ? Date.parse(g) : NaN;
+    return isFinite(t) ? { datum: NL_DAG.format(new Date(t)), tijd: NL_TIJD.format(new Date(t)) } : null;
+  }
+  function tankDagen(s) {
+    return (Array.isArray(s && s.tank_per_dag) ? s.tank_per_dag : []).slice(0, DAGEN_MAX)
+      .filter(function (d) { return d && typeof d === 'object' && DATUM.test(String(d.datum)); });
+  }
+  function delenVan(d) {
+    return (Array.isArray(d.delen) ? d.delen : []).slice(0, 400).filter(function (x) { return x && typeof x === 'object' && (x.a === 1 || x.a === 2); });
+  }
+  // wv4177 (2C45): deze abonnementsweek per abonnement. meter_nu = de echte weekmeter (tankmeting); telling en delen = eigen telling
+  // van de tokenboekhouding tot de meting van vanochtend (afgeleid); meter_zelfde_dagen = de stijging van de meter over precies die
+  // dagen (tank-dag.py), zodat het verschil tussen telling en meter zichtbaar is. Abonnement 2 alleen als de agents erop staan of
+  // er deze week iets op telde. Week voorbij (oude tankmeting) = dat abonnement niet.
+  function weekUit(s, tank, nu) {
+    const dagen = tankDagen(s);
+    if (!tank || !Array.isArray(s.tank_per_dag)) return null;
+    const abos = [];
+    [1, 2].forEach(function (a) {
+      const t = tank['account' + a];
+      const resetT = t && typeof t.zeven_dagen_reset === 'string' ? Date.parse(t.zeven_dagen_reset) : NaN;
+      if (!isFinite(resetT) || resetT <= nu) return;
+      const van = weekVan(resetT);
+      const g = Object.create(null);
+      WEEK_GROEPEN.forEach(function (x) { g[x.id] = { punten: 0, eur: 0 }; });
+      let punten = 0, eur = 0, meter = 0, metDagen = 0, telDagen = 0;
+      dagen.forEach(function (d) {
+        if (d.datum < van) return;
+        telDagen++;
+        delenVan(d).forEach(function (x) {
+          if (x.a !== a) return;
+          const tp = getal(x.tp) || 0, e = getal(x.eur) || 0, w = g[weekGroepVan(soortVan(x.soort))];
+          w.punten += tp; w.eur += e; punten += tp; eur += e;
+        });
+        const m = d.meter && typeof d.meter === 'object' ? getal(d.meter['a' + a]) : null;
+        if (m != null) { meter += m; metDagen++; }
+      });
+      if (a === 2 && tank.agents_op !== 2 && !(punten > 0)) return;
+      const nuPct = getal(t.zeven_dagen);
+      abos.push({ account: a, van: van, reset: new Date(resetT).toISOString(), meter_nu: nuPct == null ? null : rond(nuPct * 100, 0),
+        meter_op: t.gemeten_op || null, telling: rond(punten, 1), eur: rond(eur, 2),
+        meter_zelfde_dagen: telDagen > 0 && metDagen === telDagen ? rond(meter, 1) : null,
+        delen: WEEK_GROEPEN.map(function (x) { return { id: x.id, naam: x.naam, punten: rond(g[x.id].punten, 1), eur: rond(g[x.id].eur, 2) }; }) });
+    });
+    if (!abos.length) return null;
+    return { abonnementen: abos, afgeleid: true, agents_op: tank.agents_op === 1 || tank.agents_op === 2 ? tank.agents_op : null };
+  }
+  // wv4177 (2C73 b): per Claude-model de euro's en tankpunten van 30 dagen (= per_model in het rapport) en van deze week (week
+  // van abonnement 1, beide abonnementen samen). Vaste vier regels, ook als een model 0 had.
+  function modellenUit(s, tank, nu) {
+    const pm = Object.create(null);
+    (Array.isArray(s.per_model) ? s.per_model : []).slice(0, 12).forEach(function (r) { if (r && MODELLEN.indexOf(r.model) >= 0) pm[r.model] = r; });
+    const t1 = tank && tank.account1;
+    const resetT = t1 && typeof t1.zeven_dagen_reset === 'string' ? Date.parse(t1.zeven_dagen_reset) : NaN;
+    const van = isFinite(resetT) && resetT > nu && Array.isArray(s.tank_per_dag) ? weekVan(resetT) : null;
+    const wk = Object.create(null);
+    MODELLEN.forEach(function (m) { wk[m] = { punten: 0, eur: 0 }; });
+    if (van) tankDagen(s).forEach(function (d) {
+      if (d.datum < van) return;
+      delenVan(d).forEach(function (x) { if (heeft(wk, x.model)) { wk[x.model].punten += getal(x.tp) || 0; wk[x.model].eur += getal(x.eur) || 0; } });
+    });
+    if (!Object.keys(pm).length && !van) return null;
+    return { van_week: van, regels: MODELLEN.map(function (m) {
+      const r = pm[m];
+      return { model: m, punten_30: r ? rond(getal(r.tankpunten), 1) : null, eur_30: r ? rond(getal(r.eur), 2) : null,
+        punten_week: van ? rond(wk[m].punten, 1) : null, eur_week: van ? rond(wk[m].eur, 2) : null };
+    }) };
   }
 
   // De klussen van één dag, duurste eerst, met een optelling per soort. null = ongeldige datum.

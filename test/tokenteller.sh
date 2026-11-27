@@ -218,6 +218,62 @@ toets('10j CI-stap', /bash test\/tokenteller\.sh/.test(fs.readFileSync('.github/
 toets('10k module: geen netwerk', !/require\('(https?|net|child_process)'\)/.test(fs.readFileSync('tokenteller.js', 'utf8')));
 
 [V, W, X, G].forEach(function (p) { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) {} });
+// ── wv4177 (2C45/2C73): deze abonnementsweek, per model, staaf van vandaag "tot hh:mm" (verzonnen getallen) ──
+const WK = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tokens-week-')));
+fs.mkdirSync(path.join(WK, '00_Systeem', 'Tokens', 'klussen'), { recursive: true });
+const samW = {
+  gegenereerd_op: '2030-01-10T05:21:00.000Z', periode: { van: '2030-01-01', tot: '2030-01-10', dagen: 10 }, dollars_per_euro: 1.25,
+  totaal: { usd: 125, eur: 100 }, per_soort: [],
+  per_dag: [{ datum: '2030-01-10', tankpunten: 3 }, { datum: '2030-01-09', tankpunten: 12.34 }],
+  per_dag_soort: [{ datum: '2030-01-10', soorten: { routine: 5 } }, { datum: '2030-01-09', soorten: { 'werkvoorraad-agent': 50 } }],
+  per_model: [{ model: 'Opus', tankpunten: 40, eur: 800 }, { model: 'Fable', tankpunten: 8, eur: 80 }, { model: 'Sonnet', tankpunten: 1, eur: 20 }, { model: 'OpenAI (Codex)', tankpunten: 0, eur: 5 }],
+  tank_per_dag: [
+    { datum: '2030-01-10', delen: [{ a: 1, soort: 'routine', model: 'Sonnet', tp: 1, eur: 20 }, { a: 1, soort: 'gesprek-hoofd', model: 'Opus', tp: 2, eur: 30 }], meter: { a1: 3, a2: 0, heel: false } },
+    { datum: '2030-01-09', delen: [{ a: 1, soort: 'werkvoorraad-agent', model: 'Opus', tp: 10, eur: 200 }, { a: 1, soort: 'manager', model: 'Fable', tp: 2, eur: 10 },
+      { a: 2, soort: 'werkvoorraad-agent', model: 'Opus', tp: 4, eur: 80 }, { a: 1, soort: 'cijfer-meester', model: 'Opus', tp: 0.5, eur: 9 }, { a: 3, soort: 'routine', model: 'Opus', tp: 99, eur: 99 }], meter: { a1: 13, a2: 4, heel: true } },
+    { datum: '2030-01-04', delen: [{ a: 1, soort: 'werkvoorraad-agent', model: 'Opus', tp: 50, eur: 900 }], meter: { a1: 50, a2: 0, heel: true } },
+  ],
+};
+fs.writeFileSync(path.join(WK, '00_Systeem', 'Tokens', 'samenvatting.json'), JSON.stringify(samW));
+const NU = Date.parse('2030-01-10T12:00:00Z');
+// reset abonnement 1 za 12-1 22:00 NL (21:00Z) → week vanaf 6-1 (de dag na de start 5-1 22:00); abonnement 2 reset 13-1 13:00 NL → vanaf 7-1
+const tankW = { account1: { gemeten_op: '2030-01-10T11:50:00Z', zeven_dagen: 0.31, zeven_dagen_reset: '2030-01-12T21:00:00.000Z' },
+  account2: { gemeten_op: '2030-01-10T11:50:00Z', zeven_dagen: 0.05, zeven_dagen_reset: '2030-01-13T12:00:00.000Z' }, agents_op: 2 };
+const tw = T.maak({ vault: WK, vv: VV });
+const sw = tw.stand({ tank: tankW, nu: NU });
+const a1 = sw.week && sw.week.abonnementen[0], a2 = sw.week && sw.week.abonnementen[1];
+toets('12a week: twee abonnementen, afgeleid', !!sw.week && sw.week.afgeleid === true && sw.week.abonnementen.length === 2 && a1.account === 1 && a2.account === 2, sw.week);
+toets('12b week van abonnement 1 begint de dag na een start na 12:00 (5-1 22:00 → 6-1); 4-1 telt niet', a1.van === '2030-01-06' && a1.telling === 15.5, a1);
+toets('12c verdeling: agents / vaste routines (routine + manager) / jouw gesprekken / overig tellen op tot de telling',
+  JSON.stringify(a1.delen.map(function (x) { return [x.id, x.punten]; })) === JSON.stringify([['agents', 10], ['routines', 3], ['gesprekken', 2], ['overig', 0.5]])
+  && Math.abs(a1.delen.reduce(function (s, x) { return s + x.punten; }, 0) - a1.telling) < 0.05, a1.delen);
+toets('12d euro\'s als tweede getal per deel en totaal', a1.eur === 269 && a1.delen[0].eur === 200, a1);
+toets('12e meter nu = echte weekmeter in procent; meter over dezelfde dagen = som tank-dag', a1.meter_nu === 31 && a1.meter_zelfde_dagen === 16, a1);
+toets('12f abonnement 2: eigen week (start 6-1 13:00 NL, na 12:00 → 7-1), alleen zijn eigen punten; account 3 telt nergens', a2.van === '2030-01-07' && a2.telling === 4 && a2.meter_zelfde_dagen === 4, a2);
+const sw1 = tw.stand({ tank: Object.assign({}, tankW, { agents_op: 1, account2: Object.assign({}, tankW.account2) }), nu: NU });
+toets('12g agents op 1 maar wel punten op abonnement 2 deze week: blijft zichtbaar', sw1.week.abonnementen.length === 2);
+const samW0 = JSON.parse(JSON.stringify(samW)); samW0.tank_per_dag.forEach(function (d) { d.delen = d.delen.filter(function (x) { return x.a !== 2; }); });
+fs.writeFileSync(path.join(WK, '00_Systeem', 'Tokens', 'samenvatting.json'), JSON.stringify(samW0));
+const tw0 = T.maak({ vault: WK, vv: VV });
+toets('12h agents op 1 en niets op abonnement 2: alleen abonnement 1', tw0.stand({ tank: Object.assign({}, tankW, { agents_op: 1 }), nu: NU }).week.abonnementen.length === 1);
+toets('12i reset voorbij (oude meting): geen week voor dat abonnement', tw0.stand({ tank: tankW, nu: Date.parse('2030-01-14T00:00:00Z') }).week === null);
+const samJ = JSON.parse(JSON.stringify(samW)); delete samJ.tank_per_dag; fs.writeFileSync(path.join(WK, '00_Systeem', 'Tokens', 'samenvatting.json'), JSON.stringify(samJ));
+const sj = T.maak({ vault: WK, vv: VV }).stand({ tank: tankW, nu: NU });
+toets('12j zonder tank_per_dag (oud rapport): week null, geen fout; per model blijft (30 dagen)', sj.ok === true && sj.week === null && sj.modellen && sj.modellen.van_week === null && sj.modellen.regels[0].punten_30 === 40, sj.week);
+fs.writeFileSync(path.join(WK, '00_Systeem', 'Tokens', 'samenvatting.json'), JSON.stringify(samW));
+const md = T.maak({ vault: WK, vv: VV }).stand({ tank: tankW, nu: NU }).modellen;
+toets('12k per model: vier vaste regels, 30 dagen = per_model van het rapport', md && JSON.stringify(md.regels.map(function (r) { return [r.model, r.punten_30, r.eur_30]; }))
+  === JSON.stringify([['Opus', 40, 800], ['Fable', 8, 80], ['Sonnet', 1, 20], ['Haiku', null, null]]), md);
+toets('12l per model deze week: week van abonnement 1, beide abonnementen samen (Opus 2+10+4+0,5)', md.van_week === '2030-01-06'
+  && md.regels[0].punten_week === 16.5 && md.regels[1].punten_week === 2 && md.regels[2].punten_week === 1 && md.regels[3].punten_week === 0, md.regels);
+toets('12m staaf van vandaag: meting_tot = Nederlandse dag en tijd van de meting', JSON.stringify(sw.meting_tot) === JSON.stringify({ datum: '2030-01-10', tijd: '06:21' }), sw.meting_tot);
+toets('12n per dag: tankpunten erbij (venstertje)', sw.per_dag.length === 2 && sw.per_dag[1].punten === 3 && sw.per_dag[0].punten === 12.3, sw.per_dag);
+toets('12o rare invoer in tank_per_dag (geen object, rare soort) faalt niet', (function () {
+  const k = JSON.parse(JSON.stringify(samW)); k.tank_per_dag.push(null, 5, { datum: '2030-01-09', delen: [null, 'x', { a: 1, soort: '<script>', model: 'Opus', tp: 'x', eur: null }] });
+  fs.writeFileSync(path.join(WK, '00_Systeem', 'Tokens', 'samenvatting.json'), JSON.stringify(k));
+  try { const r = T.maak({ vault: WK, vv: VV }).stand({ tank: tankW, nu: NU }); return r.week.abonnementen[0].telling === 15.5; } catch (e) { return false; }
+})());
+
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');
 process.exit(fouten ? 1 : 0);
 JS
