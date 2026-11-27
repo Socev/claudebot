@@ -25846,6 +25846,14 @@ const mailman = (function () {
         try { g = gmailOpdracht && typeof gmailOpdracht.conceptKlaar === 'function' ? gmailOpdracht.conceptKlaar() : []; } catch (e) { g = []; }
         return v.concat(g);
       },
+      // wv4283: Socev-labels eraf na afloop (gmail-opdracht.js labelWeg / labelWegUitkomst); gmailOpdracht staat verderop (TDZ: try)
+      opdrachtWeg: function (pv) {
+        if (pv !== 'gmail:david') return [];
+        try { return gmailOpdracht && typeof gmailOpdracht.labelWeg === 'function' ? gmailOpdracht.labelWeg() : []; } catch (e) { return []; }
+      },
+      opdrachtWegUitkomst: function (x) {
+        try { return gmailOpdracht && typeof gmailOpdracht.labelWegUitkomst === 'function' ? gmailOpdracht.labelWegUitkomst(x) : 0; } catch (e) { return 0; }
+      },
       proces: intakeProces, verkoopTmp: '/dev/shm' });
   } catch (e) { logError('mailman', e); return null; }
 })();
@@ -26477,7 +26485,8 @@ function conceptLeerInfo() { if (!conceptLeer) return { module: false }; try { c
 // ── wv4105 (besluitenpagina nr 162 = 2C62): Socev-labels in Gmail. Logica en waarom in gmail-opdracht.js; ontwerp + Codex-ontwerpreview:
 // mk-scripts/wv4105/ontwerp.md. Hier de koppeling: het lees-luik (alleen mail_zoeken), POST /agent op deze pod (vaste socev:-labels, chat 40687,
 // zoals Shopper), het agentregister, het conceptregister van de skill (alleen lezen) en de Jev-scores van MailMan. Schakelaar
-// /opt/data/gmail-opdracht/stand.json {"aan": false} = uit (ontbreekt = aan). De pod schrijft niets in Gmail.
+// /opt/data/gmail-opdracht/stand.json {"aan": false} = uit (ontbreekt = aan). De pod schrijft niets in Gmail; het label eraf na afloop gaat via
+// MailMan (wv4283, soort opdracht_weg, aan zodra labelset2["gmail:david"].ids de drie Socev-labels kent).
 const GMAIL_OPDRACHT_DIR = process.env.GMAIL_OPDRACHT_DIR || '/opt/data/gmail-opdracht';
 const GMAIL_OPDRACHT_LABELS = ['socev: Antwoord uit Gmail', 'socev: Zoek uit vanuit Gmail', 'socev: Todo uit Gmail'];
 function gmailOpdrachtAan() {

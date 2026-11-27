@@ -166,6 +166,81 @@ function opzet(o) {
     const mode = fs.statSync(path.join(dir, 'opdracht.sqlite')).mode & 0o777;
     is('databank 0600', mode === 0o600);
   }
+  // ── wv4283: label eraf na afloop (via MailMan), en opnieuw labelen ──
+  {
+    const { m, st } = opzet({ mails: [mail('aaaaaaaaaaaa0001', 'bbbbbbbbbbbb0001', ['INBOX', 'Socev/Antwoord'], '2026-11-27T08:00:00Z')] });
+    await m.tik();
+    is('loopt: niets eraf', m.labelWeg().length === 0);
+    st.agent[st.starts[0].job] = 'klaar'; st.concept.add('bbbbbbbbbbbb0001');
+    await m.tik();
+    let w = m.labelWeg();
+    is('concept → label eraf aangeboden', w.length === 1 && w[0].gmail_id === 'aaaaaaaaaaaa0001' && w[0].draad === 'bbbbbbbbbbbb0001' && w[0].label === 'Socev/Antwoord');
+    is('uitkomst: onbekend label of id doet niets', m.labelWegUitkomst({ gmail_id: 'aaaaaaaaaaaa0001', label: 'INBOX', uitkomst: 'weg' }) === 0 && m.labelWegUitkomst({ gmail_id: 'kapot', label: 'Socev/Antwoord', uitkomst: 'weg' }) === 0);
+    for (let i = 0; i < G.WEG_POGINGEN - 1; i++) m.labelWegUitkomst({ gmail_id: 'aaaaaaaaaaaa0001', label: 'Socev/Antwoord', uitkomst: 'aangeboden' });
+    is('nog ' + 1 + ' poging over', m.labelWeg().length === 1 && m.health().label_eraf.open === 1);
+    is('weg → uit de lijst', m.labelWegUitkomst({ gmail_id: 'aaaaaaaaaaaa0001', label: 'Socev/Antwoord', uitkomst: 'weg' }) === 1 && m.labelWeg().length === 0);
+    is('health: weg_24u', m.health().label_eraf.weg_24u === 1);
+    // het label stond er na het weghalen nog in de zoekindex (en het luik geeft het label nog): binnen OPNIEUW_MS geen nieuwe agent
+    await m.tik();
+    is('zoekindex loopt achter: geen tweede agent', st.starts.length === 1);
+    // David plakt het label opnieuw op hetzelfde gesprek → nieuwe opdracht, dezelfde rij
+    st.nu += G.OPNIEUW_MS + 60000;
+    await m.tik();
+    const r = m._db().prepare('SELECT status, keer, label_weg FROM opdracht').get();
+    is('opnieuw gelabeld → nieuwe agent', st.starts.length === 2 && r.keer === 2 && r.label_weg === null && m._db().prepare('SELECT count(*) n FROM opdracht').get().n === 1);
+    // hooguit KEER_MAX keer
+    for (let k = 2; k <= G.KEER_MAX + 1; k++) {
+      st.agent[st.starts[st.starts.length - 1].job] = 'klaar';
+      await m.tik();
+      m.labelWegUitkomst({ gmail_id: 'aaaaaaaaaaaa0001', label: 'Socev/Antwoord', uitkomst: 'elders' });
+      st.nu += G.OPNIEUW_MS + 60000;
+      await m.tik();
+    }
+    is('hooguit ' + G.KEER_MAX + ' keer per gesprek', st.starts.length === G.KEER_MAX);
+  }
+  {
+    // partieel weggehaald: een ouder bericht van de draad draagt het label nog → geen nieuwe rij op dat oudere bericht
+    const { m, st } = opzet({ mails: [mail('aaaaaaaaaaaa0001', 'bbbbbbbbbbbb0001', ['INBOX', 'Socev/Todo'], '2026-11-27T07:00:00Z'), mail('aaaaaaaaaaaa0002', 'bbbbbbbbbbbb0001', ['INBOX', 'Socev/Todo'], '2026-11-27T08:00:00Z')] });
+    await m.tik();
+    st.agent[st.starts[0].job] = 'klaar';
+    await m.tik();
+    is('todo klaar → eraf op het nieuwste', m.labelWeg().length === 1 && m.labelWeg()[0].gmail_id === 'aaaaaaaaaaaa0002');
+    m.labelWegUitkomst({ gmail_id: 'aaaaaaaaaaaa0002', label: 'Socev/Todo', uitkomst: 'weg' });
+    st.mails = [st.mails[0]];
+    await m.tik();
+    is('rest-label op ouder bericht: geen nieuwe rij binnen OPNIEUW_MS', st.starts.length === 1 && m._db().prepare('SELECT count(*) n FROM opdracht').get().n === 1);
+  }
+  {
+    const { m, st } = opzet({ mails: [mail('aaaaaaaaaaaa0001', 'bbbbbbbbbbbb0001', ['Socev/Zoek uit'], '2026-11-27T08:00:00Z')] });
+    await m.tik();
+    st.agent[st.starts[0].job] = 'mislukt';
+    await m.tik();
+    is('mislukt met agentrapport → eraf aangeboden', m.labelWeg().length === 1);
+  }
+  {
+    const { m, st } = opzet({ mails: [mail('aaaaaaaaaaaa0001', 'bbbbbbbbbbbb0001', ['Socev/Zoek uit'], '2026-11-27T08:00:00Z')] });
+    await m.tik();
+    delete st.agent[st.starts[0].job]; st.nu += 3 * 3600000;
+    await m.tik();
+    is('kwijt (David hoorde niets) → label blijft', m.labelWeg().length === 0 && m.health().label_eraf.blijft === 1);
+  }
+  {
+    const { m } = opzet({ startOk: false, mails: [mail('aaaaaaaaaaaa0001', 'bbbbbbbbbbbb0001', ['Socev/Todo'], '2026-11-27T08:00:00Z')] });
+    for (let i = 0; i < G.POGINGEN + 1; i++) await m.tik();
+    is('nooit gestart → label blijft', m.labelWeg().length === 0);
+  }
+  {
+    // oude databank (van vóór wv4283) krijgt de kolommen erbij
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gmo-oud-'));
+    const { DatabaseSync } = require('node:sqlite');
+    const o = new DatabaseSync(path.join(dir, 'opdracht.sqlite'));
+    o.exec(`CREATE TABLE opdracht (id INTEGER PRIMARY KEY, soort TEXT NOT NULL, thread_id TEXT NOT NULL, gmail_id TEXT NOT NULL, bericht TEXT, status TEXT NOT NULL DEFAULT 'wacht',
+      pogingen INTEGER NOT NULL DEFAULT 0, job_id TEXT, waarschuw INTEGER NOT NULL DEFAULT 0, gezien TEXT NOT NULL, gestart TEXT, klaar TEXT, reden TEXT, UNIQUE (soort, gmail_id))`);
+    o.prepare("INSERT INTO opdracht (soort, thread_id, gmail_id, bericht, status, gezien, klaar, reden) VALUES ('todo', 'bbbbbbbbbbbb0001', 'aaaaaaaaaaaa0001', 'aaaaaaaaaaaa0001', 'klaar', ?, ?, 'klaar')").run(new Date(T0).toISOString(), new Date(T0).toISOString());
+    o.close();
+    const m = G.maak({ dir, zoek: Z, nu: () => T0, io: { aan: () => true } });
+    is('oude databank: kolommen erbij, oude klare rij → eraf', m.labelWeg().length === 1 && m.health().label_eraf.open === 1);
+  }
   console.log('gmail-opdracht: ' + goed + ' goed, ' + fout + ' fout');
   process.exit(fout ? 1 : 0);
 })().catch(function (e) { console.log('ROOD uitzondering ' + (e && e.stack || e)); process.exit(1); });

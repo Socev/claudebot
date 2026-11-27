@@ -131,7 +131,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-2.13';   // wv4326: Intake-poort (config.json intake_poort; mail van Jev zonder verband → OVERIG); wv3318: proefweek vanzelf weg voor de derde keer aangescherpt (storing/hersteld, mislukt/niet geplaatst, wijziging met ingangsdatum, export/download, tegoed/cadeaukaart/punten, kosten/tarief, kenteken/gegevens, berichten van mensen via een platform; geldoverboekdiensten en school-app als afzender) en opnieuw gestart (zou_versie 4); wv2968: proefweek vanzelf weg opnieuw aangescherpt (verificatie, storing/schijf, budget/proefperiode, onderhoud, aanvraag, locatie, FW/RE, persoonlijk adres op bedrijfsdomein, beleggen/betaaldiensten/gemeente) en opnieuw gestart (zou_versie 3); wv3092: CONCEPT_KLAAR (concept van Socev in de draad; eraf als het concept weg is), achter labelset2.ids.CONCEPT_KLAAR; wv2469: proefweek vanzelf weg aangescherpt (betaal-/termijnwoorden, bank/overheid/loon/kluis-afzenders, persoonlijke adressen nooit) en opnieuw gestart (zou_versie 2); wv2548: Doktersmaten gelijk met privé achter config.json gedeeld_gelijk (tekst, Jev, labelset 2, live; nooit uitgangen/afgedaan/zaken/overstap); wv2455: proefweek 'vanzelf weg' (schaduw: zaak.zou_weg, tabel wegzet_afzender, Nooit per afzender), teller jij_open, voorwerkbron voor mailvoorwerk.js; wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
+const VERSIE = 'mailman-2.14';   // wv4283: Socev-labels eraf na afloop (soort opdracht_weg, achter labelset2.ids van de drie labels); wv4326: Intake-poort (config.json intake_poort; mail van Jev zonder verband → OVERIG); wv3318: proefweek vanzelf weg voor de derde keer aangescherpt (storing/hersteld, mislukt/niet geplaatst, wijziging met ingangsdatum, export/download, tegoed/cadeaukaart/punten, kosten/tarief, kenteken/gegevens, berichten van mensen via een platform; geldoverboekdiensten en school-app als afzender) en opnieuw gestart (zou_versie 4); wv2968: proefweek vanzelf weg opnieuw aangescherpt (verificatie, storing/schijf, budget/proefperiode, onderhoud, aanvraag, locatie, FW/RE, persoonlijk adres op bedrijfsdomein, beleggen/betaaldiensten/gemeente) en opnieuw gestart (zou_versie 3); wv3092: CONCEPT_KLAAR (concept van Socev in de draad; eraf als het concept weg is), achter labelset2.ids.CONCEPT_KLAAR; wv2469: proefweek vanzelf weg aangescherpt (betaal-/termijnwoorden, bank/overheid/loon/kluis-afzenders, persoonlijke adressen nooit) en opnieuw gestart (zou_versie 2); wv2548: Doktersmaten gelijk met privé achter config.json gedeeld_gelijk (tekst, Jev, labelset 2, live; nooit uitgangen/afgedaan/zaken/overstap); wv2455: proefweek 'vanzelf weg' (schaduw: zaak.zou_weg, tabel wegzet_afzender, Nooit per afzender), teller jij_open, voorwerkbron voor mailvoorwerk.js; wv2259: inbox_uit (Ecobank-meldingen en factuurmail uit de inbox na verwerking; terug bij Geen factuur); wv2218: zaakregister (Mail-laag stap 3, alleen lezen; achter config.json zaken); wv2208: Ecobank-transactiemeldingen vaste regel OVERIG (geen NIEUWSBRIEF, geen Jev); wv2196: TWIJFEL alleen intern (geen Gmail-label meer, opruimen), labels op de hele draad; wv2189: factuur alleen betalen zonder actievlag; afgedaan (actievlag weg na Davids archiveren) achter actielabel_weg; wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -250,6 +250,14 @@ const CONCEPT_LABEL = 'CONCEPT_KLAAR';
 const CONCEPT_MAX = 10, CONCEPT_CHECK_MAX = 10, CONCEPT_POGINGEN = 5;
 const CONCEPT_CHECK_MS = 30 * 60000, CONCEPT_CHECK_LAAT_MS = 6 * 3600000, CONCEPT_WEEK_MS = 7 * 86400000;   // eerste week elk half uur, daarna elke 6 uur
 const CONCEPT_BRON_MS = 30 * 86400000, CONCEPT_CHECK_TOT_MS = 60 * 86400000;   // concepten van ≤ 30 dagen; na 60 dagen niet meer nalopen
+// wv4283 (toestemmingenregister rij mailman-socev-labels, Davids Ja met vingerafdruk 27-11-2026 vraag-id 64028bea): soort opdracht_weg — het
+// Socev-label (Socev/Antwoord, Socev/Zoek uit, Socev/Todo) eraf zodra Socev het werk deed (gmail-opdracht.js labelWeg via o.opdrachtWeg; de
+// uitkomst terug via o.opdrachtWegUitkomst). Alleen privé, alleen met eigen geldige label-ID's voor alle drie in config.json
+// labelset2["gmail:david"].ids (uit = die regels weg). Niet in de vaste lijst (geen tik in de Mail-App, geen label_staat). De n8n-grens leest de
+// draad na en haalt alleen dat ene label weg, van elk bericht van de draad dat het draagt (ook Davids eigen verzonden antwoord: Gmail toont het
+// gesprek anders nog met het label); nooit iets erbij, nooit iets anders eraf.
+const OPDRACHT_LABELS = ['Socev/Antwoord', 'Socev/Zoek uit', 'Socev/Todo'];
+const OPDRACHT_MAX = 10;
 // wv2036 statuslabels: de factuurstappen na FACTUUR/verwerkt, hun rang (alleen vooruit) en wat er per stap af mag (eerdere stappen uit de reeks)
 const STAP_LABEL = { in_sepa: 'FACTUUR/In_SEPA', is_betaald: 'FACTUUR/Is_betaald' };
 const STAP_RANG = { in_sepa: 1, is_betaald: 2 };
@@ -667,6 +675,19 @@ function conceptLabelId(t) {
   if (typeof id !== 'string' || !/^Label_\d{1,12}$/.test(id) || Object.values(r.ids).includes(id)) return null;
   return id;
 }
+// wv4283: de label-ID's van de drie Socev-labels uit labelset2 (t = config.labelset2[postvak]): alleen als de rest van de set geldig is en alle
+// drie een eigen ID hebben (niet een van de vaste of optionele labels, niet CONCEPT_KLAAR, onderling verschillend). → { naam: 'Label_…' } of null (= uit)
+function opdrachtLabelIds(t) {
+  const r = labelset2Lees(t);
+  if (!r.ok) return null;
+  const bezet = new Set(Object.values(r.ids).concat([t.ids[CONCEPT_LABEL]])), uit = {};
+  for (const n of OPDRACHT_LABELS) {
+    const id = t.ids[n];
+    if (typeof id !== 'string' || !/^Label_\d{1,12}$/.test(id) || bezet.has(id)) return null;
+    bezet.add(id); uit[n] = id;
+  }
+  return uit;
+}
 // Regelveld labels (B8): alleen namen uit L2_REGEL, uniek; leeg = geen. → { ok, l | reden }
 function toetsRegelLabels(x) {
   if (x == null) return { ok: true, l: [] };
@@ -810,7 +831,7 @@ function zouWeg(x) {
 
 const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, eersteRegel, regelStroom, jevVragen,
   jevState, leesJev, besluitJev, poortGeldt, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
-  labelset2Lees, conceptLabelId, CONCEPT_LABEL, CONCEPT_POGINGEN, toetsRegelLabels, labelPlan2, alleenBetalen, ecobankMelding, DRAAD_LABELS, ERF_LABELS, DRAAD_SOORTEN, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
+  labelset2Lees, conceptLabelId, opdrachtLabelIds, OPDRACHT_LABELS, CONCEPT_LABEL, CONCEPT_POGINGEN, toetsRegelLabels, labelPlan2, alleenBetalen, ecobankMelding, DRAAD_LABELS, ERF_LABELS, DRAAD_SOORTEN, VLAG_LIJSTEN, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
   authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL,
   laagBericht, laagDraad, LAAG_VERSIE, LAGEN, LAAG_REDENEN, FACTUUR_FASEN, zouWeg, VANZELF_REDENEN, VANZELF_NIET_RE, VANZELF_VERSIE, VANZELF_NIET_AFZENDER_RE, VANZELF_VRIJ_RE, persoonAdres };
 
@@ -1610,6 +1631,12 @@ function maak(o) {
     const c = config();
     return conceptLabelId(isObj(c.labelset2) ? c.labelset2[p.id] : null);
   }
+  // wv4283: Socev-labels eraf alleen privé, nooit een gedeeld postvak, alleen met drie eigen label-ID's in labelset2 → { naam: id } of null
+  function opdrachtAan(p) {
+    if (!p || p.id !== 'gmail:david' || p.gedeeld || !l2(p)) return null;
+    const c = config();
+    return opdrachtLabelIds(isObj(c.labelset2) ? c.labelset2[p.id] : null);
+  }
   // wv3092: de concepten die Socev in Gmail zette (o.conceptKlaar: [{ besluit, draad, tijd }]) bijschrijven. Alleen als het besluit van dit
   // postvak is, in die draad zit en geen verzonden mail of concept is. Een nieuwer concept begint opnieuw (label opnieuw aanbieden: David kan
   // het oude label zelf weggehaald hebben; review wv3092 ZOU 1). Stond het oude label nog, dan onthoudt vorig_gezet dat: lukt het opnieuw
@@ -1926,7 +1953,7 @@ function maak(o) {
       - db.prepare("SELECT count(*) n FROM aanbod WHERE postvak = ? AND uitkomst IS NULL AND tijd >= ? AND instr(erbij, ?) > 0").get(pv, new Date(nu() - AANBOD_EIGEN_MS).toISOString(), '"' + WACHTRIJ + '"').n;
     const acties = new Map(), aanbod = [], gelezenAangeboden = [], archiefPogingen = [], af = [];
     let wacht = 0;
-    const tel = { besluit: 0, keuze: 0, vangnet: 0, route: 0, intrek: 0, opruim: 0, overstap: 0, archief: 0, factuurstap: 0, afgedaan: 0, afgedaan_schaduw: 0, terug: 0, ecobank: 0, concept: 0, concept_weg: 0 };
+    const tel = { besluit: 0, keuze: 0, vangnet: 0, route: 0, intrek: 0, opruim: 0, overstap: 0, archief: 0, factuurstap: 0, afgedaan: 0, afgedaan_schaduw: 0, terug: 0, ecobank: 0, concept: 0, concept_weg: 0, opdracht_weg: 0 };
     const iu = inboxUit(p);   // wv2259
     const vlagPlan = function (eff, plan, b) { return plan.labels.includes('TODO') || plan.labels.includes('ACTIE_DS') || eff === 'twijfel' || vlagRij(b); };
     const vol = function () { return acties.size >= LABEL_ACTIES_MAX; };
@@ -2184,10 +2211,24 @@ function maak(o) {
         if (voeg(x.gmail_id, 'concept_weg', [], [CONCEPT_LABEL])) { acties.get(x.gmail_id).thread_id = x.thread_id; conChecks.push(x.gmail_id); }
       }
     }
+    // opdracht_weg (wv4283): het Socev-label eraf nu Socev het werk deed. Na concept (zelfde bericht: CONCEPT_KLAAR eerst, het label een ronde later).
+    const opdWeg = [];
+    if (opdrachtAan(p) && typeof o.opdrachtWeg === 'function') {
+      let lijst = [];
+      try { const x = o.opdrachtWeg(pv); lijst = Array.isArray(x) ? x : []; } catch (e) { fout('mailman-opdracht', e); }
+      for (const x of lijst.slice(0, 200)) {
+        if (vol() || opdWeg.length >= OPDRACHT_MAX) break;
+        if (!isObj(x) || !ID_RE.test(String(x.gmail_id || '')) || !ID_RE.test(String(x.draad || '')) || !OPDRACHT_LABELS.includes(x.label)) continue;
+        const id = String(x.gmail_id);
+        if (acties.has(id)) continue;
+        if (voeg(id, 'opdracht_weg', [], [x.label])) { acties.get(id).thread_id = String(x.draad); opdWeg.push({ gmail_id: id, label: x.label }); }
+      }
+    }
     tx(function () {
       const t = iso();
       for (const id of conPogingen) db.prepare('UPDATE concept_klaar SET pogingen = pogingen + 1 WHERE postvak = ? AND gmail_id = ?').run(pv, id);
       for (const id of conChecks) db.prepare('UPDATE concept_klaar SET check_tijd = ? WHERE postvak = ? AND gmail_id = ?').run(t, pv, id);
+      for (const x of opdWeg) { try { o.opdrachtWegUitkomst({ gmail_id: x.gmail_id, label: x.label, uitkomst: 'aangeboden' }); } catch (e) { fout('mailman-opdracht', e); } }
       for (const x of afgPogingen) for (const l of x.eraf) db.prepare('UPDATE vlag_plek SET pogingen = pogingen + 1 WHERE postvak = ? AND gmail_id = ? AND label = ? AND afgedaan IS NULL').run(pv, x.id, l);   // review KAN 1: alleen de aangeboden vlaggen
       for (const a of aanbod) db.prepare('INSERT INTO aanbod (postvak, ronde, gmail_id, soort, erbij, eraf, tijd, thread_id, erf) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(pv, r.id, a.id, a.soort, JSON.stringify(a.erbij), JSON.stringify(a.eraf), t, a.th || null, a.erf && a.erf.length ? JSON.stringify(a.erf) : null);
       for (const id of gelezenAangeboden) db.prepare('UPDATE besluit SET gelezen_aangeboden = ? WHERE id = ?').run(t, id);
@@ -2249,6 +2290,21 @@ function maak(o) {
         for (const a of open) {
           const ae = JSON.parse(a.erbij), aw = JSON.parse(a.eraf);
           const erbij = ae.filter(function (l) { return erbijN.includes(l); }), eraf = aw.filter(function (l) { return erafN.includes(l); });
+          if (a.soort === 'opdracht_weg') {
+            // wv4283: ok = de grens las de draad na en haalde het label weg waar het stond (eraf van dit bericht of van een ander bericht van de
+            // draad); niets weggehaald = het stond er al niet meer (David). Overgeslagen of mislukt: de volgende ronde opnieuw (poging telde al).
+            // Review wv4283 MOET 1: mislukt het weghalen op een ander bericht van de draad, dan is het niet af (fout; volgende ronde opnieuw).
+            const lab = aw.length === 1 && OPDRACHT_LABELS.includes(aw[0]) ? aw[0] : null;
+            const dr = Array.isArray(x.draad) ? x.draad : [];
+            const zus = dr.some(function (y) { return isObj(y) && y.ok === true && Array.isArray(y.eraf) && y.eraf.map(String).includes(lab); });
+            const heel = x.ok === true && dr.every(function (y) { return isObj(y) && y.ok === true; });
+            db.prepare('UPDATE aanbod SET uitkomst = ? WHERE id = ?').run(heel ? 'ok' : x.overgeslagen === true ? 'overgeslagen' : 'fout', a.id);
+            if (heel && lab) {
+              tel.ok++;
+              try { if (typeof o.opdrachtWegUitkomst === 'function') o.opdrachtWegUitkomst({ gmail_id: id, label: lab, uitkomst: eraf.includes(lab) || zus ? 'weg' : 'elders' }); } catch (e) { fout('mailman-opdracht', e); }
+            } else if (!heel && x.overgeslagen !== true) tel.fout++;
+            continue;
+          }
           if (x.ok !== true) {
             db.prepare('UPDATE aanbod SET uitkomst = ? WHERE id = ?').run(x.overgeslagen === true ? 'overgeslagen' : 'fout', a.id);
             // review wv2036 ZOU 2: een factuurstap die de grens overslaat (prullenbak, verzonden, al verder) is geen labelfout

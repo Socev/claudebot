@@ -3841,3 +3841,115 @@ test('wv4133 review ZOU 1: een oudere open vraag blijft zichtbaar achter meer da
   const v = mm.intakeVragen(3);
   assert.equal(v.length, 1); assert.equal(v[0].adres, 'oud@winkel.invalid');
 });
+
+// ── wv4283 Socev-labels eraf na afloop (register mailman-socev-labels): soort opdracht_weg ──
+const OPD_IDS = { 'Socev/Antwoord': 'Label_91', 'Socev/Zoek uit': 'Label_92', 'Socev/Todo': 'Label_93' };
+// zoals de n8n-grens: draad van de pod, dan alleen dat ene label weg van elk bericht van de draad dat het draagt (ook verzonden); hoofd altijd ok
+function opdPas(gm) {
+  return function (acties) {
+    const uit = gm.pas(acties.filter(function (a) { return a.soort !== 'opdracht_weg'; }));
+    for (const a of acties.filter(function (a) { return a.soort === 'opdracht_weg'; })) {
+      assert.deepEqual([a.erbij, a.eraf.length, !!a.draad], [[], 1, false]);
+      const x = gm.ber.get(a.gmail_id), l = a.eraf[0];
+      if (gm.fout) { uit.push({ gmail_id: a.gmail_id, ok: false, fout: 'HTTP 500' }); continue; }
+      if (!x || x.thread !== a.thread_id) { uit.push({ gmail_id: a.gmail_id, ok: false, overgeslagen: true }); continue; }
+      const had = x.labels.delete(l);
+      const zus = Array.from(gm.ber.entries()).filter(function (e) { return e[0] !== a.gmail_id && e[1].thread === x.thread && e[1].labels.has(l); });
+      zus.forEach(function (e) { e[1].labels.delete(l); });
+      const r = { gmail_id: a.gmail_id, erbij: [], eraf: had ? [l] : [], ok: true };
+      if (zus.length) r.draad = zus.map(function (e) { return { gmail_id: e[0], erbij: [], eraf: [l], ok: true }; });
+      uit.push(r);
+    }
+    return uit;
+  };
+}
+function opdKamer() {
+  const bron = [], uitkomst = [], gevraagd = [];
+  const k = nieuweKamer({ opdrachtWeg: function (pv) { gevraagd.push(pv); return bron.slice(); }, opdrachtWegUitkomst: function (x) { uitkomst.push(x); return 1; },
+    conceptKlaar: function () { return k.ck.slice(); } });
+  k.ck = [];
+  return Object.assign(k, { bron, uitkomst, gevraagd, gm: nepGmail() });
+}
+function opdRonde(mm, gm, ids, pas) {
+  const x = ckRonde(mm, gm, ids, pas);
+  return Object.assign(x, { opd: (x.l.j.acties || []).filter(function (a) { return a.soort === 'opdracht_weg'; }) });
+}
+
+test('wv4283 opdrachtLabelIds: alleen drie eigen geldige ID\'s naast een geldige labelset2', () => {
+  assert.deepEqual(K.opdrachtLabelIds({ ja: 'x', ids: Object.assign({}, IDS2, OPD_IDS) }), OPD_IDS);
+  assert.equal(K.opdrachtLabelIds({ ja: 'x', ids: IDS2 }), null, 'niet genoemd = uit');
+  assert.equal(K.opdrachtLabelIds({ ja: 'x', ids: Object.assign({}, IDS2, OPD_IDS, { 'Socev/Todo': undefined }) }), null, 'één ontbreekt = uit');
+  assert.equal(K.opdrachtLabelIds({ ja: 'x', ids: Object.assign({}, IDS2, OPD_IDS, { 'Socev/Todo': IDS2.TODO }) }), null, 'ID van een vast label');
+  assert.equal(K.opdrachtLabelIds({ ja: 'x', ids: Object.assign({}, IDS2, OPD_IDS, { CONCEPT_KLAAR: 'Label_93' }) }), null, 'ID van CONCEPT_KLAAR');
+  assert.equal(K.opdrachtLabelIds({ ja: 'x', ids: Object.assign({}, IDS2, OPD_IDS, { 'Socev/Todo': 'Label_92' }) }), null, 'twee keer hetzelfde ID');
+  assert.equal(K.opdrachtLabelIds({ ja: 'x', ids: Object.assign({}, IDS2, OPD_IDS, { 'Socev/Todo': 'INBOX' }) }), null, 'systeemlabel');
+  assert.equal(K.opdrachtLabelIds({ ids: Object.assign({}, IDS2, OPD_IDS) }), null, 'labelset2 zonder Ja');
+  assert.equal(K.labelset2Lees({ ja: 'x', ids: Object.assign({}, IDS2, OPD_IDS) }).namen.some(function (n) { return /^Socev/.test(n); }), false, 'niet in de vaste lijst');
+});
+
+test('wv4283 opdracht_weg: label eraf van de hele draad (ook verzonden), alleen dat label; uitkomst terug; uit zonder ID\'s; nooit Doktersmaten', () => {
+  const { mm, dir, gm, bron, uitkomst, gevraagd } = opdKamer();
+  const m = mail(), n = mail();
+  const ik = { id: hexId(), threadId: m.threadId };
+  draai(mm, 'gmail:david', [m, n], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  gm.voeg(m); gm.voeg(n); gm.voeg(ik, true);
+  const ids = [m.id, n.id], pas = opdPas(gm);
+  ckRonde(mm, gm, ids, pas);   // eerst de gewone labels
+  gm.draadLabel(m.threadId, 'Socev/Antwoord'); gm.zet(m.id, 'TODO'); gm.zet(n.id, 'Socev/Todo');
+  bron.push({ gmail_id: m.id, draad: m.threadId, label: 'Socev/Antwoord', soort: 'antwoord' });
+  bron.push({ gmail_id: n.id, draad: m.threadId, label: 'Socev/Todo', soort: 'todo' });   // draad klopt niet: grens slaat over
+  bron.push({ gmail_id: 'kapot!', draad: m.threadId, label: 'Socev/Antwoord' }, { gmail_id: n.id, draad: n.threadId, label: 'INBOX' });
+  assert.deepEqual(opdRonde(mm, gm, ids, pas).opd, [], 'zonder label-ID\'s in labelset2: niets');
+  assert.equal(gevraagd.length, 0, 'en de bron wordt niet eens gevraagd');
+  l2Toestaan(dir, OPD_IDS);
+  const x = opdRonde(mm, gm, ids, pas);
+  assert.deepEqual(x.opd.map(function (a) { return [a.gmail_id, a.thread_id, a.eraf]; }), [[m.id, m.threadId, ['Socev/Antwoord']], [n.id, m.threadId, ['Socev/Todo']]], 'onzin (kapot id, vreemd label) niet aangeboden');
+  assert.ok(!gm.heeft(m.id, 'Socev/Antwoord') && !gm.heeft(ik.id, 'Socev/Antwoord'), 'van het hele gesprek, ook Davids verzonden antwoord');
+  assert.ok(gm.heeft(m.id, 'TODO'), 'niets anders eraf');
+  assert.ok(gm.heeft(n.id, 'Socev/Todo'), 'verkeerde draad: blijft');
+  assert.equal(x.g.j.telling.fout, 0, 'overgeslagen is geen fout');
+  assert.deepEqual(uitkomst.map(function (u) { return [u.gmail_id === m.id ? 'm' : 'n', u.uitkomst]; }), [['m', 'aangeboden'], ['n', 'aangeboden'], ['m', 'weg']]);
+  assert.ok(gevraagd.every(function (pv) { return pv === 'gmail:david'; }));
+  assert.equal(Object.keys(mm.mailLabelIds()).some(function (k) { return /^Socev/.test(k); }), false, 'Mail-App: geen tik op Socev-labels');
+  // het label stond er al niet meer (David haalde het zelf weg) → elders
+  uitkomst.length = 0; bron.length = 0;
+  bron.push({ gmail_id: m.id, draad: m.threadId, label: 'Socev/Zoek uit', soort: 'zoek_uit' });
+  opdRonde(mm, gm, ids, pas);
+  assert.deepEqual(uitkomst.map(function (u) { return u.uitkomst; }), ['aangeboden', 'elders']);
+  // review MOET 1: hoofdbericht lukt, een ander bericht van de draad niet → fout, niet weg (volgende ronde opnieuw)
+  uitkomst.length = 0; bron.length = 0;
+  gm.draadLabel(m.threadId, 'Socev/Antwoord');
+  bron.push({ gmail_id: m.id, draad: m.threadId, label: 'Socev/Antwoord', soort: 'antwoord' });
+  const half = opdRonde(mm, gm, ids, function (acties) { return pas(acties).map(function (r) { return r.draad ? Object.assign({}, r, { draad: r.draad.map(function (y) { return Object.assign({}, y, { ok: false }); }) }) : r; }); });
+  assert.equal(half.g.j.telling.fout, 1);
+  assert.deepEqual(uitkomst.map(function (u) { return u.uitkomst; }), ['aangeboden'], 'niet als weg geboekt');
+  // Gmail-fout: fout geteld, geen uitkomst behalve de poging
+  uitkomst.length = 0; bron.length = 0; gm.fout = true;
+  bron.push({ gmail_id: m.id, draad: m.threadId, label: 'Socev/Zoek uit', soort: 'zoek_uit' });
+  const f = opdRonde(mm, gm, ids, pas); gm.fout = false;
+  assert.equal(f.g.j.telling.fout, 1);
+  assert.deepEqual(uitkomst.map(function (u) { return u.uitkomst; }), ['aangeboden']);
+});
+
+test('wv4283 opdracht_weg wacht een ronde als hetzelfde bericht CONCEPT_KLAAR krijgt', () => {
+  const k = opdKamer();
+  const { mm, dir, gm, bron } = k;
+  const m = mail();
+  draai(mm, 'gmail:david', [m], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir, Object.assign({ CONCEPT_KLAAR: CK_ID }, OPD_IDS));
+  gm.voeg(m);
+  const ids = [m.id], drafts = new Set([m.threadId]);
+  const cp = conceptPas(gm, drafts), op = opdPas(gm);
+  const pas = function (acties) { return cp(acties.filter(function (a) { return a.soort !== 'opdracht_weg'; })).concat(op(acties.filter(function (a) { return a.soort === 'opdracht_weg'; }))); };
+  ckRonde(mm, gm, ids, pas);
+  gm.zet(m.id, 'Socev/Antwoord');
+  k.ck.push({ gmail_id: m.id, draad: m.threadId, tijd: new Date(klok).toISOString() });
+  bron.push({ gmail_id: m.id, draad: m.threadId, label: 'Socev/Antwoord', soort: 'antwoord' });
+  let x = opdRonde(mm, gm, ids, pas);
+  assert.deepEqual([x.ck.map(function (a) { return a.soort; }), x.opd.length], [['concept'], 0], 'eerst CONCEPT_KLAAR');
+  x = opdRonde(mm, gm, ids, pas);
+  assert.equal(x.opd.length, 1, 'daarna het label eraf');
+  assert.ok(gm.heeft(m.id, 'CONCEPT_KLAAR') && !gm.heeft(m.id, 'Socev/Antwoord'));
+  assert.equal(mm.info().postvakken.find(function (p) { return p.id === 'gmail:groenhouten'; }).concept_klaar, undefined, 'doktersmaten nooit');
+});

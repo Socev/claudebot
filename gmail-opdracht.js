@@ -20,8 +20,13 @@
  * Afloop: agent klaar → staat er in het conceptregister (regel van de skill) een concept voor die draad van na de start, dan 'concept':
  * MailMan zet dan CONCEPT_KLAAR op het binnengekomen bericht (bestaande route, register concept-klaar).
  *
- * NIET (nog). Het label eraf halen of de labels aanmaken: valt niet onder het toestemmingenregister; de pod doet in Gmail niets. Davids Ja op de
- * registerkaart = vervolgrij. Nooit Doktersmaten (het luik zoekt alleen in privé).
+ * LABEL ERAF (wv4283; toestemmingenregister rij mailman-socev-labels, Davids Ja met vingerafdruk 27-11-2026 vraag-id 64028bea). Is het werk
+ * gedaan (concept, klaar, of mislukt: dan ging het agentrapport met ok:false al langs Socev naar David), dan biedt deze module het label aan
+ * MailMan aan om weg te halen (labelWeg); MailMan geeft het in zijn ronde aan n8n (soort opdracht_weg), de n8n-grens haalt alleen dat ene
+ * Socev-label weg van de berichten van die draad die het dragen, en MailMan meldt de uitkomst terug (labelWegUitkomst). Kwijt of nooit gestart:
+ * het label blijft staan (dan lijkt het ook niet gedaan). Haalt David het label opnieuw op een gesprek waar het al weggehaald was, dan is dat een
+ * nieuwe opdracht (hooguit KEER_MAX keer per gesprek en soort). De pod zelf schrijft nog steeds niets in Gmail. Nooit Doktersmaten (het luik
+ * zoekt alleen in privé; MailMan alleen gmail:david).
  * Opslag: opdracht.sqlite (0600), alleen id's, soort, status en tijden; geen onderwerp of tekst. Rijen na 60 dagen weg (> het zoekvenster van 30).
  * PUUR waar het kan: soortenVan, doelen, opdrachtTekst. Alles naar buiten via io (server.js).
  */
@@ -43,6 +48,9 @@ const KWIJT_MS = 2 * 3600000;          // agent na 2 uur niet meer in het regist
 const AGENT_MINUTEN = 30;
 const ID_RE = /^[0-9a-f]{12,24}$/;
 const STATUS = ['wacht', 'loopt', 'concept', 'klaar', 'mislukt', 'opgegeven'];
+// wv4283: label eraf na afloop. WEG_POGINGEN aanbiedingen aan MailMan (elk kwartier één ronde); daarna laat de pod het los (health weg_opgegeven).
+// OPNIEUW_MS: zo lang na het weghalen telt een label dat de zoekvraag nog ziet niet als nieuwe opdracht (Gmail-zoekindex loopt soms even achter).
+const WEG_POGINGEN = 5, OPNIEUW_MS = 15 * 60000, KEER_MAX = 3;
 
 function isObj(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
 function kort(s, n) { s = String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
@@ -144,6 +152,12 @@ function maak(o) {
       bericht TEXT, status TEXT NOT NULL DEFAULT 'wacht', pogingen INTEGER NOT NULL DEFAULT 0, job_id TEXT, waarschuw INTEGER NOT NULL DEFAULT 0,
       gezien TEXT NOT NULL, gestart TEXT, klaar TEXT, reden TEXT, UNIQUE (soort, gmail_id));
       CREATE INDEX IF NOT EXISTS opdracht_status ON opdracht (status);`);
+    // wv4283: label eraf (label_weg = tijd, weg_door mailman|elders), aanbiedingen, en hoe vaak David dit gesprek met dit label opnieuw gaf
+    const kol = new Set(db.prepare('PRAGMA table_info(opdracht)').all().map(function (r) { return r.name; }));
+    if (!kol.has('label_weg')) db.exec('ALTER TABLE opdracht ADD COLUMN label_weg TEXT');
+    if (!kol.has('weg_door')) db.exec('ALTER TABLE opdracht ADD COLUMN weg_door TEXT');
+    if (!kol.has('weg_pogingen')) db.exec('ALTER TABLE opdracht ADD COLUMN weg_pogingen INTEGER NOT NULL DEFAULT 0');
+    if (!kol.has('keer')) db.exec('ALTER TABLE opdracht ADD COLUMN keer INTEGER NOT NULL DEFAULT 1');
     return db;
   }
   function iso(ms) { return new Date(ms == null ? nu() : ms).toISOString(); }
@@ -184,6 +198,20 @@ function maak(o) {
       const d = open(), t = iso();
       let nieuw = 0;
       for (const x of doelen(mails)) {
+        // wv4283: haalde MailMan het label van dit gesprek al weg en staat het er nu weer (langer dan OPNIEUW_MS na het weghalen), dan gaf David
+        // het opnieuw: dezelfde rij gaat terug naar wacht (hooguit KEER_MAX keer). Zo start een label dat het weghalen miste geen tweede agent op
+        // een ouder bericht van de draad (rij per soort + draad zodra er één weggehaald is).
+        const weg = d.prepare('SELECT * FROM opdracht WHERE soort = ? AND thread_id = ? AND label_weg IS NOT NULL ORDER BY label_weg DESC, id DESC LIMIT 1').get(x.soort, x.draad);
+        if (weg) {
+          if (d.prepare("SELECT 1 FROM opdracht WHERE soort = ? AND thread_id = ? AND (label_weg IS NULL OR status IN ('wacht', 'loopt')) LIMIT 1").get(x.soort, x.draad)) continue;
+          if (Number(weg.keer) >= KEER_MAX || nu() - Date.parse(weg.label_weg) < OPNIEUW_MS) continue;
+          const bezet = d.prepare('SELECT id FROM opdracht WHERE soort = ? AND gmail_id = ? AND id != ?').get(x.soort, x.gmail_id, weg.id);
+          const n = Number(d.prepare(`UPDATE opdracht SET status = 'wacht', gmail_id = ?, bericht = ?, pogingen = 0, job_id = NULL, gestart = NULL, klaar = NULL,
+            reden = NULL, waarschuw = 0, label_weg = NULL, weg_door = NULL, weg_pogingen = 0, keer = keer + 1, gezien = ? WHERE id = ?`)
+            .run(bezet ? weg.gmail_id : x.gmail_id, bezet ? weg.bericht : x.bericht, t, weg.id).changes) || 0;
+          if (n) { nieuw += n; log('gmail-opdracht opnieuw soort=' + x.soort + ' keer=' + (Number(weg.keer) + 1)); }
+          continue;
+        }
         nieuw += Number(d.prepare('INSERT OR IGNORE INTO opdracht (soort, thread_id, gmail_id, bericht, gezien) VALUES (?, ?, ?, ?, ?)').run(x.soort, x.draad, x.gmail_id, x.bericht, t).changes) || 0;
       }
       const meta = new Map(doelen(mails).map(function (x) { return [x.soort + ' ' + x.gmail_id, x]; }));
@@ -221,15 +249,49 @@ function maak(o) {
         .all(iso(nu() - CONCEPT_BRON_MS)).map(function (r) { return { gmail_id: r.bericht, draad: r.thread_id, tijd: r.klaar }; });
     } catch (e) { fout('gmail-opdracht', e); return []; }
   }
+  /*
+   * wv4283 — voor MailMan (soort opdracht_weg): het werk is gedaan, het label mag eraf. → [{ gmail_id, draad, label, soort }]
+   * Gedaan = concept, klaar, of mislukt met een agentrapport (reden 'mislukt': de agent eindigde met ok:false en zijn rapport ging langs Socev
+   * naar David). Kwijt (pod-herstart) of nooit gestart (opgegeven): het label blijft, want dan hoorde David niets.
+   */
+  function labelWeg() {
+    try {
+      return open().prepare(`SELECT soort, gmail_id, thread_id FROM opdracht WHERE label_weg IS NULL AND weg_pogingen < ? AND klaar >= ?
+          AND (status IN ('concept', 'klaar') OR (status = 'mislukt' AND reden = 'mislukt')) ORDER BY klaar, id LIMIT 50`)
+        .all(WEG_POGINGEN, iso(nu() - CONCEPT_BRON_MS))
+        .filter(function (r) { return SOORTEN[r.soort] && ID_RE.test(r.gmail_id) && ID_RE.test(r.thread_id); })
+        .map(function (r) { return { gmail_id: r.gmail_id, draad: r.thread_id, label: SOORTEN[r.soort].label, soort: r.soort }; });
+    } catch (e) { fout('gmail-opdracht', e); return []; }
+  }
+  // x = { gmail_id, label, uitkomst: 'aangeboden' | 'weg' | 'elders' } — aangeboden telt een poging; weg = MailMan haalde het label weg; elders =
+  // de draad is nagelezen en het label stond er al niet meer (David haalde het zelf weg). Overgeslagen of fout: niets (de poging telde al).
+  function labelWegUitkomst(x) {
+    try {
+      if (!isObj(x) || !ID_RE.test(String(x.gmail_id || ''))) return 0;
+      const soort = Object.keys(SOORTEN).find(function (k) { return SOORTEN[k].label === x.label; });
+      if (!soort) return 0;
+      const d = open(), waar = ' WHERE soort = ? AND gmail_id = ? AND label_weg IS NULL';
+      if (x.uitkomst === 'aangeboden') return Number(d.prepare('UPDATE opdracht SET weg_pogingen = weg_pogingen + 1' + waar).run(soort, String(x.gmail_id)).changes) || 0;
+      if (x.uitkomst === 'weg' || x.uitkomst === 'elders') {
+        const n = Number(d.prepare('UPDATE opdracht SET label_weg = ?, weg_door = ?' + waar).run(iso(), x.uitkomst === 'weg' ? 'mailman' : 'elders', soort, String(x.gmail_id)).changes) || 0;
+        if (n) log('gmail-opdracht label eraf soort=' + soort + ' door=' + (x.uitkomst === 'weg' ? 'mailman' : 'elders'));
+        return n;
+      }
+      return 0;
+    } catch (e) { fout('gmail-opdracht', e); return 0; }
+  }
   function health() {
     try {
-      const t = {};
-      for (const r of open().prepare('SELECT status, count(*) n FROM opdracht WHERE gezien >= ? GROUP BY 1').all(iso(nu() - DAG))) t[r.status] = r.n;
+      const t = {}, d = open();
+      for (const r of d.prepare('SELECT status, count(*) n FROM opdracht WHERE gezien >= ? GROUP BY 1').all(iso(nu() - DAG))) t[r.status] = r.n;
       let aan = false; try { aan = io.aan() === true; } catch (e) { aan = false; }
-      return { aan, u24: t, vandaag: vandaag(), laatste_tik: laatst.tik, laatste_zoek: laatst.zoek, laatste_fout: laatst.fout };
+      const w = d.prepare(`SELECT COALESCE(sum(label_weg >= ?), 0) weg_24u, COALESCE(sum(label_weg IS NULL AND weg_pogingen >= ?), 0) weg_opgegeven,
+        COALESCE(sum(label_weg IS NULL AND status IN ('mislukt', 'opgegeven') AND COALESCE(reden, '') != 'mislukt'), 0) label_blijft FROM opdracht`).get(iso(nu() - DAG), WEG_POGINGEN);
+      return { aan, u24: t, vandaag: vandaag(), laatste_tik: laatst.tik, laatste_zoek: laatst.zoek, laatste_fout: laatst.fout,
+        label_eraf: { open: labelWeg().length, weg_24u: Number(w.weg_24u) || 0, opgegeven: Number(w.weg_opgegeven) || 0, blijft: Number(w.label_blijft) || 0 } };
     } catch (e) { return { fout: true }; }
   }
-  return { tik, afloop, conceptKlaar, health, _db: open };
+  return { tik, afloop, conceptKlaar, labelWeg, labelWegUitkomst, health, _db: open };
 }
 
-module.exports = { maak, soortenVan, doelen, opdrachtTekst, SOORTEN, QUERY, STATUS, TIK_MAX, DAG_MAX, POGINGEN };
+module.exports = { maak, soortenVan, doelen, opdrachtTekst, SOORTEN, QUERY, STATUS, TIK_MAX, DAG_MAX, POGINGEN, WEG_POGINGEN, OPNIEUW_MS, KEER_MAX };
