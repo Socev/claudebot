@@ -13045,6 +13045,7 @@ function appVjRegel2(p, vandaag) {
 // toekomst; null = meteen). Geldt overal waar de pod 'zichtbaar' gebruikt: lijst, telling, Onderweg.
 function appVjZichtbaar(p, vandaag, nu) {
   if (Date.parse(p.toon_vanaf || '') > (nu == null ? Date.now() : nu)) return false;
+  if (typeof appVjUitgang === 'function' && VJU && VJU.verborgen(appVjUitgang(p.id, nu))) return false;   // wv4194: Doe jij het, de beurt loopt nog
   if (typeof appVjBriefingVerlopen === 'function' && appVjBriefingVerlopen(p, vandaag)) return false;   // wv4016 (los geknipt in test/voor-jou-momenten: zonder): een vraag uit de briefing vervalt aan het eind van zijn dag
   return p.status === 'open' || (p.status === 'later' && !(String(p.later_tot || '') > vandaag));
 }
@@ -13334,7 +13335,10 @@ function appVjKort(p, vandaag) {
   return { id: p.id, soort: ['doen', 'besluit', 'proef'].indexOf(p.soort) >= 0 ? p.soort : 'doen', titel: appKort(appVjGewoon(p.titel), 120), regel2: appVjRegel2(p, vandaag),
     deadline: appVjDeadline(p) ? p.deadline : null, deadline_reden: (appVjDeadline(p) || {}).reden || null, dichtbij: appVjDichtbij(p, vandaag),   // wv4193: alleen een echte datum
     waar: APP_VJ_WAAR[p.waar] || null, duur_min: Number(p.duur_min) > 0 ? Number(p.duur_min) : null, status: p.status,
-    later_tot: p.status === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(p.later_tot || '')) ? p.later_tot : null };
+    later_tot: p.status === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(p.later_tot || '')) ? p.later_tot : null,
+    // wv4194: Niet nu › Vanavond (de kaart wacht tot toon_vanaf) en Lukt niet / Doe jij het (stand van de beurt); oude app negeert ze
+    toon_vanaf: p.status === 'open' && Date.parse(p.toon_vanaf || '') > Date.now() ? p.toon_vanaf : undefined,
+    uitgang: typeof appVjUitgang === 'function' ? appVjUitgang(p.id) || undefined : undefined };
 }
 // Telling voor /app/nieuw en Agents: zichtbare punten (en hoeveel met een deadline binnen 48 u) voor dit apparaat
 async function appVjTelling(a) {
@@ -13421,6 +13425,12 @@ async function appVoorJouRoute(req, res, a, kanaal) {
     return (p.status === 'gedaan' || p.status === 'vervallen') && p.gesloten_door === 'david' && Number.isFinite(g) && appYmd(g) === vandaag && !inLijst.has(p.id);
   }).sort(function (x, y) { return String(y.gesloten_op).localeCompare(String(x.gesloten_op)); }).slice(0, 30)
     .map(function (p) { return { id: p.id, titel: appKort(p.titel, 120), status: p.status, t: p.gesloten_op, beantwoord: appVjBeantwoordKort(p, vr, af.map) }; });
+  // wv4194 (3C17): Doe jij het — zolang Socevs beurt loopt staat de kaart hier als "Socev doet het" (status socev; oude app toont het woord)
+  if (VJU) eigen.forEach(function (p) {
+    if (inLijst.has(p.id) || (p.status !== 'open' && p.status !== 'later')) return;
+    const u = appVjUitgang(p.id, nu);
+    if (VJU.verborgen(u)) afgehandeld.unshift({ id: p.id, titel: appKort(p.titel, 120), status: 'socev', t: u.t });
+  });
   // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten).
   // wv926 (Fable-diffreview #1): alleen op GET /app/voor-jou/kanaal (sinds wv946 de enige weg van de app); /app/voor-jou blijft zoals main.
   // wv3967: wat nog op een vast moment wacht (kaarten; in het kanaal ook de uitgestelde machinekamer-vragen), met het eerstvolgende moment
@@ -14110,16 +14120,39 @@ async function appVoorJouDetail(req, res, a, idTekst) {
     terug_ms: appVjTerugMs(p.id, nu, a.id), knop: p.soort === 'besluit' && !sw && !rg ? await appVjKnopVormDb(p, appVjKnopStand(p, rv, (await appVjAfgeleid(punten, nu)).map)) : undefined,   // wv1018, wv3692
     ja_nee: p.soort === 'besluit' && !sw && !rg ? appVjJaNee(stappen) || undefined : undefined }));   // wv4193 (3C11): Ja/Nee-uitleg bij de knoppen
 }
-// POST /app/voor-jou/keuze {id, van, keuze: gedaan|later|vervallen|terug, tot?}. Onder het invoerslot (niet in APP_SLOT_VRIJ),
+// POST /app/voor-jou/keuze {id, van, keuze: gedaan|later|vanavond|wacht|vervallen|terug, tot?}. Onder het invoerslot (niet in APP_SLOT_VRIJ),
 // sessie glijdt, alleen de primaire kant, 60 per uur, auditregel zonder tekst. ↩️ alleen binnen een minuut na een keuze op deze pod.
+// wv4194 (3C84): "Niet nu" — vanavond = de kaart blijft open en wacht tot 20:00 (toon_vanaf, mk_voor_jou_toon; vanaf 22:00 niet meer);
+// wacht = later tot over 2, 7 of 14 dagen, met "wacht op iemand anders" in het bewijs. later blijft voor Morgen en een oude app.
+const VJU = (function () { try { return require(typeof __dirname === 'string' ? path.join(__dirname, 'vj-uitgang.js') : './vj-uitgang.js'); } catch (e) { logError('vj-uitgang', e); return null; } })();
+// wv4194 (3C17): Lukt niet / Doe jij het per kaart {soort, t, job} in APP_DATA/vj-uitgang.json (0600, 2 dagen); de stand volgt de beurt
+const APP_VJ_UITGANG = path.join(APP_DATA, 'vj-uitgang.json');
+function appVjUitgangStaat() { if (!appStaat.vjUitgang) appStaat.vjUitgang = appLeesJson(APP_VJ_UITGANG, {}) || {}; return appStaat.vjUitgang; }
+function appVjUitgang(id, nu) {
+  if (!VJU) return null;
+  const u = appVjUitgangStaat()[id];
+  return u ? VJU.stand(u, function (j) { return j && jobs[j] ? jobs[j].status : null; }, nu == null ? Date.now() : nu) : null;
+}
+function appVjUitgangZet(id, soort, job) {
+  const st = appVjUitgangStaat();
+  VJU.ruim(st, Date.now());
+  if (soort === 'opmerking') delete st[id];
+  else st[id] = { soort: soort, t: Date.now(), job: job };
+  try { appSchrijfJson(APP_VJ_UITGANG, st); } catch (e) { logError('vj-uitgang', e); }   // lukt schrijven niet: de stand geldt tot een herstart
+}
 async function appVoorJouKeuze(req, res, a, d) {
   const id = d.id, keuze = String(d.keuze || ''), van = String(d.van || '');
-  if (!Number.isInteger(id) || id < 1 || id > 999999999 || !Object.hasOwn({ gedaan: 1, later: 1, vervallen: 1, terug: 1 }, keuze)) return appWeiger(res, 400, 'ongeldige keuze', 'voor-jou velden');
+  if (!Number.isInteger(id) || id < 1 || id > 999999999 || !Object.hasOwn({ gedaan: 1, later: 1, vanavond: 1, wacht: 1, vervallen: 1, terug: 1 }, keuze)) return appWeiger(res, 400, 'ongeldige keuze', 'voor-jou velden');
+  if (keuze === 'vanavond' && !VJU) return appWeiger(res, 503, 'Vanavond kan nu niet; kies Morgen', 'vj-uitgang ontbreekt');
   const nu = Date.now(), vandaag = appYmd(nu);
-  let tot = null;
-  if (keuze === 'later') {
+  let tot = null, toon = null;
+  if (keuze === 'later' || keuze === 'wacht') {
     tot = String(d.tot || '');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(tot) || !(tot > vandaag) || tot > appYmdPlus(vandaag, 60)) return appWeiger(res, 400, 'kies een dag na vandaag (hooguit 60 dagen)', 'voor-jou tot');
+  }
+  if (keuze === 'vanavond') {
+    toon = VJU.vanavondTot(nu);
+    if (!toon) return appWeiger(res, 400, 'na 22:00 kan Vanavond niet meer; kies Morgen', 'voor-jou vanavond te laat');
   }
   if (keuze !== 'terug' && ['open', 'later'].indexOf(van) < 0) return appWeiger(res, 400, 'ongeldige keuze', 'voor-jou van');
   if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het straks', 'rol passief');
@@ -14132,14 +14165,22 @@ async function appVoorJouKeuze(req, res, a, d) {
   const t = appStaat.vjTerug[id];
   // Fable wv335 #3: elke app-keuze krijgt een herkomstregel als bewijs (geen tekst van David); de beheerronde leest daaraan af
   // dat David het in de app deed, en bij een besluit ("Al beantwoord") zoekt hij het antwoord zelf in het register.
-  const wat = keuze === 'gedaan' ? (p.soort === 'besluit' ? 'Al beantwoord' : 'Gedaan') : keuze === 'later' ? 'Later tot ' + appVjDag(tot) : keuze === 'vervallen' ? 'Niet meer nodig' : 'Terugdraaien';
+  const wat = keuze === 'gedaan' ? (p.soort === 'besluit' ? 'Al beantwoord' : 'Gedaan') : keuze === 'later' ? 'Later tot ' + appVjDag(tot)
+    : keuze === 'wacht' ? 'Niet nu: wacht op iemand anders, vraag het opnieuw op ' + appVjDag(tot) : keuze === 'vanavond' ? 'Niet nu: vanavond om ' + VJU.klokNL(toon)
+    : keuze === 'vervallen' ? 'Niet meer nodig' : 'Terugdraaien';
   const bewijs = 'app ' + appVjDag(vandaag) + ' ' + appKlok(new Date(nu).toISOString()) + ': David tikte ' + wat;
+  let fn = 'mk_voor_jou_status';
   if (keuze === 'terug') {
     if (!t || t.apparaat !== a.id) return appWeiger(res, 409, 'terugdraaien kan hier niet (meer); zet het punt zelf goed of zeg het Socev', 'voor-jou terug onbekend');
     if (t.tot <= nu) return appWeiger(res, 409, 'terugdraaien kan alleen tot een minuut na je keuze', 'voor-jou terug te laat');
-    body = { p_sleutel: p.sleutel, p_van: t.naar, p_naar: t.van, p_door: 'david', p_bewijs: bewijs, p_later_tot: t.van === 'later' ? t.later_tot : null };
+    // wv4194: Vanavond terug = weer meteen zichtbaar (open; een zichtbare later-kaart was dat in feite al)
+    if (t.naar === 'vanavond') { fn = 'mk_voor_jou_toon'; body = { p_sleutel: p.sleutel, p_van: 'open', p_toon: null, p_door: 'david', p_bewijs: bewijs }; }
+    else body = { p_sleutel: p.sleutel, p_van: t.naar, p_naar: t.van, p_door: 'david', p_bewijs: bewijs, p_later_tot: t.van === 'later' ? t.later_tot : null };
+  } else if (keuze === 'vanavond') {
+    fn = 'mk_voor_jou_toon';
+    body = { p_sleutel: p.sleutel, p_van: van, p_toon: new Date(toon).toISOString(), p_door: 'david', p_bewijs: bewijs };
   } else {
-    body = { p_sleutel: p.sleutel, p_van: van, p_naar: keuze, p_door: 'david', p_bewijs: bewijs, p_later_tot: tot };
+    body = { p_sleutel: p.sleutel, p_van: van, p_naar: keuze === 'wacht' ? 'later' : keuze, p_door: 'david', p_bewijs: bewijs, p_later_tot: tot };
   }
   // wv1229: Gedaan op een kaart met een voorwaarde (bv. herstart naar een nieuwe versie) telt pas als die nu waar is
   const vw = keuze === 'gedaan' && p.soort !== 'besluit' && p.voorwaarde && typeof p.voorwaarde === 'object' && p.voorwaarde.veld ? p.voorwaarde : null;   // Fable diffreview #2
@@ -14166,7 +14207,7 @@ async function appVoorJouKeuze(req, res, a, d) {
     } else body.p_reden = 'wv1229 voorwaarde waar: ' + m.spoor;
   }
   let r;
-  try { r = await appSbRpc('mk_voor_jou_status', body); } catch (e) {
+  try { r = await appSbRpc(fn, body); } catch (e) {
     logError('app-voor-jou', e); appStaat.vjCache = null;
     // Fable wv335 #7: bij een time-out kan het toch gelukt zijn
     return appWeiger(res, 503, /timeout|abort/i.test(String(e && (e.name + ' ' + e.message))) ? 'geen antwoord van de databank; kijk zo bij Ververs of het gelukt is' : 'opslaan lukte nu niet; probeer het zo opnieuw', 'voor-jou rpc');
@@ -14178,16 +14219,19 @@ async function appVoorJouKeuze(req, res, a, d) {
     return appStuur(res, 409, { ok: false, fout: 'dit punt is intussen veranderd; ververs de lijst', nu: r && typeof r.nu === 'string' ? r.nu : null });
   }
   if (keuze === 'terug') { delete appStaat.vjTerug[id]; clearTimeout(appStaat.vjDoorzet[id]); delete appStaat.vjDoorzet[id]; clearTimeout(appStaat.vjVrijgeef[id]); delete appStaat.vjVrijgeef[id]; }
-  else appStaat.vjTerug[id] = { van: van, naar: keuze, later_tot: van === 'later' ? (p.later_tot || null) : null, tot: nu + APP_VJ_TERUG_MS, apparaat: a.id };
+  else appStaat.vjTerug[id] = { van: van, naar: keuze === 'wacht' ? 'later' : keuze, later_tot: van === 'later' ? (p.later_tot || null) : null, tot: nu + APP_VJ_TERUG_MS, apparaat: a.id };
   if (keuze === 'vervallen') appVjDoorzetLater(id, p.sleutel);   // wv506: de klus erachter na de ↩️-minuut ook dicht
-  if (keuze !== 'terug' && typeof hkNaKeuze === 'function') hkNaKeuze(p.sleutel);   // wv3905: herinneringskaart → de tik na de ↩️-minuut in het register
+  if (keuze !== 'terug' && keuze !== 'vanavond' && typeof hkNaKeuze === 'function') hkNaKeuze(p.sleutel);   // wv3905: herinneringskaart → de tik na de ↩️-minuut in het register
   const metKlus = p.soort !== 'besluit' && !!(p.herkomst && Array.isArray(p.herkomst.wv) && p.herkomst.wv.length);   // review wv1853 #5
   if (keuze === 'gedaan' && metKlus) appVjVrijgeefLater(id, p.sleutel);   // wv1853: de klus erachter na de ↩️-minuut vrij
   Object.keys(appStaat.vjTerug).forEach(function (k) { if (appStaat.vjTerug[k].tot <= nu) delete appStaat.vjTerug[k]; });
-  const melding = keuze === 'gedaan' ? (metKlus ? 'Gedaan. De klus erachter gaat zo verder en meet of het gelukt is.' : 'Gedaan. Socev kijkt bij de volgende ronde of het ook zo gemeten wordt.')
-    : keuze === 'later' ? 'Op later gezet tot ' + appVjDag(tot) + '.' : keuze === 'vervallen' ? 'Weggehaald: niet meer nodig.' : 'Teruggedraaid.';
   const q = r.punt || {};
-  appStuur(res, 200, { ok: true, melding: melding, punt: Object.assign(appVjKort(Object.assign({}, p, { status: q.status || p.status, later_tot: q.later_tot }), vandaag), { terug_ms: appVjTerugMs(id, Date.now(), a.id) }) });
+  const blijft = keuze === 'vanavond' && !(Date.parse(q.toon_vanaf || '') > Date.now());   // wv4194: spoed of deadline vandaag = de databank laat hem niet wachten
+  const melding = keuze === 'gedaan' ? (metKlus ? 'Gedaan. De klus erachter gaat zo verder en meet of het gelukt is.' : 'Gedaan. Socev kijkt bij de volgende ronde of het ook zo gemeten wordt.')
+    : keuze === 'later' ? 'Op later gezet tot ' + appVjDag(tot) + '.' : keuze === 'wacht' ? 'Komt ' + appVjDag(tot) + ' terug; dan vraagt Socev het opnieuw.'
+    : keuze === 'vanavond' ? (blijft ? 'Deze kaart moet vandaag af; hij blijft in je lijst.' : 'Komt vanavond om ' + VJU.klokNL(Date.parse(q.toon_vanaf)) + ' terug.')
+    : keuze === 'vervallen' ? 'Weggehaald: niet meer nodig.' : 'Teruggedraaid.';
+  appStuur(res, 200, { ok: true, melding: melding, blijft: blijft || undefined, punt: Object.assign(appVjKort(Object.assign({}, p, { status: q.status || p.status, later_tot: q.later_tot, toon_vanaf: q.toon_vanaf }), vandaag), { terug_ms: appVjTerugMs(id, Date.now(), a.id) }) });
 }
 
 // ── wv4124 (besluitenpagina nr 370 = 3C70, David Ja 25-11-2026 22:05): elke nachtwachtermelding een kaart met 2–3 passende knoppen ──
@@ -14881,10 +14925,15 @@ async function appAnders(req, res, reg, a, s, d) {
   const soort = String(d.soort || '');
   if (['kaart', 'lijstje', 'agenda'].indexOf(soort) < 0) return appWeiger(res, 400, 'ongeldige knop', 'anders soort');
   const toel = String(d.toelichting == null ? '' : d.toelichting).replace(/\r\n?/g, '\n').trim();
-  if (!toel) return appWeiger(res, 400, 'typ je toelichting', 'anders leeg');
+  if (!toel && d.uitgang !== 'lukt_niet' && d.uitgang !== 'doe_jij') return appWeiger(res, 400, 'typ je toelichting', 'anders leeg');   // wv4194: die twee mogen zonder
   if (toel.length > 4000) return appWeiger(res, 413, 'toelichting te lang', 'anders te lang');
   if (d.gedaan !== undefined && d.gedaan !== null && typeof d.gedaan !== 'boolean') return appWeiger(res, 400, 'ongeldige knop', 'anders gedaan');
   if (d.gedaan === true && soort === 'agenda') return appWeiger(res, 400, 'een agendavoorstel kent geen Gedaan', 'anders gedaan agenda');
+  // wv4194 (3C17): uitgang = de knop Gedaan, met opmerking / Lukt niet / Doe jij het op een doe-kaart; zelfde beurt als Anders
+  const uitgang = d.uitgang === undefined || d.uitgang === null ? null : String(d.uitgang);
+  if (uitgang !== null && (soort !== 'kaart' || !VJU || VJU.UITGANGEN.indexOf(uitgang) < 0)) return appWeiger(res, 400, 'ongeldige knop', 'anders uitgang');
+  if (uitgang === 'opmerking' && d.gedaan !== true) return appWeiger(res, 400, 'ongeldige knop', 'anders opmerking zonder gedaan');
+  if ((uitgang === 'lukt_niet' || uitgang === 'doe_jij') && d.gedaan === true) return appWeiger(res, 400, 'ongeldige knop', 'anders uitgang met gedaan');
   const aid = d.anders_id === undefined || d.anders_id === null ? '' : String(d.anders_id);
   if (aid && !/^[a-z0-9-]{8,64}$/.test(aid)) return appWeiger(res, 400, 'ongeldige knop', 'anders_id');
   // herhaling van hetzelfde verzoek (app kreeg geen antwoord): dezelfde beurt terug, geen tweede bericht
@@ -14909,6 +14958,8 @@ async function appAnders(req, res, reg, a, s, d) {
     try { punten = await appVjPuntenVers(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
     const p = punten.find(function (x) { return x.id === id; });
     if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'anders kaart ' + id + ' weg');
+    if (uitgang) { const nee = VJU.magOp(uitgang, p.soort); if (nee) return appWeiger(res, 409, nee, 'anders uitgang ' + uitgang + ' op ' + p.soort); }
+    if ((uitgang === 'lukt_niet' || uitgang === 'doe_jij') && ['open', 'later'].indexOf(p.status) < 0) return appWeiger(res, 409, 'deze kaart is al afgehandeld; ververs', 'anders uitgang dicht');
     const rv = await appVjRegisterVraag(p);
     let gekRij = null;
     if (p.soort === 'besluit') {
@@ -14936,6 +14987,14 @@ async function appAnders(req, res, reg, a, s, d) {
     socevRij = 'Voor jou-kaart ' + JSON.stringify(titel);
     davidRij = 'Anders (knop bij een Voor jou-kaart in de app' + (gedaanWaar ? ', kaart op Gedaan gezet' : '') + ') bij ' + JSON.stringify(titel) + ' — toelichting: ' + t;
     reden = 'anders kaart #' + id + ' -> ' + kanaal + (gedaanWaar ? ' (gedaan)' : '');
+    if (uitgang) {   // wv4194: eigen kop en uitleg; de kaartregel (punt, registerrij, werkvoorraad) blijft dezelfde
+      const kaartRegel = 'Kaart: punt ' + appOntmasker(String(p.sleutel || ''), 'kaart') + ' (status ' + (gedaanWaar ? 'gedaan' : String(p.status || '?')) + ')' + (rv.vraag ? ', registerrij ' + JSON.stringify(appOntmasker(rv.vraag.regSleutel, 'kaart')) : regSl.length ? ', registerrij ' + JSON.stringify(appOntmasker(regSl[0], 'kaart')) : '') + (wv.length ? ', werkvoorraad ' + wv.join(', ') : '') + '.';
+      const bt = VJU.beurtTekst(uitgang, { titel: titel, toelichting: toel ? t : '', tijd: tijd, kanaalNaam: APP_ANDERS_KANAALNAAM[kanaal], gedaanWaar: gedaanWaar, kaartRegel: kaartRegel });
+      kop = bt.kop; ctx = bt.ctx;
+      const knopNaam = { opmerking: 'Gedaan, met opmerking', lukt_niet: 'Lukt niet', doe_jij: 'Doe jij het' }[uitgang];
+      davidRij = knopNaam + ' (knop bij een Voor jou-kaart in de app' + (gedaanWaar ? ', kaart op Gedaan gezet' : '') + ') bij ' + JSON.stringify(titel) + (toel ? ' — ' + t : '');
+      reden = uitgang + ' kaart #' + id + ' -> ' + kanaal + (gedaanWaar ? ' (gedaan)' : '');
+    }
   } else if (soort === 'lijstje') {
     const datum = String(d.datum || ''), positie = typeof d.positie === 'number' ? d.positie : NaN;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 99) return appWeiger(res, 400, 'ongeldige knop', 'anders lijstje velden');
@@ -15001,11 +15060,13 @@ async function appAnders(req, res, reg, a, s, d) {
   };
   if (ah) appStaat.andersIds[ah] = { t: Date.now(), job: null, kanaal: kanaal };
   const bijVerval = function () { if (ah && appStaat.andersIds && appStaat.andersIds[ah]) delete appStaat.andersIds[ah]; };   // Opus-review KAN 6: vervallen = opnieuw sturen mag
-  const st = appStartBeurt(a, kanaal, promptTekst, { soort: 'knop', bijStart: bijStart, bijVerval: bijVerval, tekst: '✎ Anders: ' + toel + ' — bij ' + (soort === 'kaart' ? 'de kaart ' : soort === 'lijstje' ? 'de actie ' : 'het agendavoorstel ') + (soort === 'agenda' ? '' : socevRij.replace(/^(Voor jou-kaart |Actielijstje [^:]*: )/, '')) });
+  const knopTekst = uitgang === 'lukt_niet' ? 'Lukt niet' : uitgang === 'doe_jij' ? 'Doe jij het' : uitgang === 'opmerking' ? 'Gedaan, met opmerking' : '✎ Anders';   // wv4194
+  const st = appStartBeurt(a, kanaal, promptTekst, { soort: 'knop', bijStart: bijStart, bijVerval: bijVerval, tekst: knopTekst + (toel ? ': ' + toel : '') + ' — bij ' + (soort === 'kaart' ? 'de kaart ' : soort === 'lijstje' ? 'de actie ' : 'het agendavoorstel ') + (soort === 'agenda' ? '' : socevRij.replace(/^(Voor jou-kaart |Actielijstje [^:]*: )/, '')) });
   if (!st.job_id) { if (ah) delete appStaat.andersIds[ah]; return appStartFout(res, st); }
   if (ah) appStaat.andersIds[ah].job = st.job_id;
+  if (uitgang) appVjUitgangZet(d.id, uitgang, st.job_id);   // wv4194: Socev kijkt ernaar / Socev doet het, zolang deze beurt loopt
   res._app.reden = reden + ' -> ' + st.job_id + (inRij ? ' (in de rij)' : '');
-  appStuur(res, 200, { ok: true, job_id: st.job_id, kanaal: kanaal, in_rij: inRij });
+  appStuur(res, 200, { ok: true, job_id: st.job_id, kanaal: kanaal, in_rij: inRij, uitgang: uitgang ? appVjUitgang(d.id) || undefined : undefined });
 }
 
 // ── Details bij het actielijstje (wv335; bouwplan Voor jou § 2, § 4.4): GET /app/vandaag/actie/<datum>/<positie> ──

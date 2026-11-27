@@ -367,6 +367,13 @@ async function nepFetch(url, opt) {
         gesloten_op: ['gedaan', 'vervallen'].includes(b.p_naar) ? new Date().toISOString() : null, bewijs: b.p_bewijs != null ? b.p_bewijs : x.bewijs });
       return antw(200, { ok: true, punt: Object.assign({}, x) });
     }
+    if (fn === 'mk_voor_jou_toon') {   // wv4194: Niet nu › Vanavond, zoals de echte (status open, later_tot weg, toon_vanaf; spoed = niet wachten)
+      const x = (sbStaat.vj || []).find((y) => y.sleutel === b.p_sleutel);
+      if (!['open', 'later'].includes(b.p_van) || b.p_door !== 'david') return antw(400, { message: 'ongeldig' });
+      if (!x || x.status !== b.p_van) return antw(200, { ok: false, fout: 'conflict', nu: x ? x.status : null });
+      Object.assign(x, { status: 'open', later_tot: null, toon_vanaf: x.spoed ? null : b.p_toon, bewijs: b.p_bewijs != null ? b.p_bewijs : x.bewijs });
+      return antw(200, { ok: true, punt: Object.assign({}, x) });
+    }
     if (fn === 'mk_voor_jou_nog_niet') {   // wv1229: zoals de echte (compare-and-set, tik + teller in voorwaarde, meting)
       const x = (sbStaat.vj || []).find((y) => y.sleutel === b.p_sleutel);
       if (!/^app \d{1,2}-\d{1,2} \d{1,2}:\d{2}: David tikte Gedaan$/.test(b.p_tik || '')) return antw(400, { message: 'tik' });
@@ -487,7 +494,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { berichtVraagOpKaart, handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appVastJaDicht, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appDradenUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm, appVjDoel, appVjModuleKaart, appVjBron, appVjVoorwaardeMeet, appVjVoorwaardeRonde, appAnders, appAntwoordSeintjeKomt };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { berichtVraagOpKaart, handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appVastJaDicht, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appDradenUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm, appVjDoel, appVjModuleKaart, appVjBron, appVjVoorwaardeMeet, appVjVoorwaardeRonde, appAnders, appAntwoordSeintjeKomt, VJU };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -8331,6 +8338,100 @@ async function bewijs(o) {
       await klaarC();
       sbStaat.vj = sbStaat.vj.filter((x) => x.id < 61 || x.id > 69); H.appStaat.vjCache = null;
       H.appStaat.tellers.beurt = [];
+    }
+
+    // ── 27h. wv4194 (3C17 + 3C84): Niet nu (vanavond / wacht op iemand) en Gedaan, met opmerking / Lukt niet / Doe jij het ──
+    {
+      const sV = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')]; if (sV) sV.tot = Date.now() + 20 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      rolStub.primair = true;
+      const oudH = new Date(Date.now() - 3600000).toISOString();
+      const ph = (id, sl, x) => Object.assign({ id, sleutel: sl, soort: 'doen', titel: 'Proefkaart ' + sl, waarom: null, stappen: [], deadline: null, waar: 'overal', prive: false, duur_min: null,
+        herkomst: { wv: [4194], auto: 'wv' }, status: 'open', later_tot: null, bewijs: null, gesloten_door: null, meting: null, laatst_gemeten: oudH, volgorde: 100, gesloten_op: null, toon_vanaf: null }, x || {});
+      sbStaat.vj = (sbStaat.vj || []).filter((x) => x.id < 41940 || x.id > 41949).concat([
+        ph(41941, 'nietnu-avond'), ph(41942, 'nietnu-wacht'), ph(41943, 'nietnu-spoed', { spoed: true }),
+        ph(41944, 'uitgang-lukt'), ph(41945, 'uitgang-doe'), ph(41946, 'uitgang-proef', { soort: 'proef' }), ph(41947, 'uitgang-besluit', { soort: 'besluit' }), ph(41948, 'uitgang-opm')]);
+      H.appStaat.vjCache = null; H.appStaat.vjTerug = {}; H.appStaat.vjUitgang = {};
+      const K = (b) => vraag('POST', '/app/voor-jou/keuze', b, { pot: P.jar });
+      const nT = () => sbRpc.filter((x) => x.fn === 'mk_voor_jou_toon');
+      const nT0 = nT().length;
+      const vanavondKan = H.VJU.vanavondTot(Date.now()) != null;
+      let r = await K({ id: 41941, van: 'open', keuze: 'vanavond' });
+      const t1 = nT()[nT0] || {};
+      if (vanavondKan) {
+        toets('27h Vanavond -> 200; mk_voor_jou_toon met de tijd van de pod (20:00 of een uur later, nooit na 22:45), melding met de klok', r.status === 200 && t1.b && t1.b.p_van === 'open' && t1.b.p_door === 'david'
+          && Date.parse(t1.b.p_toon) > Date.now() && H.VJU.klokNL(Date.parse(t1.b.p_toon)) <= '22:45' && /^Komt vanavond om \d\d:\d\d terug\.$/.test(r.j.melding) && r.j.punt.toon_vanaf === t1.b.p_toon && /David tikte Niet nu: vanavond om/.test(t1.b.p_bewijs), JSON.stringify([r.status, r.j, t1.b]));
+        H.appStaat.vjCache = null;
+        let l = await vraag('GET', '/app/voor-jou/kanaal', undefined, { pot: P.jar });
+        const p1 = (l.j.punten || []).find((x) => x.id === 41941);
+        toets('27h Vanavond: binnen de ↩️-minuut met toon_vanaf (app telt hem niet), en hij telt als wachtend', p1 && p1.toon_vanaf && p1.terug_ms > 0 && l.j.wacht && l.j.wacht.n >= 1, JSON.stringify([p1, l.j.wacht]));
+        r = await K({ id: 41941, keuze: 'terug' });
+        const t2 = nT()[nT0 + 1] || {};
+        toets('27h Vanavond ↩️ -> weer open zonder toon_vanaf', r.status === 200 && t2.b && t2.b.p_toon === null && sbStaat.vj.find((x) => x.id === 41941).toon_vanaf === null, JSON.stringify([r.status, r.j, t2.b]));
+        r = await K({ id: 41943, van: 'open', keuze: 'vanavond' });
+        toets('27h Vanavond op een spoedkaart: de databank laat hem niet wachten -> eerlijk "blijft in je lijst"', r.status === 200 && r.j.blijft === true && /blijft in je lijst/.test(r.j.melding), JSON.stringify(r.j));
+      } else {
+        toets('27h na 22:00 (NL): Vanavond -> 400 "kies Morgen", geen RPC', r.status === 400 && /Morgen/.test(r.j.fout) && nT().length === nT0, JSON.stringify([r.status, r.j]));
+      }
+      const V = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
+      const plusH = (d, n) => { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+      const nS0 = sbRpc.filter((x) => x.fn === 'mk_voor_jou_status').length;
+      r = await K({ id: 41942, van: 'open', keuze: 'wacht', tot: plusH(V, 7) });
+      const s7 = sbRpc.filter((x) => x.fn === 'mk_voor_jou_status')[nS0] || {};
+      toets('27h Wacht op iemand, over 7 dagen -> later tot die dag, bewijs "wacht op iemand anders"', r.status === 200 && s7.b && s7.b.p_naar === 'later' && s7.b.p_later_tot === plusH(V, 7) && /wacht op iemand anders/.test(s7.b.p_bewijs) && /dan vraagt Socev het opnieuw/.test(r.j.melding) && r.j.punt.status === 'later', JSON.stringify([r.status, r.j, s7.b]));
+      r = await K({ id: 41942, keuze: 'terug' });
+      toets('27h Wacht ↩️ -> weer open', r.status === 200 && sbStaat.vj.find((x) => x.id === 41942).status === 'open', JSON.stringify([r.status, r.j]));
+      r = await K({ id: 41942, van: 'open', keuze: 'wacht' });
+      toets('27h Wacht zonder dag -> 400', r.status === 400, r.status);
+      // uitgangen via /app/anders
+      const AN = (b) => vraag('POST', '/app/anders', b, { pot: P.jar });
+      const klaarH = async () => { for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('ok'); await slaap(40); };
+      let n = gestart.length;
+      r = await AN({ soort: 'kaart', id: 41944, toelichting: '', uitgang: 'lukt_niet', anders_id: 'proef-lukt-41944' });
+      await slaap(40);
+      let g = gestart[gestart.length - 1];
+      toets('27h Lukt niet (zonder tekst) -> 200, één beurt met kop LUKT NIET en de kaartregel, uitgang bezig', r.status === 200 && gestart.length === n + 1 && /\[KNOP\] David koos LUKT NIET bij de Voor jou-kaart "Proefkaart uitgang-lukt"\n/.test(g.prompt)
+        && /Socev kijkt ernaar/.test(g.prompt) && /punt uitgang-lukt \(status open\), werkvoorraad wv4194\./.test(g.prompt) && r.j.uitgang && r.j.uitgang.soort === 'lukt_niet' && r.j.uitgang.bezig === true, JSON.stringify([r.status, r.j]) + ' ' + (g && g.prompt.slice(0, 400)));
+      H.appStaat.vjCache = null;
+      let l = await vraag('GET', '/app/voor-jou/kanaal', undefined, { pot: P.jar });
+      let p4 = (l.j.punten || []).find((x) => x.id === 41944);
+      toets('27h Lukt niet: kaart blijft in de lijst met uitgang lukt_niet bezig', p4 && p4.uitgang && p4.uitgang.bezig === true && sbStaat.vj.find((x) => x.id === 41944).status === 'open', JSON.stringify(p4));
+      n = gestart.length;
+      r = await AN({ soort: 'kaart', id: 41944, toelichting: '', uitgang: 'lukt_niet', anders_id: 'proef-lukt-41944' });
+      toets('27h zelfde anders_id nog eens -> dezelfde beurt, geen tweede', r.status === 200 && r.j.al === true && gestart.length === n, JSON.stringify(r.j));
+      for (let i = 0; i < 2; i++) await klaarH();   // anders start de volgende beurt pas na deze (rij per kanaal)
+      r = await AN({ soort: 'kaart', id: 41945, toelichting: 'Jij kunt dit beter', uitgang: 'doe_jij' });
+      await slaap(40);
+      g = gestart[gestart.length - 1];
+      toets('27h Doe jij het -> beurt met DOE JIJ HET, toelichting, voor-jou.py-regel', r.status === 200 && /\[KNOP\] David koos DOE JIJ HET bij de Voor jou-kaart "Proefkaart uitgang-doe" — toelichting: Jij kunt dit beter\n/.test(g.prompt) && /voor-jou\.py status --sleutel/.test(g.prompt), g && g.prompt.slice(0, 300));
+      H.appStaat.vjCache = null;
+      l = await vraag('GET', '/app/voor-jou/kanaal', undefined, { pot: P.jar });
+      const af5 = (l.j.afgehandeld || []).find((x) => x.id === 41945);
+      toets('27h Doe jij het: kaart uit de lijst (ook niet geteld), in Afgehandeld als "socev"', !(l.j.punten || []).some((x) => x.id === 41945) && af5 && af5.status === 'socev', JSON.stringify([(l.j.punten || []).map((x) => x.id), af5]));
+      for (let i = 0; i < 4; i++) await klaarH();   // de tweede beurt stond in de rij achter de eerste
+      H.appStaat.vjCache = null;
+      l = await vraag('GET', '/app/voor-jou/kanaal', undefined, { pot: P.jar });
+      const p5 = (l.j.punten || []).find((x) => x.id === 41945); p4 = (l.j.punten || []).find((x) => x.id === 41944);
+      toets('27h na de beurt: Doe jij het-kaart die nog open staat komt terug (uitgang niet bezig); Lukt niet zonder "kijkt ernaar"', p5 && p5.uitgang && p5.uitgang.bezig === false && p4 && p4.uitgang && p4.uitgang.bezig === false, JSON.stringify([p5, p4]));
+      toets('27h uitgang bewaard in vj-uitgang.json (0600), zonder tekst', (() => { try { const f = path.join(DATA, 'vj-uitgang.json'); const j = JSON.parse(fs.readFileSync(f, 'utf8')); return j['41945'].soort === 'doe_jij' && !/beter/.test(JSON.stringify(j)) && (fs.statSync(f).mode & 0o777) === 0o600; } catch (e) { return false; } })());
+      const weig = [];
+      weig.push((await AN({ soort: 'kaart', id: 41946, toelichting: '', uitgang: 'doe_jij' })).status);   // proef: geen Doe jij het
+      weig.push((await AN({ soort: 'kaart', id: 41947, toelichting: '', uitgang: 'lukt_niet' })).status);   // besluit
+      weig.push((await AN({ soort: 'kaart', id: 41948, toelichting: 'x', uitgang: 'opmerking' })).status);   // opmerking zonder gedaan
+      weig.push((await AN({ soort: 'kaart', id: 41948, toelichting: '', uitgang: 'lukt_niet', gedaan: true })).status);
+      weig.push((await AN({ soort: 'kaart', id: 41948, toelichting: '', uitgang: 'raar' })).status);
+      weig.push((await AN({ soort: 'lijstje', datum: V, positie: 1, toelichting: 'x', uitgang: 'lukt_niet' })).status);
+      weig.push((await AN({ soort: 'kaart', id: 41948, toelichting: '' })).status);   // gewone Anders blijft tekst eisen
+      toets('27h weigeringen: proef+Doe jij het 409, besluit 409, opmerking zonder gedaan 400, uitgang+gedaan 400, rommel 400, lijstje 400, lege Anders 400', weig.join() === '409,409,400,400,400,400,400', weig.join());
+      sbStaat.vj.find((x) => x.id === 41948).status = 'gedaan'; sbStaat.vj.find((x) => x.id === 41948).gesloten_door = 'david'; sbStaat.vj.find((x) => x.id === 41948).gesloten_op = new Date().toISOString();
+      H.appStaat.vjCache = null;
+      r = await AN({ soort: 'kaart', id: 41948, toelichting: 'Ging goed, wel 20 min', gedaan: true, uitgang: 'opmerking' });
+      await slaap(40);
+      g = gestart[gestart.length - 1];
+      toets('27h Gedaan, met opmerking -> kop GEDAAN, MET OPMERKING, "laat hem dicht"', r.status === 200 && /\[KNOP\] David koos GEDAAN, MET OPMERKING bij de Voor jou-kaart "Proefkaart uitgang-opm" — toelichting: Ging goed, wel 20 min\n/.test(g.prompt) && /laat hem dicht/.test(g.prompt), g && g.prompt.slice(0, 300));
+      for (let i = 0; i < 4; i++) await klaarH();
+      sbStaat.vj = sbStaat.vj.filter((x) => x.id < 41940 || x.id > 41949); H.appStaat.vjCache = null; H.appStaat.vjTerug = {}; H.appStaat.vjUitgang = {};
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
     }
 
     // ── 28. wv350: zoeken in gesprekken (bouwplan § 4.15) en het anker in de geschiedenis ──
