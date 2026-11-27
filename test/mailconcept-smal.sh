@@ -68,6 +68,29 @@ function post(pad, body) {
     toets('register: geen concept-id = 400', r.st === 400, r.st);
     r = await post('/smal/mailconcept', { secret: 'proef', opdracht: 'vervang', draad: 'aa11bb22cc33dd44', aan: 'x@voorbeeld.invalid', onderwerp: 'Re: Proef', concept: 'Nieuwe versie, verzonnen.' });
     toets('vervang: zonder registerrij geen kaart (uit)', r.st === 200 && r.j.kaart === false && r.j.reden === 'uit', JSON.stringify(r.j));
+    // wv4108 (nr 448): doktersmaten-concept alleen met registerrij aan én workflow ingericht; invoer streng; nooit zonder draad
+    const dm = { secret: 'proef', opdracht: 'doktersmaten', draad: 'aa11bb22cc33dd44', aan: 'x@voorbeeld.invalid', onderwerp: 'Re: Proef', concept: 'Hoi,\n\nVerzonnen proeftekst.\n\nGroet,\nDavid' };
+    r = await post('/smal/mailconcept', dm);
+    toets('doktersmaten: zonder registerrij uit, niets gemaakt', r.st === 200 && r.j.gemaakt === false && r.j.reden === 'uit' && /in de chat/.test(r.j.regel), JSON.stringify(r.j));
+    fs.writeFileSync(path.join(d, 'geen-register.json'), JSON.stringify({ rijen: [{ id: 'mailconcept-doktersmaten', status: 'gebouwd maar uit' }] }));
+    r = await post('/smal/mailconcept', dm);
+    toets('doktersmaten: rij niet op aan = uit', r.st === 200 && r.j.reden === 'uit', JSON.stringify(r.j));
+    fs.writeFileSync(path.join(d, 'geen-register.json'), JSON.stringify({ rijen: [{ id: 'mailconcept-doktersmaten', status: 'aan' }] }));
+    r = await post('/smal/mailconcept', dm);
+    toets('doktersmaten: rij aan maar workflow niet ingericht = uit', r.st === 200 && r.j.gemaakt === false && r.j.reden === 'niet_ingericht', JSON.stringify(r.j));
+    fs.writeFileSync(path.join(d, 'concept-leer', 'doktersmaten.json'), JSON.stringify({ workflow: 'NepWorkflow123' }));
+    r = await post('/smal/mailconcept', Object.assign({}, dm, { draad: '' }));
+    toets('doktersmaten: zonder draad = 400 (geen nieuwe draad)', r.st === 400, r.st);
+    r = await post('/smal/mailconcept', Object.assign({}, dm, { van: '"D. Schaap" <d.schaap@voorbeeld.invalid>' }));
+    toets('doktersmaten: van buiten doktersmaten = 400', r.st === 400 && /doktersmaten-adres/.test(r.j.fout), r.st);
+    r = await post('/smal/mailconcept', Object.assign({}, dm, { onderwerp: 'Re: Proef\r\nBcc: x@voorbeeld.invalid' }));
+    toets('doktersmaten: regeleinde in onderwerp = 400', r.st === 400, r.st);
+    r = await post('/smal/mailconcept', Object.assign({}, dm, { bijlagen: ['a.pdf'] }));
+    toets('doktersmaten: bijlagen = 400', r.st === 400 && /bijlagen/.test(r.j.fout), r.st);
+    r = await post('/smal/mailconcept', Object.assign({}, dm, { van: 'Dokters Maten <doktersmaten@hpgroenhouten.nl>' }));
+    toets('doktersmaten: geldige aanroep, n8n onbereikbaar = niets gemaakt, eerlijk gezegd', r.st === 200 && r.j.gemaakt === false && r.j.reden === 'niet_bereikt' && /in de chat/.test(r.j.regel), JSON.stringify(r.j));
+    const reg2 = (function () { try { return fs.readFileSync(path.join(d, 'vault', '01_Ontwikkeling', '0b-werkmap', 'conceptregister.jsonl'), 'utf8'); } catch (e) { return ''; } })();
+    toets('doktersmaten: geen registerregel zonder concept', reg2.indexOf('doktersmaten') < 0);
     r = await post('/smal/mailconcept', { secret: 'proef', opdracht: 'stuur' });
     toets('onbekende opdracht = 400 (geen concept maken)', r.st === 400, r.st);
   } finally { try { process.kill(-p.pid, 'SIGKILL'); } catch (e) {} sb.close(); }

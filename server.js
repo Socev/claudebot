@@ -25246,7 +25246,81 @@ async function mailconceptSmal(d) {
     const st = conceptLeer.vervangStand(draad);
     return { status: 200, j: Object.assign({ ok: true }, st) };
   }
-  return { status: 400, j: { ok: false, fout: "opdracht 'draad', 'feiten', 'register', 'vervang' of 'vervang-stand'" } };
+  if (d.opdracht === 'doktersmaten') return mailconceptDoktersmaten(d, draad);   // wv4108 (nr 448): alleen met registerrij aan
+  return { status: 400, j: { ok: false, fout: "opdracht 'draad', 'feiten', 'register', 'vervang', 'vervang-stand' of 'doktersmaten'" } };
+}
+// ── wv4108 (besluitenpagina nr 448 = 3C148, David Ja 25-11-2026 21:47): mailconcept in een doktersmaten-draad ─────────────────────────────
+// WAAROM. Loopt een draad via het gedeelde doktersmaten-postvak, dan kreeg David tekst in de chat om over te plakken; een concept in zijn
+// privé-Gmail helpt dan niet. WAT. opdracht 'doktersmaten' {draad, aan, cc?, van?, onderwerp, concept}: de pod (niet Socev) roept n8n
+// *AI - Mailconcept doktersmaten* aan, die met de bestaande doktersmaten-koppeling één concept in die draad zet (nooit versturen, geen nieuwe
+// draad, geen bijlagen, niet als er al een concept in de draad staat). SCHAKELAAR = registerrij mailconcept-doktersmaten op aan in
+// toestemmingen.json (doktersmaten-grens: "andere postvakken alleen na een eigen besluit"; collega's zien het concept) EN het workflow-id in
+// CONCEPT_LEER_DIR/doktersmaten.json; ontbreekt één van beide, dan uit en geeft Socev de tekst in de chat zoals voorheen. De n8n-workflow
+// neemt alleen het pod-geheim (API_SECRET) aan, dus Socev kan er niet omheen. Ontwerp + review: mk-scripts/wv4108/.
+const MC_DM_RIJ = 'mailconcept-doktersmaten';
+const mcDmRij = { keten: Promise.resolve(), wacht: 0 };
+const MC_DM_VAN = /^(?:"?[^"<>\r\n]{0,60}"?\s*<doktersmaten@(?:hapleusden|hpgroenhouten)\.nl>|doktersmaten@(?:hapleusden|hpgroenhouten)\.nl)$/i;
+function mcDmStand() {
+  let aan = false, wf = '';
+  try { const r = JSON.parse(fs.readFileSync(CONCEPT_LEER_REGISTER, 'utf8')); aan = !!(r && Array.isArray(r.rijen) && r.rijen.some(function (x) { return x && x.id === MC_DM_RIJ && x.status === 'aan'; })); }
+  catch (e) { aan = false; }   // onleesbaar = uit
+  try { wf = String(JSON.parse(fs.readFileSync(path.join(CONCEPT_LEER_DIR, 'doktersmaten.json'), 'utf8')).workflow || ''); } catch (e) { wf = ''; }
+  return { aan: aan, wf: /^[A-Za-z0-9]{8,40}$/.test(wf) ? wf : '' };
+}
+async function mailconceptDoktersmaten(d, draad) {
+  const st = mcDmStand();
+  const plak = ' Geef de tekst in de chat om te plakken, met erbij dat David hem uit doktersmaten verstuurt.';
+  if (!st.aan || !st.wf) return { status: 200, j: { ok: true, gemaakt: false, reden: st.aan ? 'niet_ingericht' : 'uit', regel: 'Concepten in het doktersmaten-postvak staan (nog) uit.' + plak } };
+  const regel1 = function (x, max) { return typeof x === 'string' && x.length <= max && !/[\r\n]/.test(x) ? x.trim() : null; };
+  const aan = regel1(d.aan, 1000), cc = d.cc == null || d.cc === '' ? '' : regel1(d.cc, 1000), onderwerp = regel1(d.onderwerp, 300);
+  const van = d.van == null || d.van === '' ? '' : String(d.van).trim();
+  const tekst = typeof d.concept === 'string' ? d.concept : '';
+  if (!draad) return { status: 400, j: { ok: false, fout: 'draad ontbreekt: alleen een antwoord in een bestaande doktersmaten-draad (threadId uit mail_zoeken met account doktersmaten)' } };
+  if (!aan || aan.indexOf('@') < 0 || cc === null || !onderwerp) return { status: 400, j: { ok: false, fout: 'aan, onderwerp (en cc) als één regel; aan met een adres' } };
+  if (van && !MC_DM_VAN.test(van)) return { status: 400, j: { ok: false, fout: 'van mag alleen een doktersmaten-adres zijn (hapleusden.nl of hpgroenhouten.nl), of leeg' } };
+  if (tekst.trim().length < 5 || tekst.length > 20000) return { status: 400, j: { ok: false, fout: 'concept ontbreekt of is langer dan 20.000 tekens' } };
+  if (Array.isArray(d.bijlagen) && d.bijlagen.length) return { status: 400, j: { ok: false, fout: 'bijlagen kunnen (nog) niet in doktersmaten: maak het concept zonder en zeg David welk bestand hij er zelf aan hangt' } };
+  if (!appTeller('mailconcept-doktersmaten', 10, 3600000)) return { status: 429, j: { ok: false, fout: 'hooguit 10 doktersmaten-concepten per uur' } };
+  const geheim = process.env.API_SECRET;
+  if (!geheim) return { status: 200, j: { ok: true, gemaakt: false, reden: 'niet_ingericht', regel: 'De pod mist zijn geheim voor deze route.' + plak } };
+  const body = JSON.stringify({ secret: geheim, opdracht: 'concept', thread_id: draad, aan: aan, cc: cc, van: van, onderwerp: onderwerp, bericht: tekst });
+  // review Codex wv4108 MOET 1: één aanroep tegelijk (de pod is de enige aanroeper), zodat twee verzoeken niet allebei een vrije draad zien;
+  // n8n leest de draad binnen die beurt opnieuw. Wachtrij hooguit 3, anders 429.
+  if (mcDmRij.wacht >= 3) return { status: 429, j: { ok: false, fout: 'er lopen al doktersmaten-concepten; probeer het zo opnieuw' } };
+  mcDmRij.wacht++;
+  const vorige = mcDmRij.keten;
+  let klaar; mcDmRij.keten = new Promise(function (ok) { klaar = ok; });
+  let r = null, onzeker = false;
+  try {
+    await vorige;
+    for (let poging = 0; poging < 2 && !r; poging++) {
+      const url = await appWebhookUrl(st.wf, null, 'mcDmUrl', poging > 0);
+      onzeker = true;   // vanaf hier kan Gmail het concept al gemaakt hebben (MOET 2)
+      const x = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body, signal: AbortSignal.timeout(60000) });
+      if (x.status === 404 && poging === 0) { onzeker = false; continue; }
+      let j = null; try { j = await x.json(); } catch (e) { j = null; }
+      r = { status: x.status, j: j };
+    }
+  } catch (e) { logError('mailconcept-doktersmaten', e); r = null; }
+  finally { mcDmRij.wacht--; klaar(); }
+  const j = r && r.j && typeof r.j === 'object' ? r.j : {};
+  if (r && r.status === 200 && j.ok === true && /^r-?[0-9]{5,25}$/.test(String(j.concept_id || '')) && String(j.thread_id || '') === draad) {
+    const regel = { aangemaakt: new Date().toISOString(), concept_id: String(j.concept_id), thread_id: draad, postvak: 'doktersmaten', aan: aan.slice(0, 500), onderwerp: onderwerp,
+      hash: crypto.createHash('sha256').update(tekst).digest('hex'), tekens: tekst.length };
+    let reg = true;
+    try { potVzRegister(regel); } catch (e) { logError('mailconcept-doktersmaten-register', e); reg = false; }
+    schrijfLog(nu() + ' mailconcept-doktersmaten gemaakt');
+    return { status: 200, j: { ok: true, gemaakt: true, concept_id: regel.concept_id, thread_id: draad, register: reg,
+      regel: 'Het concept staat in de draad in het doktersmaten-postvak (collega\'s zien het ook); David opent het daar en verstuurt zelf.' } };
+  }
+  // review Codex wv4108 MOET 2: zonder duidelijk antwoord (time-out, 5xx, 200 zonder geldig id) weten we niet of Gmail het concept al opsloeg:
+  // dan 'onbekend', geen nieuwe poging, en David kijkt zelf in de draad. 409/400/401 en 'niet bereikt' zijn zeker: niets gemaakt.
+  const reden = r && r.status === 409 ? 'bestaand_concept' : r && r.status === 400 ? 'draad_onbekend' : (!r && !onzeker) || (r && (r.status === 401 || r.status === 404)) ? 'niet_bereikt' : 'onbekend';
+  const zin = { bestaand_concept: 'Er staat al een concept in die doktersmaten-draad (Gmail toont er één); geen tweede gemaakt.', draad_onbekend: 'Die draad staat niet in het doktersmaten-postvak; geen concept gemaakt.',
+    niet_bereikt: 'De doktersmaten-route was niet te bereiken; geen concept gemaakt.',
+    onbekend: 'Onbekend of het concept er staat (geen duidelijk antwoord van de route): probeer het niet opnieuw en zeg David dat hij in doktersmaten in de draad kijkt.' };
+  if (reden === 'onbekend' || reden === 'niet_bereikt') logError('mailconcept-doktersmaten', new Error(reden + ' ' + (r ? r.status : '-')));
+  return { status: 200, j: { ok: true, gemaakt: false, reden: reden, regel: zin[reden] + plak } };
 }
 const mailVoorwerk = (function () {
   const p = path.join(__dirname, 'mailvoorwerk.js');
@@ -25366,7 +25440,7 @@ if (conceptLeer && SERVER_ECHT) {
     }).catch(function (e) { logError('concept-leer', e); });
   }, 60 * 60000).unref();
 }
-function conceptLeerInfo() { if (!conceptLeer) return { module: false }; try { return Object.assign({ module: true, ronde: conceptLeerStaat }, conceptLeer.health()); } catch (e) { return { fout: true }; } }
+function conceptLeerInfo() { if (!conceptLeer) return { module: false }; try { const dm = mcDmStand(); return Object.assign({ module: true, ronde: conceptLeerStaat, doktersmaten: { aan: dm.aan, ingericht: !!dm.wf } }, conceptLeer.health()); } catch (e) { return { fout: true }; } }
 // ── wv4105 (besluitenpagina nr 162 = 2C62): Socev-labels in Gmail. Logica en waarom in gmail-opdracht.js; ontwerp + Codex-ontwerpreview:
 // mk-scripts/wv4105/ontwerp.md. Hier de koppeling: het lees-luik (alleen mail_zoeken), POST /agent op deze pod (vaste socev:-labels, chat 40687,
 // zoals Shopper), het agentregister, het conceptregister van de skill (alleen lezen) en de Jev-scores van MailMan. Schakelaar
