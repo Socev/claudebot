@@ -256,5 +256,25 @@ function gesprek(model, vragen, o) {
   });
 }
 
-module.exports = { STANDEN, STAND_TEKST, RUST_DAGEN, punten, puntId, plat, vaultPad, bronVan, editieSleutel, snoei, zetStand, standenVan, correctieTekst, rustLopend, volgendeDag,
+// wv4153 (besluitenpagina nr 347 = 3C47, David Ja 25-11-2026): "een punt dat jij rechtzet gaat ook bij de nachtwachter dicht". De vier
+// nachtwachters halen via /smal/wachter-correcties (hun beurtpas) Davids tikken Gedaan / Klopt niet van de laatste `dagen` dagen t/m vandaag;
+// de wachter beslist zelf of een correctie over een van zijn open rijen gaat (skill, stap "Correcties van David"). Punten zonder tekst
+// (niet_door: Geld deze maand; Gambia: alleen de naam) gaan nooit mee. Puur; [{ dag, stand, tekst }] op volgorde van dag.
+function correctiesVoorWachter(m, vandaag, dagen) {
+  const n = Math.max(1, Math.min(Number(dagen) || 3, 14)), grens = dagPlus(vandaag, -n), uit = [];
+  Object.keys((m && m.edities) || {}).sort().forEach(function (k) {
+    const soort = k.split(':')[0], dag = String(k.split(':')[1] || '');
+    if (soort !== 'briefing' || dag < grens || dag > vandaag) return;
+    const pt = (m.edities[k] && m.edities[k].punten) || {};
+    Object.keys(pt).forEach(function (id) {
+      const x = pt[id];
+      if (!x || (x.stand !== 'gedaan' && x.stand !== 'klopt_niet') || x.niet_door || 'gambia' in x) return;
+      const t = plat(x.tekst).slice(0, 400);
+      if (t) uit.push({ dag: dag, stand: x.stand, tekst: t });
+    });
+  });
+  return uit.slice(0, 60);
+}
+
+module.exports = { STANDEN, STAND_TEKST, RUST_DAGEN, punten, puntId, plat, vaultPad, bronVan, editieSleutel, snoei, zetStand, standenVan, correctieTekst, rustLopend, volgendeDag, correctiesVoorWachter,
   AV_MAX, AV_GEVOELIG, autovragen, puntBij, gesprek };

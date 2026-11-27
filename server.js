@@ -33561,10 +33561,10 @@ async function podRondeDraai(manager, prompt) {
 // wv1030 #1). SOCEV_AGENT_SLEUTEL (elk smal gesprek) opent deze routes niet; API_SECRET (machinekamer) wel, allemaal.
 // DEKT NIET: een ander proces met dezelfde uid kan het bestand lezen zolang de beurt loopt (zie MK_SESSIES, Fable wv689 #9).
 const SESSIE_ROUTES = {
-  'personeels-wachter': ['state:personeel', 'wachter-kaart'],
-  'correspondentie-wachter': ['eindjes', 'eindjes/oordeel', 'wachter-kaart'],   // wv4007: Open Eindjes-wachter (kandidaten halen, oordeel terug)
-  'actie-bewaker': ['wachter-kaart'],                 // wv4124 (3C70): knoppen per melding (wachter-kaarten.js)
-  'agenda-wachter': ['wachter-kaart'],
+  'personeels-wachter': ['state:personeel', 'wachter-kaart', 'wachter-correcties'],   // wv4153 (3C47): Davids correcties uit het ochtendbericht lezen
+  'correspondentie-wachter': ['eindjes', 'eindjes/oordeel', 'wachter-kaart', 'wachter-correcties'],   // wv4007: Open Eindjes-wachter (kandidaten halen, oordeel terug)
+  'actie-bewaker': ['wachter-kaart', 'wachter-correcties'],                 // wv4124 (3C70): knoppen per melding (wachter-kaarten.js)
+  'agenda-wachter': ['wachter-kaart', 'wachter-correcties'],
   'vault-concierge': ['state:concierge', 'sync-fouten'],
   'cijfer-meester': ['zorgdata'],                     // app-kanaal
   'cijfermeester': ['zorgdata']                       // @cijfermeester_bot
@@ -33645,9 +33645,9 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'personeelsscherm/voorstel': 20, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, pakjes: 30, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20, 'wachter-kaart': 30 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, tibber: 20, homey: 20, nmbrs: 20, ah: 20, 'bandjes/voorstel': 30, 'personeelsscherm/voorstel': 20, 'ghawa/lens': 20, 'ghawa/voorstel': 60, 'sms/voorstel': 20, 'health-opgaven': 20, osint: 60, 'manager-ronde': 6, 'harvester/kaart': 8, 'harvester/uitkomst': 120, facturen: 60, pakjes: 30, state: 120, 'sync-fouten': 10, zorgdata: 200, 'mk-noodknop': 12, beleggen: 60, mailconcept: 60, eindjes: 6, 'eindjes/oordeel': 20, 'wachter-kaart': 30, 'wachter-correcties': 20 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js); één regel: test/bank-archief.sh leest hem zo
 // wv1030: state, sync-fouten en zorgdata alleen met een beurtpas (SESSIE_ROUTES) of API_SECRET
-const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata', 'eindjes', 'eindjes/oordeel', 'wachter-kaart']);   // wv4124: wachter-kaart idem   // wv4007: eindjes alleen beurtpas of API_SECRET   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
+const SMAL_ALLEEN_PAS = new Set(['state', 'sync-fouten', 'zorgdata', 'eindjes', 'eindjes/oordeel', 'wachter-kaart', 'wachter-correcties']);   // wv4153: idem   // wv4124: wachter-kaart idem   // wv4007: eindjes alleen beurtpas of API_SECRET   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
 const SMAL_CF_ACCOUNT = '23df9b0607bb70f6d7f15a63ec843d6d';
 const SMAL_CF_BASIS = process.env.SMAL_CF_BASIS || 'https://api.cloudflare.com';   // alleen de toets wijst elders heen
@@ -33934,6 +33934,12 @@ async function smalActie(actie, d, wie) {
   }
   // wv3083: noodknop machinekamer (zie mkNoodknop). Socev-sleutel = door socev (alleen met vraag_id van Davids verse Ja); API_SECRET = machinekamer.
   // wv4007: Open Eindjes-wachter — kandidaten (staarten) en oordeel; alleen de beurtpas van de Correspondentie-Wachter of API_SECRET
+  // wv4153 (besluitenpagina nr 347 = 3C47): Davids tikken Gedaan / Klopt niet onder het ochtendbericht, voor de vier nachtwachters (beurtpas;
+  // ook als ze via de loper als socev draaien en briefing-punten.json niet kunnen lezen). Alleen lezen; tekst zoals de pod hem al bewaart.
+  if (actie === 'wachter-correcties') {
+    if (!BP || typeof BP.correctiesVoorWachter !== 'function') return { status: 404, j: { ok: false, fout: 'briefing-punten.js zonder correcties in deze release' } };
+    return { status: 200, j: { ok: true, correcties: BP.correctiesVoorWachter(appBriefingPuntenLees(), appYmd(Date.now()), d.dagen) } };
+  }
   if (actie === 'wachter-kaart') {   // wv4124 (3C70): de wachter volgt uit de beurtpas; alleen de machinekamer (API_SECRET) mag hem noemen
     if (!wachterKaarten) return { status: 404, j: { ok: false, fout: 'wachter-kaarten.js zit niet in deze release' } };
     if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
