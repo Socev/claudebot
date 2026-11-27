@@ -33772,8 +33772,34 @@ const tabulaLoket = (function () {
       log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: function (waar, e) { if (e) logError(waar, e); } });
   } catch (e) { logError('tabula-loket', e); return null; }
 })();
-function tabulaInfo() { if (!tabulaLoket) return { aan: false, module: false }; try { return tabulaLoket.health(); } catch (e) { return { fout: true }; } }
+function tabulaInfo() {
+  if (!tabulaLoket) return { aan: false, module: false };
+  let h;
+  try { h = tabulaLoket.health(); } catch (e) { h = { fout: true }; }
+  try { if (tabulaOverleg) h.overlegblad = tabulaOverleg.health(); } catch (e) { h.overlegblad = { fout: true }; }   // wv4240: alleen tellingen
+  return h;
+}
 if (tabulaLoket && (SERVER_ECHT || process.env.TABULA_TOETS_BASIS)) setTimeout(function () { try { tabulaLoket.start(); } catch (e) { logError('tabula-start', e); } }, SERVER_ECHT ? 20000 : 500).unref();
+
+// wv4240 (besluitenpagina nr 957 = L57, David Ja 25-11-2026 22:25): het overlegblad ligt al klaar. Elke 30 min (primaire kant): begint er
+// binnen 24 u een overleg in de agenda (spiegel, alleen lezen), dan zet de pod in Tabula een NIEUW blad met titel, agenda en open
+// actiepunten (actie_state, alleen lezen). Worker POST /blad (rol pod) neemt alleen een nieuw blad-id overleg-<dag>-<hash> aan; tweede
+// ronde = 409, geen tweede blad. Schakelaar tabula.json "overlegblad": false. Register <TABULA_DIR>/overlegbladen.json (alleen metadata).
+const tabulaOverleg = (function () {
+  const p = path.join(__dirname, 'tabula-overlegblad.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ dir: TABULA_DIR, vault: VAULT, basis: SERVER_ECHT ? null : process.env.TABULA_TOETS_BASIS,
+      fetch: function (u, opt) { return fetch(u, opt); }, code: tabulaCode, primair: rolPrimair,
+      tijdlijn: function (van, tot) { return appSbRpc('sb_kalender_tijdlijn', { p_van: van, p_tot: tot }, 20000); },
+      acties: function () { return appN8nRijen(APP_ACTIE_STATE_TABEL, { type: 'or', filters: [{ columnName: 'status', condition: 'eq', value: 'open' }, { columnName: 'status', condition: 'eq', value: 'gemeld' }] }, 500); },
+      log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: function (waar, e) { if (e) logError(waar, e); } });
+  } catch (e) { logError('tabula-overlegblad', e); return null; }
+})();
+if (tabulaOverleg && SERVER_ECHT) {
+  setTimeout(function () { tabulaOverleg.ronde().catch(function (e) { logError('tabula-overlegblad', e); }); }, 90000).unref();
+  setInterval(function () { tabulaOverleg.ronde().catch(function (e) { logError('tabula-overlegblad', e); }); }, 30 * 60000).unref();
+}
 
 // ── Apps › Tabula (wv4238, besluitenpagina nr 956 = L56 deel 1, David Ja 25-11-2026 22:25; ontwerp mk-scripts/wv4238/ontwerp.md, Codex
 // ontwerpreview GO-MET-WIJZIGINGEN) ──
