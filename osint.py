@@ -1864,6 +1864,117 @@ def bro_rond(ctx, lon, lat):
     return [f for f in uit if f]
 
 
+VG_GLD_REL = 'https://publiek.broservices.nl/gm/v1/gmw-relations/'
+VG_GLD_CSV = 'https://publiek.broservices.nl/gm/gld/v1/seriesAsCsv/'
+VG_GLD_PUTTEN, VG_GLD_PER_PUT, VG_GLD_MAX_M, VG_GLD_DIEP = 3, 2, 500, -5.0
+
+
+def _nl_getal(t):
+    try:
+        return float(str(t).replace('.', '').replace(',', '.')) if re.fullmatch(r'-?[\d.]+(,\d+)?', str(t)) else float(t)
+    except Exception:
+        return None
+
+
+def gld_putten(feiten):
+    """wv4182: de ondiepe putten (filter-bovenkant boven -5 m NAP) binnen 500 m uit de BRO-feiten van deze ronde, dichtstbij eerst (hooguit 3)."""
+    uit = []
+    for f in feiten or []:
+        m = re.fullmatch(r'Grondwaterput (GMW\d{12})', str((f or {}).get('veld') or ''))
+        if not m or f.get('groep') != 'bro':
+            continue
+        w = str(f.get('waarde') or '')
+        a = re.search(r'(\d+) m verderop', w)
+        mv = re.search(r'maaiveld (-?[\d.,]+) m NAP', w)
+        fl = re.search(r'filter (-?[\d.,]+) tot (-?[\d.,]+) m NAP', w)
+        if not a or int(a.group(1)) > VG_GLD_MAX_M or (fl and (_nl_getal(fl.group(1)) or -99) <= VG_GLD_DIEP):
+            continue
+        uit.append({'put': m.group(1), 'afstand': int(a.group(1)), 'maaiveld': _nl_getal(mv.group(1)) if mv else None})
+    uit.sort(key=lambda p: p['afstand'])
+    return uit[:VG_GLD_PUTTEN]
+
+
+def gld_csv_punten(t):
+    """BRO seriesAsCsv → [(ms, m NAP)]. Per tijdstip de eerste gevulde waarde: beoordeeld, dan voorlopig, dan controle ('onbekend' niet)."""
+    regels = (t or '').splitlines()
+    if not regels:
+        return []
+    kop = [k.strip().lower() for k in regels[0].split(',')]
+    volg = [i for w in ('beoordeelde', 'voorlopige', 'controle') for i, k in enumerate(kop) if k.startswith(w) and 'waarde' in k]
+    uit = []
+    for r in regels[1:]:
+        c = r.split(',')
+        if not c or not re.fullmatch(r'\d{9,14}', c[0].strip()):
+            continue
+        for i in volg:
+            if i < len(c) and c[i].strip():
+                try:
+                    v = float(c[i])
+                except ValueError:
+                    break
+                if -60 < v < 60:
+                    uit.append((int(c[0]), v))
+                break
+    return uit
+
+
+def gld_samenvatting(put, punten):
+    """Punten van één put (alle reeksen samen) → maandgemiddelden en kerncijfers; None als er niets is."""
+    if not punten:
+        return None
+    per = {}
+    for ms, v in punten:
+        per[ms] = v   # dubbele tijdstippen uit twee reeksen: één telt
+    rij = sorted(per.items())
+    dag = lambda ms: datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime('%Y-%m-%d')
+    maanden = {}
+    for ms, v in rij:
+        maanden.setdefault(dag(ms)[:7], []).append(v)
+    hoog = max(rij, key=lambda z: z[1])
+    laag = min(rij, key=lambda z: z[1])
+    return {'put': put['put'], 'afstand': put['afstand'], 'maaiveld': put['maaiveld'], 'n': len(rij), 'van': dag(rij[0][0]), 'tot': dag(rij[-1][0]),
+            'hoogste': [round(hoog[1], 3), dag(hoog[0])], 'laagste': [round(laag[1], 3), dag(laag[0])],
+            'gemiddeld': round(sum(v for _, v in rij) / len(rij), 3), 'laatste': [round(rij[-1][1], 3), dag(rij[-1][0])],
+            'maanden': {m: round(sum(x) / len(x), 3) for m, x in sorted(maanden.items())}}
+
+
+def gld_feit(s):
+    m = lambda v: getal_nl(v, 2) + ' m NAP'
+    onder = lambda v: ('' if not isinstance(s.get('maaiveld'), (int, float)) else ' (tot aan het maaiveld van de put)' if s['maaiveld'] - v < 0.05
+                       else ' (%s m onder het maaiveld van de put)' % getal_nl(s['maaiveld'] - v, 2))
+    w = ' · '.join([
+        '%s m verderop' % s['afstand'], 'gemeten %s t/m %s (%s metingen)' % (datum_nl(s['van']), datum_nl(s['tot']), getal_nl(s['n'])),
+        'hoogste %s%s op %s' % (m(s['hoogste'][0]), onder(s['hoogste'][0]), datum_nl(s['hoogste'][1])),
+        'laagste %s op %s' % (m(s['laagste'][0]), datum_nl(s['laagste'][1])), 'gemiddeld %s' % m(s['gemiddeld']),
+        'laatste %s op %s' % (m(s['laatste'][0]), datum_nl(s['laatste'][1]))])
+    return vg_feit('grond', 'Meetreeks grondwaterput %s' % s['put'], w, 'BRO grondwaterstanden (publiek.broservices.nl)', VG_LICENTIE['BRO'],
+                   peildatum=s['tot'], url='https://www.broloket.nl/ondergrondgegevens?bro-id=' + s['put'], soort='meetreeks')
+
+
+def gld_rond(ctx, putten, mr):
+    """wv4182: meetreeksen (grondwaterstanden) van de putten. Naar buiten gaan alleen de openbare putnummers en reeksnummers.
+    Vult mr met de samenvattingen; geeft de feiten."""
+    uit = []
+    for p in putten:
+        rel = jhaal(ctx, 'BRO putrelaties', VG_GLD_REL + p['put'], 'het openbare nummer van een grondwaterput', timeout=25)
+        glds = []
+        for b in (rel or {}).get('monitoringTubeReferences') or []:
+            for g in b.get('gldReferences') or []:
+                if re.fullmatch(r'GLD\d{12}', str(g.get('broId') or '')):
+                    glds.append(g['broId'])
+        punten = []
+        for g in glds[:VG_GLD_PER_PUT]:
+            t = haal(ctx, 'BRO grondwaterstanden', VG_GLD_CSV + g, 'het openbare nummer van een meetreeks', timeout=60, maxb=8_000_000)
+            punten += gld_csv_punten(t if isinstance(t, str) else (t or b'').decode('utf-8', 'replace'))
+        s = gld_samenvatting(p, punten)
+        if s:
+            mr.append(s)
+            uit.append(gld_feit(s))
+        else:
+            uit.append(vg_feit('grond', 'Meetreeks grondwaterput %s' % p['put'], 'De BRO heeft voor deze put geen meetreeks.', 'BRO grondwaterstanden (publiek.broservices.nl)', VG_LICENTIE['BRO'], soort='leeg'))
+    return uit
+
+
 def cbs_prijsindex(ctx):
     """Prijsindex bestaande koopwoningen (heel Nederland, 2020=100): {'jaren': {'2024': 117.3, …}, 'laatste': ['2026-09', 130.1]}."""
     r = jhaal(ctx, 'CBS prijsindex koopwoningen', 'https://opendata.cbs.nl/ODataApi/odata/85773NED/TypedDataSet?' + up.urlencode(
@@ -2117,8 +2228,15 @@ def vastgoed_object(ctx, o, beelden):
             uit, ok = f.result()
             groepen[naam] = ok
             feiten.extend(uit)
+    mr = []
+    if o.get('meetreeks') is True and groepen.get('bro') is True:   # wv4182: grondwaterstanden van de putten die BRO net gaf (alleen de woning)
+        putten = gld_putten(feiten)
+        if putten:
+            uit, ok = vg_groep(ctx, 'gld', lambda c: gld_rond(c, putten, mr))
+            groepen['gld'] = ok
+            feiten.extend(uit)
     b = veilig(vg_beelden, ctx, rd[0], rd[1]) if len(rd) == 2 and beelden else []
-    return {'id': o.get('id'), 'feiten': [f for f in feiten if f], 'groepen': groepen, 'beelden': b or [], 'gevonden': gevonden,
+    return {'id': o.get('id'), 'feiten': [f for f in feiten if f], 'groepen': groepen, 'beelden': b or [], 'gevonden': gevonden, 'meetreeksen': mr if groepen.get('gld') else [],
             'punt': {'rd': [round(z, 1) for z in rd], 'll': [round(z, 6) for z in ll]} if len(rd) == 2 else None}
 
 

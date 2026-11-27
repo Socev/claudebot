@@ -9,7 +9,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 f=0
 VJS="${VASTGOED_JS:-$PWD/vastgoed.js}"; OPY="${OSINT_PY:-$PWD/osint.py}"
-C=$(grep -vE '^\s*(\*|//)' "$VJS")
+C=$(grep -vE '^\s*(\*|//)' "$VJS" | grep -vE "^const GESPREK_BASIS = 'https://app\.socev\.dev/vastgoed';")   # wv4182: de vaste link voor Socev (L39) is geen netwerk
 if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|node:sqlite|\./woning-bron\.js)'\)$"; then echo "ROOD  CI-poort: vastgoed.js laadt een andere module"; f=1; fi
 if echo "$C" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new Function|child_process|https?://[a-z]|\bnet\b|XMLHttpRequest|WebSocket"; then echo "ROOD  CI-poort: vastgoed.js raakt netwerk, proces of log"; f=1; fi
 [ $f = 0 ] && echo "GROEN CI-poort: vastgoed.js heeft geen netwerk, proces of log"
@@ -20,8 +20,8 @@ if echo "$W" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new 
 g=0
 grep -q "const vastgoedApp = (function () {" server.js || { echo "ROOD  server.js: vastgoedApp ontbreekt"; g=1; }
 P=$(grep -oE "POST \\\\/app\\\\/vastgoed\\\\/\([a-z|-]+\)" server.js)
-[ "$P" = 'POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar)' ] || { echo "ROOD  server.js: POST-routes van Vastgoed zijn niet precies de zeven ($P)"; g=1; }
-grep -qF "['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar', 'woz-bezwaar'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });" server.js || { echo "ROOD  server.js: Vastgoed-routes verlengen de sessie niet"; g=1; }
+[ "$P" = 'POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar|gezien|kelder-pdf)' ] || { echo "ROOD  server.js: POST-routes van Vastgoed zijn niet precies de negen ($P)"; g=1; }   # wv4182: + gezien, kelder-pdf
+grep -qF "['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar', 'woz-bezwaar', 'gezien', 'kelder-pdf'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });" server.js || { echo "ROOD  server.js: Vastgoed-routes verlengen de sessie niet"; g=1; }
 grep -qF "p === '/app/vastgoed/woz-lees') ? APP_OSINT_BESTAND_MAX_BODY" server.js || { echo "ROOD  server.js: woz-lees heeft niet de bestandsgrens (10 MB)"; g=1; }
 grep -qE "^\s+vastgoed: typeof vastgoedInfo === 'function'" server.js || { echo "ROOD  server.js: /health.vastgoed ontbreekt"; g=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* vastgoed\.js" uitrol.sh || { echo "ROOD  uitrol.sh: vastgoed.js niet in RELEASE_OPTIONEEL"; g=1; }
@@ -52,6 +52,7 @@ VASTGOED_JS="$VJS" node --test test/vastgoed-kern.test.js >/dev/null 2>&1 && ech
 # wv4229 (L41): het WOZ-moment (dagtekening, vergelijking, termijn in het deadline-register, concept-bezwaar uit vaste velden)
 VASTGOED_JS="$VJS" node --test test/vastgoed-woz-moment.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-woz-moment.test.js (L41: WOZ-moment)" || { echo "ROOD  test/vastgoed-woz-moment.test.js"; f=1; }
 VASTGOED_JS="$VJS" node --test test/vastgoed-gesprek.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-gesprek.test.js (L39: Socev leest Vastgoed)" || { echo "ROOD  test/vastgoed-gesprek.test.js"; f=1; }
+VASTGOED_JS="$VJS" node --test test/vastgoed-kelder.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-kelder.test.js (2C49: kelderdossier, ronde, melding alleen bij verschil)" || { echo "ROOD  test/vastgoed-kelder.test.js"; f=1; }
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 python3 -I test/vastgoed-laag.py "$OPY" "$T" | tail -1; python3 -I test/vastgoed-laag.py "$OPY" "$T" >/dev/null 2>&1 || { echo "ROOD  test/vastgoed-laag.py"; f=1; }
 

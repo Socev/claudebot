@@ -150,7 +150,7 @@ test('ververs: alleen nummers naar de bronnenlaag, feiten/beelden/aanroepen bewa
     assert.strictEqual(r.status, 200, JSON.stringify(r.body));
     const vraag = JSON.stringify(o.bronnen.vragen[0]);
     assert.ok(!/Hofstraat|Apeldoorn|KZ|7311/.test(vraag.replace(/"gemeente":"Apeldoorn"/g, '')), 'adres ging naar de bronnenlaag: ' + vraag);
-    assert.deepStrictEqual(Object.keys(o.bronnen.vragen[0].objecten[0]).sort(), ['id', 'pand', 'percelen', 'vbo']);
+    assert.deepStrictEqual(Object.keys(o.bronnen.vragen[0].objecten[0]).sort(), ['id', 'meetreeks', 'pand', 'percelen', 'vbo']);   // wv4182: meetreeks = true alleen voor de woning
     const r1 = await o.m.app({ pad: '/app/vastgoed', methode: 'GET' });
     const w1 = r1.body.objecten[0];
     const ext = w1.feiten.filter((f) => f.herkomst === 'extern');

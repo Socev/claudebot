@@ -6430,7 +6430,7 @@ APP_GLIJD_ROUTES.add('POST /app/zoek-snel/uitzoeken');   // wv3821: de tik op "Z
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze', 'past'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv3755: past   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag', 'medisch', 'mededeling', 'vanzelf'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
 ['controleer', 'inlees', 'intrek', 'code', 'koppel', 'rol', 'rooster', 'persoon'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt (wv3047: koppel, rol, rooster, persoon)   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
-['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar', 'woz-bezwaar'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt; wv3102: + WOZ-beschikking
+['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar', 'woz-bezwaar', 'gezien', 'kelder-pdf'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt; wv3102: + WOZ-beschikking
 APP_GLIJD_ROUTES.add('POST /app/nza/stuk');
 APP_GLIJD_ROUTES.add('POST /app/nza/draad');   // wv3156: een vraagdraad lezen in de tab Vragen   // wv3099: een stuk lezen in het NZa-scherm = David die werkt
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
@@ -18024,7 +18024,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
         if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag|medisch|mededeling|vanzelf)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
         if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
-        if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking; wv4229: + concept-bezwaar
+        if (route === 'GET /app/vastgoed' || route === 'GET /app/vastgoed/kelder' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar|gezien|kelder-pdf)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking; wv4229: + concept-bezwaar
         if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk' || route === 'GET /app/nza/punten' || route === 'GET /app/nza/scorekaart') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen); wv3676: tab Punten
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
         if (route === 'GET /app/beleggen/strateeg' || route === 'GET /app/beleggen/strateeg/backtest' || route === 'POST /app/beleggen/strateeg/stand' || route === 'POST /app/beleggen/strateeg/idee') return typeof appStrateeg === 'function' ? appStrateeg(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'strateeg');   // wv3993: Strateeg (fictief)
@@ -19259,6 +19259,7 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'apps-avond',           // wv3815: avondeditie "Uit je Apps" van het redactie-loket (20:30–22:29, alleen bij nieuws); hoofdkanaal, soort dag
   'pot-antwoord',          // wv3677/wv3765: herstelbericht na een mislukte Ja op de POT-aantalkaart; hoofdkanaal, soort dag (mislukte handeling op Davids knop)
   'herinnering-david',    // wv3906: Davids eigen herinnering uit Zet erbij (Vandaag te doen), op zijn tijdstip; hoofdkanaal, soort dag
+  'vastgoed',             // wv4182 (2C49): één regel als de dagelijkse Vastgoed-ronde iets veranderd vond (openbare gegevens, stukken, kelderdossier); hoofdkanaal, soort dag
   'pakjes']);             // wv4154 (2C58): seintje per pakje (tijdvak bekend, aangekomen), 07–22 u, hooguit twee per pakje; hoofdkanaal, soort dag
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
@@ -31193,6 +31194,12 @@ async function appVastgoed(req, res, a, route, d) {
     catch (e) { logError('vastgoed-woz', new Error('route faalde')); return appWeiger(res, 503, 'Vastgoed is nu niet te lezen; probeer het zo opnieuw', 'vastgoed woz fout'); }
   }
   const post = route.indexOf('POST ') === 0;
+  if (route === 'POST /app/vastgoed/kelder-pdf') {   // wv4182: het kelderdossier als pdf in Bestanden (David stuurt hem zelf door)
+    if (!appTeller('vastgoed-kelder-pdf', 10, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed-kelder-pdf');
+    const r = await vastgoedKelderPdf();
+    res._app.reden = 'vastgoed kelder-pdf ' + (r.ok ? 'gezet' : r.reden);
+    return r.ok ? appStuur(res, 200, { ok: true, naam: r.naam }) : appWeiger(res, r.status || 503, r.fout || 'de pdf lukte nu niet', 'vastgoed kelder-pdf');
+  }
   if (route === 'POST /app/vastgoed/ververs') {
     if (!rolPrimair()) return appWeiger(res, 409, 'openbare gegevens ophalen kan alleen op de hoofdpod', 'vastgoed niet primair');
     if (!appTeller('vastgoed-ververs', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed-ververs');
@@ -31218,8 +31225,72 @@ async function vastgoedSmal(d) {
 }
 function vastgoedInfo() {
   if (!vastgoedApp) return { aan: false };
-  try { return vastgoedApp.info(); } catch (e) { return { aan: true, fout: true }; }
+  try { return Object.assign(vastgoedApp.info(), { tik: vastgoedTikStand }); } catch (e) { return { aan: true, fout: true }; }
 }
+// ── wv4182 (besluitenpagina nr 149 = 2C49, David Ja 25-11-2026 22:27): kelderdossier als pdf en de dagelijkse ronde ──
+// Pdf: vastgoed.js maakt de markdown (zelfde inhoud als het scherm Kelder), omzet.js maakt er in zijn eigen kindproces een pdf van
+// (Chromium, JS uit, netwerk dicht) en appBewaar zet hem in Bestanden (30 dagen, label "Kelderdossier"). Niets naar buiten.
+// Ronde: elke 15 min een tik; op de hoofdpod (SERVER_ECHT, rolPrimair) tussen 07:00 en 21:59 Amsterdam eens per dag vastgoed.ronde()
+// (dossier lezen; openbare gegevens alleen als ze ouder zijn dan 30 dagen; vergelijken met de vorige momentopname). Een gevonden
+// wijziging ligt als melding_open in vastgoed.sqlite (samen met de wijzigingen in één transactie, review Codex MOET 2); de tik verstuurt
+// hem (bron vastgoed, soort dag, vaste sleutel) en wist hem pas na een 200. Mislukt het, dan de volgende tik opnieuw met dezelfde sleutel.
+// Geen wijziging = geen bericht. /health vastgoed.tik: laatste ronde, fout (zonder inhoud).
+const vastgoedTikStand = { laatst: null, fout: null, verstuurd: 0, pdf: null };
+let vastgoedTikBezig = false;
+async function vastgoedKelderPdf() {
+  if (!vastgoedApp || typeof vastgoedApp.kelder !== 'function') return { ok: false, status: 404, reden: 'geen module', fout: 'Vastgoed zit niet in deze versie van de pod' };
+  if (!omzetter) return { ok: false, status: 503, reden: 'geen omzetter', fout: 'de pdf-maker zit niet in deze versie van de pod' };
+  let d;
+  try { d = vastgoedApp.kelder(); } catch (e) { return { ok: false, status: e && e.status || 503, reden: 'dossier', fout: e && e.status ? e.message : 'het kelderdossier is nu niet te lezen' }; }
+  const dag = new Intl.DateTimeFormat('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', year: 'numeric' }).format(new Date());
+  const naam = 'Kelderdossier ' + dag.replace(/\//g, '-');
+  let r;
+  try { r = await omzetter.omzet({ naam: naam + '.md', soort: 'md', tekst: d.md, formaat: 'pdf' }); }
+  catch (e) { logError('vastgoed-kelder-pdf', new Error('omzetten faalde')); return { ok: false, status: 503, reden: 'omzet', fout: 'de pdf lukte nu niet' }; }
+  if (!r || r.status !== 200 || !r.j || !r.j.inhoud) return { ok: false, status: 503, reden: 'omzet ' + (r && r.status), fout: 'de pdf lukte nu niet' };
+  const id = crypto.randomBytes(8).toString('hex');
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'vg-kelder-'));
+  try {
+    fs.writeFileSync(path.join(dir, naam + '.pdf'), Buffer.from(r.j.inhoud, 'base64'), { mode: 0o600 });
+    const m = appBewaar(id, dir, { soort: 'beurt', kanaal: 'hoofd', app: true, label: 'Kelderdossier (Vastgoed)', ok: true });
+    if (!m || !m.bestanden || !m.bestanden.length) return { ok: false, status: 507, reden: 'bestanden vol', fout: 'Bestanden is vol; ruim eerst iets op' };
+  } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* tijdelijk */ } }
+  vastgoedTikStand.pdf = new Date().toISOString();
+  return { ok: true, naam: naam + '.pdf' };
+}
+async function vastgoedTik(o) {
+  const x = o || {};
+  if (!vastgoedApp || typeof vastgoedApp.ronde !== 'function' || vastgoedTikBezig) return { ok: false };
+  if (!x.nu && (!SERVER_ECHT || !rolPrimair())) return { ok: false, reden: 'niet primair' };
+  const nuMs = x.nu || Date.now();
+  const uur = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(new Date(nuMs)));
+  if (uur < 7 || uur > 21) return { ok: true, buiten_uren: true };
+  const dag = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(nuMs));
+  vastgoedTikBezig = true;
+  try {
+    let r = null;
+    if (vastgoedApp.rondeDag() !== dag) {
+      r = await vastgoedApp.ronde({ dag: dag });
+      vastgoedTikStand.laatst = new Date().toISOString();
+      vastgoedTikStand.ronde = { nulpunt: !!r.nulpunt, wijzigingen: r.wijzigingen, opgehaald: r.opgehaald };   // alleen aantallen (geen log: test/vastgoed.sh)
+      if (r.pdf_nodig) { const p = await vastgoedKelderPdf(); if (p.ok) vastgoedApp.kelderPdfGezet(r.kelder_hash); }
+    }
+    const m = vastgoedApp.meldingOpen();
+    if (m && m.tekst && m.sleutel) {
+      const b = await (x.bericht || berichtIntern)({ kanaal: 'hoofd', bron: 'vastgoed', klasse: 'normaal', soort: 'dag', tekst: m.tekst, sleutel: 'vastgoed-' + m.sleutel });
+      if (!b || b.status !== 200) throw berichtFout(b);
+      vastgoedApp.meldingVerstuurd(m.sleutel);
+      vastgoedTikStand.verstuurd++;
+    }
+    vastgoedTikStand.fout = null;
+    return { ok: true, ronde: r };
+  } catch (e) {
+    vastgoedTikStand.fout = { op: new Date().toISOString(), reden: String(e && (e.code || e.message) || e).replace(/[^\p{L}\p{N} ._:()-]/gu, ' ').slice(0, 80) };
+    logError('vastgoed-tik', new Error('ronde of bericht faalde'));
+    return { ok: false };
+  } finally { vastgoedTikBezig = false; }
+}
+if (vastgoedApp && SERVER_ECHT) { setTimeout(function () { vastgoedTik().catch(function () {}); }, 120000).unref(); setInterval(function () { vastgoedTik().catch(function () {}); }, 15 * 60000).unref(); }
 // ── einde OVIS Vastgoed ──
 // ── OVIS NZa scherm (wv3099, 15-11-2026; fase 1b van het plan vault "01_Ontwikkeling/OVIS NZa - plan (Fable 5.2, 14-11-2026)" § 3) ──
 // Het eigen scherm /nza (pc: Dossier, Stukken, Zaken; telefoon: Vraag, Nieuw, Stuk) leest het NZa-dossier via nza.py scherm (zelfde script

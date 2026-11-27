@@ -29,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const WB = require('./woning-bron.js');   // wv3923: gedeelde lezer voor taxaties en de bankstand van de hypotheek (ook Financiën)
 
-const SCHEMA_VERSIE = 4;   // 2 = fase 2 (wv3102): leningdeel, woz_eigen; reeksen lening/restschuld/verbouwing/servicekosten/stroom; 3 = object.weg_op (A15); 4 = woz_eigen.dagtekening/maten/concept_op (wv4229)
+const SCHEMA_VERSIE = 5;   // 2 = fase 2 (wv3102): leningdeel, woz_eigen; reeksen lening/restschuld/verbouwing/servicekosten/stroom; 3 = object.weg_op (A15); 4 = woz_eigen.dagtekening/maten/concept_op (wv4229); 5 = wijziging (wv4182)
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT);
 CREATE TABLE IF NOT EXISTS object (id INTEGER PRIMARY KEY AUTOINCREMENT, sleutel TEXT NOT NULL UNIQUE, soort TEXT NOT NULL CHECK (soort IN ('woning','garagebox')),
@@ -54,18 +54,22 @@ CREATE TABLE IF NOT EXISTS leningdeel (id INTEGER PRIMARY KEY AUTOINCREMENT, obj
   volgorde INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS woz_eigen (id INTEGER PRIMARY KEY AUTOINCREMENT, object INTEGER NOT NULL REFERENCES object(id), jaar INTEGER NOT NULL, peildatum TEXT NOT NULL,
   waarde REAL NOT NULL, pad TEXT, sha TEXT, bevestigd TEXT NOT NULL, UNIQUE (object, jaar));
+CREATE TABLE IF NOT EXISTS wijziging (id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, object TEXT, soort TEXT NOT NULL, sleutel TEXT NOT NULL, tekst TEXT NOT NULL);
 `;
 const HUIS = '20_Prive/Huis';
 const BRONNEN = '20_Prive/Bronnen/Huis';
 const RUBRIEKEN = ['overzicht', 'waarde', 'bouw', 'grond', 'regels'];
-const GROEPEN = ['ls', 'bag', '3dbag', 'perceel', 'ahn', 'bodem', 'fundering', 'plannen', 'bro', 'cbs', 'lbm', 'sru', 'ep'];   // de bronnen van osint.py vastgoed
+const GROEPEN = ['ls', 'bag', '3dbag', 'perceel', 'ahn', 'bodem', 'fundering', 'plannen', 'bro', 'cbs', 'lbm', 'sru', 'ep', 'gld'];   // wv4182: gld = meetreeksen grondwater (alleen woning)   // de bronnen van osint.py vastgoed
 const GROEP_NAAM = { ls: 'Locatieserver', bag: 'BAG', '3dbag': '3D-BAG', perceel: 'kadastrale kaart', ahn: 'hoogtebestand', bodem: 'Bodemloket', fundering: 'funderingskaart',
-  plannen: 'ruimtelijke plannen', bro: 'BRO', cbs: 'CBS-buurtcijfers', lbm: 'Leefbaarometer', sru: 'bekendmakingen', ep: 'energielabel' };
+  plannen: 'ruimtelijke plannen', bro: 'BRO', cbs: 'CBS-buurtcijfers', lbm: 'Leefbaarometer', sru: 'bekendmakingen', ep: 'energielabel', gld: 'BRO-grondwaterstanden' };
 const EXTERN_VERS_MS = 30 * 24 * 3600 * 1000;      // openbare gegevens ouder dan 30 dagen = "verloopt" in de dossierstand
 const VERVERS_MIN_MS = 10 * 60 * 1000;             // hooguit eens per 10 minuten per object naar buiten
 const AANROEP_DAGEN = 365;
 const FINANCIEN = '20_Prive/Financien';
 const GELD_DAG_MS = 24 * 3600 * 1000;               // fase 2: bank, Tibber en hypotheek opnieuw lezen bij openen als de laatste lezing ouder is dan een dag
+const RONDE_MAAND_MS = 30 * 24 * 3600 * 1000;      // wv4182: openbare gegevens zelf opnieuw ophalen als ze ouder zijn dan dit
+const KELDER_PDF_MS = 25 * 24 * 3600 * 1000;       // wv4182: Bestanden bewaart 30 dagen; ouder dan dit = nieuwe pdf
+const WIJZIGING_DAGEN = 365;
 const KORT = { jan: 1, feb: 2, mrt: 3, maa: 3, apr: 4, mei: 5, jun: 6, jul: 7, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, dec: 12 };
 const MAAND = { januari: 1, februari: 2, maart: 3, april: 4, mei: 5, juni: 6, juli: 7, augustus: 8, september: 9, oktober: 10, november: 11, december: 12 };
 
@@ -820,6 +824,249 @@ function gesprekUit(ov, b, basis) {
 }
 
 // ---------------------------------------------------------------- module
+// ---------------------------------------------------------------- wv4182 (besluitenpagina nr 149 = 2C49): kelderdossier en zelf verversen
+// Het kelderdossier brengt bij elkaar wat al bekend is voor bouwadviseur en aannemer (stand en besluit, randvoorwaarden, tekeningen, hoogtes,
+// grondwater met meetreeksen, sonderingen, bestemming, fundering), elke regel met bron en datum. De lezer is net zo eng als die van het
+// dossier: alleen de vaste vorm van de kelderpagina (verbouwpagina met "Kelder" in de titel) en van de woningpagina (§ Bodem en fundering,
+// § Bestemmingsplan); wat niet in die vorm staat blijft grijs, nooit geraden. Geen netwerk, geen schrijfactie.
+const KELDER_ONDERDELEN = [['stand', 'Stand en besluit'], ['voorwaarden', 'Randvoorwaarden'], ['tekeningen', 'Tekeningen'], ['hoogtes', 'Maaiveld en hoogtes'],
+  ['grondwater', 'Grondwater'], ['sonderingen', 'Sonderingen'], ['bestemming', 'Bestemming en bouwregels'], ['fundering', 'Fundering']];
+const isoUitNl = (t) => { const m = /\b(\d{1,2})-(\d{1,2})-(\d{4})\b/.exec(String(t || '')); return m ? iso(Number(m[1]), Number(m[2]), Number(m[3])) : null; };
+const kaalMd = (t) => kaal(String(t || '').replace(/^\*(?:Bron|Bronnen)\b[^\n]*$/gim, '').replace(/^>\s?/gm, '').replace(/\[!\w+\]\s*/g, '')).replace(/\*\(bron[^)]*\)\*/gi, '').replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+function kopDatum(md, re, jaar) {   // datum uit de kop boven de eerste regel die op re past: "(22-9)" of "6-11-2026"; zonder jaar het jaar van de pagina
+  const r = String(md || '').split('\n');
+  let i = r.findIndex((x) => re.test(x));
+  for (; i >= 0; i--) if (/^#{2,3}\s/.test(r[i])) break;
+  if (i < 0) return null;
+  const vol = isoUitNl(r[i]); if (vol) return vol;
+  const m = /\((\d{1,2})-(\d{1,2})\)/.exec(r[i]);
+  return m && jaar ? iso(Number(m[1]), Number(m[2]), Number(jaar)) : null;
+}
+function frontVeld(md, veld) { const m = String(md || '').match(new RegExp(`^${veld}:\\s*(.+)$`, 'm')); return m ? m[1].trim().replace(/^["']|["']$/g, '') : null; }
+function alineaMet(md, re) {   // de alinea (tot een lege regel) waarin een regel op re past
+  const r = String(md || '').split('\n');
+  const i = r.findIndex((x) => re.test(x));
+  if (i < 0) return null;
+  let a = i, b = i;
+  while (a > 0 && r[a - 1].trim() && !/^#/.test(r[a - 1])) a--;
+  while (b < r.length - 1 && r[b + 1].trim() && !/^#/.test(r[b + 1])) b++;
+  return r.slice(a, b + 1).join('\n');
+}
+function opsomming(tekst) {   // "- regel" (met vervolgregels) → [tekst]
+  const uit = [];
+  let ouder = null;   // "**Kop:**" met een ingesprongen lijst eronder: de kop gaat voor elke subregel
+  for (const l of String(tekst || '').split('\n')) {
+    if (/^\s{2,}[-*]\s+/.test(l) && ouder) { uit.push(ouder + ' ' + l.replace(/^\s*[-*]\s+/, '')); continue; }
+    if (/^[-*]\s+/.test(l)) { const t = l.replace(/^[-*]\s+/, ''); if (/:\**\s*$/.test(t)) { ouder = t.replace(/\s+$/, ''); continue; } ouder = null; uit.push(t); continue; }
+    if (/^\s*[-*]\s+/.test(l)) uit.push(l.replace(/^\s*[-*]\s+/, ''));
+    else if (uit.length && /^\s{2,}\S/.test(l) && !/^\s*[-*]\s/.test(l)) uit[uit.length - 1] += ' ' + l.trim();
+  }
+  return uit.map(kaalMd).filter(Boolean);
+}
+function kopSectie(md, kopRe) {   // tekst onder de eerste ## of ### kop die op kopRe past, tot de volgende kop van hetzelfde of hoger niveau
+  const r = String(md || '').split('\n');
+  const i = r.findIndex((x) => /^#{2,3}\s/.test(x) && kopRe.test(x));
+  if (i < 0) return null;
+  const niv = r[i].match(/^#+/)[0].length;
+  let j = i + 1;
+  while (j < r.length && !(new RegExp(`^#{1,${niv}}\\s`).test(r[j]))) j++;
+  return { kop: kaal(r[i].replace(/^#+\s*/, '')), tekst: r.slice(i + 1, j).join('\n') };
+}
+// De kelderpagina en de woningpagina → losse stukken tekst (nog zonder bron; die zet kelderDossier).
+function leesKelder(kelderMd, woningMd) {
+  const k = { status: frontVeld(kelderMd, 'status'), bijgewerkt: isoGoed(frontVeld(kelderMd, 'updated') || '') ? frontVeld(kelderMd, 'updated') : null, titel: titel(kelderMd) };
+  const besluit = alineaMet(kelderMd, /^\*\*Besluit\b/);
+  k.besluit = besluit ? { tekst: kaalMd(besluit.replace(/\*\(bron[^)]*\)\*/gi, '')), datum: isoUitNl(besluit) } : null;
+  const bp = kopSectie(kelderMd, /Bouwplan/i);
+  if (bp) {
+    const eerste = bp.tekst.split(/\n\s*\n/).map((x) => x.trim()).find((x) => x && !/^\*\*Besluit/.test(x)) || '';
+    k.bouwplan = { kop: bp.kop, tekst: kaalMd(eerste), datum: isoUitNl(bp.kop) || isoUitNl(eerste) };
+    const m = /onderzijde\s+(\d[\d.,]*)\s*mm\s*[−–-]\s*NAP/i.exec(bp.tekst);
+    k.kelderbak = m ? { tekst: `Onderzijde kelderbak ${m[1].replace('.', '')} mm onder NAP (bouwplan)`, datum: k.bouwplan.datum } : null;
+  }
+  const jaar = (k.bijgewerkt || '').slice(0, 4);
+  const kantel = alineaMet(kelderMd, /\[!\w+\]\s*Het punt waarop/);
+  k.kantel = kantel ? { tekst: kaalMd(kantel.replace(/^>\s*\[!\w+\][^\n]*\n?/, '')), datum: kopDatum(kelderMd, /\[!\w+\]\s*Het punt waarop/, jaar) } : null;
+  const vo = kopSectie(kelderMd, /Stand van het vooronderzoek/i);
+  k.vooronderzoek = vo ? { kop: vo.kop, regels: opsomming(vo.tekst), datum: isoUitNl(vo.kop) ? null : null } : null;
+  k.sondering = [];
+  for (const blok of String(kelderMd || '').split(/\n\s*\n/)) if (/sondering/i.test(blok) && !/^>/.test(blok.trim()) && !/^---/.test(blok.trim())) {
+    const eerste = blok.split('\n')[0];
+    const d = kopDatum(kelderMd, new RegExp('^' + eerste.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'), jaar);
+    for (const zin of kaalMd(blok.replace(/^\s*[-*]\s+/gm, '')).split(/(?<=[.!?])\s+/)) if (/sondering/i.test(zin)) k.sondering.push({ tekst: zin.trim(), datum: d });
+  }
+  const open = alineaMet(kelderMd, /^\*\*Open:\*\*/);
+  k.open = open ? { tekst: kaalMd(open.replace(/^\*\*Open:\*\*\s*/, '')), datum: kopDatum(kelderMd, /^\*\*Open:\*\*/, jaar) } : null;
+  // woningpagina
+  const w = { bijgewerkt: isoGoed(frontVeld(woningMd, 'updated') || '') ? frontVeld(woningMd, 'updated') : null };
+  const bf = kopSectie(woningMd, /^##\s+Bodem en fundering/i);
+  if (bf) {
+    const i = bf.tekst.indexOf('**Voor het kelderplan**');
+    w.voorKelder = i >= 0 ? opsomming(bf.tekst.slice(i).split('\n').slice(1).join('\n')) : [];
+    const fm = alineaMet(bf.tekst, /Funderingsrisicorapport/);
+    const fl = bf.tekst.slice(bf.tekst.indexOf('**Funderingsrisicorapport')).split('**Voor het kelderplan**')[0];
+    const fk = fm ? kaalMd(fm.split('\n')[0]) : '';
+    w.fundermaps = fm ? { kop: (fk.match(/^[^(]*\([^,)]*/) || [fk])[0].replace(/:$/, '') + (/\(/.test(fk) ? ')' : ''), datum: isoUitNl(fm), regels: opsomming(fl) } : null;
+  }
+  const bs = kopSectie(woningMd, /^##\s+Bestemmingsplan/i);
+  if (bs) {
+    const t = bs.tekst.split(/\n\*\*Bouwdossier/)[0];
+    const plan = (t.match(/^\*\*Bestemmingsplan[^\n]*/m) || [null])[0];
+    w.bestemming = { plan: plan ? kaalMd(plan) : null, datum: isoUitNl(plan), regels: opsomming(t).filter((x) => /plan-ID|bestemming|Bijbehorende|maximaal 30|Kelders|onbebouwd|Hoofdgebouw|dakterras/i.test(x)) };
+  }
+  return { kelder: k, woning: w };
+}
+// Het dossier zelf (puur): o = het woningobject uit overzicht() (feiten, reeksen, stukken, bron_stand), l = leesKelder(...), pagina's = paden.
+function kelderDossier(o, l, pag, extra) {
+  const k = (l && l.kelder) || {}, w = (l && l.woning) || {};
+  const KP = pag && pag.kelder, WP = pag && pag.woning;
+  const dk = (t) => ({ dossier: true, pagina: t });
+  const R = (tekst, bron, datum, x) => Object.assign({ tekst: String(tekst).slice(0, 900), bron, datum: datum || null }, x || {});
+  const extern = (f) => R(`${f.veld}: ${f.waarde}`, f.bron, (f.peildatum && isoGoed(f.peildatum) ? f.peildatum : null) || String(f.opgehaald || '').slice(0, 10), Object.assign({ extern: true }, f.url ? { url: f.url } : {}));
+  const fe = (o.feiten || []).filter((f) => f.herkomst === 'extern');
+  const bs = o.bron_stand || {};
+  const on = {};
+  for (const [id] of KELDER_ONDERDELEN) on[id] = [];
+  if (KP) {
+    if (k.besluit) on.stand.push(R(k.besluit.tekst, 'kelderpagina (besluit)', k.besluit.datum, dk(KP)));
+    if (k.bouwplan) on.stand.push(R(k.bouwplan.tekst, 'kelderpagina (' + k.bouwplan.kop.replace(/\s*—.*$/, '') + ')', k.bouwplan.datum, dk(KP)));
+    if (k.kantel) on.stand.push(R('Kantelpunt: ' + k.kantel.tekst, 'kelderpagina', k.kantel.datum, dk(KP)));
+    if (k.open) on.stand.push(R('Open: ' + k.open.tekst, 'kelderpagina', k.open.datum, dk(KP)));
+    if (k.status) on.stand.push(R(`Stand: ${k.status}${k.bijgewerkt ? ', kelderpagina bijgewerkt ' + nlDag(k.bijgewerkt) : ''}`, 'kelderpagina', k.bijgewerkt, dk(KP)));
+  }
+  for (const x of w.voorKelder || []) on.voorwaarden.push(R(x, 'woningpagina § Bodem en fundering', w.bijgewerkt, dk(WP)));
+  // tekeningen: stukken van de woning (vaste soorten) en de constructietekeningen uit het opgevraagde bouwdossier
+  const tekRe = /palenplan|constructie|doorsnede|bouwplan kelder|begane grond|gevel|situatie/i;
+  for (const s of (o.stukken || []).filter((x) => ['tekening', 'constructie'].includes(x.soort) && tekRe.test(x.naam) && !/zolder|verdieping|terras/i.test(x.naam) && !/\.md$/i.test(x.pad)).sort((a, b) => String(b.datum || '').localeCompare(String(a.datum || ''))).slice(0, 20)) {
+    on.tekeningen.push(R(s.naam.replace(/\.\w+$/, ''), 'stuk in het dossier', s.datum && s.datum.length === 10 ? s.datum : null, { pad: s.pad }));
+  }
+  for (const s of ((extra && extra.bouwdossier) || []).slice(0, 12)) on.tekeningen.push(R(s.naam.replace(/\.\w+$/, '') + ' (bouwdossier gemeente)', 'stuk in het dossier', s.datum || null, { pad: s.pad }));
+  // hoogtes
+  for (const [g, veld] of [['ahn', 'Maaiveld rond het adres'], ['3dbag', 'Maaiveld (3D-BAG)']]) { const f = fe.find((x) => x.groep === g && x.veld === veld); if (f) on.hoogtes.push(extern(f)); }
+  const fmMv = ((w.fundermaps || {}).regels || []).find((x) => /maaiveld/i.test(x));
+  if (fmMv) on.hoogtes.push(R(fmMv, (w.fundermaps.kop || 'Funderingsrisicorapport') , w.fundermaps.datum, dk(WP)));
+  if (k.kelderbak) on.hoogtes.push(R(k.kelderbak.tekst, 'kelderpagina (bouwplan)', k.kelderbak.datum, dk(KP)));
+  if (on.hoogtes.length > 1) on.hoogtes.push(R('De bronnen meten het maaiveld elk op hun eigen manier en plek; de verschillen staan hier naast elkaar, niet verrekend.', 'Socev', null, { noot: true }));
+  // grondwater
+  const fmGw = ((w.fundermaps || {}).regels || []).find((x) => /grondwater/i.test(x));
+  if (fmGw) on.grondwater.push(R(fmGw, (w.fundermaps.kop || 'Funderingsrisicorapport'), w.fundermaps.datum, dk(WP)));
+  const nPut = fe.find((x) => x.groep === 'bro' && /^Grondwaterputten binnen/.test(x.veld));
+  if (nPut) on.grondwater.push(R(`${nPut.waarde} grondwaterputten in de BRO binnen 1 km; hieronder de dichtstbijzijnde.`, nPut.bron, String(nPut.opgehaald || '').slice(0, 10), { extern: true }));
+  const reeks = (o.reeksen || []).filter((r) => r.reeks === 'grondwater');
+  for (const f of fe.filter((x) => x.groep === 'bro' && /^Grondwaterput GMW/.test(x.veld))) {
+    const put = f.veld.replace(/^Grondwaterput /, '');
+    on.grondwater.push(Object.assign(extern(f), { put }));
+    const m = fe.find((x) => x.groep === 'gld' && x.veld === 'Meetreeks grondwaterput ' + put);
+    if (m) {
+      const pr = reeks.filter((r) => r.toelichting === put);
+      on.grondwater.push(Object.assign(extern(m), { put, meetreeks: true, maanden: pr.map((r) => [r.peildatum.slice(0, 7), r.waarde]) }));
+    }
+  }
+  if (nPut && !fe.some((x) => x.groep === 'gld')) on.grondwater.push(R('Meetreeksen van deze putten zijn nog niet opgehaald; dat gebeurt bij de volgende maandelijkse ronde.', 'Socev', null, { noot: true }));
+  // sonderingen
+  const nS = fe.find((x) => x.groep === 'bro' && /^Sonderingen binnen/.test(x.veld));
+  if (nS && String(nS.waarde).trim() === '0' && bs.bro && bs.bro.ok) {
+    on.sonderingen.push(R(`Binnen 500 m ligt geen openbare sondering (BRO, opgehaald ${nlDag(String(nS.opgehaald || '').slice(0, 10))}): die moet sowieso zelf gemaakt worden.`, nS.bron, String(nS.opgehaald || '').slice(0, 10), { kern: true, extern: true }));
+  } else if (nS) {
+    on.sonderingen.push(extern(nS));
+    for (const f of fe.filter((x) => x.groep === 'bro' && /^Sondering CPT/.test(x.veld))) on.sonderingen.push(extern(f));
+  } else on.sonderingen.push(R('Nog niet opgehaald uit de BRO.', 'Socev', null, { noot: true }));
+  for (const z of (k.sondering || []).slice(0, 4)) on.sonderingen.push(R(z.tekst, 'kelderpagina', z.datum, dk(KP)));
+  // bestemming
+  if (w.bestemming) {
+    if (w.bestemming.plan) on.bestemming.push(R(w.bestemming.plan, 'woningpagina § Bestemmingsplan', w.bestemming.datum || w.bijgewerkt, dk(WP)));
+    for (const x of w.bestemming.regels) on.bestemming.push(R(x, 'woningpagina § Bestemmingsplan', w.bestemming.datum || w.bijgewerkt, dk(WP)));
+  }
+  for (const f of fe.filter((x) => x.groep === 'plannen').slice(0, 6)) on.bestemming.push(extern(f));
+  // fundering
+  const fd = (o.feiten || []).find((f) => f.herkomst === 'dossier' && f.veld === 'Fundering');
+  if (fd) on.fundering.push(R(`Fundering: ${fd.waarde}`, 'woningpagina (kerngegevens)', w.bijgewerkt, dk(WP)));
+  for (const x of ((w.fundermaps || {}).regels || []).filter((y) => !/maaiveld|grondwater/i.test(y))) on.fundering.push(R(x, (w.fundermaps.kop || 'Funderingsrisicorapport'), w.fundermaps.datum, dk(WP)));
+  for (const f of fe.filter((x) => x.groep === 'fundering')) on.fundering.push(extern(f));
+  const onderdelen = KELDER_ONDERDELEN.map(([id, t]) => ({ id, titel: t, regels: on[id] }));
+  return { ok: true, pagina: KP || null, status: k.status || null, onderdelen, leeg: onderdelen.filter((x) => !x.regels.length).map((x) => x.titel) };
+}
+function kelderMd(d, naam, opIso) {
+  const r = [`# Kelderdossier${naam ? ' — ' + naam : ''}`, '', `*Samengesteld door Socev uit het huisdossier en openbare bronnen op ${nlDag(String(opIso || '').slice(0, 10))}. Elke regel met bron en datum.*`, ''];
+  for (const o of d.onderdelen) {
+    r.push(`## ${o.titel}`, '');
+    if (!o.regels.length) r.push('- *Niets in het dossier.*');
+    for (const x of o.regels) r.push(`- ${x.tekst.replace(/\n/g, ' ')} *(${[x.bron, x.datum ? nlDag(x.datum) : (x.noot ? null : 'datum onbekend')].filter(Boolean).join(', ')})*`);
+    r.push('');
+  }
+  return r.join('\n');
+}
+// ── zelf verversen: kenmerken en vergelijken (review Codex MOET 1: een meetreeks telt alleen met zijn uitersten en meetjaren) ──
+const KENMERK_GELD = new Set(['bank', 'tibber', 'hypotheek']);
+const r5 = (v) => Math.round(Number(v) * 20) / 20;
+function fnv(t) {   // korte vaste sleutel zonder crypto (CI-poort: alleen fs, path, node:sqlite): twee FNV-1a-rondes van 32 bit
+  let a = 0x811c9dc5, b = 0x01000193 ^ 0x9e3779b9;
+  for (const c of String(t)) { const k = c.codePointAt(0); a = Math.imul(a ^ k, 0x01000193) >>> 0; b = Math.imul(b ^ k, 0x01000193 ^ 0x2545f491) >>> 0; }
+  return a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
+}
+function kenmerken(ov, kelder) {   // → { sleutel: { tekst, soort, object } }; alleen groepen die in de laatste ronde lukten
+  const uit = {};
+  for (const o of (ov && ov.objecten) || []) {
+    if (o.weg_op) continue;
+    const bs = o.bron_stand || {};
+    for (const f of o.feiten || []) {
+      if (f.herkomst !== 'extern' || f.soort === 'meetreeks' || !f.groep || !(bs[f.groep] && bs[f.groep].ok)) continue;
+      if (f.groep === 'gld') continue;
+      uit[`f:${o.sleutel}:${f.groep}:${f.veld}`] = { tekst: String(f.waarde), soort: 'openbaar', object: o.sleutel, veld: f.veld, groep: f.groep };
+    }
+    for (const s of o.stukken || []) uit[`s:${o.sleutel}:${s.pad}`] = { tekst: s.naam, soort: 'stuk', object: o.sleutel };
+    if (bs.gld && bs.gld.ok) {
+      const per = {};
+      for (const r of (o.reeksen || []).filter((x) => x.reeks === 'grondwater' && x.toelichting)) (per[r.toelichting] = per[r.toelichting] || []).push(r);
+      for (const [put, rs] of Object.entries(per)) {
+        const w = rs.map((r) => r.waarde);
+        const jaren = new Set(rs.map((r) => r.peildatum.slice(0, 4))).size;
+        uit[`m:${o.sleutel}:${put}`] = { tekst: `hoogste ${r5(Math.max(...w)).toFixed(2)} · laagste ${r5(Math.min(...w)).toFixed(2)} · ${jaren} jaar`, soort: 'meetreeks', object: o.sleutel, put };
+      }
+    }
+  }
+  if (kelder && kelder.onderdelen) for (const od of kelder.onderdelen) {
+    const vast = od.regels.filter((x) => !x.extern && !x.noot).map((x) => `${x.tekst}|${x.bron}|${x.datum || ''}`);   // openbare regels (extern, ook de afgeleide zinnen) en meetreeksen tellen hierboven al, met de storingsregel
+    uit[`k:${od.id}`] = { tekst: vast.join('\n'), soort: 'kelder', object: 'woning', titel: od.titel };
+  }
+  return uit;
+}
+function vergelijk(oud, nieuw) {   // → [{ sleutel, soort, object, tekst }] (tekst zonder bedragen; ≤ 200 tekens)
+  const uit = [];
+  const kort = (t) => String(t || '').replace(/\s+/g, ' ').slice(0, 120);
+  for (const [s, n] of Object.entries(nieuw)) {
+    const o = oud[s];
+    if (o && o.tekst === n.tekst) continue;
+    let t;
+    if (n.soort === 'stuk') { if (o) continue; t = `Nieuw stuk: ${kort(n.tekst)}`; }
+    else if (n.soort === 'meetreeks') t = o ? `Grondwaterput ${n.put}: ${o.tekst} → ${n.tekst} (m NAP, maandgemiddelden)` : null;
+    else if (n.soort === 'kelder') t = o ? `Kelderdossier, ${n.titel}: aangepast` : null;
+    else t = o ? `${n.veld} (${GROEP_NAAM[n.groep] || n.groep}): ${kort(o.tekst)} → ${kort(n.tekst)}` : `Nieuw in ${GROEP_NAAM[n.groep] || n.groep}: ${n.veld}: ${kort(n.tekst)}`;
+    if (t) uit.push({ sleutel: s, soort: n.soort, object: n.object, tekst: t.slice(0, 200) });
+  }
+  for (const [s, o] of Object.entries(oud)) {
+    if (nieuw[s]) continue;
+    if (o.soort === 'stuk') uit.push({ sleutel: s, soort: 'stuk', object: o.object, tekst: `Stuk niet meer in het dossier: ${kort(o.tekst)}`.slice(0, 200) });
+  }
+  return uit;
+}
+// Overneemregel voor een bron die deze ronde mislukte: zijn vorige kenmerken blijven staan (een storing is nooit een wijziging)
+function kenmerkenMetOud(nieuw, oud, ov) {
+  const mislukt = new Set();
+  for (const o of (ov && ov.objecten) || []) for (const [g, x] of Object.entries(o.bron_stand || {})) if (x && x.ok === false) mislukt.add(`${o.sleutel}:${g}`);
+  const uit = Object.assign({}, nieuw);
+  for (const [s, x] of Object.entries(oud || {})) {
+    if (uit[s]) continue;
+    if ((x.soort === 'openbaar' && mislukt.has(`${x.object}:${x.groep}`)) || (x.soort === 'meetreeks' && mislukt.has(`${x.object}:gld`))) uit[s] = x;
+  }
+  return uit;
+}
+function wijzigingBericht(w, sinds) {
+  if (!w.length) return null;
+  const k = w.some((x) => x.soort === 'kelder' || x.object === 'woning') ? 'Kelder' : 'Overzicht';
+  return `Vastgoed: ${w.length === 1 ? 'één ding' : w.length + ' dingen'} veranderd${sinds ? ' sinds ' + nlDag(sinds.slice(0, 10)) : ''} (${w[0].tekst.slice(0, 110)}${w.length > 1 ? ' …' : ''}). Zie Vastgoed › ${k}.`;
+}
+
 function maak(o) {
   const map = o.map, vault = o.vault;
   const dbPad = path.join(map, 'vastgoed.sqlite');
@@ -994,6 +1241,7 @@ function maak(o) {
     const vbo = JSON.parse(obj.vbo || '[]'), percelen = JSON.parse(obj.percelen || '[]');
     const invoer = { id: obj.id, vbo, pand: JSON.parse(obj.pand || '[]'), percelen };
     if (obj.soort === 'garagebox' && !vbo.length && obj.zoek) invoer.zoek = JSON.parse(obj.zoek);
+    if (obj.soort === 'woning') invoer.meetreeks = true;   // wv4182: grondwaterstanden van de putten in de buurt (kelderdossier)
     const r = await bronnen({ objecten: [invoer], beelden: true, index: true });
     if (!r || r.ok !== true || !Array.isArray(r.objecten)) throw new Fout(502, 'de openbare bronnen gaven geen antwoord');
     const u = r.objecten.find((x) => x && x.id === obj.id) || {};
@@ -1027,6 +1275,15 @@ function maak(o) {
         for (const [j, w] of Object.entries(r.prijsindex.jaren)) if (/^\d{4}$/.test(j) && Number.isFinite(w)) ri.run(`${j}-07-01`, w, 'jaar', 'CBS 85773NED (2020=100), ' + (r.licentie_index || 'CC BY 4.0'), op);
         for (const [mnd, w] of Object.entries(r.prijsindex.maanden || {})) if (/^\d{4}-\d{2}$/.test(mnd) && Number.isFinite(w)) ri.run(`${mnd}-15`, w, 'maand', 'CBS 85773NED (2020=100), ' + (r.licentie_index || 'CC BY 4.0'), op);
       }
+      // wv4182: maandgemiddelden grondwater per put; alleen vervangen als de groep gld lukte (anders blijven de vorige staan)
+      if (groepen.gld === true && Array.isArray(u.meetreeksen)) {
+        db.prepare(`DELETE FROM reeks WHERE object = ? AND reeks = 'grondwater'`).run(obj.id);
+        const gi = db.prepare(`INSERT INTO reeks (object, reeks, peildatum, waarde, eenheid, toelichting, bron, herkomst, opgehaald) VALUES (?, 'grondwater', ?, ?, 'm NAP', ?, 'BRO grondwaterstanden', 'extern', ?)`);
+        for (const m of u.meetreeksen.slice(0, 5)) {
+          if (!m || !/^GMW\d{12}$/.test(String(m.put || '')) || !m.maanden || typeof m.maanden !== 'object') continue;
+          for (const [mnd, w] of Object.entries(m.maanden).slice(-600)) if (/^\d{4}-\d{2}$/.test(mnd) && Number.isFinite(w) && Math.abs(w) < 60) gi.run(obj.id, `${mnd}-15`, w, m.put, op);
+        }
+      }
       const gev = u.gevonden && typeof u.gevonden === 'object' ? u.gevonden : {};
       const sets = ['extern_op = ?', 'bron_stand = ?']; const arg = [geslaagd ? op : obj.extern_op, JSON.stringify(bs)];
       if (u.punt && Array.isArray(u.punt.rd)) { sets.push('punt = ?'); arg.push(JSON.stringify(u.punt)); }
@@ -1054,7 +1311,7 @@ function maak(o) {
       const index = prijsindex(db);
       let geld = {}; try { geld = JSON.parse((db.prepare(`SELECT waarde FROM meta WHERE sleutel = 'geld'`).get() || {}).waarde || '{}') || {}; } catch (e) { geld = {}; }
       const objecten = db.prepare('SELECT * FROM object ORDER BY volgorde, id').all().map((obj) => {
-        const feiten = db.prepare('SELECT herkomst, rubriek, veld, waarde, peildatum, bron, licentie, url, soort, opgehaald FROM feit WHERE object = ? ORDER BY herkomst, volgorde, id').all(obj.id);
+        const feiten = db.prepare('SELECT herkomst, rubriek, veld, waarde, peildatum, bron, licentie, url, soort, opgehaald, groep FROM feit WHERE object = ? ORDER BY herkomst, volgorde, id').all(obj.id);
         const reeksen = db.prepare('SELECT reeks, peildatum, waarde, eenheid, toelichting, bron, herkomst FROM reeks WHERE object = ? ORDER BY peildatum').all(obj.id);
         // fase 2: een WOZ-beschikking die David toevoegde en bevestigde (gaat voor een WOZ van hetzelfde jaar uit het dossier)
         for (const w of db.prepare('SELECT jaar, peildatum, waarde, pad FROM woz_eigen WHERE object = ? ORDER BY jaar').all(obj.id)) {
@@ -1079,7 +1336,13 @@ function maak(o) {
       if (won) won.geld_kern = geldKern(won, objecten, geld.holding || null);
       const aanroepen = db.prepare('SELECT COUNT(*) AS n, MAX(tijd) AS laatst FROM aanroep').get();
       const kaal2 = (x) => (x ? { ok: !!x.ok, op: x.op || null, mislukt_op: x.mislukt_op || null, reden: x.reden || null } : null);
+      const meta = (k) => (db.prepare('SELECT waarde FROM meta WHERE sleutel = ?').get(k) || {}).waarde || null;
+      const heeftW = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wijziging'").get();   // wv4182: alleen-lezen vóór de eerste schrijfactie
+      const gezienOp = meta('gezien_op');
+      const nieuw = heeftW ? db.prepare('SELECT op, object, soort, tekst FROM wijziging WHERE op > ? ORDER BY id DESC LIMIT 20').all(gezienOp || '') : [];
+      let ronde = null; try { ronde = JSON.parse(meta('ronde') || 'null'); } catch (e) { ronde = null; }
       return { ok: true, objecten, prijsindex: index ? { laatste: index.laatste, jaren: index.jaren } : null, aanroepen: { n: aanroepen.n, laatst: aanroepen.laatst },
+        nieuw, gezien_op: gezienOp, ronde: ronde ? { dag: ronde.dag || null, op: ronde.op || null } : null, kelder_pdf_op: meta('kelder_pdf_op'),
         rubrieken: RUBRIEKEN, stuk_soorten: STUK_SOORT, geld: { hypotheek: kaal2(geld.hypotheek), verbouwing: kaal2(geld.verbouwing), bank: kaal2(geld.bank), tibber: kaal2(geld.tibber), holding: kaal2(geld.holding) } };
     }, false);
   }
@@ -1172,6 +1435,74 @@ function maak(o) {
     return zoek(o) || zoek((alle || []).find((y) => y.soort === 'woning'));
   }
 
+  // ── wv4182: kelderdossier, zelf verversen en "nieuw sinds je vorige bezoek" ──
+  function leesTekst(rel) { try { return fs.readFileSync(path.join(vault, rel), 'utf8'); } catch (e) { return ''; } }
+  function kelder(ovIn) {
+    const ov = ovIn || overzicht();
+    const won = (ov.objecten || []).find((x) => x.soort === 'woning' && !x.weg_op);
+    if (!won) throw new Fout(404, 'geen woning in het dossier');
+    let namen = []; try { namen = fs.readdirSync(path.join(vault, HUIS)).filter((n) => /^Kelder\b.*\.md$/i.test(n)).sort(); } catch (e) { namen = []; }
+    const kp = namen.length ? `${HUIS}/${namen[0]}` : null;
+    const l = leesKelder(kp ? leesTekst(kp) : '', leesTekst(won.dossier));
+    // constructie en doorsnede uit een opgevraagd bouwdossier (submap in de bronnen; alleen de namen)
+    const bouwdossier = [];
+    try {
+      for (const d of fs.readdirSync(path.join(vault, BRONNEN), { withFileTypes: true }).filter((x) => x.isDirectory() && /^Bouwdossier\b/i.test(x.name)).slice(0, 3)) {
+        for (const n of fs.readdirSync(path.join(vault, BRONNEN, d.name)).filter((x) => /\.pdf$/i.test(x) && /begane grond|fundering|palen|doorsnede/i.test(x)).sort().slice(0, 12)) bouwdossier.push({ naam: n, pad: `${BRONNEN}/${d.name}/${n}`, datum: null });
+      }
+    } catch (e) { /* geen bouwdossier */ }
+    const d = kelderDossier(won, l, { kelder: kp, woning: won.dossier }, { bouwdossier });
+    d.object = { id: won.id, naam: won.naam };
+    d.md = kelderMd(d, won.naam, nu().toISOString());
+    return d;
+  }
+  function metaLees(db, k) { return (db.prepare('SELECT waarde FROM meta WHERE sleutel = ?').get(k) || {}).waarde || null; }
+  function metaZet(db, k, v) { db.prepare('INSERT INTO meta (sleutel, waarde) VALUES (?, ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde').run(k, v); }
+  // De dagelijkse ronde (server.js roept hem aan: hoofdpod, 07–22 u, eens per dag). Leest het dossier (lokaal), haalt openbare gegevens op
+  // voor een object waarvan ze ouder zijn dan 30 dagen, vergelijkt met de vorige momentopname en legt wijzigingen + nieuwe momentopname
+  // + een nog te versturen melding in één transactie vast (review Codex MOET 2). Eerste ronde = nulpunt: niets gemeld.
+  async function ronde(opt) {
+    const x = opt || {};
+    const t0 = nu();
+    try { leesDossier(); } catch (e) { /* de vorige stand blijft; vergelijken kan nog */ }
+    const opgehaald = [];
+    if (bronnen && x.extern !== false) {
+      const ov0 = overzicht();
+      for (const o of (ov0.objecten || []).filter((y) => !y.weg_op)) {
+        const zonderReeks = o.soort === 'woning' && !(o.bron_stand && o.bron_stand.gld);   // meetreeksen nog nooit opgehaald: meteen (één keer)
+        if (!zonderReeks && o.extern_op && t0.getTime() - new Date(o.extern_op).getTime() < RONDE_MAAND_MS) continue;
+        try { const r = await ververs(o.id); opgehaald.push({ id: o.id, geslaagd: !!r.geslaagd }); } catch (e) { opgehaald.push({ id: o.id, geslaagd: false }); }
+      }
+    }
+    const ov = overzicht();
+    let kel = null; try { kel = kelder(ov); } catch (e) { kel = null; }
+    const op = nu().toISOString();
+    return metDb((db) => {
+      let oud = null; try { oud = JSON.parse(metaLees(db, 'kenmerken') || 'null'); } catch (e) { oud = null; }
+      const nieuwK = kenmerkenMetOud(kenmerken(ov, kel), oud || {}, ov);
+      const w = oud ? vergelijk(oud, nieuwK) : [];
+      const wi = db.prepare('INSERT INTO wijziging (op, object, soort, sleutel, tekst) VALUES (?,?,?,?,?)');
+      for (const y of w.slice(0, 100)) wi.run(op, y.object || null, y.soort, y.sleutel.slice(0, 300), y.tekst);
+      db.prepare('DELETE FROM wijziging WHERE op < ?').run(new Date(t0.getTime() - WIJZIGING_DAGEN * 86400000).toISOString());
+      metaZet(db, 'kenmerken', JSON.stringify(nieuwK));
+      const vorige = (() => { try { return JSON.parse(metaLees(db, 'ronde') || 'null'); } catch (e) { return null; } })();
+      const tekst = wijzigingBericht(w, vorige && vorige.op);
+      if (tekst) metaZet(db, 'melding_open', JSON.stringify({ tekst, sleutel: fnv(op + tekst), op }));
+      const kelHash = kel ? fnv(JSON.stringify(Object.entries(nieuwK).filter(([k]) => k.startsWith('k:') || k.startsWith('m:woning') || k.startsWith('f:woning:')))) : null;
+      const pdfOp = metaLees(db, 'kelder_pdf_op'), pdfHash = metaLees(db, 'kelder_pdf_hash');
+      const pdfNodig = !!kel && (!pdfOp || t0.getTime() - new Date(pdfOp).getTime() > KELDER_PDF_MS || pdfHash !== kelHash);
+      metaZet(db, 'ronde', JSON.stringify({ dag: x.dag || op.slice(0, 10), op, nulpunt: !oud, wijzigingen: w.length, opgehaald: opgehaald.length, mislukt: opgehaald.filter((y) => !y.geslaagd).length }));
+      return { nulpunt: !oud, wijzigingen: w.length, melding: !!tekst, opgehaald: opgehaald.length, pdf_nodig: pdfNodig, kelder_hash: kelHash };
+    }, true);
+  }
+  function rondeDag() { return metDb((db) => { if (!db) return null; try { return (JSON.parse(metaLees(db, 'ronde') || 'null') || {}).dag || null; } catch (e) { return null; } }, false); }
+  function meldingOpen() { return metDb((db) => { if (!db) return null; try { return JSON.parse(metaLees(db, 'melding_open') || 'null'); } catch (e) { return null; } }, false); }
+  function meldingVerstuurd(sleutel) {
+    metDb((db) => { const m = (() => { try { return JSON.parse(metaLees(db, 'melding_open') || 'null'); } catch (e) { return null; } })(); if (m && m.sleutel === sleutel) db.prepare("DELETE FROM meta WHERE sleutel = 'melding_open'").run(); }, true);
+  }
+  function kelderPdfGezet(hash) { metDb((db) => { metaZet(db, 'kelder_pdf_op', nu().toISOString()); if (hash) metaZet(db, 'kelder_pdf_hash', hash); }, true); }
+  function gezien() { metDb((db) => { metaZet(db, 'gezien_op', nu().toISOString()); }, true); return { ok: true }; }
+
   async function app(v) {
     const pad = String(v.pad || ''), post = v.methode === 'POST', body = v.body && typeof v.body === 'object' ? v.body : {};
     const idUit = () => { const id = Number(body.id); if (!Number.isInteger(id) || id < 1) throw new Fout(400, 'id ontbreekt'); return id; };
@@ -1190,6 +1521,8 @@ function maak(o) {
       if (post && pad === '/app/vastgoed/ververs') { const t = await ververs(idUit()); return { status: 200, body: { ok: true, bijgewerkt: t }, reden: 'vastgoed bronnen ' + (t.geslaagd ? 'bijgewerkt' : 'zonder antwoord') }; }
       if (post && pad === '/app/vastgoed/beelden') return { status: 200, body: beelden(idUit()), reden: 'vastgoed beelden' };
       if (post && pad === '/app/vastgoed/aanroepen') return { status: 200, body: aanroepLijst(), reden: 'vastgoed aanroepen' };
+      if (!post && pad === '/app/vastgoed/kelder') { const d = kelder(); return { status: 200, body: d, reden: 'vastgoed kelder' }; }   // wv4182
+      if (post && pad === '/app/vastgoed/gezien') return { status: 200, body: gezien(), reden: 'vastgoed gezien' };
       return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'vastgoed onbekend' };
     } catch (e) {
       if (e instanceof Fout) return { status: e.status, body: { ok: false, fout: e.message }, reden: 'vastgoed ' + e.status };
@@ -1205,7 +1538,9 @@ function maak(o) {
       return { aan: true, databank: true, bronnen: !!bronnen, objecten: n('object'), feiten: n('feit'), feiten_extern: n('feit', " WHERE herkomst = 'extern'"), reeksen: n('reeks'),
         stukken: n('stuk'), beelden: n('beeld'), aanroepen: n('aanroep'), laatst_extern: (db.prepare('SELECT MAX(extern_op) AS t FROM object').get() || {}).t || null,
         objecten_weg: db.prepare("SELECT 1 FROM pragma_table_info('object') WHERE name = 'weg_op'").get() ? n('object', ' WHERE weg_op IS NOT NULL') : 0, leningdelen: n('leningdeel'), woz_eigen: n('woz_eigen'), reeksen_bank: n('reeks', " WHERE herkomst = 'bank'"), reeksen_tibber: n('reeks', " WHERE herkomst = 'tibber'"),
-        geld: { hypotheek: ok(geld.hypotheek), bank: ok(geld.bank), tibber: ok(geld.tibber) } };
+        geld: { hypotheek: ok(geld.hypotheek), bank: ok(geld.bank), tibber: ok(geld.tibber) },
+        ronde: (() => { try { const r = JSON.parse((db.prepare("SELECT waarde FROM meta WHERE sleutel = 'ronde'").get() || {}).waarde || 'null'); return r ? { dag: r.dag, nulpunt: !!r.nulpunt, wijzigingen: r.wijzigingen, opgehaald: r.opgehaald, mislukt: r.mislukt } : null; } catch (e) { return null; } })(),
+        melding_open: !!db.prepare("SELECT 1 FROM meta WHERE sleutel = 'melding_open'").get(), kelder_pdf_op: (db.prepare("SELECT waarde FROM meta WHERE sleutel = 'kelder_pdf_op'").get() || {}).waarde || null };
     }, false);
   }
   // wv4227 (L39): Socev in het gewone gesprek. Haalt het overzicht via exact dezelfde weg als GET /app/vastgoed (zelfde cijfers als het
@@ -1217,8 +1552,8 @@ function maak(o) {
     if (u.status !== 200) return { status: u.status, body: { ok: false, fout: (u.body && u.body.fout) || 'Vastgoed is nu niet te lezen' } };
     return gesprekUit(u.body, x);
   }
-  return { app, info, leesDossier, ververs, overzicht, wozHerken, wozControle, wozVastleggen, wozVergelijk, wozBezwaar, wozConceptGezet, gesprek };
+  return { app, info, leesDossier, ververs, overzicht, kelder, ronde, rondeDag, meldingOpen, meldingVerstuurd, kelderPdfGezet, gezien, wozHerken, wozControle, wozVastleggen, wozVergelijk, wozBezwaar, wozConceptGezet, gesprek };
 }
 
 module.exports = { maak, geldKern, leesWoning, leesBox, leesDossierMap, dossierstand, indicatie, soortStuk, euroUit, datumUit, bagSoort, SCHEMA_VERSIE,
-  leesHypotheek, hypotheekReeksen, laatsteStand, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink };
+  leesHypotheek, hypotheekReeksen, laatsteStand, leesKelder, kelderDossier, kelderMd, kenmerken, kenmerkenMetOud, vergelijk, wijzigingBericht, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink };
