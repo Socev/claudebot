@@ -678,17 +678,73 @@ function maak(o) {
   }
   const naamUit = (b) => String(b.naam || 'export.zip').replace(/[^\p{L}\p{N} ._()-]/gu, '').slice(0, 120) || 'export.zip';
 
-  function controleer(b) {
+  // wv4212: kern van Controleer, ook voor een ZIP die David in het gesprek aan Socev gaf (via 'chat'); wacht/<sha>.json weet waar hij vandaan kwam
+  function controleerBuf(buf, naam, via) {
     mappen(); wachtOpruimen();
-    const buf = zipUit(b), s = sha(buf), naam = naamUit(b);
+    const s = sha(buf);
     const al = metDb((db) => (db ? db.prepare('SELECT id, op, naam, stand FROM export WHERE sha256 = ?').get(s) : null), false);
     if (al && al.stand === 'actief') return { body: { ok: true, al: { op: al.op, naam: al.naam }, sha: s }, reden: 'pma controleer al' };
     const ex = leesExport(buf, pseudo);
     const p = metDb((db) => plan(db, ex, null), false);
     const tmp = path.join(wachtMap, s + '.' + crypto.randomBytes(4).toString('hex') + '.tmp');
     fs.writeFileSync(tmp, buf, { mode: 0o600 }); fs.renameSync(tmp, path.join(wachtMap, s + '.zip'));
-    fs.writeFileSync(path.join(wachtMap, s + '.json'), JSON.stringify({ naam, samenvatting: p.samenvatting, terug: al ? al.id : null }), { mode: 0o600 });
+    const jtmp = path.join(wachtMap, s + '.' + crypto.randomBytes(4).toString('hex') + '.jtmp');
+    fs.writeFileSync(jtmp, JSON.stringify({ naam, samenvatting: p.samenvatting, terug: al ? al.id : null, via: via === 'chat' ? 'chat' : 'app', op: nuIso() }), { mode: 0o600 });
+    fs.renameSync(jtmp, path.join(wachtMap, s + '.json'));
     return { body: { ok: true, sha: s, naam, eerder_ingetrokken: !!al, samenvatting: p.samenvatting }, reden: 'pma controleer' };
+  }
+  function controleer(b) { return controleerBuf(zipUit(b), naamUit(b), 'app'); }
+
+  // wv4212 (L26): een ZIP uit het gesprek met Socev. Geen export_info.csv erin = geen PMA-export (soort 'geen', niets gedaan). Anders
+  // dezelfde Controle als op het Inlezen-scherm; de uitkomst bevat alleen de praktijk, de periode en aantallen (nooit een patiënt of een
+  // registreerder): server.js zet die in de prompt van Socev met een link naar PMA › Inlezen. Inlezen blijft Davids tik daar.
+  function chatControleer(buf, naam) {
+    if (!Buffer.isBuffer(buf)) return { soort: 'geen' };
+    if (buf.length > ZIP_MAX) return { soort: 'fout', fout: 'de ZIP is te groot (hooguit 8 MB); exporteer per kalenderjaar' };
+    let namen;
+    try { namen = leesZip(buf).map((b) => b.naam); } catch (e) { return { soort: 'geen' }; }   // geen (leesbare) ZIP: niet van PMA
+    if (!namen.some((n) => n === 'export_info.csv' || /(^|\/)export_info\.csv$/i.test(n))) return { soort: 'geen' };
+    let u;
+    try { u = controleerBuf(buf, String(naam || 'export.zip').replace(/[^\p{L}\p{N} ._()-]/gu, '').slice(0, 120) || 'export.zip', 'chat'); }
+    catch (e) { if (e instanceof Fout) return { soort: 'fout', fout: e.message }; throw e; }
+    if (u.body.al) return { soort: 'pma', al: true, op: u.body.al.op };
+    const s = u.body.samenvatting || {};
+    return { soort: 'pma', al: false, praktijk: s.praktijk_naam || s.praktijk || '', begin: s.begin || null, eind: s.eind || null, exportdatum: s.exportdatum || null,
+      verrichtingen: (s.regels && s.regels.verrichting) || 0, dagen: s.dagen ? { nieuw: s.dagen.nieuw || 0, gelijk: s.dagen.gelijk || 0, wijzigt: s.dagen.wijzigt || 0, ouder: s.dagen.ouder || 0 } : null,
+      eerder_ingetrokken: !!u.body.eerder_ingetrokken, nog_in_te_delen: Array.isArray(s.nog_in_te_delen) ? s.nog_in_te_delen.length : 0 };
+  }
+  // wv4212: wat via het gesprek gecontroleerd is en nog op Davids tik wacht (hooguit 5, nieuwste eerst; ouder dan WACHT_MS telt niet)
+  function wachtLijst() {
+    const uit = [];
+    let namen = [];
+    try { namen = fs.readdirSync(wachtMap).filter((f) => /^[0-9a-f]{64}\.json$/.test(f)); } catch (e) { return uit; }
+    for (const f of namen) {
+      const s = f.slice(0, 64), jp = path.join(wachtMap, f), zp = path.join(wachtMap, s + '.zip');
+      try {
+        const st = fs.statSync(jp);
+        if (Date.now() - st.mtimeMs > WACHT_MS || !fs.existsSync(zp)) continue;
+        const w = JSON.parse(fs.readFileSync(jp, 'utf8'));
+        if (w.via !== 'chat' || !w.samenvatting) continue;
+        uit.push({ sha: s, naam: String(w.naam || ''), op: w.op || new Date(st.mtimeMs).toISOString(), eerder_ingetrokken: !!w.terug, samenvatting: w.samenvatting });
+      } catch (e) { /* half geschreven of weg: overslaan */ }
+    }
+    return uit.sort((a, b) => (a.op < b.op ? 1 : -1)).slice(0, 5);
+  }
+  // wv4212: per praktijk per jaar (2024 t/m dit jaar) hoeveel dagen een export dekt; lopend jaar t/m gisteren. Alleen tellingen.
+  const ONTBREEKT_VAN = 2024;
+  function ontbreektIn(db) {
+    const vandaag = nuIso().slice(0, 10), gisteren = plusDag(vandaag, -1), dit = Number(vandaag.slice(0, 4));
+    const uit = [];
+    for (const p of db.prepare('SELECT code, naam FROM praktijk ORDER BY code DESC').all()) {
+      for (let j = ONTBREEKT_VAN; j <= dit; j++) {
+        const a = j + '-01-01', b = j === dit ? gisteren : j + '-12-31';
+        if (b < a) continue;
+        const r = db.prepare('SELECT COUNT(*) AS n, MAX(dag) AS tot FROM dagbron WHERE praktijk = ? AND dag BETWEEN ? AND ?').get(p.code, a, b);
+        const dagen = dagenTussen(a, b).length;
+        uit.push({ praktijk: p.code, naam: p.naam, jaar: j, gedekt: r.n, dagen, tot: r.tot || null, lopend: j === dit });
+      }
+    }
+    return uit;
   }
 
   function inlees(b) {
@@ -804,7 +860,7 @@ function maak(o) {
 
   function overzicht() {
     return metDb((db) => {
-      const leeg = { ok: true, groepen: GROEPEN.map((g) => ({ id: g, naam: GROEP_NAAM[g] })), praktijken: [], exports: [], nog_in_te_delen: [] };
+      const leeg = { ok: true, groepen: GROEPEN.map((g) => ({ id: g, naam: GROEP_NAAM[g] })), praktijken: [], exports: [], nog_in_te_delen: [], wacht: wachtLijst(), ontbreekt: [] };
       if (!db) return leeg;
       const codes = codeKaart(db);
       const fin = finPatienten() || {};
@@ -813,6 +869,7 @@ function maak(o) {
         exports: db.prepare('SELECT id, praktijk, naam, exportdatum, begin, eind, op, n_inschrijf, n_regel, n_voorlopig, n_gelijk, stand, met_patient FROM export ORDER BY exportdatum DESC, id DESC').all()
           .map((r) => Object.assign({}, r, { met_patient: !!r.met_patient })),
         nog_in_te_delen: db.prepare("SELECT c.code, c.naam, (SELECT COUNT(*) FROM regel r WHERE r.code = c.code) + (SELECT COUNT(*) FROM inschrijf i WHERE i.code = c.code) AS n FROM code c WHERE c.groep = 'nog-in-te-delen' ORDER BY c.code").all().map((r) => Object.assign({}, r)),
+        ontbreekt: ontbreektIn(db),   // wv4212 (L26); wacht staat al in leeg
       });
       for (const p of uit.praktijken) {
         // kwartalen: patiënten per leeftijdsklasse (unieke pseudoniemen met een basiscode), in- en uitstroom, doorschuiven, modules
@@ -1244,7 +1301,7 @@ function maak(o) {
       return n;
     }, true);
   }
-  return { app, info, herbouw, jaarBedragen, _plan: plan, _pseudo: pseudo };
+  return { app, info, herbouw, jaarBedragen, chatControleer, _plan: plan, _pseudo: pseudo };   // wv4212: chatControleer
 }
 
 module.exports = { maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht };

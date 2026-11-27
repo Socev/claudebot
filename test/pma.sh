@@ -29,4 +29,7 @@ if echo "$B" | grep -nE "finD1\(" | grep -viE "SELECT"; then echo "ROOD  server.
 node --test test/pma.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma.test.js"; f=1; }
 node --test test/pma-werkdag.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-werkdag.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-werkdag.test.js (wv3047: werkdagregels en personeel)"; f=1; }
 node --test test/pma-bom.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-bom.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-bom.test.js (wv3409: kapotte of opgeblazen ZIP wordt snel en zuinig geweigerd)"; f=1; }
+node --test test/pma-chat.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-chat.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-chat.test.js (wv4212: PMA-ZIP via de chat, wacht, ontbreekt)"; f=1; }
+node --test test/pma-chat-server.test.js 2>&1 | grep -E "^# (pass|fail)"; node --test test/pma-chat-server.test.js >/dev/null 2>&1 || { echo "ROOD  test/pma-chat-server.test.js (wv4212: regel in het hoofdkanaal)"; f=1; }
+grep -qF "if (kanaal === 'hoofd' && upload) { try { pmaChat = pmaChatIn(upload); }" server.js || { echo "ROOD  server.js: PMA-ZIP in het hoofdkanaal wordt niet gecontroleerd (wv4212)"; f=1; }
 exit $f

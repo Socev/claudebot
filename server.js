@@ -9202,7 +9202,11 @@ async function appBeurt(req, res, reg, a, s, d, opt) {   // opt (wv4129): { conc
     // wv4223 (L35): bijlage in het NZa-gesprek = nieuw stuk voor het dossier; eerst kopie + werkvoorraadrij, lukt dat niet dan geen beurt
     let nzaStuk = null;
     if (kanaal === 'ovis-nza' && upload) nzaStuk = await nzaStukIn(upload, bh);
+    // wv4212 (L26): een PMA-ZIP in het gesprek met Socev → de pod controleert hem en geeft Socev het blok met de link naar PMA › Inlezen
+    let pmaChat = '';
+    if (kanaal === 'hoofd' && upload) { try { pmaChat = pmaChatIn(upload); } catch (e) { pmaChat = ''; } }
     let promptTekst = nzaStuk && nzaStuk.meta ? NZA_STUK.agentKop(nzaStuk.meta, appOntmasker(tekst)) + staartOp : (upload ? appBestandenPrompt(appOntmasker(tekst), namen, upload.lijst.filter(function (x) { return x.grootte > APP_UPLOAD_BESTAND_MAX; }).map(function (x) { return x.doel + ' (' + appUploadMb(x.grootte) + ')'; })) + (kop ? '\n' + kop.replace(/\n$/, '') : '') : kop + appOntmasker(tekst)) + staartOp + (gelogd ? '' : APP_CHATLOG_NIET);
+    if (pmaChat) promptTekst += pmaChat;   // wv4212
     let draadFout = null;
     if (draad) { const dp = nzaDoorvraagPrompt(draad, promptTekst); if (dp.fout) draadFout = dp.fout; else promptTekst = dp.tekst; }   // wv3156
     // wv628 (review #7): na de laatste await opnieuw tellen, anders komen twee gelijktijdige verzoeken er allebei door
@@ -30726,6 +30730,37 @@ async function appPma(req, res, a, route, d) {
 function pmaInfo() {
   if (!pmaApp) return { aan: false };
   try { const i = pmaApp.info(); i.fin_controle = pmaFin.waarden ? 'ja' : 'nog niet gelezen'; return i; } catch (e) { return { aan: true, fout: true }; }
+}
+// wv4212 (besluitenpagina nr 926 = L26): een PMA-export die David in het gesprek aan Socev geeft. De pod controleert elke *.zip (≤ 8 MB)
+// meteen met dezelfde Controle als PMA › Inlezen (pma.js chatControleer; de ZIP wacht een dag in pma/wacht) en geeft Socev één systeemregel met
+// een kant-en-klaar blok: praktijk, periode, aantallen en een link naar PMA › Inlezen, waar het klaargezette blok met de knop Inlezen staat.
+// Inlezen gebeurt alleen na Davids tik daar (bestaande route /app/pma/inlees, achter zijn slot). Geen PMA-ZIP = geen regel; een fout in de
+// controle zelf = ook geen regel (de beurt gaat gewoon door). De ZIP blijft ook in Socevs invoermap, zoals elke bijlage (niet filteren, wv3762).
+// Synchroon zoals de controleer-route (een jaar Tolgaarde ± 1–2 s).
+const PMA_CHAT_LINK = '/pma#inlezen';
+function pmaDatumNl(iso) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || '')); return m ? Number(m[3]) + '-' + Number(m[2]) + '-' + m[1] : '?'; }
+function pmaChatIn(upload) {
+  if (!pmaApp || typeof pmaApp.chatControleer !== 'function' || !upload || !Array.isArray(upload.lijst)) return '';
+  const regels = [];
+  upload.lijst.forEach(function (x) {
+    if (!/\.zip$/i.test(String(x.doel || '')) || !(x.grootte > 0) || x.grootte > 8 * 1024 * 1024) return;
+    let u;
+    try { u = pmaApp.chatControleer(fs.readFileSync(path.join(upload.dir, String(x.n))), x.doel); }
+    catch (e) { logError('pma-chat', new Error('controle faalde')); return; }   // geen inhoud in de log
+    if (!u || u.soort === 'geen') return;
+    if (u.soort === 'fout') { regels.push('- ' + x.doel + ': dit lijkt een PMA-export uit Promedico, maar de controle weigerde hem: ' + String(u.fout || '').slice(0, 300) + '. Exporteer opnieuw (gegevensset PMA, per praktijk, per kalenderjaar) en stuur de nieuwe ZIP.'); return; }
+    if (u.al) { regels.push('- ' + x.doel + ': deze PMA-export is al ingelezen op ' + pmaDatumNl(u.op) + '; er verandert niets.'); return; }
+    const d = u.dagen || {}, dl = [];
+    if (d.nieuw) dl.push(d.nieuw + ' nieuwe dagen'); if (d.wijzigt) dl.push(d.wijzigt + ' dagen wijzigen'); if (d.gelijk) dl.push(d.gelijk + ' dagen stonden er al en zijn gelijk'); if (d.ouder) dl.push(d.ouder + ' dagen staan al in een nieuwere export');
+    regels.push('- ' + x.doel + ': PMA-export ' + (u.praktijk || '?') + ', periode ' + pmaDatumNl(u.begin) + ' t/m ' + pmaDatumNl(u.eind) + ' (export van ' + pmaDatumNl(u.exportdatum) + '): ' +
+      Number(u.verrichtingen || 0).toLocaleString('nl-NL') + ' verrichtingen' + (dl.length ? '; ' + dl.join(', ') : '') + '.' +
+      (u.eerder_ingetrokken ? ' Deze export was eerder ingetrokken; Inlezen zet hem terug.' : '') +
+      (u.nog_in_te_delen ? ' ' + u.nog_in_te_delen + ' nieuwe code(s) moeten daarna nog ingedeeld worden.' : '') +
+      ' Nog niets ingelezen: [Inlezen in PMA](' + PMA_CHAT_LINK + ') (tik daar op Inlezen, binnen een dag).');
+  });
+  if (!regels.length) return '';
+  return '\n\n[Systeem (pod, wv4212): de pod herkende een PMA-export uit Promedico en controleerde hem al; de standaardopdracht voor bijlagen (omzetten naar markdown) geldt niet voor deze ZIP. ' +
+    'Je hoeft hem niet zelf te openen of in te lezen: inlezen doet David met één tik in PMA. Neem in je antwoord dit blok over, met de link precies zo:\n' + regels.join('\n') + '\n]';
 }
 // ── einde OVIS PMA ──
 // ── OVIS Vastgoed (wv3085, 14-11-2026; advies vault "01_Ontwikkeling/Overheids-API's - wat kunnen we ermee (Fable 5.2, 14-11-2026)" § 4) ──
