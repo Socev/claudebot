@@ -165,6 +165,7 @@ function leesWoning(md) {
   if (lev && datumUit(lev[1])) u.gebeurtenissen.push({ datum: datumUit(lev[1]), titel: 'Akte van levering', soort: 'aankoop' });
   const strook = md.match(/^###\s+Extra strook grond[^,\n]*,\s*(\d{1,2}-\d{1,2}-\d{4})/m);
   if (strook && datumUit(strook[1])) u.gebeurtenissen.push({ datum: datumUit(strook[1]), titel: 'Extra strook grond geleverd', soort: 'aankoop' });
+  u.bouwkosten = leesBouwkosten(md);   // wv4230 (L42): tabel "Kosten bij de bouw" (aankoop, strook, meerwerk …)
   // taxaties: | Rapport | Peildatum | Taxateur / kantoor | Doel | Marktwaarde | Na verbouwing | Validatie | — wv3923 (C49): dezelfde lezer als
   // Financiën (woning-bron.js), kolommen op naam; de gewone marktwaarde is de basis, "na verbouwing" een aparte reeks
   for (const r of WB.taxaties(md)) {
@@ -409,6 +410,104 @@ function leesKosten(md) {
   }
   return uit;
 }
+// ---------------------------------------------------------------- wv4230 (L42, Fable-review "Een 9 - vastgoed" F7): wat het huis werkelijk kostte
+// Per verbouwing de offerte naast wat er betaald is (privébank, alleen lezen) en één regel: bouw plus verbouwingen tegenover de indicatie.
+// Koppeling alleen via een vaste tabel op de verbouwpagina, nooit geraden:
+//   ## Betaald
+//   | Aan (zoals in de bank) | Van | Tot | Toelichting |
+//   | Bouwbedrijf X          | 1-11-2018 | 31-12-2019 | termijnen en slotnota |
+//   | (bouwdepot hypotheek)  | 1-12-2018 | 30-6-2019  | een deel ging buiten de privébank om |
+// Aan = de tegenpartij zoals de bank hem noemt (gelijk na normaliseren; " via …"/" by …" van een betaaldienst valt weg). Een naam tussen haakjes
+// is een vlag "een deel ging buiten je privébank om" (bouwdepot, contant): die verbouwing telt dan met de offerte als die hoger is.
+// Een betaling aan een genoemde tegenpartij buiten elke periode, of in de periode van twee verbouwingen, is zichtbaar "niet gekoppeld".
+function tegenSleutel(t) {
+  return String(t || '').toLowerCase().replace(/^(.+?)\s+(?:via|by)\s+\S.*$/, '$1').replace(/[^a-z0-9à-ÿ]+/g, ' ').trim();
+}
+function leesBetaald(md) {
+  const t = tabelOnder(md, /^Betaald\b/);
+  if (!t) return null;
+  const kol = (re) => t.koppen.findIndex((x) => re.test(x));
+  const iA = kol(/^aan\b/), iV = kol(/^van$/), iT = kol(/^tot$/), iN = kol(/^toelichting/);
+  if (iA < 0 || iV < 0 || iT < 0) return null;
+  const u = { aan: [], buiten: [], zonder_periode: [] };
+  for (const r of t.rijen) {
+    const c = r.map(kaal);
+    const naam = (c[iA] || '').slice(0, 80);
+    if (!naam) continue;
+    const van = datumUit(c[iV]), tot = datumUit(c[iT]), noot = iN >= 0 && c[iN] ? c[iN].slice(0, 200) : null;
+    if (/^\(.*\)$/.test(naam)) { u.buiten.push({ naam: naam.slice(1, -1).trim(), van, tot, noot }); continue; }
+    const sleutel = tegenSleutel(naam);
+    if (!sleutel) continue;
+    if (!van || !tot || van > tot) { u.zonder_periode.push({ naam, sleutel, noot }); continue; }   // genoemd, maar geen geldige periode: niets koppelen
+    u.aan.push({ naam, sleutel, van, tot, noot });
+  }
+  return u;
+}
+// Wat de woning kostte bij de bouw: tabel onder "### Kosten bij de bouw" op de woningpagina (| Post | Bedrag incl. btw | …).
+function leesBouwkosten(md) {
+  const t = tabelOnder(md, /^Kosten bij de bouw\b/);
+  if (!t) return [];
+  const iP = t.koppen.findIndex((x) => /^post/.test(x)), iB = t.koppen.findIndex((x) => /^bedrag/.test(x));
+  if (iP < 0 || iB < 0) return [];
+  const uit = [];
+  for (const r of t.rijen) {
+    const c = r.map(kaal);
+    if (!c[iP] || /^totaal/i.test(c[iP])) continue;
+    const w = euroUit(c[iB]);
+    if (w) uit.push({ post: c[iP].slice(0, 100), waarde: w });
+  }
+  return uit;
+}
+const rond2 = (x) => Math.round(x * 100) / 100;
+function kenmerkKort(t) {   // factuur- of referentienummer uit de omschrijving; geen IBAN, geen lange betaaldienst-nummers
+  let s = String(t || '');
+  const om = s.match(/Omschrijving:\s*(.+)$/i); if (om) s = om[1];
+  s = s.replace(/\b[A-Z]{2}\d{2}[A-Z]{4}\d{6,}\b/g, '').replace(/\b(?=[A-Z0-9]*\d)[A-Z0-9]{12,}\b/g, '').replace(/\s+/g, ' ').trim();
+  return s.slice(0, 40) || null;
+}
+// verbouwingen: [{ titel, pagina, datum, kosten, betaald }] (leesDossierMap); posten: [{ nr, datum, bedrag, tegen, tekst }] uit de privébank (al gefilterd
+// op de genoemde tegenpartijen; bedrag < 0 = afgeschreven). bouw: [{ post, waarde }]; aankoop: terugval als de tabel bouwkosten ontbreekt.
+function kostteUit(verbouwingen, posten, bouw, aankoop, indicatieWaarde) {
+  const mee = verbouwingen.filter((v) => v.betaald || (v.kosten || []).length);
+  const per = mee.map((v) => {
+    const k = v.kosten || [];
+    return { titel: v.titel, pagina: v.pagina, datum: v.datum, offerte: k.length ? rond2(k.reduce((s, x) => s + x.waarde, 0)) : null,
+      offertes: k.map((x) => ({ waarde: x.waarde, kop: x.kop, soort: x.offerte ? 'offerte' : 'prijs' })),
+      koppel: v.betaald ? v.betaald.aan.map((a) => ({ naam: a.naam, van: a.van, tot: a.tot, noot: a.noot })) : [],
+      buiten: v.betaald ? v.betaald.buiten : [], zonder_periode: v.betaald ? v.betaald.zonder_periode.map((a) => a.naam) : [],
+      heeft_tabel: !!v.betaald, betalingen: [], betaald: null, telt: null, telt_als: null };
+  });
+  const namen = new Set(mee.flatMap((v) => (v.betaald ? v.betaald.aan.concat(v.betaald.zonder_periode).map((a) => a.sleutel) : [])));
+  const los = [];
+  const gezien = new Set();
+  for (const p of posten.slice().sort((a, b) => (a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : (a.nr || 0) - (b.nr || 0)))) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(p.datum)) || !Number.isFinite(p.bedrag) || gezien.has(p.nr)) continue;
+    const s = tegenSleutel(p.tegen);
+    if (!namen.has(s)) continue;
+    gezien.add(p.nr);
+    const b = { datum: p.datum, bedrag: rond2(-p.bedrag), tegen: String(p.tegen || '').slice(0, 80), kenmerk: kenmerkKort(p.tekst) };
+    const raak = per.filter((x, i) => mee[i].betaald && mee[i].betaald.aan.some((a) => a.sleutel === s && p.datum >= a.van && p.datum <= a.tot));
+    if (raak.length === 1) { raak[0].betalingen.push(b); continue; }
+    const twijfel = raak.length ? null : mee.map((v, i) => ({ v, i, a: v.betaald ? v.betaald.zonder_periode.find((x) => x.sleutel === s) : null })).find((x) => x.a);
+    los.push(Object.assign(b, { reden: raak.length > 1 ? 'past in de periode van meer verbouwingen'
+      : twijfel ? `twijfel bij ${twijfel.v.titel}${twijfel.a.noot ? ': ' + twijfel.a.noot : ''}`.slice(0, 200) : 'buiten elke periode in de tabel Betaald',
+      pagina: twijfel ? twijfel.v.pagina : null }));
+  }
+  for (const x of per) {
+    if (x.betalingen.length) x.betaald = rond2(x.betalingen.reduce((s, b) => s + b.bedrag, 0));
+    if (x.buiten.length && x.offerte !== null && (x.betaald === null || x.offerte > x.betaald)) { x.telt = x.offerte; x.telt_als = 'offerte'; }
+    else if (x.betaald !== null) { x.telt = x.betaald; x.telt_als = 'betaald'; }
+    else if (x.offerte !== null) { x.telt = x.offerte; x.telt_als = 'offerte'; }
+  }
+  const bouwPosten = bouw && bouw.length ? bouw : (aankoop ? [{ post: 'Aankoop (koop-aanneemsom)', waarde: aankoop }] : []);
+  const bouwSom = bouwPosten.length ? rond2(bouwPosten.reduce((s, x) => s + x.waarde, 0)) : null;
+  const telt = per.filter((x) => x.telt !== null);
+  const verbSom = rond2(telt.reduce((s, x) => s + x.telt, 0));
+  const samen = bouwSom !== null ? rond2(bouwSom + verbSom) : null;
+  return { verbouwingen: per, niet_gekoppeld: los, bouw: bouwPosten, bouw_som: bouwSom, verbouwingen_som: verbSom,
+    verbouwingen_betaald: telt.filter((x) => x.telt_als === 'betaald').length, verbouwingen_offerte: telt.filter((x) => x.telt_als === 'offerte').length,
+    samen, indicatie: indicatieWaarde ?? null, verschil: samen !== null && indicatieWaarde ? Math.round(indicatieWaarde - samen) : null };
+}
 // Servicekosten (VvE) per box uit de privé-banktransacties (alleen lezen; bank-archief transacties.sqlite). Een box op naam van een BV staat niet
 // in de privébank. Toewijzing: één privébox in die VvE = alles naar die box; meer privéboxen = alleen posten met "<huisnummer>-<toevoeging>" erin.
 const VVE_RUIS = new Set(['vve', 'vereniging', 'van', 'eigenaars', 'eigenaren', 'aan', 'het', 'de', 'en']);
@@ -618,7 +717,7 @@ function leesDossierMap(vault, vandaag) {
   for (const n of namen.filter((x) => !/^(Woning\b|Garagebox|Index\.md$|Eigen woning|NAS )/i.test(x))) {
     const t = titel(lees(n)) || n.replace(/\.md$/, '');
     const j = t.match(/\b(19|20)\d{2}\b/);
-    verbouwingen.push({ titel: t, datum: j ? `${j[0]}-01-01` : null, soort: /plan\b|verbouwplan/i.test(t) ? 'plan' : 'verbouwing', pagina: `${HUIS}/${n}`, kosten: leesKosten(lees(n)) });
+    verbouwingen.push({ titel: t, datum: j ? `${j[0]}-01-01` : null, soort: /plan\b|verbouwplan/i.test(t) ? 'plan' : 'verbouwing', pagina: `${HUIS}/${n}`, kosten: leesKosten(lees(n)), betaald: leesBetaald(lees(n)) });
   }
   // fase 2: de hypotheekpagina in 20_Prive/Financien (alleen lezen)
   let hypotheek = null;
@@ -1283,6 +1382,26 @@ function maak(o) {
       return { posten };
     });
   }
+  // wv4230 (L42): betalingen aan de tegenpartijen uit de tabellen "Betaald" (privérekeningen, alleen lezen; zelfde rekeningfilter als de VvE).
+  // SQL zoekt ruim op het langste woord; de exacte koppeling (gelijke naam na normaliseren + periode) doet kostteUit.
+  function leesBetalingen(verbouwingen) {
+    const sleutels = Array.from(new Set(verbouwingen.flatMap((v) => (v.betaald ? v.betaald.aan.concat(v.betaald.zonder_periode).map((a) => a.sleutel) : []))));
+    return leesAnder(bankPad, (db) => {
+      const priv = `FROM transacties t JOIN rekeningen r ON r.rek = t.rek WHERE t.status = 'booked' AND t.vervangen_door IS NULL AND coalesce(r.eigenaar, '') NOT IN ('POT', 'extern')
+        AND coalesce(t.valuta, 'EUR') = 'EUR'`;
+      let dekking = [];   // vanaf wanneer elke bank in de bank-lezer staat; zonder kolom bron (oud schema) geen dekking, wel betalingen
+      try { dekking = db.prepare(`SELECT r.bron AS bron, min(t.datum) AS vanaf ${priv} GROUP BY r.bron ORDER BY vanaf`).all().map((x) => ({ bron: String(x.bron || ''), vanaf: x.vanaf })); } catch (e) { dekking = []; }
+      const q = db.prepare(`SELECT t.nr AS nr, t.datum AS datum, t.bedrag AS bedrag, coalesce(t.tegenpartij, '') AS tegen, coalesce(t.omschrijving, '') AS tekst ${priv}
+        AND lower(coalesce(t.tegenpartij, '')) LIKE ? LIMIT 2000`);
+      const gezien = new Set(), posten = [];
+      for (const s of sleutels) {
+        const woord = s.split(' ').sort((a, b) => b.length - a.length)[0];
+        if (!woord) continue;
+        for (const r of q.all('%' + woord + '%')) if (!gezien.has(r.nr) && tegenSleutel(r.tegen) === s) { gezien.add(r.nr); posten.push({ nr: r.nr, datum: r.datum, bedrag: Number(r.bedrag), tegen: r.tegen, tekst: r.tekst }); }
+      }
+      return { posten, dekking };
+    });
+  }
   function leesTibber() {
     return leesAnder(tibberPad, (db) => stroomMaanden(db.prepare(`SELECT home_id, substr(van, 1, 7) AS maand, SUM(kwh) AS kwh, SUM(kosten) AS kosten, COUNT(kwh) AS uren, COUNT(kosten) AS kosten_uren
       FROM verbruik WHERE kwh IS NOT NULL GROUP BY home_id, maand ORDER BY maand`).all()));
@@ -1295,6 +1414,7 @@ function maak(o) {
     const boxen = d.objecten.filter((x) => x.soort === 'garagebox').map((x) => ({ sleutel: x.sleutel, vve: x.vve, zoek: x.zoek, eigenaar: (x.feiten.find((f) => f.veld === 'Eigenaar') || {}).waarde }));
     const bank = leesBank(boxen);
     const stroom = leesTibber();
+    const betalingen = leesBetalingen(d.verbouwingen);   // wv4230
     return metDb((db) => {
       const ids = {};
       d.objecten.forEach((x, i) => {
@@ -1369,6 +1489,15 @@ function maak(o) {
         geld.tibber = { ok: true, op, maanden: stroom.maanden.length };
       } else geld.tibber = Object.assign({}, oudGeld.tibber || {}, { ok: false, mislukt_op: op, reden: stroom.ok ? (stroom.stand === 'leeg' ? 'nog geen verbruik' : 'meer dan één Tibber-woning') : stroom.reden });
       db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('geld', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde").run(JSON.stringify(geld));
+      // wv4230 (L42): wat het huis kostte. Het dossier telt altijd opnieuw; lukt de bank niet, dan de betalingen van de vorige lezing (met de reden).
+      if (woning) {
+        let oudK = {}; try { oudK = JSON.parse((db.prepare(`SELECT waarde FROM meta WHERE sleutel = 'kostte'`).get() || {}).waarde || '{}') || {}; } catch (e) { oudK = {}; }
+        const bk = betalingen.ok ? { ok: true, op, posten: betalingen.posten, dekking: betalingen.dekking } : Object.assign({}, oudK.bank || { posten: [], dekking: [] }, { ok: false, mislukt_op: op, reden: betalingen.reden });
+        const aank = woning.reeks.filter((r) => r.reeks === 'aankoop').map((r) => r.waarde)[0] || null;
+        const kost = { op, bouw: woning.bouwkosten || [], aankoop: aank, bank: bk,
+          verbouwingen: d.verbouwingen.map((v) => ({ titel: v.titel, pagina: v.pagina, datum: v.datum, kosten: v.kosten || [], betaald: v.betaald || null })) };
+        db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('kostte', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde").run(JSON.stringify(kost));
+      }
       // objecten die niet meer in het dossier staan (pagina weg of hernoemd). A15: nooit vanzelf wissen wat niet uit het dossier komt
       // (openbare feiten, beelden, een door David bevestigde WOZ, leningdelen): zo'n object krijgt weg_op en blijft staan tot iemand het opruimt.
       // Alleen een object zonder zulke gegevens gaat weg.
@@ -1495,6 +1624,14 @@ function maak(o) {
       // wv4170 (2C54): restschuld, overwaarde (indicatie) en rentevast tot voor de woning, uit dezelfde leningdelen als het tabblad Waarde
       const won = objecten.find((x) => x.soort === 'woning');
       if (won) won.geld_kern = geldKern(won, objecten, geld.holding || null);
+      if (won) {   // wv4230 (L42): offerte naast betaald per verbouwing, en bouw + verbouwingen tegenover de indicatie
+        let k = null; try { k = JSON.parse((db.prepare(`SELECT waarde FROM meta WHERE sleutel = 'kostte'`).get() || {}).waarde || 'null'); } catch (e) { k = null; }
+        if (k && Array.isArray(k.verbouwingen)) {
+          const b = k.bank || {};
+          won.kostte = Object.assign(kostteUit(k.verbouwingen, b.posten || [], k.bouw || [], k.aankoop || null, won.indicatie ? won.indicatie.waarde : null),
+            { op: k.op || null, bank: { ok: !!b.ok, op: b.op || null, mislukt_op: b.mislukt_op || null, reden: b.reden || null, dekking: b.dekking || [] } });
+        } else won.kostte = null;
+      }
       const aanroepen = db.prepare('SELECT COUNT(*) AS n, MAX(tijd) AS laatst FROM aanroep').get();
       const kaal2 = (x) => (x ? { ok: !!x.ok, op: x.op || null, mislukt_op: x.mislukt_op || null, reden: x.reden || null } : null);
       const meta = (k) => (db.prepare('SELECT waarde FROM meta WHERE sleutel = ?').get(k) || {}).waarde || null;
@@ -1788,5 +1925,5 @@ function maak(o) {
 }
 
 module.exports = { maak, geldKern, leesWoning, leesBox, leesDossierMap, dossierstand, indicatie, soortStuk, euroUit, datumUit, bagSoort, SCHEMA_VERSIE,
-  leesHypotheek, hypotheekReeksen, laatsteStand, leesKelder, kelderDossier, kelderMd, kenmerken, kenmerkenMetOud, vergelijk, wijzigingBericht, buurtNieuw, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink,
+  leesHypotheek, hypotheekReeksen, laatsteStand, leesKelder, kelderDossier, kelderMd, kenmerken, kenmerkenMetOud, vergelijk, wijzigingBericht, buurtNieuw, leesKosten, leesBetaald, leesBouwkosten, tegenSleutel, kostteUit, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink,
   looptUit, toekomstUit, alvUit, wozBinnenkort, nuEnBinnenkort, binnenkortRegels, binnenkortNodig, binnenkortErbij };

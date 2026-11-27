@@ -55,6 +55,7 @@ VASTGOED_JS="$VJS" node --test test/vastgoed-gesprek.test.js >/dev/null 2>&1 && 
 VASTGOED_JS="$VJS" node --test test/vastgoed-kelder.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-kelder.test.js (2C49: kelderdossier, ronde, melding alleen bij verschil)" || { echo "ROOD  test/vastgoed-kelder.test.js"; f=1; }
 VASTGOED_JS="$VJS" node --test test/vastgoed-buurt.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-buurt.test.js (L38: buurtwachter, nooit twee keer dezelfde)" || { echo "ROOD  test/vastgoed-buurt.test.js"; f=1; }
 VASTGOED_JS="$VJS" node --test test/vastgoed-binnenkort.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-binnenkort.test.js (L40: Loopt nu, Binnenkort, Nieuw; register)" || { echo "ROOD  test/vastgoed-binnenkort.test.js"; f=1; }
+VASTGOED_JS="$VJS" node --test test/vastgoed-kostte.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-kostte.test.js (L42: offerte naast betaald, wat het huis kostte)" || { echo "ROOD  test/vastgoed-kostte.test.js"; f=1; }
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 python3 -I test/vastgoed-laag.py "$OPY" "$T" | tail -1; python3 -I test/vastgoed-laag.py "$OPY" "$T" >/dev/null 2>&1 || { echo "ROOD  test/vastgoed-laag.py"; f=1; }
 
