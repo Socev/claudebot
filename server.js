@@ -17857,7 +17857,9 @@ function spraakNamenMaak() {
         const { DatabaseSync } = require('node:sqlite');
         const db = new DatabaseSync(pad, { readOnly: true });
         try {
-          db.exec('PRAGMA busy_timeout = 2000;');
+          // review wv4176 MOET 1: synchroon, dus nooit wachten op een slot (busy_timeout 0): vergrendeld = de bron gooit en valt deze ronde weg
+          // (1 min later opnieuw). Gemeten 27-11: de telling duurt ± 2 ms (WAL, alleen lezen); hooguit eens per 10 min.
+          db.exec('PRAGMA busy_timeout = 0;');
           return db.prepare("select l.knoop_id as knoop_id, l.naam as naam, count(*) as n from factuur f join leverancier l on l.id = f.leverancier where f.factuurdatum >= date('now', '-365 day') group by l.id").all();
         } finally { try { db.close(); } catch (e) { /* al dicht */ } }
       },
