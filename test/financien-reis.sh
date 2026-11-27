@@ -87,6 +87,11 @@ if (R) {
     d1.posten.some((x) => x.naam === 'Toscane Tours' && x.vooraf && /naam van de reis/.test(x.waarom)), [namen(d2), namen(d1)]);
   toets('totaal = bevestigd + voorstellen ter plekke; vooraf telt pas na ja (vraag_vooraf); per dag = totaal / dagen', d1.totaal === 140 && d1.open === 140 && d1.bevestigd === 0 && d1.vraag_vooraf === 300 &&
     d1.per_dag === Math.round(140 / 11 * 100) / 100 && d2.totaal === 100 && d2.vraag_vooraf === 2900 && d1.ter_plekke === 140 && d1.vooraf === 0, [d1.totaal, d1.open, d1.vraag_vooraf, d1.per_dag, d2.totaal, d2.vraag_vooraf]);
+  // wv4186 (2C97): wanneer je vooraf boekte = de vroegste vooraf-post (erbij of voorstel, eraf niet); bevestigd alleen bij Davids erbij
+  toets('vooraf_eerst: R1 Toscane Tours 2024-09-01 (voorstel), R2 termijn 1 2025-02-01, R3 geen; in de lijst ook', JSON.stringify(d1.vooraf_eerst) === JSON.stringify({ datum: '2024-09-01', bevestigd: false }) &&
+    JSON.stringify(d2.vooraf_eerst) === JSON.stringify({ datum: '2025-02-01', bevestigd: false }) && d3.vooraf_eerst === null && JSON.stringify(o.reizen.find((r) => r.id === R2.id).vooraf_eerst) === JSON.stringify(d2.vooraf_eerst), [d1.vooraf_eerst, d2.vooraf_eerst, d3.vooraf_eerst]);
+  const ve = R.voorafEerst([{ datum: '2025-03-01', vooraf: true, status: 'erbij' }, { datum: '2025-01-01', vooraf: true, status: 'eraf' }, { datum: '2025-02-01', vooraf: false, status: 'erbij' }]);
+  toets('vooraf_eerst: eraf en ter plekke tellen niet; erbij = bevestigd', JSON.stringify(ve) === JSON.stringify({ datum: '2025-03-01', bevestigd: true }), ve);
   toets('per categorie telt op tot het totaal; lijst gelijk aan de reis', Math.abs(d1.per_categorie.reduce((s, c) => s + c.bedrag, 0) - d1.totaal) < 0.01 && o.reizen.find((r) => r.id === R1.id).totaal === d1.totaal, d1.per_categorie);
   toets('meer: AH thuis, de webwinkel en tot + 5 staan erbij om zelf toe te voegen; de terugbetaling vóór de reis ook (review MOET 2)', ['Albert Heijn 1234', 'Webwinkel Proef', 'Trattoria Laat'].every((t) => d1.meer.some((x) => x.naam === t)) &&
     d1.meer.some((x) => x.naam === 'Vliegmaatschappij Proef' && x.bedrag === -100) && d1.meer.some((x) => x.naam === 'Rifugio Proef' && x.elders === R3.titel), d1.meer.map((x) => [x.naam, x.bedrag, x.elders]));

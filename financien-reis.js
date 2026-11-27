@@ -193,6 +193,14 @@ function post(x, t, elders) {
 // zwakker (de eerstvolgende reis hoeft niet de goede te zijn: gemeten 8-11 viel de vooruitbetaling van een lange zomerreis bij een korte reis ervoor) en telt
 // pas mee na Davids ja; tot dan staat het apart als vraag.
 function telt(p) { return p.status === 'erbij' || (p.status === 'voorstel' && (!p.vooraf || p.sterk)); }
+// wv4186 (besluitenpagina nr 197 = 2C97, Tripper "je reisjaar als voorstel"): wanneer je deze reis vooraf boekte = de vroegste vooraf-post die
+// erbij staat of nog voorstel is (eraf telt niet); bevestigd = die post heeft Davids erbij. null = geen vooraf-boeking. Alleen lezen.
+function voorafEerst(posten) {
+  const v = posten.filter(function (p) { return p.vooraf && (p.status === 'erbij' || p.status === 'voorstel'); });
+  if (!v.length) return null;
+  const e = v.reduce(function (a, p) { return p.datum < a.datum ? p : a; });
+  return { datum: e.datum, bevestigd: e.status === 'erbij' };
+}
 function samenvatting(r, posten) {
   const tel = posten.filter(telt);
   const som = function (f) { return r2(tel.filter(f).reduce(function (s, p) { return s + p.bedrag; }, 0)); };
@@ -204,6 +212,7 @@ function samenvatting(r, posten) {
     aantal: { erbij: posten.filter(function (p) { return p.status === 'erbij'; }).length, voorstel: posten.filter(function (p) { return p.status === 'voorstel'; }).length,
       eraf: posten.filter(function (p) { return p.status === 'eraf'; }).length },
     per_dag: r.dagen > 0 ? r2(totaal / r.dagen) : null, vooraf: som(function (p) { return p.vooraf; }), ter_plekke: som(function (p) { return !p.vooraf; }),
+    vooraf_eerst: voorafEerst(posten),
     per_categorie: Array.from(cats.entries()).map(function (e) { return { categorie: e[0], bedrag: r2(e[1]) }; }).filter(function (c) { return c.bedrag !== 0; })
       .sort(function (p, q) { return q.bedrag - p.bedrag; }) };
 }
@@ -279,5 +288,5 @@ function labelZet(A, a, o) {
   return { reis: r.id, nr: nr, keuze: o.keuze };
 }
 
-module.exports = { reizenOverzicht: reizenOverzicht, labelZet: labelZet, reizenOpVorm: reizenOpVorm, toewijzen: toewijzen, titelWoorden: titelWoorden, landVan: landVan, reisMcc: reisMcc,
+module.exports = { voorafEerst: voorafEerst, reizenOverzicht: reizenOverzicht, labelZet: labelZet, reizenOpVorm: reizenOpVorm, toewijzen: toewijzen, titelWoorden: titelWoorden, landVan: landVan, reisMcc: reisMcc,
   MARGE: MARGE, VOORAF_DAGEN: VOORAF_DAGEN, NAAM_DAGEN: NAAM_DAGEN };
