@@ -123,6 +123,8 @@ const wacht = () => new Promise((r) => setImmediate(r));
     const arch = '## [week] 2026-11-16 06:12 — CISO-ronde 2026-11-16: 5 open\n- van: wachter:ciso (ronde 2026-11-16)\n## [week] 2026-11-23 06:2x — CISO-ronde 2026-11-23: 7 open #ciso\n- van: wachter:ciso (ronde 2026-11-23)\n';
     const rc = M.rapporten([box, arch], M.MANAGERS.find((x) => x.id === 'ciso'), 5);
     toets('3b rapporten CISO: nieuwste eerst, dubbel uit archief één keer, dagcheck niet mee, kop zonder [week] en #tag', rc.length === 2 && rc[0].datum === '2026-11-23' && rc[0].titel === '2026-11-23 06:2x — CISO-ronde 2026-11-23: 7 open' && /wat ik zag/.test(rc[0].tekst) && rc[1].datum === '2026-11-16', rc);
+    const twee = M.rapporten(['## [week] 2026-11-23 06:2x — CISO-ronde 2026-11-23: 7 open\n- van: wachter:ciso (ronde 2026-11-23)\n## [week] 2026-11-23 18:4x — CISO-ronde 2026-11-23: 6 open\n- van: wachter:ciso (ronde 2026-11-23)\n'], M.MANAGERS.find((x) => x.id === 'ciso'), 5);
+    toets('3b twee rondes op één dag zonder tijd in de van-regel = twee rapporten (review Codex ZOU 1)', twee.length === 2, twee.map((x) => x.titel));
     const rd = M.rapporten([box], des, 5);
     toets('3b rapporten Design nemen het UI-deel mee; Bibliothecaris heeft er geen', rd.length === 1 && rd[0].wie === 'ui-manager' && M.rapporten([box], M.MANAGERS.find((x) => x.id === 'bibliothecaris'), 5).length === 0, rd);
   }

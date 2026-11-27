@@ -192,7 +192,7 @@ function rapporten(teksten, m, n) {
       const v = /^- van: wachter:([a-z-]+) \(ronde (\d{4}-\d{2}-\d{2})([^)\n]*)\)/m.exec(rij);
       if (!v || m.boxVan.indexOf(v[1]) < 0) return;
       const kop = rij.split('\n')[0].replace(/^## (\[[a-z]+\] )?/, '').replace(/(\s+#[\w-]+)+\s*$/, '').trim();
-      const sl = v[1] + ' ' + v[2] + v[3];
+      const sl = v[1] + ' ' + v[2] + v[3] + ' ' + kop;   // review Codex ZOU 1: twee rondes op één dag blijven twee rapporten
       if (gezien[sl]) return;   // dezelfde rij in box én archief (archiefstap halverwege)
       gezien[sl] = true;
       const body = rij.split('\n').slice(1).join('\n').replace(/\s+$/, '');
