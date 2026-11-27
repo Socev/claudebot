@@ -115,7 +115,7 @@ test('concept → meting één keer; door David dichtgezet → stoppen, niets he
 test('potAfRegelsApp/potAfVergelijkApp: alleen bekende velden, getallen afgerond, lijsten begrensd', () => {
   const t = laad();
   const r = t.R.potAfRegelsApp([{ datum: '2026-10-05', tegenpartij: 'Leverancier A B.V.', omschrijving: 'x', wat: 'Overige betaling', soort: 'overig', stuk: '?', vraag: true, bedrag: -123.456, saldo: 10, geheim: 'nee' }]);
-  assert.deepEqual(Object.keys(r[0]).sort(), ['bedrag', 'datum', 'omschrijving', 'saldo', 'soort', 'stuk', 'tegenpartij', 'vraag', 'wat']);
+  assert.deepEqual(Object.keys(r[0]).sort(), ['afwijkt', 'bedrag', 'datum', 'omschrijving', 'saldo', 'soort', 'stuk', 'tegenpartij', 'vraag', 'wat']);
   assert.equal(r[0].bedrag, -123.46);
   const v = t.R.potAfVergelijkApp({ vorige_maand: '2026-09', zelfde: false, tekst: 'Anders', nieuw: Array(30).fill('a'), ontbreekt: [1, 'b'] });
   assert.equal(v.nieuw.length, 20); assert.deepEqual(v.ontbreekt, ['b']);
