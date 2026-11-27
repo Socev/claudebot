@@ -136,6 +136,8 @@ function rij(id, t, tekst, bron) { return { id: id, createdAt: new Date(t).toISO
     w.io.run = async function (x) { return Object.assign({ id: String(x), mode: 'trigger', status: 'error', startedAt: '2026-11-21T08:58:00Z', retryOf: null, retrySuccessId: null }, o.run || {}); };
     w.io.opnieuw = async function (x) { w.opnieuw.push(String(x)); w.staatBijRetry = JSON.parse(JSON.stringify(w.staat)); if (o.retryFout) throw new Error(o.retryFout); return { id: 900, status: o.retryStatus || 'success' }; };
     if (o.uit) w.io.opnieuwUit = function () { return true; };
+    if (o.knop) w.io.knopGeclaimd = function (x) { return o.knop === 'na-run' ? w.knopNaRun === true : String(x) === String(ex); };
+    if (o.knop === 'na-run') { const r0 = w.io.run; w.io.run = async function (x) { const r = await r0(x); w.knopNaRun = true; return r; }; }   // David tikt tijdens de await
     w.staat = Object.assign({ watermerk: 0 }, o.staat || {});
     w.rijen = [rij(1, w.t, fmTekst(o.naam || 'AI - WhatsApp Nachtextractie', wid, o.knoop || 'Volglijst lezen (Intake)', o.fout || 'Service unavailable - try again later or consider setting this node to retry automatically', ex))];
     return w;
@@ -168,6 +170,13 @@ function rij(id, t, tekst, bron) { return { id: id, createdAt: new Date(t).toISO
   toets('11m plafond per dag → geen retry', w.opnieuw.length === 0 && w.claude.length === 1);
   w = opWereld({ uit: true }); await draai(w);
   toets('11n noodrem → geen retry', w.opnieuw.length === 0);
+  // wv4202: gedeelde claim met de knop Opnieuw proberen (Codex MOET 2)
+  w = opWereld({ knop: true }); await draai(w);
+  toets('11o David tikte al op Opnieuw proberen → geen retry', w.opnieuw.length === 0 && w.claude.length === 1);
+  w = opWereld({ knop: 'na-run' }); await draai(w);
+  toets('11p David tikt tijdens het lezen van de run → geen retry (claim na de await opnieuw getoetst)', w.opnieuw.length === 0);
+  d = opWereld().dienst();
+  toets('11q opnieuwGeclaimd: onbekende executie = nee', d.opnieuwGeclaimd('12345') === false);
   // (max. uren per workflow is een extra rem: een onderzoek start toch al uiterlijk 60 min na het alarm)
   // 12 latere retry (bv. van de inhaalslag) met retryOf = de foute run → bewezen
   w = wereld({ runs: { R1: [{ id: 51, status: 'success', startedAt: '2026-11-21T09:10:00Z', retryOf: '50' }, { id: 50, status: 'error', startedAt: '2026-11-21T08:59:00Z' }] } });

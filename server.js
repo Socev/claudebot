@@ -4848,7 +4848,8 @@ function handleRequest(req, res) {
       weekinhaal: typeof weekinhaalInfo === 'function' ? weekinhaalInfo() : { aan: false },
       pod_klok: typeof podKlokInfo === 'function' ? podKlokInfo() : { aan: false },
       heartbeat_moment: hbMomentLaatst,   // wv3686: laatste momentbesluit (meta)
-      storingsdienst: typeof storingsdienstInfo === 'function' ? storingsdienstInfo() : null,   // wv3712: onderzoek per alarm (laatste ronde, wacht, vandaag, verbruik)
+      storingsdienst: typeof storingsdienstInfo === 'function' ? storingsdienstInfo() : null,
+      meld_opnieuw: typeof meldOpnieuwInfo === 'function' ? meldOpnieuwInfo() : null,   // wv4202: knop Opnieuw proberen (vandaag, bezig, gelukt, mislukt)   // wv3712: onderzoek per alarm (laatste ronde, wacht, vandaag, verbruik)
       hartslag_alarm: typeof hartslagAlarmInfo === 'object' ? hartslagAlarmInfo : null,   // wv3484: verlopen hartslag → box (laatste ronde, gemeld, overgeslagen)   // wv3194: inhaal gemiste weekrondes (laatste tik, aantallen deze week, bezig)
       nieuwsbrief: nieuwsbriefInfo(),   // wv2190: nieuwsbrief-bloemlezing (laatste ronde, bezig; geen inhoud)
       te_lezen: { aan: typeof teLezenMod !== 'undefined' && !!teLezenMod },   // wv2245: Te lezen in Voor jou (module in de release)
@@ -6396,7 +6397,7 @@ const APP_UITDAGING_MS = 2 * 60 * 1000;
 const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
 const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // vaste plek: wie bezig is, houdt over de dagdeelgrens heen 5 min glijdend (wv488; was fase 4: 5 min glijdend)
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
-const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/meldingen/waarom', 'POST /app/knop', 'POST /app/rij/terug', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
+const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/meldingen/waarom', 'POST /app/meldingen/opnieuw', 'POST /app/knop', 'POST /app/rij/terug', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/broedstoof/knop', 'POST /app/agents/rij', 'POST /app/harvester/broedstoof', 'POST /app/harvester/weg', 'POST /app/harvester/terug', 'POST /app/harvester/bron-nieuw',
   'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/harvester/regel', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
@@ -11704,6 +11705,7 @@ async function appMeldingenVerzamel() {
     // niet na te gaan of hij weer goed loopt, maar al 3 dagen niet teruggekomen: geen storing-chip meer (de app toont "kwam niet terug")
     const rustig = !!g.nagekeken && herstel[i].stand === 'onbekend' && Date.now() - Date.parse(g.laatste) >= APP_MELD_RUSTIG_MS;
     return { id: g.id, rij: g.rij, kaart: 'k' + appSha(g.sleutel).slice(0, 12), soort: 'storing', titel: appWfNaam(f.workflow) + ' liep vast', uitleg: g.uitleg.tekst, _wf: f.workflow_id || null,
+      _ex: g.executies.slice(), _knoop: f.knoop || '', _laatste_ex: f.executie || null,   // wv4202: Opnieuw proberen (niet naar de app)
       wanneer: g.laatste, eerste: g.eerste, aantal: g.aantal, herstel: herstel[i], rustig: rustig, techniek: techniek };
   });
   // Stilgevallen aanvoer: elke gemelde stroom één kaart (de laatste melding), met de stand van nu erbij.
@@ -11738,6 +11740,8 @@ async function appMeldingenVerzamel() {
   if (typeof storingsdienstVoorKaart === 'function') items.forEach(function (x) { if (!x.kaart) return; const o = storingsdienstVoorKaart(x.kaart, x.rij); if (o) x.onderzoek = o; });
   // wv4120 (nr 407 = 3C107): twee vaste regels per kaart: Gevolg voor jou (vaste tabel storing-gevolg.js) en Ingehaald (deterministisch)
   appMeldGevolg(items);
+  // wv4202 (nr 474 = 3C174): knop Opnieuw proberen en de afloop ervan op de kaart
+  if (typeof appMeldOpnieuw === 'function') appMeldOpnieuw(items);
   items.sort(function (a, b) { return Date.parse(b.wanneer) - Date.parse(a.wanneer); });
   // wv4120 (nr 408 = 3C108): >= 3 verschillende storingen binnen een uur → één kop "Voorval" met de oorzaak van de storingsdienst
   const voorvallen = appMeldVoorvallen(rijen, items);
@@ -11765,8 +11769,11 @@ async function appMeldingenVerzamel() {
   // wv4129 (nr 334 = 3C34): welke workflow/stroom achter een kaart zit, voor de knop Waarom? (niet naar de app)
   const herkomst = {};
   getoond.forEach(function (x) { const h = x._wf ? 'workflow ' + x._wf : x._pijplijn ? 'stroom ' + x._pijplijn : null; if (h) herkomst[appMeldRef(x)] = h; });
-  getoond.forEach(function (x) { delete x._wf; delete x._pijplijn; });
-  return { items: getoond, voorvallen: voorvallen, stand: { aanvoer: aanvoer, extern: extern }, max_rij: maxRij, kaarten: kaarten, herkomst: herkomst, gelezen: !!rijen.length || !fouten.length, fouten: fouten, op: Date.now() };
+  // wv4202: wat de knop Opnieuw proberen nodig heeft; de pod kiest zelf de run (de app stuurt alleen de ref)
+  const opnieuwBron = {};
+  getoond.forEach(function (x) { if (x.soort === 'storing' && x._wf) opnieuwBron[appMeldRef(x)] = { soort: x.soort, wf: x._wf, knoop: x._knoop, executie: x._laatste_ex }; });
+  getoond.forEach(function (x) { delete x._wf; delete x._pijplijn; delete x._ex; delete x._knoop; delete x._laatste_ex; });
+  return { items: getoond, voorvallen: voorvallen, stand: { aanvoer: aanvoer, extern: extern }, max_rij: maxRij, kaarten: kaarten, herkomst: herkomst, opnieuw_bron: opnieuwBron, gelezen: !!rijen.length || !fouten.length, fouten: fouten, op: Date.now() };
 }
 /* meld-gevolg:begin */
 // wv4120: Gevolg voor jou + Ingehaald op elke kaart (niet op geweigerde verzoeken). Puur op de tabel en wat er al op de kaart staat.
@@ -11786,6 +11793,47 @@ function appMeldGevolg(items) {
     x.ingehaald = { stand: ih.stand, tekst: G.ingehaaldTekst(ih, appDagKlok) };
   });
 }
+/* meld-opnieuw:begin */
+// wv4202 (nr 474 = 3C174): per storingskaart de knop (opnieuw.kan) of de afloop van Davids tik (opnieuw.stand/tekst). Een geslaagde
+// herhaling is bewijs: Ingehaald wordt ja; een mislukte maakt een "niet vast te stellen" tot nee. Puur op meld-opnieuw.js (zonder n8n).
+function appMeldOpnieuw(items) {
+  if (typeof meldOpnieuw === 'undefined' || !meldOpnieuw) return;
+  items.forEach(function (x) {
+    if (x.soort !== 'storing' || !x._wf) return;
+    let st = null;
+    try { st = meldOpnieuw.stand(x._ex || [], x._laatste_ex); } catch (e) { st = null; }
+    if (st) {
+      x.opnieuw = { stand: st.stand, op: st.op, tekst: st.tekst };
+      if (st.stand === 'gelukt' && appStoringGevolg)
+        x.ingehaald = { stand: 'ja', tekst: appStoringGevolg.ingehaaldTekst({ stand: 'ja', op: st.klaar_op || st.op, toelichting: 'op jouw tik opnieuw gedraaid vanaf de mislukte stap; dat lukte.' }, appDagKlok) };
+      else if (st.stand === 'mislukt' && x.ingehaald && x.ingehaald.stand !== 'ja')
+        x.ingehaald = { stand: 'nee', tekst: 'Nee — ook de herhaling op jouw tik liep vast.' };
+      return;
+    }
+    let kan = false;
+    try { kan = meldOpnieuw.kan({ soort: x.soort, wf: x._wf, knoop: x._knoop, executie: x._laatste_ex, t: Date.parse(x.wanneer),
+      ingehaald: x.ingehaald && x.ingehaald.stand, herstel: x.herstel && x.herstel.stand }); } catch (e) { kan = false; }
+    if (kan) x.opnieuw = { kan: true };
+  });
+}
+async function appMeldingenOpnieuw(req, res, a, d) {
+  const ref = String(d.ref || '');
+  if (!/^[a-z0-9-]{4,40}$/.test(ref)) return appWeiger(res, 400, 'ongeldige melding', 'meldingen opnieuw');
+  if (typeof meldOpnieuw === 'undefined' || !meldOpnieuw) return appWeiger(res, 503, 'opnieuw proberen kan nu niet', 'meldingen opnieuw module');
+  let m;
+  try { m = await appMeldingen(); } catch (e) { logError('app-meldingen', e); return appWeiger(res, 503, 'meldingen zijn nu niet te lezen', 'meldingen fout'); }
+  const x = appMeldMetSeintjes(m.items).find(function (y) { return appMeldRef(y).slice(0, 40) === ref; }) || null;
+  const bron = x ? (m.opnieuw_bron || {})[appMeldRef(x)] : null;
+  if (!x || !bron) return appWeiger(res, 404, 'die melding staat er niet meer', 'meldingen opnieuw onbekend');
+  if (!x.opnieuw || !x.opnieuw.kan) return appWeiger(res, 409, x.opnieuw && x.opnieuw.tekst ? x.opnieuw.tekst : 'deze melding kan niet opnieuw', 'meldingen opnieuw niet');
+  let r;
+  try { r = await meldOpnieuw.start(bron); } catch (e) { logError('meld-opnieuw', e); return appWeiger(res, 503, 'opnieuw proberen lukte nu niet', 'meldingen opnieuw fout'); }
+  if (!r || !r.ok) return appWeiger(res, (r && r.code) || 409, (r && r.reden) || 'kan niet opnieuw', 'meldingen opnieuw ' + ref + ': ' + String(r && r.reden || '').slice(0, 60));
+  res._app.reden = 'opnieuw ' + ref + ' (executie ' + r.executie + ')';
+  appStaat.meld = null;   // volgende verversing toont de afloop
+  appStuur(res, 202, { ok: true, opnieuw: { stand: 'bezig', op: r.op, tekst: 'Opnieuw gestart ' + appKlok(r.op) + ' (op jouw tik); loopt nog.' } });
+}
+/* meld-opnieuw:einde */
 function appMeldVoorvallen(rijen, items) {
   try {
     if (!storingsdienst || typeof storingsdienst.alarmenVan !== 'function') return [];
@@ -17814,6 +17862,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/meldingen/gezien') return appMeldingenGezien(req, res, a, d);
         if (route === 'POST /app/meldingen/af') return appMeldingenAf(req, res, a, d);   // wv446
         if (route === 'POST /app/meldingen/waarom') return appMeldingenWaarom(req, res, reg, a, s, d);   // wv4129 (nr 334 = 3C34)
+        if (route === 'POST /app/meldingen/opnieuw') return appMeldingenOpnieuw(req, res, a, d);   // wv4202 (nr 474 = 3C174)
         if (route === 'GET /app/nieuw') return appNieuwRoute(req, res, a);
         if (route === 'GET /app/telegram-bezig') return appTelegramBezigRoute(req, res);   // wv292
         if (route === 'POST /app/gezien') return appNieuwGezien(req, res, a, d);
@@ -27745,6 +27794,8 @@ const storingsdienst = (function () {
       // wv3760 (stap 2): de mislukte run zelf (mode, retryOf) en de n8n-retry (hervat bij de mislukte knoop; antwoord na afloop, max 8 min).
       // Welke runs mogen, beslist storingsdienst.js (vaste lijst leesknopen). Noodrem: STORINGSDIENST_OPNIEUW=0.
       opnieuwUit: function () { return process.env.STORINGSDIENST_OPNIEUW === '0'; },
+      // wv4202: gedeelde claim met de knop Opnieuw proberen (meld-opnieuw.js); onleesbaar = geclaimd
+      knopGeclaimd: function (ex) { try { return typeof meldOpnieuw !== 'undefined' && !!meldOpnieuw && meldOpnieuw.geclaimd(ex); } catch (e) { return true; } },
       run: async function (ex) {
         const x = await appN8n('/executions/' + encodeURIComponent(ex));
         return x ? { id: x.id, mode: x.mode, status: x.status, startedAt: x.startedAt, retryOf: x.retryOf || null, retrySuccessId: x.retrySuccessId || null } : null;
@@ -27797,6 +27848,62 @@ async function storingsdienstTik() {
 }
 /* storingsdienst:einde */
 if (storingsdienst && SERVER_ECHT === true) { setTimeout(function () { storingsdienstTik(); }, 240000).unref(); setInterval(function () { storingsdienstTik(); }, 5 * 60000).unref(); }
+
+// wv4202 (besluitenpagina nr 474 = 3C174, David Ja 25-11-2026): knop "Opnieuw proberen" op een storingskaart. Logica en vaste lijst in
+// meld-opnieuw.js; staat in klokken/meld-opnieuw.json; noodrem MELD_OPNIEUW=0. Claim gedeeld met de storingsdienst (opnieuwGeclaimd).
+const MELD_OPNIEUW_PAD = path.join(KLOKKEN_DIR, 'meld-opnieuw.json');
+var meldOpnieuw = (function () {
+  const p = path.join(__dirname, 'meld-opnieuw.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const run = async function (ex) {
+      let x;
+      try { x = await appN8n('/executions/' + encodeURIComponent(ex)); } catch (e) { if (/http 404/.test(String(e && e.message))) return null; throw e; }
+      return x ? { id: x.id, mode: x.mode, status: x.status, startedAt: x.startedAt, stoppedAt: x.stoppedAt || null, retryOf: x.retryOf || null,
+        retrySuccessId: x.retrySuccessId || null, workflowId: x.workflowId || null } : null;
+    };
+    return require(p).maak({
+      nu: function () { return Date.now(); },
+      uit: function () { return process.env.MELD_OPNIEUW === '0'; },
+      leesStaat: function () {
+        try { return JSON.parse(fs.readFileSync(MELD_OPNIEUW_PAD, 'utf8')); }
+        catch (e) { if (e && e.code === 'ENOENT') return {}; throw e; }   // onleesbaar: geen knop (claims onbekend)
+      },
+      schrijfStaat: function (s) {
+        fs.mkdirSync(KLOKKEN_DIR, { recursive: true });
+        const t = MELD_OPNIEUW_PAD + '.tmp'; fs.writeFileSync(t, JSON.stringify(s), { mode: 0o600 }); fs.renameSync(t, MELD_OPNIEUW_PAD);
+      },
+      run: run,
+      runs: async function (wf) {
+        const j = await appN8n('/executions?workflowId=' + encodeURIComponent(wf) + '&limit=10');
+        return (Array.isArray(j && j.data) ? j.data : []).map(function (x) { return { id: x.id, status: x.status, startedAt: x.startedAt, mode: x.mode, retryOf: x.retryOf || null }; });
+      },
+      inhaalRij: async function (ex) {
+        const r = await appN8nRijen(STORINGSDIENST_INHAAL_TABEL, { type: 'and', filters: [{ columnName: 'execution_id', condition: 'eq', value: String(ex) }] }, 5);
+        return r.length ? { status: String(r[0].status || '') } : null;
+      },
+      sdGeclaimd: function (ex) { return !!(storingsdienst && typeof storingsdienst.opnieuwGeclaimd === 'function' && storingsdienst.opnieuwGeclaimd(ex)); },
+      retry: async function (ex) {
+        const b = appN8nBasis(), k = process.env.N8N_API_KEY;
+        if (!b || !k) throw new Error('n8n-API niet ingesteld');
+        const r = await fetch(b + '/api/v1/executions/' + encodeURIComponent(ex) + '/retry', { method: 'POST', headers: { 'X-N8N-API-KEY': k, accept: 'application/json', 'content-type': 'application/json' },
+          body: JSON.stringify({ loadWorkflow: true }), signal: AbortSignal.timeout(480000) });
+        if (!r.ok) throw new Error('n8n retry http ' + r.status);
+        const j = await r.json();
+        return { id: j && j.id != null ? j.id : null, status: j && j.status || null };
+      },
+      log: function (r) { schrijfLog(nu() + ' ' + r); },
+    });
+  } catch (e) { logError('meld-opnieuw', e); return null; }
+})();
+let meldOpnieuwBezig = false;
+async function meldOpnieuwTik() {
+  if (!meldOpnieuw || meldOpnieuwBezig || meldOpnieuw.open() === 0) return;
+  meldOpnieuwBezig = true;
+  try { const voor = meldOpnieuw.open(); if ((await meldOpnieuw.tik()) !== voor) appStaat.meld = null; } catch (e) { logError('meld-opnieuw', e); } finally { meldOpnieuwBezig = false; }
+}
+if (meldOpnieuw && SERVER_ECHT === true) setInterval(function () { meldOpnieuwTik(); }, 60000).unref();
+function meldOpnieuwInfo() { if (!meldOpnieuw) return { module: false }; try { return meldOpnieuw.health(); } catch (e) { return { fout: true }; } }
 // ── wv2016 (SB2 fase 6b): maandklok van de herstelproef (waarom, moment en proefdag in sb2-nacht.js maakMaandRonde) ──
 // Elke 5 min (echte pod, rol primair, schakelaar aan): vanaf de eerste zondag van de maand 10:00–22:59 (inhalen tot 2 dagen later), één
 // ronde per maand op de kopie van de 1e: socev-run --naam sb2-herstelproef --max-min 30 -- herstelproef.py draai --dag <JJJJ-MM-01> --klok.

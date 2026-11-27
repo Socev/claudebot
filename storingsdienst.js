@@ -183,6 +183,7 @@ function maak(io) {
     if (!a.standaard || !TIJDELIJK.some(function (re) { return re.test(a.standaard); })) return false;
     if (!(nu - a.t < lijst.uur * 3600000)) return false;
     if (Object.prototype.hasOwnProperty.call(staat.opnieuw, String(a.executie))) return false;   // per executie hooguit één poging, ook na herstart
+    if (io.knopGeclaimd && io.knopGeclaimd(String(a.executie))) return false;   // wv4202: David tikte al op Opnieuw proberen (gedeelde claim)
     if (((staat.dag && staat.dag.opnieuw) || 0) >= OPNIEUW_PER_DAG) return false;
     if (h && h.inhaal) return false;   // de inhaalslag heeft hem al
     return true;
@@ -200,6 +201,8 @@ function maak(io) {
     try { run = await io.run(a.executie); } catch (e) { return; }
     if (!opnieuwMetRun(a, h, run)) return;
     const ex = String(a.executie);
+    // wv4202 (Codex MOET 2): na de await opnieuw, synchroon tot en met de claim: de knop van David kan intussen geclaimd hebben
+    if (Object.prototype.hasOwnProperty.call(staat.opnieuw, ex) || (io.knopGeclaimd && io.knopGeclaimd(ex))) return;
     ctx.opnieuw_gedaan = true;
     staat.opnieuw[ex] = { op: nu, workflow_id: a.workflow_id, knoop: a.knoop };
     staat.dag.opnieuw = ((staat.dag && staat.dag.opnieuw) || 0) + 1;
@@ -546,7 +549,9 @@ function maak(io) {
     return Object.assign({ aan: !(io.uit && io.uit()), per_dag: PER_DAG, voorvallen: vvs.length, voorvallen_met_oorzaak: vvs.filter(function (v) { return !!v.oorzaak; }).length, opnieuw_aan: !!(io.opnieuw && !(io.opnieuwUit && io.opnieuwUit())),
       opnieuw_vandaag: (staat && staat.dag && staat.dag.datum === dag(io.nu()) && staat.dag.opnieuw) || 0 }, info);
   }
-  return { tik: tik, voorKaart: voorKaart, voorKop: voorKop, alarmenVan: alarmenVan, health: health };
+  // wv4202: gedeelde claim met de knop Opnieuw proberen (meld-opnieuw.js). Onleesbare staat = geclaimd (liever geen knop dan dubbel).
+  function opnieuwGeclaimd(ex) { try { laad(); return Object.prototype.hasOwnProperty.call(staat.opnieuw, String(ex)); } catch (e) { return true; } }
+  return { tik: tik, voorKaart: voorKaart, voorKop: voorKop, alarmenVan: alarmenVan, health: health, opnieuwGeclaimd: opnieuwGeclaimd };
 }
 
 module.exports = { maak, voorvallen, VOORVAL_MS, VOORVAL_MIN, standaardMelding, ZELFHERSTEL, OPNIEUW, OPNIEUW_PER_DAG, WACHT_MS, UITERLIJK_MS, RUIS_MS, PER_DAG, BUNDEL_MAX };
