@@ -20,8 +20,8 @@ if echo "$W" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new 
 g=0
 grep -q "const vastgoedApp = (function () {" server.js || { echo "ROOD  server.js: vastgoedApp ontbreekt"; g=1; }
 P=$(grep -oE "POST \\\\/app\\\\/vastgoed\\\\/\([a-z|-]+\)" server.js)
-[ "$P" = 'POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar)' ] || { echo "ROOD  server.js: POST-routes van Vastgoed zijn niet precies de zes ($P)"; g=1; }
-grep -qF "['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });" server.js || { echo "ROOD  server.js: Vastgoed-routes verlengen de sessie niet"; g=1; }
+[ "$P" = 'POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar)' ] || { echo "ROOD  server.js: POST-routes van Vastgoed zijn niet precies de zeven ($P)"; g=1; }
+grep -qF "['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar', 'woz-bezwaar'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });" server.js || { echo "ROOD  server.js: Vastgoed-routes verlengen de sessie niet"; g=1; }
 grep -qF "p === '/app/vastgoed/woz-lees') ? APP_OSINT_BESTAND_MAX_BODY" server.js || { echo "ROOD  server.js: woz-lees heeft niet de bestandsgrens (10 MB)"; g=1; }
 grep -qE "^\s+vastgoed: typeof vastgoedInfo === 'function'" server.js || { echo "ROOD  server.js: /health.vastgoed ontbreekt"; g=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* vastgoed\.js" uitrol.sh || { echo "ROOD  uitrol.sh: vastgoed.js niet in RELEASE_OPTIONEEL"; g=1; }
@@ -49,6 +49,8 @@ VASTGOED_JS="$VJS" node --test test/vastgoed.test.js 2>&1 | grep -E "^# (pass|fa
 # wv3923 (C49): Financiën en Vastgoed lezen woningwaarde en restschuld met één lezer (woning-bron.js)
 node --test test/woning-bron.test.js >/dev/null 2>&1 && echo "GROEN test/woning-bron.test.js (C49: één woningwaarde en restschuld)" || { echo "ROOD  test/woning-bron.test.js"; f=1; }
 VASTGOED_JS="$VJS" node --test test/vastgoed-kern.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-kern.test.js (2C54: restschuld, overwaarde, rentevast, gebruik box)" || { echo "ROOD  test/vastgoed-kern.test.js"; f=1; }
+# wv4229 (L41): het WOZ-moment (dagtekening, vergelijking, termijn in het deadline-register, concept-bezwaar uit vaste velden)
+VASTGOED_JS="$VJS" node --test test/vastgoed-woz-moment.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-woz-moment.test.js (L41: WOZ-moment)" || { echo "ROOD  test/vastgoed-woz-moment.test.js"; f=1; }
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 python3 -I test/vastgoed-laag.py "$OPY" "$T" | tail -1; python3 -I test/vastgoed-laag.py "$OPY" "$T" >/dev/null 2>&1 || { echo "ROOD  test/vastgoed-laag.py"; f=1; }
 

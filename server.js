@@ -6427,7 +6427,7 @@ APP_GLIJD_ROUTES.add('POST /app/zoek-snel/uitzoeken');   // wv3821: de tik op "Z
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze', 'past'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv3755: past   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag', 'medisch', 'mededeling', 'vanzelf'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
 ['controleer', 'inlees', 'intrek', 'code', 'koppel', 'rol', 'rooster', 'persoon'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt (wv3047: koppel, rol, rooster, persoon)   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
-['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt; wv3102: + WOZ-beschikking
+['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar', 'woz-bezwaar'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt; wv3102: + WOZ-beschikking
 APP_GLIJD_ROUTES.add('POST /app/nza/stuk');
 APP_GLIJD_ROUTES.add('POST /app/nza/draad');   // wv3156: een vraagdraad lezen in de tab Vragen   // wv3099: een stuk lezen in het NZa-scherm = David die werkt
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
@@ -17614,7 +17614,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
         if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag|medisch|mededeling|vanzelf)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
         if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
-        if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking
+        if (route === 'GET /app/vastgoed' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking; wv4229: + concept-bezwaar
         if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk' || route === 'GET /app/nza/punten') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen); wv3676: tab Punten
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
         if (route === 'GET /app/beleggen/strateeg' || route === 'GET /app/beleggen/strateeg/backtest' || route === 'POST /app/beleggen/strateeg/stand' || route === 'POST /app/beleggen/strateeg/idee') return typeof appStrateeg === 'function' ? appStrateeg(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'strateeg');   // wv3993: Strateeg (fictief)
@@ -30343,6 +30343,15 @@ function pmaInfo() {
 //                                                      ("Prive - <jaar> - WOZ-beschikking <jaar> <object>.<ext>", nooit overschrijven), dan
 //                                                      woz_eigen in vastgoed.sqlite en het dossier opnieuw lezen. Een proefserver schrijft nooit
 //                                                      in de echte vault. WOZ automatisch opvragen is niet gebouwd (voorwaarden niet vastgesteld).
+// wv4229 (besluitenpagina nr 941 = L41, David Ja 25-11-2026 22:27): het WOZ-moment in februari. Gemeten 27-11: de beschikking komt NIET per mail
+// (MijnOverheid/het belastingloket; 2025 en 2026 geen seintje in Gmail), dus geen mailherkenning maar:
+//   - woz-lees geeft ook dagtekening, maten en vergelijk (nieuwe WOZ naast vorig jaar, buurtgemiddelde, indicatie, maten naast BAG,
+//     bezwaar_tot = dagtekening + 42 dagen); het controlescherm in de app is de "kaart" met Klopt, bewaren;
+//   - woz-bewaar zet in 00_Systeem/Deadlines.md (onder ## Actueel, idempotent op een sleutel in de kolom Bron) de bezwaartermijn en, bij de
+//     woning, het seintje voor volgend jaar (31-3, signaleer 35): die komen als [jij]-regel in het actielijstje / Voor jou;
+//   POST /app/vastgoed/woz-bezwaar {id, jaar, opnieuw?}  Gmail-CONCEPT via het mailluik (bandjesMailConcept; nooit versturen). De tekst is
+//     vast (vastgoed.js wozBezwaarTekst) uit de bevestigde rij in woz_eigen: geen taalmodel, geen vrije getallen (review Codex MOET 1).
+//     Het adres van het WOZ-loket komt uit het dossier in de vault. Tweede keer = 409 tenzij opnieuw.
 // Audit/log: alleen route + reden; nooit een adres, nummer of bedrag.
 const VASTGOED_DIR = serverPad('vastgoed', process.env.VASTGOED_DIR, '/opt/data/vastgoed', serverProefDeel('vastgoed'));
 const VASTGOED_BANK = serverPad('vastgoed_bank', process.env.BANK_DIR ? path.join(process.env.BANK_DIR, 'transacties.sqlite') : '', '/opt/data/bank/transacties.sqlite', serverProefDeel('bank/transacties.sqlite'));   // wv3102: alleen lezen
@@ -30398,9 +30407,11 @@ async function appVastgoedWoz(res, a, route, d) {
     const voorstel = vastgoedApp.wozHerken(tekst);
     const token = crypto.randomBytes(16).toString('hex');
     while (VASTGOED_WOZ.size >= 4) VASTGOED_WOZ.delete(VASTGOED_WOZ.keys().next().value);
-    VASTGOED_WOZ.set(token, { buf: buf, soort: soort, id: id, apparaat: a && a.id, tot: Date.now() + VASTGOED_WOZ_MS });
+    VASTGOED_WOZ.set(token, { buf: buf, soort: soort, id: id, apparaat: a && a.id, tot: Date.now() + VASTGOED_WOZ_MS, maten: voorstel && voorstel.maten || {} });
+    let vergelijk = null;   // wv4229: alleen als jaar en waarde gelezen zijn; anders rekent de app na het invullen niets (bewaren geeft hem wel)
+    if (voorstel && voorstel.jaar && voorstel.waarde) { try { vergelijk = vastgoedApp.wozVergelijk(Object.assign({ id: id }, voorstel)); } catch (e) { vergelijk = null; } }
     res._app.reden = 'vastgoed woz gelezen' + (tekst ? '' : ' zonder tekst');
-    return appStuur(res, 200, { ok: true, token: token, soort: soort, tekst: !!tekst.trim(), voorstel: voorstel });
+    return appStuur(res, 200, { ok: true, token: token, soort: soort, tekst: !!tekst.trim(), voorstel: voorstel, vergelijk: vergelijk });
   }
   // woz-bewaar: alleen met het token van dit apparaat en voor hetzelfde object
   const k = VASTGOED_WOZ.get(String(d.token || ''));
@@ -30418,14 +30429,49 @@ async function appVastgoedWoz(res, a, route, d) {
   } catch (e) { logError('vastgoed-woz', new Error('stuk bewaren faalde')); return appWeiger(res, 503, 'het stuk kon niet in het dossier; probeer het zo opnieuw', 'vastgoed woz schrijven'); }
   if (!rel) return appWeiger(res, 409, 'er staan al te veel stukken met deze naam', 'vastgoed woz naam');
   VASTGOED_WOZ.delete(String(d.token));
-  try { vastgoedApp.wozVastleggen(d, { pad: rel, sha: crypto.createHash('sha256').update(k.buf).digest('hex') }); }
+  let vl;
+  try { vl = vastgoedApp.wozVastleggen(d, { pad: rel, sha: crypto.createHash('sha256').update(k.buf).digest('hex'), maten: k.maten }); }
   catch (e) { logError('vastgoed-woz', new Error('vastleggen faalde')); return appWeiger(res, 503, 'het stuk staat in het dossier, maar de waarde kon niet worden bewaard; voeg het opnieuw toe', 'vastgoed woz vastleggen'); }
-  res._app.reden = 'vastgoed woz bewaard';
-  return appStuur(res, 200, { ok: true, pad: rel });
+  const deadline = vastgoedWozDeadline(vl && vl.vergelijk);
+  res._app.reden = 'vastgoed woz bewaard' + (deadline.ok ? '' : ' (register: ' + deadline.reden + ')');
+  return appStuur(res, 200, { ok: true, pad: rel, vergelijk: (vl && vl.vergelijk) || null, deadline: deadline });
+}
+// wv4229: de bezwaartermijn en het seintje voor volgend jaar in het deadline-register. Faalt dit, dan blijft het bewaren gelukt.
+function vastgoedWozDeadline(v) {
+  if (!v) return { ok: false, reden: 'geen vergelijking' };
+  try {
+    const V = require(path.join(__dirname, 'vastgoed.js'));
+    const regels = V.wozDeadlineRegels(v, appYmd(Date.now()));
+    if (!regels.length) return { ok: true, regels: 0 };
+    let tabel = true;
+    const gezet = VV().wijzig(dlRegister(), function (t) { const n = V.deadlineErbij(t, regels); if (n === null && regels.some(function (r) { return String(t).indexOf('(' + r.sleutel + ')') < 0; })) tabel = false; return n; }, { grendel: 5 });
+    if (!tabel) return { ok: false, reden: 'tabel Actueel niet gevonden' };
+    // bezwaar_tot alleen als de termijnregel erbij hoorde (termijn nog niet voorbij); de app zegt dan "staat in je deadlines"
+    return { ok: true, regels: gezet ? regels.length : 0, bezwaar_tot: regels.some(function (r) { return r.sleutel.indexOf('vastgoed-woz-bezwaar-') === 0; }) ? v.bezwaar_tot : null };
+  } catch (e) { logError('vastgoed-woz-deadline', new Error('register niet bijgewerkt')); return { ok: false, reden: 'register niet bij te werken' }; }
+}
+// wv4229: concept-bezwaar als Gmail-concept (David verstuurt zelf; nooit versturen)
+async function appVastgoedWozBezwaar(res, d) {
+  if (!appTeller('vastgoed-woz-bezwaar', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed-woz-bezwaar');
+  if (!SERVER_ECHT) return appWeiger(res, 409, 'proefserver: geen concept in Gmail', 'vastgoed bezwaar proef');
+  let c;
+  try { c = vastgoedApp.wozBezwaar(d || {}); } catch (e) { return appWeiger(res, e && e.status || 400, e && e.status ? e.message : 'ongeldig', 'vastgoed bezwaar ' + (e && e.status || 400)); }
+  const r = await bandjesMailConcept(c);
+  if (!r.ok) {
+    res._app.reden = 'vastgoed bezwaar mislukt';
+    return appStuur(res, r.zeker ? 502 : 504, { ok: false, onzeker: !r.zeker, fout: r.zeker ? 'Het concept kon niet in Gmail: ' + r.reden + '.' : 'Geen bevestiging van het mailluik. Kijk in Gmail bij Concepten of het er toch staat voor je het opnieuw probeert.' });
+  }
+  vastgoedApp.wozConceptGezet(Number(d.id), Number(d.jaar));
+  res._app.reden = 'vastgoed bezwaar concept';
+  return appStuur(res, 200, { ok: true, concept: true });
 }
 async function appVastgoed(req, res, a, route, d) {
   if (!vastgoedApp) return appWeiger(res, 404, 'Vastgoed zit niet in deze versie van de pod', 'vastgoed ontbreekt');
   if (!appTeller('vastgoed', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed');
+  if (route === 'POST /app/vastgoed/woz-bezwaar') {
+    try { return await appVastgoedWozBezwaar(res, d); }
+    catch (e) { logError('vastgoed-woz-bezwaar', new Error('route faalde')); return appWeiger(res, 503, 'het concept lukte nu niet; probeer het zo opnieuw', 'vastgoed bezwaar fout'); }
+  }
   if (route === 'POST /app/vastgoed/woz-lees' || route === 'POST /app/vastgoed/woz-bewaar') {
     try { return await appVastgoedWoz(res, a, route, d); }
     catch (e) { logError('vastgoed-woz', new Error('route faalde')); return appWeiger(res, 503, 'Vastgoed is nu niet te lezen; probeer het zo opnieuw', 'vastgoed woz fout'); }

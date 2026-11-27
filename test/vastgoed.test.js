@@ -375,14 +375,14 @@ test('fase 2: een onleesbare bank laat de vorige servicekosten staan; bank en Ti
 
 test('fase 2 WOZ: tekst geeft alleen een voorstel; pas na bevestiging telt de WOZ (dossierstand), nooit zonder controle', async () => {
   const tekst = 'Gemeente Proef  Beschikking WOZ  Belastingjaar 2026\nWaardepeildatum: 1 januari 2025\nVastgestelde waarde   € 432.000\nAanslag ozb € 321,00';
-  assert.deepStrictEqual(V.wozUitTekst(tekst, new Date('2026-11-14T12:00:00Z')), { jaar: 2026, waarde: 432000, peildatum: '2025-01-01' });
-  assert.deepStrictEqual(V.wozUitTekst('WOZ-waarde: € 98.000 waardepeildatum 01-01-2024', new Date('2026-11-14T12:00:00Z')), { jaar: 2025, waarde: 98000, peildatum: '2024-01-01' });
-  assert.deepStrictEqual(V.wozUitTekst('', new Date()), { jaar: null, waarde: null, peildatum: null });
+  assert.deepStrictEqual(V.wozUitTekst(tekst, new Date('2026-11-14T12:00:00Z')), { jaar: 2026, waarde: 432000, peildatum: '2025-01-01', dagtekening: null, maten: {} });   // wv4229: + dagtekening, maten
+  assert.deepStrictEqual(V.wozUitTekst('WOZ-waarde: € 98.000 waardepeildatum 01-01-2024', new Date('2026-11-14T12:00:00Z')), { jaar: 2025, waarde: 98000, peildatum: '2024-01-01', dagtekening: null, maten: {} });
+  assert.deepStrictEqual(V.wozUitTekst('', new Date()), { jaar: null, waarde: null, peildatum: null, dagtekening: null, maten: {} });
   const o = omgeving2();
   try {
     const [, , b12] = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten;
     assert.ok(b12.stand.ontbreekt.some((x) => /^WOZ-beschikking 2026/.test(x)));
-    assert.deepStrictEqual(o.m.wozHerken(tekst), { jaar: 2026, waarde: 432000, peildatum: '2025-01-01' });   // herkennen bewaart niets
+    assert.deepStrictEqual(o.m.wozHerken(tekst), { jaar: 2026, waarde: 432000, peildatum: '2025-01-01', dagtekening: null, maten: {} });   // herkennen bewaart niets
     let r = (await o.m.app({ pad: '/app/vastgoed', methode: 'GET' })).body.objecten[2];
     assert.ok(r.stand.ontbreekt.some((x) => /^WOZ-beschikking 2026/.test(x)));
     for (const fout of [{ id: b12.id, jaar: 1999, waarde: 50000 }, { id: b12.id, jaar: 2026, waarde: 12.5 }, { id: b12.id, jaar: 2026, waarde: 50000, peildatum: '2027-01-01' }, { id: 99, jaar: 2026, waarde: 50000 }]) {

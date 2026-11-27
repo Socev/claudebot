@@ -29,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const WB = require('./woning-bron.js');   // wv3923: gedeelde lezer voor taxaties en de bankstand van de hypotheek (ook Financiën)
 
-const SCHEMA_VERSIE = 3;   // 2 = fase 2 (wv3102): leningdeel, woz_eigen; reeksen lening/restschuld/verbouwing/servicekosten/stroom; 3 = object.weg_op (A15)
+const SCHEMA_VERSIE = 4;   // 2 = fase 2 (wv3102): leningdeel, woz_eigen; reeksen lening/restschuld/verbouwing/servicekosten/stroom; 3 = object.weg_op (A15); 4 = woz_eigen.dagtekening/maten/concept_op (wv4229)
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (sleutel TEXT PRIMARY KEY, waarde TEXT);
 CREATE TABLE IF NOT EXISTS object (id INTEGER PRIMARY KEY AUTOINCREMENT, sleutel TEXT NOT NULL UNIQUE, soort TEXT NOT NULL CHECK (soort IN ('woning','garagebox')),
@@ -448,7 +448,95 @@ function wozUitTekst(t, nu) {
   if (jaar && !peildatum) peildatum = `${jaar - 1}-01-01`;
   m = s.match(/(?:vastgestelde (?:WOZ-)?waarde|WOZ-waarde|waarde van (?:uw|de|het) (?:woning|object|onroerende zaak))[^€]{0,60}€\s*(\d{1,3}(?:\.\d{3})+)(?![\d,]\d)/i);
   if (m) { const n = Number(m[1].replace(/\./g, '')); if (n >= 1000 && n <= 100000000) waarde = n; }
-  return { jaar, waarde, peildatum };
+  // wv4229 (L41): de dagtekening (daar begint de bezwaartermijn) en de maten waarmee de gemeente rekent, als ze in het stuk staan
+  let dagtekening = null;
+  m = s.match(/dagtekening\D{0,20}?(\d{1,2}[- ](?:\d{1,2}|januari|februari|maart|april|mei|juni|juli|augustus|september|oktober|november|december)[- ]\d{4})/i);
+  if (m) { const d = datumUit(/^\d{1,2} \d{1,2} \d{4}$/.test(m[1]) ? m[1].replace(/ /g, '-') : m[1]); if (d && Number(d.slice(0, 4)) >= 2000 && Number(d.slice(0, 4)) <= ditJaar + 1) dagtekening = d; }
+  const maten = {};
+  m = s.match(/(?:gebruiksoppervlakte|woonoppervlakte|oppervlakte (?:woning|wonen)|woning)\D{0,40}?(\d{1,4})\s*m(?:²|2)(?![\w²])/i);
+  if (m && Number(m[1]) >= 5) maten.wonen_m2 = Number(m[1]);
+  m = s.match(/(?:perceel(?:oppervlakte)?|kavel(?:oppervlakte)?|grond(?:oppervlakte)?)\D{0,40}?(\d{1,5})\s*m(?:²|2)(?![\w²])/i);
+  if (m && Number(m[1]) >= 1) maten.grond_m2 = Number(m[1]);
+  return { jaar, waarde, peildatum, dagtekening, maten };
+}
+// wv4229 (L41): bezwaar tegen een WOZ-beschikking kan zes weken; de termijn begint de dag na de dagtekening (AWR art. 22j, Awb 6:7/6:8).
+// We rekenen dagtekening + 42 dagen, zonder verlenging voor een weekend of feestdag (Algemene termijnenwet): liever een dag te vroeg dan te laat.
+function bezwaarTot(dagtekening) {
+  if (!isoGoed(String(dagtekening || ''))) return null;
+  const t = new Date(dagtekening + 'T12:00:00Z'); t.setUTCDate(t.getUTCDate() + 42);
+  return t.toISOString().slice(0, 10);
+}
+// wv4229 (L41): regels voor het deadline-register (00_Systeem/Deadlines.md). Geen bedragen in de regel; de sleutel in de kolom Bron maakt het
+// idempotent (staat hij ergens in het register, ook onder Afgehandeld, dan niet nog eens). Gedaan/Later doet David via het actielijstje of Voor jou.
+const NL_DAG = (d) => `${Number(d.slice(8, 10))}-${Number(d.slice(5, 7))}-${d.slice(0, 4)}`;
+function wozDeadlineRegels(v, vandaag) {
+  const uit = [];
+  const cel = (t) => String(t).replace(/\|/g, '/').replace(/\s+/g, ' ').trim();
+  if (v.bezwaar_tot && v.bezwaar_tot >= vandaag) {
+    const sl = `vastgoed-woz-bezwaar-${v.jaar}-${v.id}`;
+    uit.push({ sleutel: sl, regel: `| ${v.bezwaar_tot} | Privé (David) | **WOZ ${v.jaar} ${cel(v.naam)}: bezwaar kan tot en met ${NL_DAG(v.bezwaar_tot)}** (zes weken na de dagtekening ${NL_DAG(v.dagtekening)}; de vergelijking met vorig jaar en de buurt staat in Apps › Vastgoed › Waarde). | [jij] alleen als je bezwaar wilt maken: in Vastgoed "Concept-bezwaar", lezen, dan zelf indienen ⏱ ± 30 min | 14 | Vastgoed (${sl}) |` });
+  }
+  if (v.soort === 'woning') {
+    const j = v.jaar + 1, sl = `vastgoed-woz-seintje-${j}`;
+    uit.push({ sleutel: sl, regel: wozSeintjeRegel(j) });
+  }
+  return uit;
+}
+function wozSeintjeRegel(j) {
+  return `| ${j}-03-31 | Privé (David) | **WOZ-beschikkingen ${j} (woning en beide garageboxen) staan vanaf eind februari klaar bij de gemeente (MijnOverheid of het belastingloket); ze komen niet per mail.** Zet ze in Apps › Vastgoed › Waarde › "WOZ-beschikking toevoegen": dan zie je ze naast vorig jaar en de buurt, en tot wanneer bezwaar kan (zes weken na de dagtekening). | [jij] beschikkingen downloaden en in Vastgoed zetten ⏱ ± 30 min | 35 | Vastgoed (vastgoed-woz-seintje-${j}) |`;
+}
+// Het concept-bezwaar (vaste tekst, Davids formele toon zoals in zijn bezwaar van 2023: kort, zakelijk, met verzoek om de onderbouwing).
+// Alleen gecontroleerde velden; waar een gegeven ontbreekt staat een open plek tussen [ ] die David zelf invult.
+function wozBezwaarTekst(v, o) {
+  const eur = (n) => '€ ' + Math.round(n).toLocaleString('nl-NL');
+  const r = ['Geachte heer, mevrouw,', ''];
+  r.push(`Hierbij maak ik bezwaar tegen de WOZ-beschikking ${v.jaar}${v.dagtekening ? ' met dagtekening ' + NL_DAG(v.dagtekening) : ''} voor ${o.adres || o.naam}${o.woz_nr ? ' (WOZ-objectnummer ' + o.woz_nr + ')' : ''}. `
+    + `U hebt de waarde vastgesteld op ${eur(v.waarde)}, naar de waardepeildatum ${NL_DAG(v.peildatum)}.`);
+  r.push('', 'Mijn bezwaar:');
+  if (v.vorig) r.push(`- Vorig jaar was de waarde ${eur(v.vorig.waarde)}. Dat is ${v.verschil >= 0 ? 'een stijging' : 'een daling'} van ${eur(Math.abs(v.verschil))} (${String(Math.abs(v.pct)).replace('.', ',')}%).`);
+  if (v.buurt) r.push(`- ${v.buurt.veld}: ${v.buurt.waarde} (CBS).`);
+  if (v.maten && v.maten.wonen_m2 && v.maten.bag) r.push(`- U rekent met ${v.maten.wonen_m2} m² woonoppervlakte; de Basisregistratie Adressen en Gebouwen noemt ${v.maten.bag}.`);
+  r.push('- [vul aan: waarom de waarde te hoog is, bijvoorbeeld de staat van de woning of verkopen in de buurt die lager liggen]');
+  r.push('', 'Ik verzoek u de waarde te verlagen. Graag ontvang ik het taxatieverslag met de vergelijkingsobjecten (de waardematrix) die u hebt gebruikt, en wil ik in de gelegenheid worden gesteld mijn bezwaar mondeling toe te lichten.');
+  r.push('', 'Met vriendelijke groet,', '', 'David Schaap');
+  return r.join('\n');
+}
+// Zet de regels onderaan de tabel onder "## Actueel". Geeft de nieuwe tekst, of null als er niets bij hoeft of de tabel niet te vinden is.
+function deadlineErbij(tekst, regels) {
+  const t = String(tekst || '');
+  const nieuw = regels.filter((r) => !t.includes(`(${r.sleutel})`));
+  if (!nieuw.length) return null;
+  const rg = t.split('\n');
+  const a = rg.findIndex((r) => /^## Actueel\s*$/.test(r));
+  if (a < 0) return null;
+  let i = a + 1;
+  while (i < rg.length && !rg[i].startsWith('| Datum |')) { if (/^## /.test(rg[i])) return null; i++; }
+  if (i >= rg.length) return null;
+  let eind = i + 1;
+  while (eind < rg.length && rg[eind].startsWith('|')) eind++;
+  rg.splice(eind, 0, ...nieuw.map((r) => r.regel));
+  return rg.join('\n');
+}
+// Nieuwe WOZ naast die van vorig jaar, het buurtgemiddelde (CBS-feit), de indicatie en de maten (stuk naast BAG). Puur op een object uit overzicht().
+// vorig = de WOZ met de waardepeildatum een jaar vóór die van de nieuwe (belastingjaar − 2), ongeacht hoe de toelichting hem noemt.
+function wozVergelijkObject(o, x) {
+  const jaar = Number(x.jaar), waarde = Number(x.waarde);
+  const pd = isoGoed(String(x.peildatum || '')) ? x.peildatum : `${jaar - 1}-01-01`;
+  const vpd = `${Number(pd.slice(0, 4)) - 1}${pd.slice(4)}`;
+  const woz = (o.reeksen || []).filter((r) => r.reeks === 'woz');
+  const v = woz.find((r) => r.peildatum === vpd) || null;
+  const vorig = v ? { jaar: Number(vpd.slice(0, 4)) + 1, waarde: v.waarde, peildatum: v.peildatum } : null;
+  const verschil = vorig && Number.isFinite(waarde) ? Math.round(waarde - vorig.waarde) : null;
+  const pct = vorig && vorig.waarde > 0 && Number.isFinite(waarde) ? Math.round(((waarde - vorig.waarde) / vorig.waarde) * 1000) / 10 : null;
+  const bf = (o.feiten || []).find((f) => /^Gemiddelde WOZ-waarde/.test(f.veld)) || null;
+  const buurt = bf ? { veld: bf.veld.replace('Gemiddelde WOZ-waarde', 'Gemiddelde WOZ in de buurt'), waarde: bf.waarde } : null;
+  const bag = (o.feiten || []).find((f) => f.veld === 'Gebruiksoppervlakte (BAG)') || null;
+  const mt = x.maten && typeof x.maten === 'object' ? x.maten : {};
+  const maten = { wonen_m2: Number.isInteger(mt.wonen_m2) ? mt.wonen_m2 : null, grond_m2: Number.isInteger(mt.grond_m2) ? mt.grond_m2 : null, bag: bag ? bag.waarde : null };
+  const dag = isoGoed(String(x.dagtekening || '')) ? x.dagtekening : null;
+  return { id: o.id, naam: o.naam, soort: o.soort, jaar, waarde, peildatum: pd, vorig, verschil, pct, buurt,
+    indicatie: o.indicatie ? { waarde: o.indicatie.waarde, peildatum: o.indicatie.peildatum || null } : null, maten,
+    dagtekening: dag, bezwaar_tot: bezwaarTot(dag) };
 }
 
 function soortStuk(naam) {
@@ -655,6 +743,7 @@ function maak(o) {
       db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE;');
       db.exec(SCHEMA);
       if (!db.prepare("SELECT 1 FROM pragma_table_info('object') WHERE name = 'weg_op'").get()) db.exec('ALTER TABLE object ADD COLUMN weg_op TEXT');   // A15
+      for (const k of ['dagtekening', 'maten', 'concept_op']) if (!db.prepare("SELECT 1 FROM pragma_table_info('woz_eigen') WHERE name = ?").get(k)) db.exec(`ALTER TABLE woz_eigen ADD COLUMN ${k} TEXT`);   // wv4229
       db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?) ON CONFLICT(sleutel) DO UPDATE SET waarde = excluded.waarde").run(String(SCHEMA_VERSIE));
     }
     return db;
@@ -884,7 +973,7 @@ function maak(o) {
         const beelden = db.prepare('SELECT volgorde, soort, titel, jaar, bron, opgehaald FROM beeld WHERE object = ? ORDER BY volgorde').all(obj.id);
         const stand = dossierstand(obj, feiten, reeksen, stukken, nu());
         if (obj.weg_op) stand.ontbreekt.unshift(`Niet meer in het dossier sinds ${nlDag(obj.weg_op.slice(0, 10))}: de pagina is weg of hernoemd; wat hier staat blijft bewaard tot iemand het opruimt`);
-        return { id: obj.id, sleutel: obj.sleutel, soort: obj.soort, naam: obj.naam, adres: obj.adres, dossier: obj.dossier, vbo: JSON.parse(obj.vbo || '[]'),
+        return { id: obj.id, sleutel: obj.sleutel, soort: obj.soort, naam: obj.naam, adres: obj.adres, dossier: obj.dossier, woz_nr: obj.woz_nr || null, vbo: JSON.parse(obj.vbo || '[]'),
           percelen: JSON.parse(obj.percelen || '[]'), punt: obj.punt ? JSON.parse(obj.punt) : null, bag_gemeten: obj.bag_gemeten ? JSON.parse(obj.bag_gemeten) : null,
           dossier_op: obj.dossier_op, weg_op: obj.weg_op || null, extern_op: obj.extern_op, bron_stand: (() => { try { return JSON.parse(obj.bron_stand || '{}'); } catch (e) { return {}; } })(), feiten, reeksen, stukken, gebeurtenissen, beelden, stand,
           indicatie: obj.soort === 'woning' ? indicatie(reeksen, index) : null, leningdelen,
@@ -922,21 +1011,70 @@ function maak(o) {
     if (!Number.isInteger(waarde) || waarde < 1000 || waarde > 100000000) throw new Fout(400, 'de WOZ-waarde klopt niet (hele euro’s)');
     const peildatum = b.peildatum ? String(b.peildatum) : `${jaar - 1}-01-01`;
     if (!isoGoed(peildatum) || Number(peildatum.slice(0, 4)) > jaar || Number(peildatum.slice(0, 4)) < jaar - 2) throw new Fout(400, 'de waardepeildatum klopt niet');
+    // wv4229: dagtekening mag leeg; anders niet vóór 1-1 van het jaar vóór het belastingjaar en niet meer dan een week in de toekomst
+    let dagtekening = null;
+    if (b.dagtekening) {
+      dagtekening = String(b.dagtekening);
+      const morgen = new Date(nu().getTime() + 7 * 86400000).toISOString().slice(0, 10);
+      if (!isoGoed(dagtekening) || dagtekening < `${jaar - 1}-01-01` || dagtekening > morgen) throw new Fout(400, 'de dagtekening klopt niet');
+    }
     const obj = metDb((db) => db && db.prepare('SELECT id, naam, soort FROM object WHERE id = ?').get(id), false);
     if (!obj) throw new Fout(404, 'onbekend object');
-    return { id, naam: obj.naam, soort: obj.soort, jaar, waarde, peildatum, stam: `WOZ-beschikking ${jaar} ${obj.naam}` };
+    return { id, naam: obj.naam, soort: obj.soort, jaar, waarde, peildatum, dagtekening, stam: `WOZ-beschikking ${jaar} ${obj.naam}` };
+  }
+  // wv4229 (L41): de vergelijking voor het controlescherm en na bewaren (leest het overzicht; niets naar buiten)
+  function wozVergelijk(x) {
+    const ov = overzicht();
+    const o = (ov.objecten || []).find((y) => y.id === Number(x && x.id));
+    if (!o) throw new Fout(404, 'onbekend object');
+    return wozVergelijkObject(o, x);
   }
   function wozVastleggen(c, stuk) {
     const x = wozControle(c);
     const pad = stuk && typeof stuk.pad === 'string' && stuk.pad.startsWith(BRONNEN + '/') && !stuk.pad.includes('..') ? stuk.pad : null;
     const sha = stuk && /^[a-f0-9]{64}$/.test(String(stuk.sha || '')) ? stuk.sha : null;
+    // wv4229: de maten komen uit het stuk zelf (server.js geeft ze mee uit de eigen lezing, niet uit de app)
+    const mt = stuk && stuk.maten && typeof stuk.maten === 'object' ? stuk.maten : {};
+    const maten = {}; for (const k of ['wonen_m2', 'grond_m2']) if (Number.isInteger(mt[k]) && mt[k] > 0 && mt[k] < 100000) maten[k] = mt[k];
     metDb((db) => {
-      db.prepare(`INSERT INTO woz_eigen (object, jaar, peildatum, waarde, pad, sha, bevestigd) VALUES (?,?,?,?,?,?,?)
-        ON CONFLICT(object, jaar) DO UPDATE SET peildatum = excluded.peildatum, waarde = excluded.waarde, pad = excluded.pad, sha = excluded.sha, bevestigd = excluded.bevestigd`)
-        .run(x.id, x.jaar, x.peildatum, x.waarde, pad, sha, nuIso());
+      db.prepare(`INSERT INTO woz_eigen (object, jaar, peildatum, waarde, pad, sha, bevestigd, dagtekening, maten, concept_op) VALUES (?,?,?,?,?,?,?,?,?,NULL)
+        ON CONFLICT(object, jaar) DO UPDATE SET peildatum = excluded.peildatum, waarde = excluded.waarde, pad = excluded.pad, sha = excluded.sha, bevestigd = excluded.bevestigd,
+          dagtekening = excluded.dagtekening, maten = excluded.maten, concept_op = NULL`)
+        .run(x.id, x.jaar, x.peildatum, x.waarde, pad, sha, nuIso(), x.dagtekening, JSON.stringify(maten));
     }, true);
     leesDossier();
-    return { id: x.id, jaar: x.jaar };
+    return { id: x.id, jaar: x.jaar, vergelijk: wozVergelijk(Object.assign({}, x, { maten })) };
+  }
+  // wv4229 (L41): concept-bezwaar. Alleen voor een WOZ die David bevestigde (woz_eigen); elk getal en elke datum komt uit die rij, de reeks
+  // van vorig jaar of een feit (review Codex MOET 1: geen taalmodel, geen vrije getallen). Geeft { aan, onderwerp, bericht } of een Fout.
+  function wozBezwaar(b) {
+    const id = Number(b && b.id), jaar = Number(b && b.jaar);
+    if (!Number.isInteger(id) || id < 1 || !Number.isInteger(jaar)) throw new Fout(400, 'id en jaar ontbreken');
+    const r = metDb((db) => db && db.prepare('SELECT * FROM woz_eigen WHERE object = ? AND jaar = ?').get(id, jaar), true);
+    if (!r) throw new Fout(404, 'bewaar eerst de beschikking van dit jaar');
+    if (r.concept_op && !(b && b.opnieuw === true)) throw new Fout(409, 'het concept staat al in Gmail (bij Concepten)');
+    let maten = {}; try { maten = JSON.parse(r.maten || '{}') || {}; } catch (e) { maten = {}; }
+    const v = wozVergelijk({ id, jaar, waarde: r.waarde, peildatum: r.peildatum, dagtekening: r.dagtekening, maten });
+    const ov = overzicht();
+    const o = ov.objecten.find((y) => y.id === id);
+    const aan = wozLoketAdres(o, ov.objecten);
+    if (!aan) throw new Fout(422, 'in het dossier staat geen mailadres van het WOZ-loket; zoek het op de beschikking');
+    return { aan, onderwerp: `Bezwaar WOZ-beschikking ${jaar}${o.woz_nr ? ' (WOZ-objectnummer ' + o.woz_nr + ')' : ''}`.slice(0, 150), bericht: wozBezwaarTekst(v, o) };
+  }
+  function wozConceptGezet(id, jaar) {
+    metDb((db) => { db.prepare('UPDATE woz_eigen SET concept_op = ? WHERE object = ? AND jaar = ?').run(nuIso(), Number(id), Number(jaar)); }, true);
+  }
+  // het mailadres van het WOZ-loket uit het dossier: een regel met "WOZ" en een mailadres (eerst een adres dat met woz begint), eerst op de
+  // pagina van het object, anders op die van de woning. Niets in code: het adres staat in de vault.
+  function wozLoketAdres(o, alle) {
+    const zoek = (x) => {
+      if (!x || !x.dossier) return null;
+      let t = ''; try { t = fs.readFileSync(path.join(vault, x.dossier), 'utf8'); } catch (e) { return null; }
+      const adr = [];
+      for (const rg of t.split('\n')) if (/WOZ/.test(rg)) for (const m of rg.matchAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[a-z]{2,}/g)) adr.push(m[0].toLowerCase());
+      return adr.find((a) => a.startsWith('woz')) || adr[0] || null;
+    };
+    return zoek(o) || zoek((alle || []).find((y) => y.soort === 'woning'));
   }
 
   async function app(v) {
@@ -975,8 +1113,8 @@ function maak(o) {
         geld: { hypotheek: ok(geld.hypotheek), bank: ok(geld.bank), tibber: ok(geld.tibber) } };
     }, false);
   }
-  return { app, info, leesDossier, ververs, overzicht, wozHerken, wozControle, wozVastleggen };
+  return { app, info, leesDossier, ververs, overzicht, wozHerken, wozControle, wozVastleggen, wozVergelijk, wozBezwaar, wozConceptGezet };
 }
 
 module.exports = { maak, geldKern, leesWoning, leesBox, leesDossierMap, dossierstand, indicatie, soortStuk, euroUit, datumUit, bagSoort, SCHEMA_VERSIE,
-  leesHypotheek, hypotheekReeksen, laatsteStand, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout };
+  leesHypotheek, hypotheekReeksen, laatsteStand, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst };
