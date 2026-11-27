@@ -23664,6 +23664,90 @@ function imagineInfo() {
   if (!imagineApp) return { aan: false };
   try { return imagineApp.info(); } catch (e) { return { aan: true, fout: true }; }
 }
+// ── wv4109 (besluitenpagina nr 918 = L18): levende herinneringen 's nachts (werking in imagine.js bij LEVENDE HERINNERINGEN) ──
+// Kandidaten: foto's (geen video's, niet in de prullenbak) uit de Immich-albums van actieve MemoryLane-herinneringen met een niet-gevoelige
+// categorie (geen opname, geen samengevoegde, geen gevoelig-vink), alleen tijdvakken vóór NACHT.voor_jaar (gemeten 27-11: 582 stuks, scans).
+// Alleen lezen in Immich. Schakelaar /opt/data/imagine/nacht.json { "aan": true|false, "aantal": 1..3 } (ontbreekt = aan, 3).
+function imagineNachtSchakelaar() {
+  let j = null;
+  try { j = JSON.parse(fs.readFileSync(path.join(IMAGINE_DIR, 'nacht.json'), 'utf8')); } catch (e) { j = null; }
+  const aantal = j && Number.isInteger(j.aantal) ? Math.max(0, Math.min(3, j.aantal)) : 3;
+  return { aan: !(j && j.aan === false), aantal: aantal };
+}
+async function imagineNachtKandidaten(voorJaar) {
+  if (!immichMl || !intake || !HERINNERINGEN_MOD) return [];
+  const cat = HERINNERINGEN_MOD.CATEGORIEEN || {};
+  const albums = intake._db.prepare("SELECT a.album_id, h.categorie FROM ml_album a JOIN ml_herinnering h ON h.hid = a.hid WHERE a.album_id IS NOT NULL AND h.status = 'actief' AND h.soort != 'opname' AND COALESCE(h.gevoelig, 0) = 0").all()
+    .filter(function (a) { return a.categorie && cat[a.categorie] && !cat[a.categorie].gevoelig; });
+  const uit = [];
+  for (const a of albums) {
+    let bakken;
+    try { bakken = await immichMl.verzoek('GET', '/api/timeline/buckets', { albumId: a.album_id, order: 'asc' }); } catch (e) { continue; }
+    for (const b of Array.isArray(bakken) ? bakken : []) {
+      const tb = b && typeof b.timeBucket === 'string' ? b.timeBucket : '';
+      if (!/^\d{4}-/.test(tb) || Number(tb.slice(0, 4)) >= voorJaar) continue;
+      let r;
+      try { r = await immichMl.verzoek('GET', '/api/timeline/bucket', { albumId: a.album_id, timeBucket: tb, order: 'asc' }); } catch (e) { continue; }
+      const ids = r && Array.isArray(r.id) ? r.id : [], fc = r && Array.isArray(r.fileCreatedAt) ? r.fileCreatedAt : [];
+      const img = r && Array.isArray(r.isImage) ? r.isImage : [], tr = r && Array.isArray(r.isTrashed) ? r.isTrashed : [];
+      ids.forEach(function (id, i) {
+        if (img[i] !== true || tr[i] === true || typeof fc[i] !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(fc[i])) return;
+        uit.push({ immich: String(id), jaar: Number(fc[i].slice(0, 4)), md: fc[i].slice(5, 10) });
+      });
+    }
+  }
+  return uit;
+}
+async function imagineNachtStap(ctx) {
+  if (!imagineApp || typeof imagineApp.nachtStart !== 'function') return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+  const sch = imagineNachtSchakelaar();
+  if (!sch.aan || !sch.aantal) return { ok: true, al_gedaan: true, detail: { uit: true } };
+  const dag = String(ctx && ctx.datum || appYmd(Date.now()));
+  let k;
+  try { k = await imagineNachtKandidaten(require(path.join(__dirname, 'imagine.js')).NACHT.voor_jaar); } catch (e) { logError('imagine-nacht', new Error('kandidaten niet te lezen')); return { ok: false, reden: 'MemoryLane-albums niet te lezen' }; }
+  const r = await imagineApp.nachtStart(k, { dag: dag, aantal: sch.aantal, md: dag.slice(5, 10) });
+  return { ok: r.status === 200, reden: r.status === 200 ? undefined : r.reden, detail: { gekozen: r.gekozen || 0, kandidaten: r.kandidaten || 0, reden: r.reden || null } };
+}
+// 06:40: wat nog loopt stoppen, even wachten tot het gestopt is (review Codex MOET 1), dan hooguit één kaart. Sleutel per nacht: nooit twee.
+const IMAGINE_NACHT_JAAR = { 2: 'Twee', 3: 'Drie' };
+function imagineNachtKaart(dag, s) {
+  const klaar = s.stukken.filter(function (x) { return x.stand === 'open'; });
+  // geen jaartal in de titel: scans dragen vaak de datum van de scanbatch (gemeten 27-11: 582 foto's, 5 verschillende dag-maanden)
+  const titel = klaar.length === 1 ? 'Een oude foto beweegt — kijk' : (IMAGINE_NACHT_JAAR[klaar.length] || String(klaar.length)) + " oude foto's bewegen — kijk";
+  return {
+    sleutel: 'imagine-nacht-' + dag, soort: 'doen', titel: titel.slice(0, 90), waar: 'overal',
+    waarom: "Vannacht liet de server " + (klaar.length === 1 ? 'een oude foto' : klaar.length + " oude foto's") + ' uit je MemoryLane-albums bewegen. Er is niets in Immich veranderd.',
+    stappen: ['Tik op deze kaart: Imagine opent. Bovenaan staan de beelden met de titel Vannacht.',
+      'Houden: open het filmpje en tik Zet in Immich. Het komt in hetzelfde album als de foto en speelt dan in de diashow van MemoryLane.',
+      'Niet mooi: tik Gooi weg. De foto zelf blijft gewoon in Immich.'],
+    herkomst: { module: 'imagine', handmatig: 'imagine-nacht', nacht: dag, doel: { scherm: 'imagine' } }, volgorde: 40,   // tik op de kaart = Imagine
+  };
+}
+async function imagineNachtKaartStap(ctx) {
+  if (!imagineApp || typeof imagineApp.nachtOchtend !== 'function') return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+  const dag = String(ctx && ctx.datum || appYmd(Date.now()));
+  let s = imagineApp.nachtOchtend(dag);
+  for (let i = 0; i < 12 && s.wacht > 0; i++) { await new Promise(function (r) { setTimeout(r, 5000); }); s = imagineApp.nachtOchtend(dag); }
+  if (!s.open) return { ok: true, detail: { open: 0, mislukt: s.mislukt, wacht: s.wacht } };
+  try { await appSbRpc('mk_voor_jou_zet', { p: imagineNachtKaart(dag, s) }); appStaat.vjCache = null; }
+  catch (e) { logError('imagine-nacht-kaart', new Error('kaart zetten mislukt')); return { ok: false, reden: 'kaart zetten mislukt' }; }
+  schrijfLog(nu() + ' imagine nacht kaart dag=' + dag + ' open=' + s.open);
+  return { ok: true, detail: { open: s.open, mislukt: s.mislukt } };
+}
+// Kaart dicht zodra alle stukken van die nacht besloten zijn (Zet in Immich of Gooi weg); elke 10 min, alleen met een open nachtkaart.
+async function imagineNachtSluit() {
+  if (!imagineApp || typeof imagineApp.nachtStand !== 'function' || !rolPrimair()) return;
+  let punten;
+  try { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: false }); punten = (j && j.punten) || []; } catch (e) { return; }
+  for (const p of punten) {
+    if (!p || !/^imagine-nacht-\d{4}-\d{2}-\d{2}$/.test(String(p.sleutel)) || (p.status !== 'open' && p.status !== 'later')) continue;
+    const s = imagineApp.nachtStand(String(p.sleutel).slice(14));
+    if (!s.besloten) continue;
+    try { await appSbRpc('mk_voor_jou_status', { p_sleutel: p.sleutel, p_van: p.status, p_naar: 'gedaan', p_door: 'agent', p_bewijs: 'Gehouden: ' + s.houd + ', weggegooid: ' + s.weg + '.' }); appStaat.vjCache = null; }
+    catch (e) { logError('imagine-nacht-sluit', new Error('kaart sluiten mislukt')); }
+  }
+}
+if (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setInterval(function () { imagineNachtSluit().catch(function () {}); }, 10 * 60000).unref(); }
 // ── einde OVIS Imagine ──
 
 // ── Facturen-app, opslag (wv824, F1c, 22-10-2026; bouwplan "Facturen-app - bouwplan (App, 22-10-2026)" § 4.1, § 4.2 en § 8) ──
@@ -28309,6 +28393,10 @@ const nachtketen = (function () {
       { naam: 'apps-editie', start_na: [6, 50], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return loketOchtendEditie(ctx); } },
       // wv4131 (2C90): zondag het Weekboek van MemoryLane (één Sonnet-aanroep) + één loketregel vóór apps-editie (06:50); andere dagen al_gedaan.
       // Te weinig stof = overgeslagen (ok). Mislukt na twee pogingen = box-rij van de stap zelf (meldtZelf).
+      // wv4109 (L18): levende herinneringen — 01:00 zet hooguit drie oude MemoryLane-foto's als filmpje in de stapel van Imagine (stil als er
+      // nog een nachtstuk op Davids besluit wacht); 06:40 stopt wat nog loopt en zet hooguit één Voor jou-kaart. Schakelaar imagine/nacht.json.
+      { naam: 'imagine-nacht', start_na: [1, 0], limiet_min: 15, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return imagineNachtStap(ctx); } },
+      { naam: 'imagine-nacht-kaart', start_na: [6, 40], limiet_min: 5, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return imagineNachtKaartStap(ctx); } },
       { naam: 'ml-weekboek', start_na: [6, 0], limiet_min: 10, pogingen: 2, inProces: true, meldtZelf: true, doe: async function (ctx) {
         if (typeof mlWeekboek === 'undefined' || !mlWeekboek) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
         return mlWeekboek.stap({ datum: ctx.datum });

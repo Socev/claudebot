@@ -74,6 +74,15 @@
 //   mislukte taak met Opnieuw (geen stille stilstand); een keten die tussen twee stappen bleef hangen (herstart) hervat de ronde.
 //   Vanuit MemoryLane: /laad met hergebruik: true geeft voor hetzelfde Immich-nummer het bestaande beeld terug (geen dubbel). Naar Immich alleen
 //   op Davids tik (Zet in Immich: foto's gestapeld op het origineel, filmpje los in dezelfde albums, zoals sinds wv3266).
+//
+// LEVENDE HERINNERINGEN 'S NACHTS (wv4109, besluitenpagina nr 918 = L18, David Ja 25-11-2026 21:41; ontwerp mk-scripts/ovis-imagine/wv4109/ontwerp.md):
+//   nachtStart (nachtketenstap imagine-nacht, 01:00) kiest hooguit NACHT.max oude foto's (opnamejaar < NACHT.voor_jaar; gemeten 27-11: allemaal
+//   scans) uit de albums van MemoryLane die server.js aanlevert, laadt elk als NIEUW beeld (nooit een bestaand beeld van David) en zet het in de
+//   stapel als filmpje (Trouw aan gezichten); de stapel start ze als de server stil is. Alleen als er geen nachtstuk meer op Davids besluit wacht,
+//   de stapel leeg is en de motor stil. Geen seintje voor een nachtgroep: 's ochtends (nachtOchtend, 06:40) hooguit één kaart (server.js).
+//   Houd = de gewone knop Zet in Immich op het filmpje (dezelfde albums als het origineel, dus de diashow speelt het); Weg = het beeld
+//   weggooien (alleen de kopie in Imagine). Het besluit volgt uit de toestand (nachtStand). Een immich-id dat ooit gekozen werd, komt nooit terug.
+//   Niets naar Immich zonder tik: de nacht leest alleen.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -169,6 +178,7 @@ const KETEN = [
   { id: 'opknappen', naam: 'Opknappen en vergroten' },
   { id: BEWEGEN_STAND, naam: 'Laat bewegen' },
 ];
+const NACHT = { max: 3, voor_jaar: 2000, model: 'trouw' };   // wv4109
 const KETEN_T = { vers_ms: 3 * 3600 * 1000, hervat_ms: 60 * 1000, tijd: '± 10–12 min', lijst: 3 };
 const NAAM_BEELD = /^[a-f0-9]{16}\.(jpg|png|webp|mp4)$/, NAAM_TOON = /^[a-f0-9]{16}\.jpg$/, NAAM_REST = /^[a-f0-9]{16}\.(jpg|png|webp|mp4)\.nieuw\.\d{1,10}$/;
 function bewegenModel(m) { if (m === undefined || m === null || m === '') return BEWEGEN.find(function (x) { return x.model === BEWEGEN_VOORKEUR; }) || BEWEGEN[0]; return BEWEGEN.find(function (x) { return x.model === m; }) || null; }
@@ -219,6 +229,8 @@ function maak(deps) {
     db.exec('CREATE TABLE IF NOT EXISTS seintje (groep TEXT PRIMARY KEY, klaar INTEGER NOT NULL, mislukt INTEGER NOT NULL, op TEXT NOT NULL, gezien TEXT)');
     db.exec('CREATE TABLE IF NOT EXISTS recept (id TEXT PRIMARY KEY, naam TEXT NOT NULL, soort TEXT NOT NULL, stand TEXT, opdracht TEXT NOT NULL, gemaakt TEXT NOT NULL)');   // wv4099
     // wv4104: keten (stappen = JSON-lijst van stand-ids in volgorde; start = de versie waarop stap 1 begon; beurt = de tik, tegen dubbel)
+    // wv4109: nachtstukken (immich = het gekozen origineel, nooit opnieuw; groep = de stapelgroep van die nacht; dag = de nacht (YYYY-MM-DD))
+    db.exec('CREATE TABLE IF NOT EXISTS nacht (immich TEXT PRIMARY KEY, dag TEXT NOT NULL, groep TEXT NOT NULL, bron TEXT, taak TEXT, jaar INTEGER, gekozen TEXT NOT NULL, opgeruimd TEXT)');
     db.exec('CREATE TABLE IF NOT EXISTS keten (id TEXT PRIMARY KEY, bron TEXT NOT NULL, start TEXT NOT NULL, stappen TEXT NOT NULL, model TEXT, beweging TEXT, beurt TEXT, gemaakt TEXT NOT NULL, gestopt TEXT, eind TEXT)');
     // na een herstart loopt er niets meer (de motor hield de taak in het geheugen). wv4092: een eerste poging die Opnieuw kan, probeert de pod
     // zelf nog één keer zodra de server vrij is (auto = 12 uur lang); een stapelrij (status 'stapel') blijft gewoon in de stapel.
@@ -636,7 +648,7 @@ function maak(deps) {
       const db = open();
       if (db.prepare("SELECT COUNT(*) AS n FROM taak WHERE status = 'stapel'").get().n >= STAPEL.max) return { status: 429, fout: 'de stapel is vol (hooguit ' + STAPEL.max + ' filmpjes); wacht tot er een klaar is' };
       const lopend = db.prepare("SELECT stapel FROM taak WHERE stapel IS NOT NULL AND status IN ('stapel','wacht','bezig') ORDER BY gemaakt LIMIT 1").get();
-      const sid = hex16(), groep = lopend ? lopend.stapel : hex16();
+      const sid = hex16(), groep = ex.nacht ? ex.nacht : lopend ? lopend.stapel : hex16();   // wv4109: een nachtstuk in de eigen nachtgroep
       db.prepare('INSERT INTO taak (id, studio, bron, voorganger, stand, status, gemaakt, instel, poging, stapel, keten, keten_stap) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(sid, v.bron, v.id, BEWEGEN_STAND, 'stapel', iso(), instel, pogingVan(ex), groep, kId(ex), kStap(ex));
       log('imagine stapel taak=' + sid + ' model=' + bm.model + (eigen ? ' eigen=1' : ''));
       setImmediate(function () { ronde().catch(function () {}); });
@@ -1251,6 +1263,112 @@ function maak(deps) {
     return false;
   }
 
+  // ── wv4109 (L18): levende herinneringen 's nachts (zie de kop) ──
+  // Stand van één nachtstuk: wacht (stapel/loopt), klaar-open (filmpje klaar, nog geen besluit), houd (filmpje staat in Immich), weg (beeld weg),
+  // mislukt (niet gelukt of gestopt; de kopie ruimt nachtOpruim op).
+  function nachtStuk(n) {
+    const db = open();
+    const b = n.bron ? db.prepare('SELECT id FROM bron WHERE id = ?').get(n.bron) : null;
+    if (!b) return n.opgeruimd ? 'mislukt' : 'weg';
+    const t = n.taak ? db.prepare('SELECT status, versie FROM taak WHERE id = ?').get(n.taak) : null;
+    if (!t) return 'mislukt';
+    if (['stapel', 'wacht', 'bezig'].indexOf(t.status) >= 0) return 'wacht';
+    if (t.status !== 'klaar' || !t.versie) return 'mislukt';
+    const v = db.prepare('SELECT immich_asset FROM versie WHERE id = ?').get(t.versie);
+    if (!v) return 'mislukt';
+    return v.immich_asset ? 'houd' : 'open';
+  }
+  // Alle stukken van één nacht (dag) met hun stand; stukken = [{ bron, versie (het filmpje), jaar, stand }]
+  function nachtStand(dag) {
+    const db = open();
+    const rijen = db.prepare('SELECT * FROM nacht WHERE dag = ? ORDER BY gekozen, immich').all(String(dag || ''));
+    const stukken = rijen.map(function (n) {
+      const st = nachtStuk(n), t = n.taak ? db.prepare('SELECT versie FROM taak WHERE id = ?').get(n.taak) : null;
+      return { bron: st === 'weg' || st === 'mislukt' ? null : n.bron, versie: st === 'open' || st === 'houd' ? t.versie : null, jaar: n.jaar, stand: st };
+    });
+    const tel = function (s) { return stukken.filter(function (x) { return x.stand === s; }).length; };
+    return { dag: String(dag || ''), stukken: stukken, wacht: tel('wacht'), open: tel('open'), houd: tel('houd'), weg: tel('weg'), mislukt: tel('mislukt'),
+      besloten: rijen.length > 0 && tel('wacht') === 0 && tel('open') === 0 };
+  }
+  // Mislukte of gestopte nachtstukken: de kopie in Imagine weg (het origineel in Immich blijft); telt alleen eigen nachtbronnen.
+  function nachtOpruim() {
+    const db = open();
+    let n = 0;
+    db.prepare('SELECT * FROM nacht WHERE opgeruimd IS NULL AND bron IS NOT NULL').all().forEach(function (x) {
+      if (nachtStuk(x) !== 'mislukt') return;
+      if (db.prepare('SELECT 1 FROM bron WHERE id = ?').get(x.bron)) { const r = weg('bron', x.bron); if (r.status !== 200) return; }
+      db.prepare('UPDATE nacht SET opgeruimd = ? WHERE immich = ?').run(iso(), x.immich);
+      n++;
+    });
+    return n;
+  }
+  // De nacht. kandidaten = [{ immich (uuid), jaar, md ('MM-DD') }] uit MemoryLane (server.js), o = { dag, aantal, md (vandaag), motorLeeg }.
+  async function nachtStart(kandidaten, o) {
+    o = o || {};
+    if (!deps.primair()) return { status: 409, reden: 'passief' };
+    const db = open(), dag = /^\d{4}-\d{2}-\d{2}$/.test(String(o.dag || '')) ? o.dag : null;
+    if (!dag) return { status: 400, reden: 'geen dag' };
+    nachtOpruim();
+    if (db.prepare('SELECT 1 FROM nacht WHERE dag = ?').get(dag)) return { status: 200, al: true, reden: 'al gedaan' };
+    const vorig = db.prepare('SELECT DISTINCT dag FROM nacht ORDER BY dag DESC LIMIT 3').all().map(function (x) { return x.dag; });
+    if (vorig.some(function (d) { const s = nachtStand(d); return s.open > 0 || s.wacht > 0; })) return { status: 200, gekozen: 0, reden: 'vorige nacht wacht nog op besluit' };
+    if (schijf().vol) return { status: 200, gekozen: 0, reden: 'schijf vol' };
+    if (db.prepare("SELECT 1 FROM taak WHERE status IN ('stapel','wacht','bezig')").get()) return { status: 200, gekozen: 0, reden: 'imagine bezig' };
+    if (!studioStil() || o.motorLeeg === false) return { status: 200, gekozen: 0, reden: 'server bezig' };
+    const bm = bewegenModel(NACHT.model);
+    let f = null;
+    try { f = await S.flowVan(bm.flow); } catch (e) { f = null; }
+    if (!f || !f.klaar || f.vers_per_keer) return { status: 200, gekozen: 0, reden: 'filmflow niet klaar of op proef' };
+    const aantal = Math.max(0, Math.min(NACHT.max, Number.isInteger(o.aantal) ? o.aantal : NACHT.max));
+    const h = S.health();
+    const ruimte = Math.min(aantal, STAPEL.max, h ? GRENS.dag - (h.taken_vandaag || 0) : aantal);
+    if (ruimte <= 0) return { status: 200, gekozen: 0, reden: 'geen ruimte' };
+    // kandidaten: geldig, oud, nooit eerder gekozen, niet al een beeld van David in Imagine; eerst dezelfde dag-maand, dan willekeurig
+    const gezien = new Set();
+    const l = (Array.isArray(kandidaten) ? kandidaten : []).filter(function (k) {
+      if (!k || !UUID_RE.test(String(k.immich)) || gezien.has(k.immich)) return false;
+      gezien.add(k.immich);
+      return Number.isInteger(k.jaar) && k.jaar > 1800 && k.jaar < NACHT.voor_jaar;
+    }).filter(function (k) { return !db.prepare('SELECT 1 FROM nacht WHERE immich = ?').get(k.immich) && !db.prepare('SELECT 1 FROM bron WHERE immich = ?').get(k.immich); });
+    const schud = function (a) { for (let i = a.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); const x = a[i]; a[i] = a[j]; a[j] = x; } return a; };
+    const md = String(o.md || '');
+    const keus = schud(l.filter(function (k) { return md && k.md === md; })).concat(schud(l.filter(function (k) { return !(md && k.md === md); })));
+    const groep = hex16();
+    let n = 0, mis = 0;
+    for (const k of keus) {
+      if (n >= ruimte || mis >= 3) break;   // (niet opnieuw op stil toetsen: de stapel start het eerste stuk meteen)
+      const lr = await laad({ immich: k.immich, titel: 'Vannacht · rond ' + k.jaar });   // scans dragen vaak een batchdatum (gemeten: 5 dag-maanden op 582)
+      if (lr.status !== 200) { mis++; continue; }
+      db.prepare('INSERT INTO nacht (immich, dag, groep, bron, taak, jaar, gekozen) VALUES (?, ?, ?, ?, NULL, ?, ?)').run(k.immich, dag, groep, lr.bron, k.jaar, iso());
+      const r = await bewegen({ versie: lr.versie, model: bm.model, beweging: '', beurt_id: 'nacht-' + lr.bron, stapel: true }, ctxZelf, '', { nacht: groep });
+      if (r.status !== 200 || !r.taak) { weg('bron', lr.bron); db.prepare('UPDATE nacht SET opgeruimd = ? WHERE immich = ?').run(iso(), k.immich); mis++; continue; }
+      db.prepare('UPDATE nacht SET taak = ? WHERE immich = ?').run(r.taak.id, k.immich);
+      n++;
+    }
+    log('imagine nacht dag=' + dag + ' gekozen=' + n + ' mis=' + mis + ' kandidaten=' + l.length);
+    return { status: 200, gekozen: n, mis: mis, kandidaten: l.length };
+  }
+  // De ochtend: nachtstukken die nog in de stapel staan of lopen, stoppen (ze tellen deze ochtend niet); dan opruimen en de stand van vannacht.
+  function nachtOchtend(dag) {
+    const db = open();
+    db.prepare('SELECT taak FROM nacht WHERE dag = ? AND taak IS NOT NULL').all(String(dag || '')).forEach(function (x) {
+      const t = db.prepare('SELECT * FROM taak WHERE id = ?').get(x.taak);
+      if (!t) return;
+      if (t.status === 'stapel') stapelStop(t);
+      else if ((t.status === 'wacht' || t.status === 'bezig') && t.studio) { try { S.stopGeheugen(t.studio); } catch (e) {} }
+    });
+    nachtOpruim();
+    const s = nachtStand(dag);
+    log('imagine nacht ochtend dag=' + s.dag + ' open=' + s.open + ' wacht=' + s.wacht + ' mislukt=' + s.mislukt);
+    return s;
+  }
+  function nachtInfo() {
+    const db = open(), l = db.prepare('SELECT dag FROM nacht ORDER BY dag DESC LIMIT 1').get();
+    const s = l ? nachtStand(l.dag) : null;
+    return { stukken: db.prepare('SELECT COUNT(*) AS n FROM nacht').get().n, laatst: l ? l.dag : null,
+      vannacht: s ? { wacht: s.wacht, open: s.open, houd: s.houd, weg: s.weg, mislukt: s.mislukt } : null };
+  }
+
   // ── wv4092: afronden, Opnieuw, vanzelf opnieuw, stapel, seintje, opruimronde (zie de kop bij OPRUIM) ──
   function pogingVan(ex) { return ex && Number.isInteger(ex.poging) && ex.poging > 0 ? ex.poging : 0; }
   function kId(ex) { return ex && ex.keten && HEX16.test(String(ex.keten.id)) ? ex.keten.id : null; }   // wv4104
@@ -1396,6 +1514,7 @@ function maak(deps) {
     const db = open();
     const t = db.prepare('SELECT stapel FROM taak WHERE id = ?').get(taakId);
     if (!t || !t.stapel) return;
+    if (db.prepare('SELECT 1 FROM nacht WHERE groep = ?').get(t.stapel)) return;   // wv4109: een nachtgroep krijgt geen seintje (alleen de ochtendkaart)
     if (db.prepare("SELECT 1 FROM taak WHERE stapel = ? AND status IN ('stapel','wacht','bezig')").get(t.stapel)) return;
     const k = db.prepare("SELECT SUM(status = 'klaar') AS klaar, SUM(status != 'klaar') AS mis FROM taak WHERE stapel = ?").get(t.stapel);
     const r = db.prepare('INSERT OR IGNORE INTO seintje (groep, klaar, mislukt, op) VALUES (?, ?, ?, ?)').run(t.stapel, Number(k.klaar) || 0, Number(k.mis) || 0, iso());
@@ -1794,10 +1913,11 @@ function maak(deps) {
       return { aan: true, bronnen: d.prepare('SELECT COUNT(*) AS n FROM bron').get().n, versies: d.prepare('SELECT COUNT(*) AS n FROM versie').get().n,
         schijf_bytes: schijf().bytes, incognito_nog_te_wissen: S.incognito().nog_te_wissen,
         opruim: Object.assign({}, opruimStand, { vanaf: deps.opruimVanaf || OPRUIM.vanaf }),   // wv4092: aantallen, geen namen
-        stapel: d.prepare("SELECT COUNT(*) AS n FROM taak WHERE status = 'stapel'").get().n, auto: d.prepare("SELECT COUNT(*) AS n FROM taak WHERE auto > ?").get(iso()).n };
+        stapel: d.prepare("SELECT COUNT(*) AS n FROM taak WHERE status = 'stapel'").get().n, auto: d.prepare("SELECT COUNT(*) AS n FROM taak WHERE auto > ?").get(iso()).n,
+        nacht: nachtInfo() };   // wv4109
     } catch (e) { return { aan: true, fout: true }; }
   }
-  return { app: app, info: info, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB, stopTimers: function () { clearInterval(timer); clearTimeout(opruimEerst); clearInterval(opruimTimer); }, _opruim: opruim, _ronde2: ronde, _hangers: hangers, _inc: inc, _ronde: incRonde, _uitb: uitb, _uitbRonde: uitbRonde, _ronde3: ronde, _ketenVers: ketenVers, _db: function () { return open(); } };
+  return { nachtStart: nachtStart, nachtOchtend: nachtOchtend, nachtStand: nachtStand, app: app, info: info, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB, stopTimers: function () { clearInterval(timer); clearTimeout(opruimEerst); clearInterval(opruimTimer); }, _opruim: opruim, _ronde2: ronde, _hangers: hangers, _inc: inc, _ronde: incRonde, _uitb: uitb, _uitbRonde: uitbRonde, _ronde3: ronde, _ketenVers: ketenVers, _db: function () { return open(); } };
 }
 
-module.exports = { OPRUIM: OPRUIM, KETEN: KETEN, KETEN_T: KETEN_T, maak: maak, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB };
+module.exports = { NACHT: NACHT, OPRUIM: OPRUIM, KETEN: KETEN, KETEN_T: KETEN_T, maak: maak, BEWEGEN: BEWEGEN, BEWEGEN_STANDAARD: BEWEGEN_STANDAARD, STANDEN: STANDEN, TEKST: TEKST, TEKSTEN: TEKSTEN, GRENS: GRENS, PLUS: PLUS, UITB: UITB };
