@@ -4873,6 +4873,7 @@ function handleRequest(req, res) {
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
       weer: typeof weerInfo === 'function' ? weerInfo() : { aan: false },   // wv2389: weerregel in het ochtendbericht (laatste ronde, dagteller; geen sleutel of regel)
       contactringen: typeof contactringenInfo === 'function' ? contactringenInfo() : { aan: false },
+      ml_weekboek: typeof mlWeekboekInfo === 'function' ? mlWeekboekInfo() : { aan: false },   // wv4131
       open_eindjes: typeof openEindjesInfo === 'function' ? openEindjesInfo() : { aan: false },
       wachter_kaarten: typeof wachterKaartenInfo === 'function' ? wachterKaartenInfo() : { aan: false },   // wv4124: tellingen per stand (geen namen)   // wv4007: stand, storingen (geen namen of inhoud)   // wv2894: zondagseintje binnenste kring (stand, geen namen of nummers)
       agenda_potlood: typeof agendaPotloodInfo === 'function' ? agendaPotloodInfo() : { aan: false },   // wv3741: potloodlaag (laatste ronde, alleen aantallen)
@@ -27542,6 +27543,12 @@ const nachtketen = (function () {
       { naam: 'ghawa-ochtend', start_na: [6, 30], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return ghawaOchtendStap(ctx); } },
       // wv3815 (2C59 fase 2): ochtendeditie "Uit je Apps" als bufferrij bron 'apps' vóór de briefing van 07:00; een fout meldt de keten (box-rij)
       { naam: 'apps-editie', start_na: [6, 50], limiet_min: 3, pogingen: 2, inProces: true, meldtZelf: false, doe: function (ctx) { return loketOchtendEditie(ctx); } },
+      // wv4131 (2C90): zondag het Weekboek van MemoryLane (één Sonnet-aanroep) + één loketregel vóór apps-editie (06:50); andere dagen al_gedaan.
+      // Te weinig stof = overgeslagen (ok). Mislukt na twee pogingen = box-rij van de stap zelf (meldtZelf).
+      { naam: 'ml-weekboek', start_na: [6, 0], limiet_min: 10, pogingen: 2, inProces: true, meldtZelf: true, doe: async function (ctx) {
+        if (typeof mlWeekboek === 'undefined' || !mlWeekboek) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        return mlWeekboek.stap({ datum: ctx.datum });
+      } },
       // wv2894 (idee 19d): zondag één regel over de binnenste kring voor de briefing van 07:00; stil bij een fout (box-rij), anders al_gedaan
       { naam: 'contactringen', start_na: [6, 40], na: ['weer-ochtend'], limiet_min: 5, pogingen: 2, inProces: true, doe: async function (ctx) {
         if (!contactringen) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
@@ -29470,6 +29477,7 @@ if (memorylanePubliek && SERVER_ECHT) { setTimeout(function () { memorylanePubli
 appStaat.tellers.memorylane = [];
 appStaat.tellers['memorylane-foto'] = [];
 appStaat.tellers['memorylane-video'] = [];
+appStaat.tellers['memorylane-weekboek'] = [];   // wv4131
 async function appMemorylane(req, res, a, s, route, d) {
   if (!memorylaneDelen) return appWeiger(res, 404, 'MemoryLane delen zit niet in deze versie van de pod', 'ml ontbreekt');
   const antw = function (wat, u) { res._app.reden = 'memorylane ' + wat + ' ' + u.status; return appStuur(res, u.status, u.body); };
@@ -29512,6 +29520,14 @@ async function appMemorylane(req, res, a, s, route, d) {
       return antw('toon ' + (d.aan ? 'aan' : 'uit'), { status: 200, body: { ok: true, toon: d.aan } });
     }
     if (route === 'GET /app/memorylane/lijst') return antw('lijst', memorylaneDelen.lijst(toon));
+    // wv4131: het Weekboek (alleen David; in de toonmodus niet)
+    if (route === 'GET /app/memorylane/weekboek' || route === 'POST /app/memorylane/weekboek/antwoord') {
+      if (toon.toon) return antw('weekboek toon', { status: 403, body: { ok: false, fout: 'niet beschikbaar', toon: true } });
+      if (!mlWeekboek) return antw('weekboek', { status: 404, body: { ok: false, fout: 'het Weekboek zit niet in deze versie van de pod' } });
+      if (route === 'GET /app/memorylane/weekboek') { res._app.stil = true; return antw('weekboek', mlWeekboek.laatste()); }
+      if (!appTeller('memorylane-weekboek', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens memorylane-weekboek');
+      return antw('weekboek antwoord', mlWeekboek.antwoord(d));
+    }
     // wv2449: de hoofdpersonen met geboortedatum voor het notitieboekje (vaultpagina 20_Prive/Herinneringen/Hoofdpersonen.md); niet in de toonmodus
     if (route === 'GET /app/memorylane/personen') return antw('personen', typeof memorylaneDelen.hoofdpersonen === 'function' ? memorylaneDelen.hoofdpersonen(toon) : { status: 404, body: { ok: false, fout: 'niet in deze versie' } });
     if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})$/.exec(route))) return antw('detail', memorylaneDelen.detail(m[1], toon));
@@ -29607,6 +29623,45 @@ const tripper = (function () {
   } catch (e) { logError('tripper', e); return null; }
 })();
 function tripperInfo() { if (!tripper) return { aan: false }; try { return tripper.info(); } catch (e) { return { aan: true, fout: true }; } }
+// ── wv4131 (besluitenpagina nr 190 = 2C90, David Ja 25-11-2026): het Weekboek van MemoryLane. Logica en waarom in memorylane-weekboek.js;
+// hier de io. Zondag nachtketenstap ml-weekboek (vóór apps-editie); GET/POST /app/memorylane/weekboek(/antwoord); koppel() elke 5 min.
+// Afleveringen in HERINNERINGEN_DIR/weekboek (700/600). Geen stemaanroep bij het maken; log alleen weeknummer en aantallen.
+const mlWeekboek = (function () {
+  const p = path.join(__dirname, 'memorylane-weekboek.js');
+  if (!fs.existsSync(p) || !memorylaneDelen) return null;
+  try {
+    return require(p).maak({ dir: path.join(HERINNERINGEN_DIR, 'weekboek'),
+      lijst: async function () { const u = memorylaneDelen.lijst({ toon: false }); if (!u || u.status !== 200) throw new Error('lijst ' + (u && u.status)); return u.body.herinneringen; },
+      verhaal: async function (hid) { const u = memorylaneDelen.detail(hid, { toon: false }); return u && u.status === 200 && u.body.herinnering.verhaal ? String(u.body.herinnering.verhaal.tekst || '') : null; },
+      agenda: function (van, tot) { return appSbRpc('sb_kalender_tijdlijn', { p_van: van, p_tot: tot }, 20000); },
+      reizen: async function () { if (!tripper) return []; const u = tripper.lijst(); return u && u.status === 200 ? u.body.reizen : []; },
+      // foto's per dag (lokale dag) uit Immich; alleen aantallen
+      fotos: async function (van, tot) {
+        if (!immichMl) return {};
+        const uit = {}, maanden = Array.from(new Set([van.slice(0, 7), tot.slice(0, 7)]));
+        for (const mnd of maanden) {
+          const r = await immichMl.verzoek('GET', '/api/timeline/bucket', { timeBucket: mnd + '-01', order: 'desc', visibility: 'timeline' });
+          const t = r && Array.isArray(r.fileCreatedAt) ? r.fileCreatedAt : [], off = r && Array.isArray(r.localOffsetHours) ? r.localOffsetHours : [];
+          t.forEach(function (x, i) { const ms = Date.parse(x); if (!Number.isFinite(ms)) return; const d = new Date(ms + (Number(off[i]) || 0) * 3600000).toISOString().slice(0, 10); if (d >= van && d <= tot) uit[d] = (uit[d] || 0) + 1; });
+        }
+        return uit;
+      },
+      claude: harvesterClaude,
+      opnameHid: function (rid) { try { const r = intake._db.prepare("select hid from ml_herinnering where soort = 'opname' and ref = ? and status = 'actief'").get(rid); return r ? r.hid : null; } catch (e) { return null; } },
+      wanneer: function (hid, d) { return memorylaneDelen.wanneer(hid, d); },
+      naamgeving: function (hid, t) { return memorylaneDelen.naamgeving(hid, t); },
+      loket: function (m) { return loketMeld(m); },
+      box: function (t) { ovisBoxRij(t); },
+      log: function (o) { schrijfLog(nu() + ' ml-weekboek ' + velden(o)); } });
+  } catch (e) { logError('ml-weekboek', e); return null; }
+})();
+function mlWeekboekInfo() { if (!mlWeekboek) return { aan: false }; try { return Object.assign({ aan: true }, mlWeekboek.info()); } catch (e) { return { aan: true, fout: true }; } }
+if (mlWeekboek && SERVER_ECHT) {
+  setInterval(function () {
+    if (!rolPrimair()) return;
+    try { if (mlWeekboek.koppel()) memorylaneDelenTik(); } catch (e) { logError('ml-weekboek-koppel', e); }
+  }, 5 * 60000).unref();
+}
 appStaat.tellers.tripper = [];
 async function appTripper(req, res, a, route) {
   if (!tripper) return appWeiger(res, 404, 'Tripper zit niet in deze versie van de pod', 'tripper ontbreekt');

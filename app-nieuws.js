@@ -217,7 +217,7 @@ function pakjesVandaag(l) { return ((l && Array.isArray(l.lopend)) ? l.lopend : 
 // Het loket kiest niets op inhoud; wat niet past in de lengte schuift door naar de volgende editie en staat intussen in het paneel.
 const APP_NAMEN = { facturen: 'Facturen', pakjes: 'Pakjes', beleggen: 'Beleggen', mail: 'Mail', kalender: 'Kalender', financien: 'Financiën',
   socev: 'Socev', pot: 'POT', docplan: 'DocPlan', gezondheid: 'Gezondheid', harvester: 'Harvester', mediatheek: 'Mediatheek', bandjes: 'Bandjes',
-  pma: 'PMA', vastgoed: 'Vastgoed', imagine: 'Imagine', 'ovis-nza': 'NZa', personeelsscherm: 'Personeelsscherm', ghawa: 'GHAWA', proef: 'Proef' };
+  pma: 'PMA', vastgoed: 'Vastgoed', imagine: 'Imagine', 'ovis-nza': 'NZa', personeelsscherm: 'Personeelsscherm', ghawa: 'GHAWA', memorylane: 'MemoryLane', proef: 'Proef' };   // wv4131: memorylane (Weekboek)
 function appNaam(id) { return Object.hasOwn(APP_NAMEN, id) ? APP_NAMEN[id] : String(id).charAt(0).toUpperCase() + String(id).slice(1); }
 const EDITIE_MAX = 3500;   // ochtend_buffer-rij en bericht; Opmaak kort niets in
 function editieRegels(staat, soort, dag, nu) {
