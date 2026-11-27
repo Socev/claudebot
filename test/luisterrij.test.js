@@ -14,7 +14,7 @@ const vb = s.indexOf('async function appVoorlees(req, res, a, d) {'), ve = s.ind
 function laad() {
   assert.ok(b > 0 && e > b && vb > 0, 'blok luisterrij niet gevonden in server.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wv4127-'));
-  const ctx = { fs, path, crypto, APP_DATA: dir, appStaat: { tellers: {} }, grens: true, stem: [], fouten: [], Date, Number, Object, String, Error, Promise, Buffer, JSON, process: { env: { GEMINI_API_KEY_AUTO: 'nep' }, pid: 1 },
+  const ctx = { fs, path, crypto, setTimeout: () => ({ unref() {} }), setInterval: () => ({ unref() {} }), APP_DATA: dir, appStaat: { tellers: {} }, grens: true, stem: [], fouten: [], Date, Number, Object, String, Error, Promise, Buffer, JSON, process: { env: { GEMINI_API_KEY_AUTO: 'nep' }, pid: 1 },
     APP_VOORLEES_TEKST_MAX: 16000, APP_VOORLEES_PER_UUR: 240, APP_VOORLEES_PER_DAG: 300 };
   ctx.appTeller = () => ctx.grens;
   ctx.appStuur = (res, st, obj) => { res.st = st; res.obj = obj; };
@@ -95,6 +95,7 @@ test('opruimen: ouder dan 7 dagen weg, hooguit 200 stukken', () => {
   assert.ok(!over.includes(crypto.createHash('md5').update('0').digest('hex').slice(0, 16) + '.json'));
   assert.ok(fs.existsSync(path.join(c.DIR, 'vreemd.txt')), 'andere bestanden blijven staan');
 });
-test('koppeling: route in de app-poort', () => {
+test('koppeling: route in de app-poort; opruimen ook na de start en elk uur', () => {
+  assert.match(s.slice(b, e), /setInterval\(function \(\) \{ try \{ appLuisterOpruimen\(\); \}[^\n]*3600000\)\.unref\(\)/);
   assert.ok(s.includes("if (route === 'POST /app/luisterrij') return appLuisterrij(req, res, a, d);"));
 });

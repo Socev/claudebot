@@ -18185,6 +18185,9 @@ function appLuisterOpruimen() {
   st.sort(function (x, y) { return y.m - x.m; });
   st.forEach(function (x, i) { if (x.m < grens || i >= APP_LUISTER_MAX) try { fs.unlinkSync(x.f); } catch (e) { logError('app-luisterrij', e); } });
 }
+// review diff MOET 1: ook opruimen zonder nieuw stuk (na de start en elk uur), zodat geen tekst langer dan APP_LUISTER_DAGEN blijft staan
+setTimeout(function () { try { appLuisterOpruimen(); } catch (e) { logError('app-luisterrij', e); } }, 60000).unref();
+setInterval(function () { try { appLuisterOpruimen(); } catch (e) { logError('app-luisterrij', e); } }, 3600000).unref();
 // titel voor Hierna: de eerste regel van de spreektekst, kort
 function appLuisterTitel(spreek) {
   const r = (String(spreek || '').split('\n').find(function (x) { return x.trim(); }) || '').trim().replace(/[.:;,]$/, '');
