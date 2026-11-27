@@ -14513,6 +14513,58 @@ async function appVoorJouRegels(req, res, reg, a, s, d) {
 // per vraag-id in vragen.json). Vraag-id: de gekoppelde app-vraag (herkomst.vraag) als die nog leeft, anders het eigen id van de
 // kaart; die vragen.json-rij (soort voorjou, geen inhoud) maakt de pod bij de eerste druk. Bij de start van de beurt gaat de kaart
 // op gedaan (door david, bewijs met de keuze en het vraag-id); de beurt zelf werkt register en werkvoorraad bij.
+// ── wv4196 (besluitenpagina nr 372 = 3C72, David Ja 25-11-2026 22:29): gewone Ja geeft de wachtende klus zelf vrij ──
+// Ontwerp: mk-scripts/wv4196/ontwerp.md (Codex-ontwerpreview GO-MET-WIJZIGINGEN, MOET 1 verwerkt: databank idempotent + één herhaling).
+// Meting 13-27/11: 35 gewone Ja's op een kaart, 32 met precies één wachtende klus; elk startte een machinekamerbeurt om één rij vrij te geven.
+// Alleen: Ja zonder vingerafdruk, kaart in de machinekamer, geen gekoppelde chatvraag, geen moduleknop, herkomst met wv en zonder
+// wegen/grondwet/todoist/module/regels/ovis/briefing/vraag. De databank (mk_voor_jou_ja_vrijgeven) toetst het opnieuw onder een slot: precies
+// één rij wacht op David en geen andere open kaart noemt hem; dan kaart -> gedaan (gewoon kaartbewijs, dus de Voor jou-ronde zet de registerrij
+// op beantwoord) en de rij -> opdracht aangevuld met "David: Ja (…)" + open. Uit: bestand APP_VJ_JA_ZELF_UIT bestaat.
+const APP_VJ_JA_ZELF_UIT = process.env.APP_VJ_JA_ZELF_UIT || '/opt/data/vj-ja-zelf-uit';
+const APP_VJ_JA_ZELF_GEEN = ['todoist', 'module', 'regels', 'ovis', 'briefing', 'vraag'];
+function appVjJaZelfKan(p, k) {
+  try { if (fs.existsSync(APP_VJ_JA_ZELF_UIT)) return false; } catch (e) { return false; }
+  if (!p || p.soort !== 'besluit' || !k || k.gevoelig || k.gek || k.waaromNiet || k.beantwoord || k.elders || k.kanaal !== 'machinekamer') return false;
+  const h = p.herkomst && typeof p.herkomst === 'object' && !Array.isArray(p.herkomst) ? p.herkomst : null;
+  if (!h || !Array.isArray(h.wv) || !h.wv.length || h.wegen === true || h.grondwet === true) return false;
+  if (APP_VJ_JA_ZELF_GEEN.some(function (x) { const v = h[x]; return v != null && v !== '' && !(Array.isArray(v) && !v.length) && !(typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length); })) return false;
+  if (typeof doorbouwStopSleutel === 'function' && doorbouwStopSleutel(p.sleutel)) return false;
+  return true;
+}
+// {klaar: true} = beantwoord en vrijgegeven (200 gestuurd); anders {waarom} en niets gestuurd: de aanroeper gaat de gewone route.
+async function appVjJaZelf(res, a, s, p, k, jobId, hash, inhoudHash, titel) {
+  const sl = jobId + ':' + hash;
+  let v;
+  try { v = appVragen(); } catch (e) { logError('app-vragen', e); return { waarom: 'vragenregister' }; }
+  if (!v[sl] || appAntwoord(v[sl])) return { waarom: 'al beantwoord of onbekend' };   // appKnop geeft dan zijn gewone antwoord
+  const tMs = Date.now(), tIso = new Date(tMs).toISOString(), viaOw = !!(s && s.onderweg);
+  const merk = 'vj-zelf-' + crypto.randomBytes(6).toString('hex');   // gestart false + onbekende job = vervalt na een herstart (appAntwoord)
+  const antwoord = { keuze: 'ja', t: tIso, apparaat: a.id, via: viaOw ? 'onderweg' : undefined, zelf: true,
+    kaart_hash: /^[a-f0-9]{64}$/.test(String(inhoudHash || '')) ? inhoudHash : undefined };
+  v[sl].antwoord = Object.assign({ job: merk, gestart: false }, antwoord);
+  try { appVragenSchrijf(v); } catch (e) { logError('app-vragen', e); return { waarom: 'vragenregister niet schrijfbaar' }; }
+  const wanneer = appVjDag(appYmd(tMs)) + ' ' + appKlok(tIso);
+  const bewijs = 'app ' + wanneer + ': David drukte Ja op de kaart (vraag-id ' + hash + ')';   // = APP_VJ_KNOP_BEWIJS_RE en ovis-register vjKoppel
+  const erbij = '[Pod, wv4196] David: Ja (' + wanneer + ', knop op de Voor jou-kaart ' + JSON.stringify(appKort(appEenRegel(titel, 400), 160)) + ', vraag-id ' + hash +
+    ', zonder vingerafdruk' + (viaOw ? ', in Onderweg' : '') + '). De pod gaf deze rij daarop zelf vrij; er was geen machinekamerbeurt. ' +
+    'De registerrij in Open vragen gaat bij de volgende Voor jou-ronde vanzelf op beantwoord.';
+  let r = null;
+  for (let poging = 0; poging < 2 && !r; poging++) {   // MOET 1: een fout na een geslaagde transactie geeft bij de herhaling {ok, al}
+    try { r = await appSbRpc('mk_voor_jou_ja_vrijgeven', { p_sleutel: p.sleutel, p_bewijs: bewijs, p_erbij: erbij }); } catch (e) { logError('app-vj-ja-zelf', e); r = null; }
+  }
+  appStaat.vjCache = null; appStaat.vjWvCache = null; appStaat.wvCache = null;
+  const ok = !!(r && r.ok === true);
+  try {
+    const w = appVragen(), x = w[sl] && w[sl].antwoord;
+    if (x && x.job === merk) { if (ok) x.gestart = true; else w[sl].antwoord = null; appVragenSchrijf(w); }
+  } catch (e) { logError('app-vragen', e); }
+  if (!ok) return { waarom: r ? appEenRegel(String(r.reden || r.fout || 'geweigerd'), 120) : 'databank' };
+  schrijfLog(nu() + ' vj-ja-zelf ' + velden({ kaart: p.sleutel, vraag: hash, uitkomst: 'vrij', rij: r.wv != null ? 'wv' + r.wv : '-', al: r.al ? 1 : 0 }));
+  res._app.reden = 'knop ja ' + hash + ' -> pod gaf ' + (r.wv != null ? 'wv' + r.wv : 'de klus') + ' zelf vrij (geen beurt' + (r.al ? ', herhaling' : '') + ')';
+  appStuur(res, 200, { ok: true, beantwoord: antwoord, vrijgegeven: true });
+  return { klaar: true };
+}
+// ── einde wv4196 ──
 async function appVoorJouKnop(req, res, reg, a, s, d) {
   const id = d.id, keuze = String(d.keuze || '');
   const tekstId = String(d.tekst_id || '');
@@ -14710,6 +14762,13 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
     await knopDb;
     if (res._app) res._app.reden = 'voor-jou knop #' + id + (stopRij ? ' doorbouw-stop ' : ' doorbouw ') + (res._app.reden || '');
     return;
+  }
+  // wv4196 (3C72): een gewone Ja (geen vingerafdruk) op een machinekamerkaart met precies één wachtende klus: de pod geeft die klus zelf vrij,
+  // zonder [KNOP]-beurt. Lukt dat niet (voorwaarde niet meer waar, databank), dan de gewone route hieronder: nooit slechter dan voorheen.
+  if (keuze === 'ja' && !pot && !bs && !aw && !ib && !ov && appVjJaZelfKan(p, k)) {
+    const zelf = await appVjJaZelf(res, a, s, p, k, jobId, hash, inhoudHash, titel);
+    if (zelf.klaar) { res._app.reden = 'voor-jou knop #' + id + ' ' + (res._app.reden || ''); return; }
+    if (zelf.waarom) schrijfLog(nu() + ' vj-ja-zelf ' + velden({ kaart: p.sleutel, vraag: hash, uitkomst: 'beurt', waarom: zelf.waarom }));
   }
   // wv921, wv861 en wv1253 sluiten elkaar uit (pot-vrijgave-N, de sleutel in bundel.json, intake-…); de haak van de een of de ander
   const knopRes = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
