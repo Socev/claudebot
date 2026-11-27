@@ -164,3 +164,21 @@ test('kostteUit puur: indicatie en verschil, geen indicatie = geen verschil', ()
   assert.strictEqual(V.kostteUit(vb, [], [], 900, null).verschil, null);
   assert.strictEqual(V.kostteUit(vb, [], [], 900, null).samen, 1000);
 });
+
+test('review MOET 2: een naam die ergens als twijfel staat, koppelt nergens vanzelf', () => {
+  const md = (r) => '# X\n\n## Betaald\n\n| Aan (zoals in de bank) | Van | Tot |\n|---|---|---|\n' + r + '\n';
+  const vb = [{ titel: 'A 2019', pagina: 'a', datum: '2019-01-01', kosten: [], betaald: V.leesBetaald(md('| Aannemer Proef | 1-1-2019 | 31-12-2019 |')) },
+    { titel: 'B 2020', pagina: 'b', datum: '2020-01-01', kosten: [], betaald: V.leesBetaald(md('| Aannemer Proef | ? | ? |')) }];
+  const k = V.kostteUit(vb, [{ nr: 1, datum: '2019-06-01', bedrag: -100, tegen: 'Aannemer Proef', tekst: '' }], [], null, null);
+  assert.strictEqual(k.verbouwingen[0].betalingen.length, 0);
+  assert.strictEqual(k.niet_gekoppeld.length, 1);
+  assert.match(k.niet_gekoppeld[0].reden, /^twijfel bij B 2020/);
+});
+
+test('review MOET 3: geen IBAN in het kenmerk, ook gespreid of in kleine letters', () => {
+  const vb = [{ titel: 'A 2019', pagina: 'a', datum: '2019-01-01', kosten: [], betaald: V.leesBetaald('# X\n\n## Betaald\n\n| Aan | Van | Tot |\n|---|---|---|\n| Aannemer Proef | 1-1-2019 | 31-12-2019 |\n') }];
+  const tekst = ['naar NL00 TEST 0123 4567 89 factuur 7', 'naar nl00test0123456789 factuur 7', 'Omschrijving: factuur 7 NL00TEST0123456789'];
+  const k = V.kostteUit(vb, tekst.map((x, i) => ({ nr: i + 1, datum: '2019-06-0' + (i + 1), bedrag: -1, tegen: 'Aannemer Proef', tekst: x })), [], null, null);
+  for (const b of k.verbouwingen[0].betalingen) { assert.doesNotMatch(b.kenmerk || '', /0123|test/i, b.kenmerk); assert.match(b.kenmerk || '', /factuur 7/); }
+});
+

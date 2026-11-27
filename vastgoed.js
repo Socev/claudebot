@@ -462,7 +462,7 @@ const rond2 = (x) => Math.round(x * 100) / 100;
 function kenmerkKort(t) {   // factuur- of referentienummer uit de omschrijving; geen IBAN, geen lange betaaldienst-nummers
   let s = String(t || '');
   const om = s.match(/Omschrijving:\s*(.+)$/i); if (om) s = om[1];
-  s = s.replace(/\b[A-Z]{2}\d{2}[A-Z]{4}\d{6,}\b/g, '').replace(/\b(?=[A-Z0-9]*\d)[A-Z0-9]{12,}\b/g, '').replace(/\s+/g, ' ').trim();
+  s = s.replace(/\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,7}(?:\s?[A-Z0-9]{1,3})?\b/gi, '')   // review wv4230 MOET 3: ook gespreid en kleine letters.replace(/\b(?=[A-Z0-9]*\d)[A-Z0-9]{12,}\b/g, '').replace(/\s+/g, ' ').trim();
   return s.slice(0, 40) || null;
 }
 // verbouwingen: [{ titel, pagina, datum, kosten, betaald }] (leesDossierMap); posten: [{ nr, datum, bedrag, tegen, tekst }] uit de privébank (al gefilterd
@@ -487,9 +487,10 @@ function kostteUit(verbouwingen, posten, bouw, aankoop, indicatieWaarde) {
     gezien.add(p.nr);
     const b = { datum: p.datum, bedrag: rond2(-p.bedrag), tegen: String(p.tegen || '').slice(0, 80), kenmerk: kenmerkKort(p.tekst) };
     const raak = per.filter((x, i) => mee[i].betaald && mee[i].betaald.aan.some((a) => a.sleutel === s && p.datum >= a.van && p.datum <= a.tot));
-    if (raak.length === 1) { raak[0].betalingen.push(b); continue; }
-    const twijfel = raak.length ? null : mee.map((v, i) => ({ v, i, a: v.betaald ? v.betaald.zonder_periode.find((x) => x.sleutel === s) : null })).find((x) => x.a);
-    los.push(Object.assign(b, { reden: raak.length > 1 ? 'past in de periode van meer verbouwingen'
+    // review wv4230 MOET 2: staat dezelfde naam ergens als twijfel (zonder periode), dan koppelt hij nergens vanzelf
+    const twijfel = mee.map((v, i) => ({ v, i, a: v.betaald ? v.betaald.zonder_periode.find((x) => x.sleutel === s) : null })).find((x) => x.a) || null;
+    if (raak.length === 1 && !twijfel) { raak[0].betalingen.push(b); continue; }
+    los.push(Object.assign(b, { reden: raak.length > 1 && !twijfel ? 'past in de periode van meer verbouwingen'
       : twijfel ? `twijfel bij ${twijfel.v.titel}${twijfel.a.noot ? ': ' + twijfel.a.noot : ''}`.slice(0, 200) : 'buiten elke periode in de tabel Betaald',
       pagina: twijfel ? twijfel.v.pagina : null }));
   }
@@ -1392,7 +1393,7 @@ function maak(o) {
       let dekking = [];   // vanaf wanneer elke bank in de bank-lezer staat; zonder kolom bron (oud schema) geen dekking, wel betalingen
       try { dekking = db.prepare(`SELECT r.bron AS bron, min(t.datum) AS vanaf ${priv} GROUP BY r.bron ORDER BY vanaf`).all().map((x) => ({ bron: String(x.bron || ''), vanaf: x.vanaf })); } catch (e) { dekking = []; }
       const q = db.prepare(`SELECT t.nr AS nr, t.datum AS datum, t.bedrag AS bedrag, coalesce(t.tegenpartij, '') AS tegen, coalesce(t.omschrijving, '') AS tekst ${priv}
-        AND lower(coalesce(t.tegenpartij, '')) LIKE ? LIMIT 2000`);
+        AND lower(coalesce(t.tegenpartij, '')) LIKE ?`);   // review wv4230 MOET 1: geen LIMIT vóór de exacte naamcontrole
       const gezien = new Set(), posten = [];
       for (const s of sleutels) {
         const woord = s.split(' ').sort((a, b) => b.length - a.length)[0];
