@@ -119,7 +119,54 @@ if (a > 0 && b > a) {
   eis(f({ soort: 'bestand', job: 'bbbbbbbbbbbbbbb2', n: 1 }).status === 404 && f({ soort: 'bestand', job: META.job_id, n: 9 }).status === 404, 'onbekend bestand: 404');
   eis(f({ soort: 'mail', id: 'x' }).status === 400 && f(null).status === 400, 'andere bron: 400');
 }
+// wv4288: mailbijlage en factuur als bron (verzonnen Mail-App; echte facturen.js op een proefdatabank met het verzonnen zaad)
+const c = bron.indexOf('function osintBronBytes'), e = bron.indexOf('async function osintBronLees');
+eis(c > 0 && e > c && c > a, 'server.js kent osintBronMail en osintBronFactuur');
+const vervolg = (async () => {
+  if (!(c > 0 && e > c && a > 0)) return;
+  const g = new Function('fs', 'APP_JOB_RE', 'appBewaardVan', 'appBestandPad', bron.slice(a, b).replace(/function osintBestandUitBron[\s\S]*$/, '') + bron.slice(c, e) + '\nreturn { osintBronMail, osintBronFactuur };')(fs, /^[a-f0-9]{16}$/, () => null, () => null);
+  // Mail: de nep geeft alleen een bijlage die bij het gesprek hoort (zoals mail-app.js bijlage), en telt de aanroepen
+  const vragen = [];
+  const mail = { bijlage: async (x) => { vragen.push(x);
+    if (x.draad === 'aaaaaaaaaa01' && x.bericht === 'bbbbbbbbbb01' && x.naam === 'offerte.pdf') return { status: 200, j: { ok: true, naam: x.naam, type: 'application/pdf', inhoud: Buffer.from('%PDF-proef').toString('base64') } };
+    if (x.naam === 'groot.pdf') return { status: 200, j: { ok: true, naam: x.naam, inhoud: Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64') } };
+    if (x.naam === 'stuk.pdf') throw new Error('luik weg');
+    return { status: 404, j: { ok: false, fout: 'Deze bijlage hoort niet bij dit gesprek' } }; } };
+  let r = await g.osintBronMail({ draad: 'aaaaaaaaaa01', bericht: 'bbbbbbbbbb01', naam: 'offerte.pdf' }, mail);
+  eis(r.ok && r.inhoud.toString() === '%PDF-proef' && r.naam === 'offerte.pdf', 'mailbijlage: inhoud en naam via mail.bijlage');
+  eis(vragen.length === 1 && vragen[0].draad === 'aaaaaaaaaa01' && vragen[0].bericht === 'bbbbbbbbbb01', 'mailbijlage: draad en bericht gaan mee (de Mail-App toetst dat de bijlage erbij hoort)');
+  r = await g.osintBronMail({ draad: 'aaaaaaaaaa01', bericht: 'bbbbbbbbbb02', naam: 'offerte.pdf' }, mail);
+  eis(!r.ok && r.status === 404 && /hoort niet/.test(r.fout), 'bijlage van een ander bericht: 404 van de Mail-App');
+  eis((await g.osintBronMail({ draad: 'aaaaaaaaaa01', bericht: 'bbbbbbbbbb01', naam: 'groot.pdf' }, mail)).status === 413, 'mailbijlage groter dan 10 MB: 413');
+  eis((await g.osintBronMail({ draad: 'aaaaaaaaaa01', bericht: 'bbbbbbbbbb01', naam: 'stuk.pdf' }, mail)).status === 502, 'luik weg: 502');
+  const n0 = vragen.length;
+  eis((await g.osintBronMail({ draad: '../x', bericht: 'bbbbbbbbbb01', naam: 'a.pdf' }, mail)).status === 400 && (await g.osintBronMail({ draad: 'aaaaaaaaaa01', bericht: 'bbbbbbbbbb01', naam: '' }, mail)).status === 400
+    && (await g.osintBronMail({ draad: 'aaaaaaaaaa01', bericht: 'bbbbbbbbbb01', naam: 'x'.repeat(1001) }, mail)).status === 400 && vragen.length === n0, 'vreemde draad of naam: 400 zonder luikvraag');
+  eis((await g.osintBronMail({ draad: 'aaaaaaaaaa01', bericht: 'bbbbbbbbbb01', naam: 'offerte.pdf' }, null)).status === 404, 'geen Mail-App: 404');
+  // Factuur: echte facturen.js (rolcontrole, uurteller, auditrij) op een proefdatabank
+  const ROOT = path.dirname(js);
+  if (!fs.existsSync(path.join(ROOT, 'facturen.js'))) { eis(false, 'facturen.js naast server.js'); return; }
+  const D = require(path.join(ROOT, 'facturen-db.js')), F = require(path.join(ROOT, 'facturen.js')), Z = require(path.join(ROOT, 'test', 'facturen-zaad.js'));
+  const fdb = D.open(path.join(T, 'fdb')); Z.zaai(fdb, { vandaag: '2026-10-22' });
+  const routes = F.maak({ docPerUur: 3, fout: () => {} });
+  const io = { routes, open: () => fdb, primair: () => true, rol: (x) => F.rolVoor(x, { ingang: 'app', wie: 'david (proef) via OSINT' }) };
+  const fa = fdb.db.prepare('SELECT id, document FROM factuur ORDER BY id LIMIT 1').get();
+  const doc = fdb.db.prepare('SELECT naam, sha256 FROM document WHERE id = ?').get(fa.document);
+  const audit = () => Number(fdb.db.prepare("SELECT count(*) AS n FROM audit WHERE wat = 'document_inzage'").get().n);
+  const stand = () => fdb.db.prepare("SELECT group_concat(id || ':' || status || ':' || versie, ',') AS s FROM factuur").get().s;
+  const s0 = stand(), a0 = audit();
+  r = g.osintBronFactuur({ id: fa.id }, io);
+  eis(r.ok && require('crypto').createHash('sha256').update(r.inhoud).digest('hex') === doc.sha256 && r.naam === String(doc.naam).slice(0, 120), 'factuur: het stuk zelf (sha klopt) en de naam, via facturen.js');
+  eis(audit() === a0 + 1, 'factuur: Facturen schrijft zijn auditrij (document_inzage)');
+  eis(g.osintBronFactuur({ id: 'ffffffffffffffff' }, io).status === 404 && g.osintBronFactuur({ id: "x' OR 1=1" }, io).status === 400 && g.osintBronFactuur({}, io).status === 400, 'onbekende of vreemde factuur: 404 / 400');
+  eis(g.osintBronFactuur({ id: fa.id }, Object.assign({}, io, { open: () => null })).status === 503 && g.osintBronFactuur({ id: fa.id }, null).status === 404, 'Facturen dicht: 503; niet in deze pod: 404');
+  eis(g.osintBronFactuur({ id: fa.id }, Object.assign({}, io, { rol: () => null })).status === 403, 'zonder rol geeft Facturen niets');
+  g.osintBronFactuur({ id: fa.id }, io); g.osintBronFactuur({ id: fa.id }, io);
+  eis(g.osintBronFactuur({ id: fa.id }, io).status === 429, 'uurteller van Facturen geldt ook via OSINT');
+  eis(stand() === s0, 'alleen lezen: geen factuur veranderd');
+})().catch((x) => eis(false, 'uitzondering: ' + (x && x.stack || x)));
+eis(/osintBronLees\(d\.bron, a\)/.test(bron), 'POST /app/osint/bestand leest de bron via osintBronLees (mail, factuur, bestand)');
 eis(/\^GET \\\/app\\\/osint\\\/bewaard\\\/\\d\{1,9\}\$/.test(bron), 'route GET /app/osint/bewaard/<id> staat in de verdeler');
-console.log('osint-kort js: ' + fout + ' fout'); process.exit(fout ? 1 : 0);
+vervolg.then(() => { console.log('osint-kort js: ' + fout + ' fout'); process.exit(fout ? 1 : 0); });
 JSEOF
 [ "$F" = 0 ] && echo "osint-kort: groen" || { echo "osint-kort: ROOD"; exit 1; }

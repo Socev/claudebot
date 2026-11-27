@@ -33413,8 +33413,8 @@ async function appOsint(req, res, a, route, d) {
   if (route === 'POST /app/osint/zoek' && ing === 'bestand') return appWeiger(res, 400, 'een bestand gaat via /app/osint/bestand', 'osint bestand route');
   if (route === 'POST /app/osint/bestand' && d && d.bron != null) {
     // wv4156 (2C94 e): een bestand dat al op de pod staat (Bestanden), zonder upload. Alleen lezen; de pod geeft osint.py een kopie in het geheugen.
-    const g = osintBestandUitBron(d.bron);
-    if (!g.ok) return appWeiger(res, g.status, g.fout, 'osint bestand bron');
+    const g = await osintBronLees(d.bron, a);   // wv4288: ook een mailbijlage of een factuur
+    if (!g.ok) return appWeiger(res, g.status, g.fout, 'osint bestand bron ' + String((d.bron && d.bron.soort) || '?').replace(/[^a-z]/g, '').slice(0, 8));
     d = { ingang: 'bestand', bestand: g.inhoud.toString('base64'), naam: g.naam };
   }
   const r = await osintZoekMetSleutels(osintInvoer(d || {}, 'david'));
@@ -33422,7 +33422,8 @@ async function appOsint(req, res, a, route, d) {
   return appStuur(res, r.ok ? 200 : (r.fout === 'lege zoekterm' || r.fout === 'onbekende ingang' ? 400 : 503), r);
 }
 // wv4156 (2C94 e): bron {soort: 'bestand', job, n} = een bestand uit Bestanden (app-bestanden; een verwijzing naar een agentbestand volgt
-// appBestandPad). Hooguit 10 MB, geen koppelingen volgen. Mailbijlage en Facturen volgen in een eigen stap.
+// appBestandPad). Hooguit 10 MB, geen koppelingen volgen. wv4288: ook {soort: 'mail', draad, bericht, naam} en {soort: 'factuur', id}
+// (osintBronMail / osintBronFactuur hieronder).
 const OSINT_BRON_MAX = 10 * 1024 * 1024;
 function osintBestandUitBron(bron) {
   const b = bron && typeof bron === 'object' ? bron : {};
@@ -33445,6 +33446,48 @@ function osintBestandUitBron(bron) {
     return { ok: true, inhoud: inhoud.subarray(0, gelezen), naam: String(x.naam || 'bestand').slice(0, 120) };
   } catch (e) { return { ok: false, status: 404, fout: 'dit bestand staat niet (meer) in Bestanden' }; }
   finally { if (fd !== null) try { fs.closeSync(fd); } catch (e) { /* al dicht */ } }
+}
+// wv4288 (2C94 e, restant): een mailbijlage of een factuur als bron, zonder upload. Beide alleen lezen en via de bestaande routes:
+// mail = mail-app.js bijlage() (leest het gesprek opnieuw, de bijlage moet bij dat bericht horen; het lees-luik mail_bijlage, er wordt niets
+// gelabeld of gearchiveerd); factuur = facturen.js GET document/<id> (rolcontrole, uurteller en auditrij van Facturen; niets in Facturen
+// zelf gebouwd, David Nee op 2C35). De patiëntpoort op de inhoud zit in osint.py (zoek_bestand), zoals bij een eigen upload.
+function osintBronBytes(inhoud, naam) {
+  const buf = Buffer.from(typeof inhoud === 'string' ? inhoud : '', 'base64');
+  if (buf.length > OSINT_BRON_MAX) return { ok: false, status: 413, fout: 'bestand te groot (hooguit 10 MB)' };
+  if (!buf.length) return { ok: false, status: 400, fout: 'leeg bestand' };
+  return { ok: true, inhoud: buf, naam: String(naam || 'bestand').slice(0, 120) };
+}
+async function osintBronMail(b, mail) {
+  if (!mail || typeof mail.bijlage !== 'function') return { ok: false, status: 404, fout: 'De Mail-App zit niet in deze versie van de pod' };
+  const re = /^[0-9a-f]{10,24}$/;
+  if (!re.test(String(b.draad || '')) || !re.test(String(b.bericht || '')) || typeof b.naam !== 'string' || !b.naam || b.naam.length > 1000) return { ok: false, status: 400, fout: 'onbekende bijlage' };
+  let r;
+  try { r = await mail.bijlage({ draad: String(b.draad), bericht: String(b.bericht), naam: b.naam }); } catch (e) { r = null; }
+  if (!r || r.status !== 200 || !r.j || !r.j.ok) return { ok: false, status: r && r.status >= 400 ? r.status : 502, fout: String((r && r.j && r.j.fout) || 'Gmail gaf de bijlage nu niet').slice(0, 160) };
+  return osintBronBytes(r.j.inhoud, b.naam);
+}
+function osintBronFactuur(b, f) {
+  const id = String(b.id || '');
+  if (!/^[0-9a-f]{16}$/.test(id)) return { ok: false, status: 400, fout: 'onbekende factuur' };
+  if (!f || !f.routes || typeof f.routes.app !== 'function') return { ok: false, status: 404, fout: 'Facturen zit niet in deze versie van de pod' };
+  const fdb = f.open();
+  if (!fdb) return { ok: false, status: 503, fout: 'Facturen is nu niet te openen' };
+  let doc = null;
+  try { doc = fdb.db.prepare('SELECT document FROM factuur WHERE id = ?').get(id); } catch (e) { doc = null; }
+  if (!doc || !doc.document) return { ok: false, status: 404, fout: 'deze factuur staat niet (meer) in Facturen' };
+  // de rolcontrole (magFactuur), de uurteller en de auditrij doet facturen.js zelf, net als bij Bekijk in Facturen
+  const r = f.routes.app(fdb, { methode: 'GET', pad: '/app/facturen/document/' + doc.document, d: {}, rol: f.rol(fdb), primair: f.primair() });
+  if (!r || r.status !== 200 || !r.j) return { ok: false, status: r && r.status >= 400 ? r.status : 500, fout: String((r && r.j && r.j.fout) || 'Facturen gaf het stuk niet').slice(0, 160) };
+  return osintBronBytes(r.j.inhoud, r.j.naam);
+}
+async function osintBronLees(bron, a) {
+  const b = bron && typeof bron === 'object' ? bron : {};
+  if (b.soort === 'mail') return osintBronMail(b, typeof mailApp !== 'undefined' ? mailApp : null);
+  if (b.soort === 'factuur') {
+    return osintBronFactuur(b, { routes: typeof facturenRoutes !== 'undefined' ? facturenRoutes : null, open: facturenOpen, primair: function () { return rolPrimair(); },
+      rol: function (fdb) { return facturenRoutes.rolVoor(fdb, { ingang: 'app', wie: 'david (' + String((a && (a.naam || a.id)) || 'app').slice(0, 60) + ') via OSINT' }); } });
+  }
+  return osintBestandUitBron(b);
 }
 async function smalOsint(d, socev) {
   if (!fs.existsSync(OSINT_SCRIPT)) return { status: 404, j: { ok: false, fout: 'OSINT zit niet in deze versie van de pod' } };
