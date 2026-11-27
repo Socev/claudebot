@@ -4819,6 +4819,7 @@ function handleRequest(req, res) {
       doorgeefluik: typeof doorgeefInfo === 'function' ? doorgeefInfo() : { aan: false },   // wv1267: schakelaar en laatste uitkomst (geen inhoud)
       syncthing: typeof syncthingInfo === 'function' ? syncthingInfo() : { aan: false },   // wv1277: Syncthing (schakelaar, poort, map, apparaten, filtertoets; geen inhoud of sleutel)
       zoek_snel: typeof zoekSnelInfo === 'function' ? zoekSnelInfo() : { aan: false },   // wv1252: Zoek snel (module, schakelaar, laatste uitkomst en duur; geen inhoud)
+      voorpost: typeof voorpostInfo === 'function' ? voorpostInfo() : { aan: false },   // wv4199: tellingen, duur, kosten; geen inhoud
       secondbrain: secondbrainInfo(),
       omzet: omzetInfo(),   // wv1854: Download als… (pandoc/chromium aanwezig, huisstijlen, bezig/wachtend, tellers; geen inhoud)
       docs_aanpas: typeof docsAanpasInfo === 'function' ? docsAanpasInfo() : null,   // wv4023 (3C151): Wat moet er anders? (aantallen, eur; nooit tekst)
@@ -8499,7 +8500,8 @@ async function appNaBeurt(jobId) {
     const vraag = appVraagVan(j.app.kanaal, out);
     if (vraag) {
       // gevoelig één keer bepalen en vastleggen (Fable-ontwerpreview wv135 #6); een rij zonder dit veld (ouder) telt als gevoelig
-      try { const v = appVragen(); v[jobId + ':' + vraag.hash] = appVraagRij(vraag, out, j.app.kanaal, new Date().toISOString()); appVragenSchrijf(v); }   // wv4179: + eigen knoppen
+      try { const v = appVragen(); v[jobId + ':' + vraag.hash] = appVraagRij(vraag, out, j.app.kanaal, new Date().toISOString(),
+        j.app.voorpostParkeer ? { voorpost: { bericht: String(j.app.tekst || '').slice(0, 4000), getypt: appKlok(new Date(j.created).toISOString()) } } : undefined); appVragenSchrijf(v); }   // wv4179: + eigen knoppen; wv4199: geparkeerde wedervraag
       catch (e) { logError('app-vragen', e); }
     }
     j.app.vraag = vraag;
@@ -8508,7 +8510,7 @@ async function appNaBeurt(jobId) {
       getypt: new Date(j.created).toISOString(), antwoord_op: j.app.antwoord_op || undefined,   // wv628: typtijd (sorteren) en Antwoord hierop
       apparaat: j.app.apparaat, tekst: j.app.tekst, invoer: (j.app.invoer && j.app.invoer.length) ? j.app.invoer : undefined, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
       vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [],
-      open: j.app.open || undefined, draad: j.app.draad || undefined, fasen: j.fasen || undefined });   // wv1712: alleen het veld; uitgeleverd alleen aan j.app.apparaat (appGeschiedenis); wv3156: draad; wv4180: fasen (alleen tijden)
+      open: j.app.open || undefined, draad: j.app.draad || undefined, fasen: j.fasen || undefined, voorpost: typeof voorpostLogVeld === 'function' ? voorpostLogVeld(j, jobId) : undefined });   // wv4199: eerste reactie (tekst die David zag) + tijden/kosten   // wv1712: alleen het veld; uitgeleverd alleen aan j.app.apparaat (appGeschiedenis); wv3156: draad; wv4180: fasen (alleen tijden)
     j.app.gelogd = goed;
     // wv3156: een antwoord van OVIS NZa wordt (of komt in) een vraagdraad; fail-open, het app-log blijft de bron (lijst() haalt in)
     if (j.app.kanaal === 'ovis-nza' && NZA_VRAGEN) {
@@ -8652,6 +8654,16 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
     const voor = meta.bijStart ? Promise.resolve().then(meta.bijStart).catch(function (e) { logError('app-bij-start', e); return ''; }) : Promise.resolve('');
     return voor.then(function (staart) {
       if (vervalt()) { if (CODE_POD) CODE_POD.codePlekLos(jobId); return; }
+      // wv4199 (3C161): de voorpost stelde binnen de grens een niet-gevoelige wedervraag → die is het antwoord; de grondige start niet (geen sessie,
+      // geen proces). Zelfde afloop als een beurt (appNaBeurt: vragenregister met eigen knoppen, chat_log-rij van Socev, app-log, seintje).
+      if (j.app.voorpostParkeer) {
+        j.app.gestart = true;
+        if (meta.rij) appRijWeg(jobId);
+        j.status = 'done'; j.done_at = Date.now();
+        j.result = { ok: true, output: j.app.voorpostParkeer.tekst, files: [] };
+        try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e) {}
+        return appNaBeurt(jobId).catch(function (e) { logError('app-na-beurt', e); });
+      }
       // wv628 (§ 4.2 1a, review #3): "gestart" in dezelfde tik als de laatste controle: processJob zet running pas na await
       // lessenBlok, en in dat venster mag Haal terug niet meer lukken. Vanaf hier niet meer in rij.json.
       j.app.gestart = true;
@@ -9329,12 +9341,15 @@ async function appBeurt(req, res, reg, a, s, d, opt) {   // opt (wv4129): { conc
       const chatId = APP_KANALEN[kanaal];
       inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
       let jidRef = null;
-      st = appStartBeurt(a, kanaal, promptTekst, { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload, rij: rijAan || undefined,
+      // wv4199 (3C161): voorpost — alleen hoofdkanaal, getypt, zonder bijlage en zonder "Antwoord hierop"; start nu, de grondige wacht in bijStart hooguit VOORPOST.WACHT_MS
+      const vpJob = kanaal === 'hoofd' && typeof voorpostStart === 'function' ? crypto.randomBytes(8).toString('hex') : null;
+      const vpP = vpJob && typeof voorpostStart === 'function' ? voorpostStart(vpJob, tekst, { bijlagen: !!upload, antwoordOp: !!antwOp }) : null;
+      st = appStartBeurt(a, kanaal, promptTekst, { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload, rij: rijAan || undefined, job_id: vpJob || undefined,
         antwoord_op: antwOp ? antwOp.x.job_id : undefined, draad: draad || undefined,   // wv3156
         // wv628 (§ 4.2 1a/1b): rijregel en tussendoor-regel pas bij de start (wat er dan afrondde of binnenkwam)
         bijStart: kanaal === 'machinekamer' ? function () { return appRijStaart(jidRef, kanaal, !!antwOp); }
           : codeIdVanKanaal(kanaal) ? function () { return appRijStaart(jidRef, kanaal, !!antwOp, true); }   // wv3227
-          : chatlogBijStart ? function () { return appHoofdStart(jidRef, inRij || bezigBijOntvangst, chatRijen, ontvangen); }   // wv2965 (met Zoek snel, wv1252)
+          : chatlogBijStart ? function () { return Promise.all([appHoofdStart(jidRef, inRij || bezigBijOntvangst, chatRijen, ontvangen), (vpP && typeof voorpostBijStart === 'function' ? voorpostBijStart(jidRef, vpP, ontvangen) : '')]).then(function (x) { return (x[0] || '') + (x[1] || ''); }); }   // wv2965 (met Zoek snel, wv1252); wv4199 voorpost
           : undefined });
       jidRef = st.job_id || null;
     }
@@ -9547,7 +9562,7 @@ function appUitslag(req, res, reg, a, s, d) {
     return appStuur(res, 200, { ok: true, gevonden: true, klaar: false, status: j.status, kanaal: j.app.kanaal, gestart: j.app.gestart === true,   // wv628: gestart = niet meer terug te halen
       running_ms: (j.progress && j.progress.running_ms) || 0, last_activity_ms: (j.progress && j.progress.last_activity_ms) || 0,
       stappen: typeof beurtStappen !== 'undefined' && beurtStappen && j.progress ? beurtStappen.stappenUitslag(j.progress, Date.now()) : [],   // wv3693: wat Socev nu doet (vaste tabel, geen inhoud)
-      ...appDeelVeld(j) });   // wv3824: de tekst tot nu toe van het lopende tekstblok (platte tekst, zonder half getoonde vraag- of markerregel)
+      ...appDeelVeld(j), ...(typeof voorpostUitslagVeld === 'function' ? voorpostUitslagVeld(id) : {}) });   // wv4199: eerste reactie van de voorpost   // wv3824: de tekst tot nu toe van het lopende tekstblok (platte tekst, zonder half getoonde vraag- of markerregel)
   }
   if (!j.opgehaald) j.opgehaald = Date.now();
   // wv1243 (OVIS M1c, ontwerplijnen § 2.5): het gesprek staat op de laptop vast rechts en haalt het antwoord ook op als David elders typt;
@@ -9663,7 +9678,8 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
     ? '[KNOP] David koos ' + JSON.stringify(eigen.tekst) + ' (een van jouw eigen knoppen) op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + ', vraag-id ' + hash + '. Dit is zijn antwoord op die vraag; het is geen Ja op versturen, agenda, verwijderen of geld: daarvoor stel je een gewone Ja/Nee-vraag. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)'
     : keuze === 'anders'
     ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
-    : '[KNOP] David drukte ' + (keuze === 'nee' ? (kaart && kaart.stop ? 'STOP (knop Stop = Nee)' : 'NEE') : doorbouw ? 'JA, EN BOUW DOOR (knop "' + DOORBOUW_KNOP + '")' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)') + (kaart && kaart.context ? '\n' + kaart.context : '');
+    : '[KNOP] David drukte ' + (keuze === 'nee' ? (kaart && kaart.stop ? 'STOP (knop Stop = Nee)' : 'NEE') : doorbouw ? 'JA, EN BOUW DOOR (knop "' + DOORBOUW_KNOP + '")' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)') + (kaart && kaart.context ? '\n' + kaart.context : '')
+    + (!kaart && rij.voorpost && typeof VOORPOST !== 'undefined' && VOORPOST ? VOORPOST.knopRegel(rij.voorpost, eigen ? eigen.tekst : null) : '');   // wv4199: wedervraag van de voorpost → Davids bericht erbij
   const chatId = APP_KANALEN[rij.kanaal];
   // wv405: loopt er al een beurt in dit gesprek (app of Telegram), dan komt deze erachter; de app toont dan "staat in de rij"
   const inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
@@ -9807,7 +9823,8 @@ async function appGeschiedenis(req, res, reg, a, pad) {
       bestanden: bnamen, bron: bericht ? x.bron || null : undefined, klasse: bericht ? x.klasse || null : undefined, agent_job: bericht ? x.agent_job || null : undefined,
       reactie: reacties && reacties[kanaal + ':' + x.job_id] ? reacties[kanaal + ':' + x.job_id].duim : null,
       agenda: agendaKnoppen[x.job_id] && agendaKnoppen[x.job_id].kanaal === kanaal ? appAgendaVorm(agendaKnoppen[x.job_id], agNu) : undefined,
-      open: x.open && typeof appOpenVoor === 'function' ? appOpenVoor(x.open, x.apparaat, a, false) : undefined };   // wv1712: alleen het typende apparaat, uit de geschiedenis nooit een wissel
+      open: x.open && typeof appOpenVoor === 'function' ? appOpenVoor(x.open, x.apparaat, a, false) : undefined,   // wv1712: alleen het typende apparaat, uit de geschiedenis nooit een wissel
+      voorpost: x.voorpost && x.voorpost.tekst && !x.voorpost.geparkeerd ? { soort: x.voorpost.soort, tekst: x.voorpost.tekst, bronnen: x.voorpost.bronnen || undefined } : undefined };   // wv4199
   });
   // wie de geschiedenis met een afgerond antwoord ophaalt, heeft het gezien (fase 5c, Fable-review wv100 B2)
   if (!appNietGezien(req)) items.forEach(function (x) { if (jobs[x.job_id] && jobs[x.job_id].app && jobs[x.job_id].status === 'done') appGezienDoor(x.job_id, a.id); });   // wv1243
@@ -26481,8 +26498,8 @@ async function harvesterClaude(systeem, prompt, schema, o) {
     HARVESTER_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
     if (tok) env.CLAUDE_CODE_OAUTH_TOKEN = tok;
     const args = ['-p', '--output-format', 'json', '--restricted', '--strict-mcp-config', '--tools', '', '--permission-mode', 'acceptEdits',
-      '--permission-prompts', 'none', '--no-session-persistence', '--model', (o && o.model) || HARVESTER_MODEL, '--effort', (o && ['low', 'medium', 'high'].includes(o.effort)) ? o.effort : 'low', '--system-prompt', systeem,
-      '--json-schema', JSON.stringify(schema)];
+      '--permission-prompts', 'none', '--no-session-persistence', '--model', (o && o.model) || HARVESTER_MODEL, '--effort', (o && ['low', 'medium', 'high'].includes(o.effort)) ? o.effort : 'low', '--system-prompt', systeem];
+    if (schema) args.push('--json-schema', JSON.stringify(schema));   // wv4199: zonder schema één modelstap (voorpost: JSON uit de tekst, zie hieronder)
     if (o && typeof o.maxUsd === 'number' && o.maxUsd > 0 && o.maxUsd <= 5) args.push('--max-budget-usd', String(o.maxUsd));   // wv4012: kostenplafond per aanroep (Ideeënboek)
     let k, uit = '', fout = '';
     try { k = metOomEerst(function () { return spawn(HARVESTER_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); }); }
@@ -33751,6 +33768,106 @@ function zoekSnelStaart() {
     return '\n[Systeem: om ' + appTijdKort(x.t) + ' zocht David zelf via Zoek snel (OVIS-logo in de app) "' + x.vraag + '" en kreeg: "' + x.antwoord + '"' +
       (x.bron ? ' (bron ' + x.bron + ')' : '') + '. Dat staat ook in de geschiedenis van dit gesprek.]';
   }).join('');
+}
+// ── wv4199 (besluitenpagina nr 461 = 3C161 stap 1, David Ja met vingerafdruk 25-11-2026 22:23): de voorpost ──
+// Elk getypt bericht in het gesprek met Socev (hoofdkanaal, zonder bijlage en zonder "Antwoord hierop") krijgt binnen een paar seconden een
+// eerste reactie: het feit uit Zoek snel (met bron), één regel "dit ga ik doen", of meteen een wedervraag met knoppen. Logica en waarom in
+// voorpost.js; ontwerp + Codex-ontwerpreview: /opt/data/mk-scripts/wv4199/. Hier de koppeling:
+// - appBeurt legt het job-id vooraf vast en start voorpostStart (Haiku via harvesterClaude ZONDER --json-schema: geen tools, geen MCP, geen
+//   sessie, lege werkmap; plus Zoek snel als het bericht op een vraag lijkt);
+// - bijStart (voorpostBijStart) wacht hooguit VOORPOST.WACHT_MS na ontvangst: plan/feit → systeemregel voor de grondige (die zegt het als het
+//   niet klopt); een niet-gevoelige wedervraag → j.app.voorpostParkeer: de grondige start niet, de vraag (vorm wv4179) is het antwoord;
+// - /app/uitslag geeft voorpost zolang de beurt loopt (nooit een vraag: die is geparkeerd of verborgen); het app-log bewaart hem bij de beurt;
+// - appKnop zet bij een tik op de geparkeerde vraag Davids bericht erbij (VOORPOST.knopRegel).
+// Uit: bestand /opt/data/voorpost-uit (geen herstart). /health.voorpost: alleen tellingen, duur en kosten.
+const VOORPOST_UIT = process.env.VOORPOST_UIT || '/opt/data/voorpost-uit';
+const VOORPOST = (function () {
+  const p = path.join(__dirname, 'voorpost.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p); } catch (e) { logError('voorpost', e); return null; }
+})();
+const voorpostMod = VOORPOST ? VOORPOST.maak({
+  claude: function (systeem, prompt, schema, o) { return harvesterClaude(systeem, prompt, null, o); },
+  zoek: function (v) { return zoekSnel.zoek(v, {}); } }) : null;
+const voorpostH = {};   // job-id → { t, h } (een uur; voor /app/uitslag en het app-log)
+const voorpostTel = { n: 0, soort: {}, overgeslagen: {}, geparkeerd: 0, verborgen: 0, aan_grondige: 0, ms: [], eerste_ms: [], kosten: 0, fout: 0 };
+function voorpostAan() { return !!voorpostMod && !fs.existsSync(VOORPOST_UIT); }
+function voorpostInfo() {
+  const med = function (a) { if (!a.length) return null; const b = a.slice().sort(function (x, y) { return x - y; }); return b[Math.floor(b.length / 2)]; };
+  return { aan: voorpostAan(), n: voorpostTel.n, soort: voorpostTel.soort, overgeslagen: voorpostTel.overgeslagen, geparkeerd: voorpostTel.geparkeerd,
+    verborgen: voorpostTel.verborgen, aan_grondige: voorpostTel.aan_grondige, fout: voorpostTel.fout, mediaan_ms: med(voorpostTel.ms),
+    mediaan_eerste_ms: med(voorpostTel.eerste_ms), kosten_som: Math.round(voorpostTel.kosten * 10000) / 10000 };
+}
+async function voorpostStart(jobId, tekst, o) {
+  try {
+    if (!voorpostAan()) return null;
+    const mag = VOORPOST.magVoorpost(tekst, o);
+    if (!mag.ok) { voorpostTel.overgeslagen[mag.reden] = (voorpostTel.overgeslagen[mag.reden] || 0) + 1; return null; }
+    const nu = Date.now();
+    Object.keys(voorpostH).forEach(function (k) { if (nu - voorpostH[k].t > 3600000) delete voorpostH[k]; });
+    const metZoek = VOORPOST.lijktVraag(tekst) && typeof zoekSnel !== 'undefined' && !!zoekSnel && typeof zoekSnelAan === 'function' && zoekSnelAan();
+    // Socevs vorige antwoord (staart, voor "doe dat maar"): uit het geheugen van de pod, anders zonder. Geen bestandsleesactie op dit pad.
+    let vorig = '';
+    Object.keys(jobs).forEach(function (id) {
+      const x = jobs[id];
+      if (x.app && x.app.kanaal === 'hoofd' && x.status === 'done' && x.result && x.result.ok !== false && (!vorig || x.done_at > vorig.t)) vorig = { t: x.done_at, tekst: appUitvoer(x) };
+    });
+    const h = voorpostMod.start(appSleutelMasker(tekst), { vorig: vorig ? appSleutelMasker(String(vorig.tekst).slice(-600)) : '', metZoek: metZoek });
+    voorpostH[jobId] = { t: nu, h: h };
+    voorpostTel.n++;
+    let eerste = false;
+    const tik = setInterval(function () { if (!eerste && h.huidig()) { eerste = true; voorpostTel.eerste_ms.push(Date.now() - nu); if (voorpostTel.eerste_ms.length > 50) voorpostTel.eerste_ms.shift(); } }, 200);
+    if (tik.unref) tik.unref();
+    h.klaar.then(function (vp) {
+      clearInterval(tik);
+      if (!eerste && vp) { voorpostTel.eerste_ms.push(Date.now() - nu); if (voorpostTel.eerste_ms.length > 50) voorpostTel.eerste_ms.shift(); }
+      const m = h.meting();
+      voorpostTel.soort[m.uitkomst] = (voorpostTel.soort[m.uitkomst] || 0) + 1;
+      voorpostTel.ms.push(m.ms); if (voorpostTel.ms.length > 50) voorpostTel.ms.shift();
+      if (typeof m.kosten === 'number') voorpostTel.kosten += m.kosten;
+      if (m.model_fout) voorpostTel.fout++;
+    }, function (e) { clearInterval(tik); logError('voorpost', e); });
+    return h;
+  } catch (e) { logError('voorpost', e); return null; }
+}
+async function voorpostBijStart(jobId, vpP, ontvangen) {
+  if (!vpP) return '';
+  try {
+    const h = await vpP;
+    if (!h) return '';
+    const t0 = Number(ontvangen) || Date.now();
+    const vp = await h.wacht(t0 + VOORPOST.WACHT_MS);
+    const j = jobs[jobId];
+    if (!vp || !j || !j.app) return '';
+    if (vp.soort === 'vraag') {
+      // Alleen parkeren als de vraag in de app echt eigen knoppen krijgt (zelfde toetsen als appVraagRij): niet gevoelig en geldige KNOPPEN-regel.
+      const pt = VOORPOST.parkeerTekst(vp);
+      if (appGevoelig(vp.tekst + '\n' + vp.knoppen.join('\n')) || !appVraagKnoppen(pt)) { j.app.voorpostVerborgen = 'gevoelig of knoppen'; voorpostTel.verborgen++; return ''; }
+      j.app.voorpostParkeer = { tekst: pt };
+      voorpostTel.geparkeerd++;
+      return '';
+    }
+    j.app.voorpostGezien = true;
+    voorpostTel.aan_grondige++;
+    return VOORPOST.grondigRegel(vp, Math.max(1, Math.round((Date.now() - t0) / 1000)));
+  } catch (e) { logError('voorpost', e); return ''; }
+}
+function voorpostBronnen(vp) {
+  return vp && Array.isArray(vp.bronnen) && vp.bronnen.length ? vp.bronnen.map(function (b) { return { pad: b.pad, naam: b.naam, nr: b.nr || undefined, link: b.link || undefined, app: b.app || undefined }; }) : undefined;
+}
+function voorpostUitslagVeld(id) {
+  const e = voorpostH[id], vp = e && e.h.huidig();
+  if (!vp || vp.soort === 'vraag') return {};
+  return { voorpost: { soort: vp.soort, tekst: vp.tekst, bronnen: voorpostBronnen(vp) } };
+}
+function voorpostLogVeld(j, id) {
+  const e = voorpostH[id];
+  if (!e) return undefined;
+  const vp = e.h.huidig(), m = e.h.meting();
+  const toon = vp && vp.soort !== 'vraag';
+  return { soort: vp ? vp.soort : 'niets', tekst: toon ? vp.tekst : undefined, bronnen: toon ? voorpostBronnen(vp) : undefined, geparkeerd: !!j.app.voorpostParkeer || undefined,
+    aan_grondige: !!j.app.voorpostGezien || undefined, verborgen: j.app.voorpostVerborgen || undefined,
+    ms: m.ms, model_ms: m.model_ms, zoek_ms: m.zoek_ms, kosten: m.kosten, tools: 0, model_fout: m.model_fout || undefined };
 }
 async function zoekSnelVoer(a, id, vraag, toonDekking, opt) {
   const t0 = Date.now();
