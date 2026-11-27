@@ -369,6 +369,8 @@ jobs:
           TOETS_NU=2027-01-10T10:00:00Z t test/financien-overzicht.sh   # B14: ook na het laatste tariefjaar (geen indicatie, wel de zin; A1 in ontbreekt)
           t test/tarieven-wachter.sh   # B14: vier weken voor de tarieven aflopen precies één werkvoorraadrij; fout één keer in de box
           t test/release-lijst.sh   # wv3483: elk bestand dat server.js uit zijn map laadt staat in de releaselijsten (tarieven-wachter.js ontbrak)
+          node --test test/release-lijst-modules.test.js || { echo "::error::test/release-lijst-modules.test.js rood"; rood=1; }   # wv4254: ook modules van meegerolde modules
+          t test/uitrol-modulepoort.sh   # wv4254: uitrol.sh weigert een release met een geladen eigen module buiten de releaselijst
           t test/hartslag-alarm.sh   # wv3484: verlopen hartslag (drempel > 0, niet op de Stiltewachter-watchlist) precies één box-rij, herstel één regel, herstart stil
           t test/nza-wachter-klok.sh   # wv3483: NZa-wachter start ondanks de OVIS-tik op dezelfde 5 min (kruisproef oude voorwaarde 0 starts)
           t test/financien-bijsturen.sh   # wv2700: Financiën › Uitgaven "Zelf bij te sturen" (boodschappen, uit eten, stroom, streaming, abonnementen)

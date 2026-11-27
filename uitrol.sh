@@ -8,6 +8,7 @@
 #           UITROL_DROOG=1 (niet omzetten, voor toetsen), UITROL_MARKER=<pad> (standaard /opt/data/uitrol-wacht),
 #           UITROL_NACONTROLE=0 (geen echt-nacontrole), UITROL_NACONTROLE_MAX=<s> (standaard 90), UITROL_BOX=<pad>
 #           UITROL_DATAKAART=0 (datakaart-poort uit, nood), UITROL_DATAKAART_PAD=<pad>, UITROL_POORT_ALLEEN=1 (stop na de poort, toets)
+#           UITROL_MODULEPOORT=0 (modulepoort in stap 2 uit, nood; wv4254)
 #           exit 1 = mislukt, ook als de nacontrole terugzette (wv358), en als de nieuwe versie niet binnen UITROL_NACONTROLE_MAX op
 #           /health verschijnt (wv3418: terugflip, halve stand, geen supervisor) - dan geen "klaar"
 #           Schrijft bij elke omzetting $APP_ROOT/gewenst ({sha,tijd,door,reden}): de bedoelde versie; server.js toont hem op /health
@@ -209,6 +210,29 @@ RELEASE_OPTIONEEL="geheimen.js vj-moment.js lees-of-weiger.js homey.js nmbrs-dat
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }
 
+# Box-rij in de machinekamer (nacontrole stap 3/4b en de modulepoort in stap 2; wv4254: naar boven gehaald).
+BOX="${UITROL_BOX:-/opt/data/AI_SecondBrain/00_Systeem/Meldingen/machinekamer.md}"
+box_rij(){ [ -f "$BOX" ] || { log "LET OP: box $BOX bestaat niet - geen rij geschreven"; return 0; }
+  python3 -I -B - "$BOX" "$1" "$2" "$3" "$4" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd):$BRON_REPO:/opt/data/mk-scripts/veilig" <<'PYBOX' || log "LET OP: kon geen rij in de box schrijven"
+import sys, datetime
+p, titel, zag, status, kost, hier = sys.argv[1:7]
+# wv900: de box staat in de vault, schrijfbaar voor socev; een vaste tijdelijke naam (vroeger .machinekamer.md.uitrol.tmp)
+# volgde een symlink die socev daar zette. Nu vault_veilig.wijzig: getoetste mapdescriptor, eigen tmp met O_EXCL, rename, flock.
+sys.path[:0] = hier.split(':')   # naast dit script, dan de werkboom (BRON_REPO), dan de kopie in mk-scripts (Fable wv900 #5)
+import vault_veilig
+nu = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+rij = ('\n## [log] %s — %s\n- status: %s\n- van: uitrol.sh (nacontrole wv358)\n- wat ik zag: %s\n'
+       '- wat het David kost als het blijft liggen: %s\n'
+       '- voorstel: oorzaak zoeken in /opt/data/bin/uitrol.log, supervisor.log en de release; niet opnieuw uitrollen voor het verklaard is.\n') % (nu, titel, status, zag, kost)
+def erin(s):
+    i = s.find('**Formaat**')
+    if i < 0: sys.exit(1)
+    j = s.index('\n', i) + 1
+    return s[:j] + rij + s[j:]
+vault_veilig.wijzig(p, erin)
+PYBOX
+}
+
 REF="${1:-}"
 [ -n "$REF" ] || fout "geen git-sha of branch meegegeven"
 
@@ -335,6 +359,33 @@ else
   [ -s "$TMP/server.js" ] || fout "server.js is leeg in commit $KORT"
   node --check "$TMP/server.js" || fout "server.js van $KORT komt de syntaxcontrole niet door"
   MIST="$(ontbrekend "$TMP")"; [ -z "$MIST" ] || fout "release $KORT mist na het bouwen ${MIST% } - niet klaargezet"
+  # wv4254 (27-11-2026): modulepoort. Een eigen module die een releasebestand laadt (require('./x'), path.join(__dirname, 'x.js|mjs|json|py'))
+  # en die wel in de commit staat maar niet in de release, laat dat onderdeel live stil uitvallen (Cannot find module): 5x gebeurd, laatst
+  # storing-gevolg.js (wv4120, 26-11: storingsdienst ruim 3 uur uit). test/release-lijst.sh vangt het, maar draaide nergens verplicht.
+  # Dit is het vangnet op de gebouwde release zelf (de poort vooraf zit in mk-scripts/uitrol-na-agents.sh): weigeren, box-rij, exit 1.
+  # Alleen bovenste .js/.mjs; browser-mcp.js komt uit het image. Nood: UITROL_MODULEPOORT=0.
+  if [ "${UITROL_MODULEPOORT:-1}" = "0" ]; then log "modulepoort UIT (UITROL_MODULEPOORT=0)"
+  else
+    MODMIST="$(git -C "$BRON_REPO" ls-tree --name-only "$SHA" 2>/dev/null | python3 -I -c 'import os,re,sys
+d=sys.argv[1]; incommit=set(sys.stdin.read().split()); mist={}
+R=[re.compile(r"path\.join\(\s*__dirname\s*,\s*'"'"'([^'"'"'/]+\.(?:js|mjs|json|py))'"'"'\s*\)"), re.compile(r"require\(\s*'"'"'\./([^'"'"'/]+?)'"'"'\s*\)")]
+for f in sorted(os.listdir(d)):
+  if not f.endswith((".js",".mjs")) or not os.path.isfile(os.path.join(d,f)): continue
+  t=open(os.path.join(d,f),encoding="utf-8",errors="ignore").read()
+  for r in R:
+    for n in r.findall(t):
+      if not os.path.splitext(n)[1]: n+=".js"
+      if n in incommit and n!="browser-mcp.js" and not os.path.exists(os.path.join(d,n)): mist.setdefault(n,set()).add(f)
+print(" ".join("%s (uit %s)"%(n,",".join(sorted(v))) for n,v in sorted(mist.items())))' "$TMP")" || fout "modulepoort faalde zelf (python) - niet klaargezet"
+    if [ -n "$MODMIST" ]; then
+      rm -rf "$TMP"
+      box_rij "Uitrol $KORT geweigerd: module buiten de releaselijst" \
+        "uitrol.sh modulepoort (wv4254): $MODMIST staat in commit $KORT en wordt geladen, maar staat niet in RELEASE_BESTANDEN/RELEASE_OPTIONEEL/RELEASE_MAPPEN. Niet klaargezet, er draait niets anders dan voorheen." \
+        "open" "zijn wijziging komt niet live tot de naam in de lijst staat (regel in RELEASE_OPTIONEEL + nieuwe commit + aanmelden)"
+      fout "modulepoort: $MODMIST niet in de releaselijst van $KORT - niet klaargezet"
+    fi
+    log "modulepoort: groen"
+  fi
   if [ -d "$DOEL" ]; then   # wv3464: onvolledige oude bouw vervangen (niet de draaiende, zie 1a); kort gat in de naam, nooit half
     mv -T "$DOEL" "$DOEL.onvolledig.$$" || fout "kon de onvolledige release $KORT niet opzij zetten"
     mv -T "$TMP" "$DOEL" || fout "kon de nieuwe bouw van $KORT niet neerzetten (de oude staat in $DOEL.onvolledig.$$)"
@@ -405,33 +456,12 @@ except Exception: print(0)' 2>/dev/null || echo 0)"
 [ "${TUN:-0}" != "0" ] && log "LET OP: ${TUN} gesprek(ken) met het spraakkastje lopen; die breken af bij de herstart"
 
 # Hulpstukken voor de nacontrole (stap 3 en 4b).
-BOX="${UITROL_BOX:-/opt/data/AI_SecondBrain/00_Systeem/Meldingen/machinekamer.md}"
 health_veld(){ curl -s -m 5 "http://127.0.0.1:${PORT:-8080}/health" | python3 -c 'import json,sys
 try:
   j=json.load(sys.stdin); s=j.get("server") or {}; a=j.get("app") or {}
   e=[x.get("echt") for x in (s,a) if isinstance(x,dict) and "echt" in x]
   print(str(j.get("versie","")) + " " + ("nee" if False in e else ("ja" if True in e else "onbekend")))
 except Exception: print("- onbekend")' 2>/dev/null || echo "- onbekend"; }
-box_rij(){ [ -f "$BOX" ] || { log "LET OP: box $BOX bestaat niet - geen rij geschreven"; return 0; }
-  python3 -I -B - "$BOX" "$1" "$2" "$3" "$4" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd):$BRON_REPO:/opt/data/mk-scripts/veilig" <<'PYBOX' || log "LET OP: kon geen rij in de box schrijven"
-import sys, datetime
-p, titel, zag, status, kost, hier = sys.argv[1:7]
-# wv900: de box staat in de vault, schrijfbaar voor socev; een vaste tijdelijke naam (vroeger .machinekamer.md.uitrol.tmp)
-# volgde een symlink die socev daar zette. Nu vault_veilig.wijzig: getoetste mapdescriptor, eigen tmp met O_EXCL, rename, flock.
-sys.path[:0] = hier.split(':')   # naast dit script, dan de werkboom (BRON_REPO), dan de kopie in mk-scripts (Fable wv900 #5)
-import vault_veilig
-nu = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-rij = ('\n## [log] %s — %s\n- status: %s\n- van: uitrol.sh (nacontrole wv358)\n- wat ik zag: %s\n'
-       '- wat het David kost als het blijft liggen: %s\n'
-       '- voorstel: oorzaak zoeken in /opt/data/bin/uitrol.log, supervisor.log en de release; niet opnieuw uitrollen voor het verklaard is.\n') % (nu, titel, status, zag, kost)
-def erin(s):
-    i = s.find('**Formaat**')
-    if i < 0: sys.exit(1)
-    j = s.index('\n', i) + 1
-    return s[:j] + rij + s[j:]
-vault_veilig.wijzig(p, erin)
-PYBOX
-}
 NC_MAX="${UITROL_NACONTROLE_MAX:-90}"
 # wv3418 (B39): de bedoelde versie vastleggen. Atomisch (tmp + mv); mislukt het, dan een LET OP en door (de uitrol zelf is niet kapot).
 GEWENST="$APP_ROOT/gewenst"
