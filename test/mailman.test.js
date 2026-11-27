@@ -3143,7 +3143,7 @@ test('wv2469 zouWeg aangescherpt: betaal- en termijnwoorden, bank/overheid/loon/
 });
 test('wv2968 zouWeg aangescherpt na proefweek 2: verificatie, storing, budget/proefperiode, onderhoud, aanvraag, locatie, FW/RE, persoon, beleggen/gemeente', () => {
   const b = { laag: 'weg', reden: 'nieuwsbrief', onderwerp: 'Nieuws van november', afzender: 'nieuws@vereniging.invalid' };
-  assert.equal(K.VANZELF_VERSIE, 3);
+  assert.ok(K.VANZELF_VERSIE >= 3);
   ['Verify your email address', 'Bevestig je e-mailadres', '[Nas] Opslagpool 1 is beschadigd', 'Volume degraded', 'Your project is running out of Disk IO Budget',
     'Notification for free trial', 'Je proefperiode stopt bijna', 'Important Notice: Scheduled System Maintenance', 'Gepland onderhoud zaterdag', 'Bevestiging aanvraag [123]',
     'Je deelt je realtime locatie met iemand', 'Iemand just messaged you', 'FW: Nieuwsbrief november', 'Re: je vraag', 'Antw: offerte', 'Je hebt opgezegd', 'Backup failure on server', 'Server is down']
@@ -3159,6 +3159,23 @@ test('wv2968 zouWeg aangescherpt na proefweek 2: verificatie, storing, budget/pr
   assert.equal(K.persoonAdres('j.verzonnen@bedrijf.invalid'), true);
   assert.equal(K.persoonAdres('noreply@bedrijf.invalid'), false);
   assert.equal(K.persoonAdres('support.api@bedrijf.invalid'), false);
+});
+test('wv3318 zouWeg aangescherpt na proefweek 3: storing/hersteld, mislukt, wijziging met datum, export, tegoed, kosten, kenteken, berichten van mensen; geldoverboeking, school-app', () => {
+  const b = { laag: 'weg', reden: 'nieuwsbrief', onderwerp: 'Nieuws van november', afzender: 'nieuws@vereniging.invalid' };
+  assert.equal(K.VANZELF_VERSIE, 4);
+  ['The app is up and running', 'Service update from Dienst', 'Alles is weer bereikbaar', 'Storing opgelost', 'David, je content is niet gepost', 'Je bericht is afgewezen',
+    'Changes to Workers version history starting December 8, 2026', 'Belangrijke updates in Apps', 'Wijziging in onze voorwaarden', 'Nieuwe tarieven per 1 januari',
+    'Je gegevens zijn geëxporteerd', 'Klaar om te downloaden', 'Je giftcard € 20 voor je volgende aankoop', 'Je hebt 1500 punten behaald', 'Hogere afvalkosten op komst',
+    'Klopt je kenteken nog?', 'Jan’s messages to De Groep are waiting', 'Iemand mentioned you in a comment']
+    .forEach(function (o) { assert.equal(K.zouWeg(Object.assign({}, b, { onderwerp: o })), null, o); });
+  ['no-reply@mail.taptapsend.com', 'info@worldremit.com', 'noreply@parro.com', 'messaging-digest-noreply@linkedin.com']
+    .forEach(function (a) { assert.equal(K.zouWeg(Object.assign({}, b, { afzender: a })), null, a); });
+  // gewone nieuwsbrieven, bezorg- en bestelmeldingen en uitnodigingen blijven kandidaat
+  [['Je pakket is bezorgd (JV123)', 'noreply@bezorger.invalid'], ['We staan vandaag voor de deur tussen 12.00 - 16.00 uur', 'noreply@bezorger.invalid'],
+    ['Black Friday: tot 50% korting', 'nieuwsbrief@winkel.invalid'], ['I want to connect', 'invitations@linkedin.com'], ['Network backup voltooid', 'sns@nasmelding.invalid'],
+    ['Bestelling bevestigd', 'no-reply@eten.invalid'], ['Bericht van de school', 'info@thing.invalid'], ['Changelog oktober', 'support.api@dienst.invalid'],
+    ['Weekly activity report', 'familysafety@dienst.invalid']]
+    .forEach(function (x) { assert.equal(K.zouWeg(Object.assign({}, b, { onderwerp: x[0], afzender: x[1] })), 'nieuwsbrief', x[0]); });
 });
 test('wv2455 zaakregister: zou_weg in de schaduw, Nooit per afzender, gemist en zelf, jij_open, voorwerkBron zonder tekst; Gmail onveranderd', () => {
   const { mm, dir, gm, fouten } = b8Kamer();
