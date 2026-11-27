@@ -15933,7 +15933,53 @@ function appVipPer(rijen) {
   });
   return per;
 }
-function appHeden(jaar, vipRijen, pmaRijen, reeksPer, bronnen) {
+// wv4217 (besluitenpagina nr 929 = L29, David Ja 25-11-2026): zelfde dagen per groep verrichtingen — PMA (aantal regels en bedrag t/m de dag van
+// de VIP-export) naast VIP (aantal en toegezegd in die export), met het verschil. Groep = de indeling van PMA (Codes indelen), ook voor de
+// VIP-codes (zelfde code = zelfde groep); een code die PMA niet kent krijgt de groep uit de VIP-categorie. Bedragen in centen opgeteld, pas
+// in de weergave gerond: het totaal is dus precies de som van de oude zin. Alleen code, naam en tellingen per praktijk.
+const APP_VIP_CAT_GROEP = { ion: 'inschrijving', module: 'module', consult: 'consult', mi: 'mi', materiaal: 'materiaal' };
+function appHedenGroepen(knipCodes, vipCodes, indeling) {
+  if (!Array.isArray(knipCodes) || !indeling || !indeling.codes || !Array.isArray(indeling.groepen)) return null;
+  const per = {};
+  const rij = function (code, naam, groep) {
+    return per[code] || (per[code] = { code: code, naam: naam, groep: groep, pma_n: 0, pma_c: 0, vip_n: 0, vip_c: 0, in_pma: false, in_vip: false });
+  };
+  knipCodes.forEach(function (x) {
+    if (!x || !appIsGetal(x.n) || !appIsGetal(x.cent)) return;
+    const r = rij(String(x.code), String(x.naam || x.code || 'zonder code'), String(x.groep || 'nog-in-te-delen'));
+    r.pma_n += x.n; r.pma_c += x.cent; r.in_pma = true;
+  });
+  (vipCodes || []).forEach(function (x) {
+    if (!appIsGetal(x.toegezegd)) return;
+    const n = appIsGetal(Number(x.aantal)) ? Number(x.aantal) : 0;
+    if (!n && !x.toegezegd) return;   // regel zonder aantal en zonder bedrag: niets te tonen
+    const code = String(x.code == null ? '' : x.code), i = indeling.codes[code];
+    const r = rij(code, i ? i.naam : appKort(String(x.oms || code || 'zonder code'), 60), i ? i.groep : (APP_VIP_CAT_GROEP[String(x.cat)] || 'overig'));
+    r.vip_n += n; r.vip_c += Math.round(x.toegezegd * 100); r.in_vip = true;
+  });
+  const alleen = function (r) { return r.in_pma && r.in_vip ? null : r.in_pma ? 'pma' : 'vip'; };
+  const uitRij = function (r) {
+    return { pma_n: r.in_pma ? r.pma_n : null, pma: r.in_pma ? appEuro(r.pma_c) : null, vip_n: r.in_vip ? r.vip_n : null, vip: r.in_vip ? appEuro(r.vip_c) : null,
+      verschil_n: r.in_pma && r.in_vip ? r.pma_n - r.vip_n : null, verschil: r.in_pma && r.in_vip ? appEuro(r.pma_c - r.vip_c) : null, alleen: alleen(r) };
+  };
+  const volgorde = indeling.groepen.map(function (g) { return g.id; });
+  const namen = {}; indeling.groepen.forEach(function (g) { namen[g.id] = g.naam; });
+  const groepen = {};
+  Object.keys(per).forEach(function (c) {
+    const r = per[c], g = groepen[r.groep] || (groepen[r.groep] = { groep: r.groep, pma_n: 0, pma_c: 0, vip_n: 0, vip_c: 0, in_pma: false, in_vip: false, codes: [] });
+    g.pma_n += r.pma_n; g.pma_c += r.pma_c; g.vip_n += r.vip_n; g.vip_c += r.vip_c; g.in_pma = g.in_pma || r.in_pma; g.in_vip = g.in_vip || r.in_vip;
+    g.codes.push(Object.assign({ code: r.code, naam: r.naam }, uitRij(r)));
+  });
+  const plek = function (g) { const i = volgorde.indexOf(g); return i < 0 ? volgorde.length : i; };
+  const lijst = Object.keys(groepen).sort(function (a, b) { return plek(a) - plek(b) || (a < b ? -1 : 1); }).map(function (k) {
+    const g = groepen[k];
+    g.codes.sort(function (a, b) { return a.code < b.code ? -1 : a.code > b.code ? 1 : 0; });
+    return Object.assign({ groep: k, naam: namen[k] || k }, uitRij(g), { codes: g.codes });
+  });
+  const t = lijst.reduce(function (s, k) { const g = groepen[k.groep]; s.pc += g.pma_c; s.vc += g.vip_c; return s; }, { pc: 0, vc: 0 });
+  return { groepen: lijst, totaal: { pma: appEuro(t.pc), vip: appEuro(t.vc), verschil: appEuro(t.pc - t.vc) } };
+}
+function appHeden(jaar, vipRijen, pmaRijen, reeksPer, bronnen, indeling) {
   const vip = appVipPer(vipRijen), pma = {};
   (pmaRijen || []).forEach(function (r) { if (r && r.code) pma[r.code] = r; });
   const praktijken = APP_HEDEN_CODES.map(function (code) {
@@ -15953,6 +15999,11 @@ function appHeden(jaar, vipRijen, pmaRijen, reeksPer, bronnen) {
       uit.vergelijk = { tot: v.tot, soort: 'berekend', pma_inschrijf: pi, vip_inschrijf: appRondEuro(v.inschrijf), pct_inschrijf: appPct(pi, v.inschrijf),
         pma_verricht: pv, vip_verricht: appRondEuro(v.verricht), pct_verricht: appPct(pv, v.verricht),
         bron: 'berekend: PMA 1-1 t/m ' + appDagMaand(v.tot) + ' naast de VIP-export t/m dezelfde dag (inschrijfgeld + modules = VIP-categorieën inschrijving en module)' };
+      // wv4217: per groep verrichtingen (mislukt = alleen de zin)
+      try {
+        const pg = appHedenGroepen(p.knip.codes, (vipRijen || []).filter(function (x) { return x.entiteit === code && Number(x.jaar) === jaar && String(x.tot) === v.tot; }), indeling);
+        if (pg && pg.groepen.length) { uit.vergelijk.groepen = pg.groepen; uit.vergelijk.totaal = pg.totaal; }
+      } catch (e) { logError('app-praktijken', new Error('heden per groep faalde')); }
     }
     const o = reeksPer[code] && reeksPer[code].omzet_totaal && reeksPer[code].omzet_totaal[jaar - 1];
     if (o) uit.vorig = { jaar: jaar - 1, omzet: appRondEuro(o.w), soort: 'werkelijk', bron: appBronTekst(o.bron, bronnen) };
@@ -16303,9 +16354,10 @@ async function appPraktijkenVerzamel() {
   const ht = APP_HEDEN_CODES.map(function (c) { return "'" + c + "'"; }).join(',');
   const prog = Object.keys(APP_PROGNOSE);
   const extra = await Promise.all([
-    appFinSql("SELECT d.entiteit, d.jaar, d.periode_tot AS tot, COALESCE(p.categorie, 'onbekend') AS cat, SUM(d.toegezegd) AS toegezegd FROM declaratie d LEFT JOIN prestatie p ON p.code = d.code"
+    // wv4217: per code (aantal erbij) voor de tabel per groep; appVipPer telt de codes weer op per categorie
+    appFinSql("SELECT d.entiteit, d.jaar, d.periode_tot AS tot, d.code, COALESCE(p.categorie, 'onbekend') AS cat, SUM(d.aantal) AS aantal, SUM(d.toegezegd) AS toegezegd FROM declaratie d LEFT JOIN prestatie p ON p.code = d.code"
       + " JOIN (SELECT entiteit, jaar, MAX(periode_tot) AS m FROM declaratie WHERE verzekeraar='totaal' AND entiteit IN (" + ht + ") GROUP BY entiteit, jaar) x"
-      + " ON x.entiteit = d.entiteit AND x.jaar = d.jaar AND x.m = d.periode_tot WHERE d.verzekeraar='totaal' GROUP BY d.entiteit, d.jaar, d.periode_tot, cat")
+      + " ON x.entiteit = d.entiteit AND x.jaar = d.jaar AND x.m = d.periode_tot WHERE d.verzekeraar='totaal' GROUP BY d.entiteit, d.jaar, d.periode_tot, d.code, cat")
       .catch(function (e) { logError('app-praktijken', e); return null; }),
     prog.length ? Promise.all([
       appFinSql("SELECT id, model, reeks_versie, gedraaid_op, werkelijk_tm FROM model_run WHERE model IN (" + prog.map(function (c) { return "'" + APP_PROGNOSE[c] + "'"; }).join(',') + ')'),
@@ -16327,12 +16379,13 @@ async function appPraktijkenVerzamel() {
       .catch(function (e) { logError('app-praktijken', e); return null; }),
   ]);
   const jaarNu = appJaarNu();
-  let pmaRijen = null;
+  let pmaRijen = null, pmaIndeling = null;
   try {
     if (typeof pmaApp !== 'undefined' && pmaApp && typeof pmaApp.jaarBedragen === 'function') {
       const knip = {};
       (extra[0] || []).forEach(function (x) { if (Number(x.jaar) === jaarNu && /^\d{4}-\d{2}-\d{2}$/.test(String(x.tot))) knip[x.entiteit] = String(x.tot); });
       pmaRijen = pmaApp.jaarBedragen(jaarNu, knip);
+      if (typeof pmaApp.indeling === 'function') { try { pmaIndeling = pmaApp.indeling(); } catch (e) { pmaIndeling = null; } }   // wv4217; zonder = alleen de zin
     }
   } catch (e) { logError('app-praktijken', new Error('pma jaarbedragen faalde')); pmaRijen = null; }   // geen inhoud in de log
   const zd = {};
@@ -16368,7 +16421,7 @@ async function appPraktijkenVerzamel() {
     if (def.pohggz && extra[2]) { const pp = appPotPrognose(extra[2]); if (pp) uit.prognose = pp; }   // wv3098
     return uit;
   });
-  const heden = appHeden(jaarNu, extra[0], pmaRijen, reeksPer, f.bronnen);
+  const heden = appHeden(jaarNu, extra[0], pmaRijen, reeksPer, f.bronnen, pmaIndeling);
   if (!extra[0]) heden.praktijken.forEach(function (p) { p.vip_fout = true; });
   const patPer = {};
   APP_HEDEN_CODES.forEach(function (c) { patPer[c] = appPatJaren(APP_PRAKTIJKEN.find(function (d) { return d.code === c; }), f); });

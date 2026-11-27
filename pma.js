@@ -1344,10 +1344,32 @@ function maak(o) {
         if (kd && kd >= j1 && kd <= tot && !missen.some((q) => q <= kd)) {   // alleen binnen de dekking en met elk kwartaal inschrijfgeld t/m die dag (review MOET 1): anders is de vergelijking niet eerlijk
           const ins = r.kwartalen.filter((q) => q <= kd).reduce((s, q) => s + (r.maanden.find((m) => m.maand === q.slice(0, 7)) || { inschrijf_cent: 0 }).inschrijf_cent, 0);
           const ver = db.prepare("SELECT COALESCE(SUM(tarief_cent), 0) AS c FROM regel WHERE praktijk = ? AND type = 'V' AND dag >= ? AND dag <= ?").get(p, j1, kd).c;
-          r.knip = { tot: kd, inschrijf_cent: ins, verricht_cent: ver };
+          r.knip = { tot: kd, inschrijf_cent: ins, verricht_cent: ver, codes: knipCodes(db, p, j1, kd, r.kwartalen.filter((q) => q <= kd)) };
         }
       }
       return uit;
+    }, false);
+  }
+  // wv4217 (L29): dezelfde sommen als de knip, per code (aantal regels en bedrag; verrichtingen type V t/m die dag, inschrijfgeld + modules van de
+  // kwartalen t/m die dag). Alleen code, naam, groep en tellingen: nooit een patiënt of registreerder. Som over de codes = knip-bedragen.
+  function knipCodes(db, p, j1, kd, kwartalen) {
+    const kaart = codeKaart(db), per = new Map();
+    const zet = (code, n, c) => {
+      const k = code == null || code === '' ? '' : String(code);
+      if (!per.has(k)) { const i = kaart.get(k); per.set(k, { code: k, naam: i ? i.naam : (k || 'zonder code'), groep: i ? i.groep : 'nog-in-te-delen', n: 0, cent: 0 }); }
+      const x = per.get(k); x.n += n; x.cent += c;
+    };
+    for (const x of db.prepare("SELECT code, COUNT(*) AS n, COALESCE(SUM(tarief_cent), 0) AS c FROM regel WHERE praktijk = ? AND type = 'V' AND dag >= ? AND dag <= ? GROUP BY code").all(p, j1, kd)) zet(x.code, x.n, x.c);
+    const q = db.prepare('SELECT code, COUNT(*) AS n, COALESCE(SUM(tarief_cent), 0) AS c FROM inschrijf WHERE praktijk = ? AND peildatum = ? GROUP BY code');
+    for (const d of kwartalen) for (const x of q.all(p, d)) zet(x.code, x.n, x.c);
+    return [...per.values()].sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+  }
+  // wv4217: de indeling van codes in groepen (zoals Codes indelen), voor codes die alleen in de VIP-export staan; volgorde en namen van de groepen
+  function indeling() {
+    return metDb((db) => {
+      const codes = {};
+      for (const [c, i] of codeKaart(db)) codes[c] = { groep: i.groep, naam: i.naam };
+      return { codes, groepen: GROEPEN.map((g) => ({ id: g, naam: GROEP_NAAM[g] })) };
     }, false);
   }
   function herbouw(praktijk) {
@@ -1357,7 +1379,7 @@ function maak(o) {
       return n;
     }, true);
   }
-  return { app, info, herbouw, jaarBedragen, chatControleer, _plan: plan, _pseudo: pseudo };   // wv4212: chatControleer
+  return { app, info, herbouw, jaarBedragen, indeling, chatControleer, _plan: plan, _pseudo: pseudo };   // wv4212: chatControleer
 }
 
 module.exports = { isoWeek, ROLGROEP, maak, leesZip, splitsCsv, leesExport, LeesFout, GROEPEN, CODES_START, PRAKTIJKEN, ROLLEN, werkdagenVan, ontleedNaam, lijkt, rolUit, feestdagen, nmbrsDagenEcht };

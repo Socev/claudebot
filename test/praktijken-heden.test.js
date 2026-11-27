@@ -28,6 +28,7 @@ function fin(sql, o) {
     { entiteit: 'GH', peildatum: JAAR + '-01-01', aantal: 4100, bron_id: 11 }]);
   if (/FROM bron/.test(sql)) return Promise.resolve([{ id: 1, titel: 'Jaarrekening ' + (JAAR - 1) + ' Proef TG' }, { id: 2, titel: 'Jaarrekening ' + (JAAR - 2) + ' Proef TG' },
     { id: 3, titel: 'Jaarrekening ' + (JAAR - 1) + ' Proef GH' }, { id: 10, titel: 'VIP proef', periode_tot: (JAAR - 1) + '-12-31' }, { id: 11, titel: 'VIP proef lopend', periode_tot: JAAR + '-03-31' }]);
+  if (o.vipRijen && /COALESCE\(p\.categorie/.test(sql)) return Promise.resolve(o.vipRijen);   // wv4217: per code
   if (/COALESCE\(p\.categorie/.test(sql)) return Promise.resolve([
     { entiteit: 'TG', jaar: JAAR, tot: JAAR + '-01-31', cat: 'ion', toegezegd: 500 }, { entiteit: 'TG', jaar: JAAR, tot: JAAR + '-01-31', cat: 'module', toegezegd: 100 },
     { entiteit: 'TG', jaar: JAAR, tot: JAAR + '-01-31', cat: 'consult', toegezegd: 200 }, { entiteit: 'TG', jaar: JAAR, tot: JAAR + '-01-31', cat: 'mi', toegezegd: 50 },
@@ -104,7 +105,7 @@ test('pma.jaarBedragen: alleen aaneengesloten dekking vanaf 1 januari, inschrijf
   assert.strictEqual(m.jaarBedragen(JAAR, { TG: JAAR + '-06-30' })[0].knip, null, 'knip na de dekking = geen vergelijking');
   const t = JSON.stringify(r);
   for (const x of A.regels.concat(B.regels)) assert.ok(!new RegExp('(^|[^0-9])' + x.pnr + '([^0-9]|$)').test(t), 'geen patiëntnummer');
-  assert.ok(!/Proefsen|Verzonnen|Testmans/.test(t), 'geen registreerder');
+  for (const n of M.REG.concat(['Z. Proefhouder'])) assert.ok(!t.includes(n), 'geen registreerder');   // wv4217: codenamen mogen 'Verzonnen' heten
   assert.throws(() => m.jaarBedragen('2026; DROP'), /jaar/);
 });
 
@@ -151,6 +152,70 @@ test('heden: PMA naast VIP lopend jaar (laatste export), vergelijking over dezel
   assert.ok(/nooit opgeteld/.test(d.heden.uitleg));
   assert.ok(!Object.keys(tg).some((x) => /som|totaal_samen/.test(x)), 'geen opgeteld veld');
   assert.ok(!d.fouten.some((f) => /PMA|VIP|model|subsidie/.test(f)), JSON.stringify(d.fouten));
+});
+
+// wv4217 (L29): per groep verrichtingen, PMA naast VIP over dezelfde dagen. Alle getallen verzonnen en hieronder met de hand nagerekend.
+test('heden per groep: handgerekend — PMA-indeling ook voor VIP-codes, alleen in PMA/VIP, verschil in aantal en euro, totaal in centen', () => {
+  const c = laad({ pmaApp: null });
+  vm.runInContext('this.pg = appHedenGroepen;', c);
+  const indeling = P.maak({ map: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pma-ind-')), 'pma') }).indeling();
+  const knip = [{ code: '11115', naam: 'Inschrijving', groep: 'inschrijving', n: 5, cent: 10000 }, { code: '12011', naam: 'Consult', groep: 'consult', n: 10, cent: 14000 },
+    { code: '12820', naam: 'Informatieverstrekking', groep: 'overig', n: 3, cent: 5070 }];
+  const vip = [{ code: '11115', cat: 'ion', aantal: 5, toegezegd: 100 }, { code: '12011', cat: 'consult', aantal: 8, toegezegd: 112 },
+    { code: '12501', cat: 'consult', aantal: 0, toegezegd: 67.6 },     // militair: alleen in VIP, aantal 0 maar wel een bedrag
+    { code: '12850', cat: 'consult', aantal: 2, toegezegd: 250.5 },    // VIP noemt het consult, PMA deelt het in bij M&I: PMA-indeling wint
+    { code: '99999', cat: 'mi', aantal: 1, toegezegd: 10 },            // code die PMA niet kent: groep uit de VIP-categorie
+    { code: '12100', cat: 'onbekend', aantal: 0, toegezegd: 0 }];      // niets: niet tonen
+  const r = j(c.pg(knip, vip, indeling));
+  assert.deepStrictEqual(r.groepen.map((g) => g.groep), ['inschrijving', 'consult', 'mi', 'overig'], 'volgorde van de PMA-groepen');
+  const g = (id) => r.groepen.find((x) => x.groep === id);
+  const kort = (x) => [x.pma_n, x.pma, x.vip_n, x.vip, x.verschil_n, x.verschil, x.alleen];
+  assert.deepStrictEqual(kort(g('inschrijving')), [5, 100, 5, 100, 0, 0, null]);
+  assert.deepStrictEqual(kort(g('consult')), [10, 140, 8, 180, 2, -40, null], '112 + 67,60 = 179,60; 140 − 179,60 = −39,60');
+  assert.deepStrictEqual(kort(g('mi')), [null, null, 3, 261, null, null, 'vip'], '250,50 + 10 = 260,50');
+  assert.deepStrictEqual(kort(g('overig')), [3, 51, null, null, null, null, 'pma'], '50,70; 12100 zonder aantal en bedrag weg');
+  assert.deepStrictEqual(g('consult').codes.map((x) => [x.code, x.alleen]), [['12011', null], ['12501', 'vip']]);
+  assert.strictEqual(g('consult').codes[1].naam, indeling.codes['12501'].naam, 'naam uit de PMA-indeling');
+  assert.deepStrictEqual(g('mi').codes.map((x) => x.code), ['12850', '99999']);
+  assert.deepStrictEqual(r.totaal, { pma: 291, vip: 540, verschil: -249 }, '290,70 / 540,10 / −249,40');
+  assert.strictEqual(c.pg(null, vip, indeling), null, 'zonder PMA-codes geen tabel');
+  assert.strictEqual(c.pg(knip, vip, null), null, 'zonder indeling geen tabel');
+});
+
+test('heden per groep in de route: tabeltotaal = de twee totalen van de zin; codes van PMA tellen op tot de knip; geen patiënt of naam', async () => {
+  const A = naarJaar(M.exportA()), B = naarJaar(M.exportB());
+  const { m } = pmaMet([A, B]);
+  const t = JAAR + '-01-31';
+  const vipRijen = [{ entiteit: 'TG', jaar: JAAR, tot: t, code: '11115', cat: 'ion', aantal: 2, toegezegd: 40 }, { entiteit: 'TG', jaar: JAAR, tot: t, code: '13050', cat: 'module', aantal: 2, toegezegd: 4 },
+    { entiteit: 'TG', jaar: JAAR, tot: t, code: '12011', cat: 'consult', aantal: 3, toegezegd: 42 }, { entiteit: 'TG', jaar: JAAR, tot: t, code: '13005', cat: 'mi', aantal: 1, toegezegd: 50.4 },
+    { entiteit: 'TG', jaar: JAAR - 1, tot: (JAAR - 1) + '-12-31', code: '12011', cat: 'consult', aantal: 999, toegezegd: 99999 },   // ander jaar telt niet
+    { entiteit: 'GH', jaar: JAAR, tot: t, code: '12011', cat: 'consult', aantal: 7, toegezegd: 98 }];                                // andere praktijk telt niet
+  const d = j(await laad({ pmaApp: m, vipRijen }).v());
+  const tg = d.heden.praktijken.find((p) => p.code === 'TG'), v = tg.vergelijk;
+  assert.ok(v && Array.isArray(v.groepen) && v.groepen.length, 'tabel per groep');
+  const k = m.jaarBedragen(JAAR, { TG: t })[0].knip;
+  assert.strictEqual(k.codes.reduce((s, x) => s + x.cent, 0), k.inschrijf_cent + k.verricht_cent, 'codes = knip in centen');
+  assert.strictEqual(v.totaal.pma, Math.round((k.inschrijf_cent + k.verricht_cent) / 100));
+  assert.ok(Math.abs(v.totaal.pma - (v.pma_inschrijf + v.pma_verricht)) <= 1, 'PMA-totaal = zin (± afronding)');
+  assert.strictEqual(v.totaal.vip, v.vip_inschrijf + v.vip_verricht, 'VIP-totaal = zin');
+  assert.strictEqual(v.totaal.vip, Math.round(40 + 4 + 42 + 50.4));
+  assert.strictEqual(v.groepen.reduce((s, g) => s + (g.vip_n || 0), 0), 8, 'alleen TG, dit jaar, deze export');
+  const consult = v.groepen.find((g) => g.groep === 'consult');
+  assert.strictEqual(consult.pma_n, k.codes.filter((x) => x.groep === 'consult').reduce((s, x) => s + x.n, 0));
+  assert.strictEqual(consult.vip_n, 3);
+  const s = JSON.stringify(d.heden);
+  for (const x of A.regels.concat(B.regels)) assert.ok(!new RegExp('(^|[^0-9])' + x.pnr + '([^0-9]|$)').test(s), 'geen patiëntnummer');
+  for (const n of M.REG.concat(['Z. Proefhouder'])) assert.ok(!s.includes(n), 'geen registreerder');
+  assert.strictEqual(d.heden.praktijken.find((p) => p.code === 'GH').vergelijk, null);
+});
+
+test('heden per groep: een pod-module zonder indeling (oud) = alleen de zin, geen fout', async () => {
+  const { m } = pmaMet([naarJaar(M.exportA()), naarJaar(M.exportB())]);
+  const oud = { jaarBedragen: m.jaarBedragen };
+  const d = j(await laad({ pmaApp: oud }).v());
+  const v = d.heden.praktijken.find((p) => p.code === 'TG').vergelijk;
+  assert.ok(v && v.pma_verricht >= 0 && !v.groepen && !v.totaal);
+  assert.ok(!d.fouten.some((f) => /PMA/.test(f)), JSON.stringify(d.fouten));
 });
 
 test('toekomst: GH laatste modelrun, drie scenario\'s gestippeld naast werkelijk; TG geen model', async () => {
