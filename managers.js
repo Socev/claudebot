@@ -13,11 +13,17 @@
 // wordt een grens zodra de loper het hoofdkanaal als socev draait. De echte sluiting (skill en scripts van de manager uit de release
 // in plaats van de vault) staat als vervolgrij in de werkvoorraad. De machinekamer (API_SECRET) start direct.
 // Geen kaart, bundel, registerrij of werkvoorraadrij op afroep (staat in de prompt en de skills).
+// wv4128 (besluitenpagina nr 74 = C64, David Ja 25-11-2026 met vingerafdruk): op afroep alleen nog door de machinekamer (API_SECRET,
+// "draai de CISO-ronde"). De knop Nu draaien in de app (POST /app/managers/ronde) en Socevs route met Davids Ja-knop zijn weg; start()
+// weigert david en socev met 403. Oude afroepen in staat.json blijven leesbaar (DOOR).
+// wv4128 (nr 329 = 3C29): een gemiste ronde in gewone taal (gemistZin; n8n schrijft dezelfde zin, de pod onthoudt hem uit het bericht
+// voor de kaart bij "te laat"). wv4128 (nr 436 = 3C136): het rapport van een ronde = zijn box-rij ("- van: wachter:<x> (ronde …)");
+// rapporten() leest de vijf nieuwste uit de box en het boxarchief (alleen lezen).
 // Logica hier, de koppeling (routes, jobs, bericht, RPC) in server.js. Geen netwerk, geen sleutels in dit bestand.
 const fs = require('fs');
 const path = require('path');
 
-const UUR = 3600000, DAG = 24 * UUR, KNOP_MS = 15 * 60000;
+const UUR = 3600000, DAG = 24 * UUR;
 const VOOR_WEEKRONDE_MS = 90 * 60000;
 const PER_MANAGER_24U = 3, TOTAAL_24U = 6;
 const REDENEN = { 'david-vroeg': 'David vroeg erom', 'na-bouwstap': 'na een bouwstap', controle: 'controle' };
@@ -25,23 +31,23 @@ const DOOR = { david: 'door jou', socev: 'door Socev', machinekamer: 'door de ma
 
 // Het register (de naam-whitelist). Een nieuwe manager = één regel hier (+ test/managers.sh). rooster: dag 0 = zondag, tijd Europe/Amsterdam (de n8n-trigger).
 const MANAGERS = [
-  { id: 'data', naam: 'Data Manager', skill: 'data-manager', sessie: 'data-manager', model: 'claude-sonnet-5-5', hartslag: 'data_manager', patroon: '^DM[0-9]', onderhoud: ['DM9', 'DM10'],
+  { id: 'data', naam: 'Data Manager', skill: 'data-manager', sessie: 'data-manager', model: 'claude-sonnet-5-5', hartslag: 'data_manager', patroon: '^DM[0-9]', onderhoud: ['DM9', 'DM10'], boxVan: ['data-manager'],
     bewaakt: 'Waar al je gegevens staan (databanken, pod, Drive, vault) en of elke plek een backup en een eigenaar heeft.',
     rooster: { dag: 0, uur: 9, min: 30 }, slot: 'DATA-MANAGER', slotRe: /^DATA-MANAGER \d{4}-\d{2}-\d{2}: [1-9]\d* bronnen gemeten/,
     slotFormaat: 'DATA-MANAGER <JJJJ-MM-DD>: <n> bronnen gemeten, <m> niet vast te stellen, <N> open (<k> nieuw), kaart geen' },
   // wv4116 (besluit nr 71 / C61, David 25-11-2026): Design en UI Manager zijn één ronde met twee delen (vorm DS, gebruik UI), om de week
   // op zaterdag 10:00 vanaf 28-11-2026 (de n8n-IF in AI - Design Manager kiest dezelfde weken); AI - UI Manager staat uit. Afroep = beide delen.
-  { id: 'design', naam: 'Design Manager', skill: 'design-manager', sessie: 'design-manager', model: 'claude-sonnet-5-5', hartslag: 'design_manager', patroon: '^DS[0-9]', delen: ['ui'],
+  { id: 'design', naam: 'Design Manager', skill: 'design-manager', sessie: 'design-manager', model: 'claude-sonnet-5-5', hartslag: 'design_manager', patroon: '^DS[0-9]', delen: ['ui'], boxVan: ['design-manager', 'ui-manager'],
     bewaakt: 'Om de week, in één ronde: of alle apps één vormgeving houden (Socev-blauw, de bouwdoos, een logische indeling) en hoe je de app echt gebruikt (waar je vastloopt, wat traag is of niets doet).',
     rooster: { dag: 6, uur: 10, min: 0, omDeWeekVanaf: '2026-11-28' }, slot: 'DESIGN-MANAGER', slotRe: /^DESIGN-MANAGER \d{4}-\d{2}-\d{2}: \d+ checks/,
     slotFormaat: 'DESIGN-MANAGER <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open (<k> nieuw), kaart geen, wv geen' },
-  { id: 'ciso', naam: 'CISO', skill: 'ciso', sessie: 'ciso', model: 'claude-opus-5-5', hartslag: 'ciso', patroon: '^C[0-9]',
+  { id: 'ciso', naam: 'CISO', skill: 'ciso', sessie: 'ciso', model: 'claude-opus-5-5', hartslag: 'ciso', patroon: '^C[0-9]', boxVan: ['ciso'],
     bewaakt: 'De beveiliging: sleutels, toegang, versies en wat er van buitenaf bereikbaar is.',
     rooster: { dag: 1, uur: 6, min: 0 }, slot: 'CISO', slotRe: /^CISO \d{4}-\d{2}-\d{2}: \d+ checks/,
     slotFormaat: 'CISO <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open (<k> nieuw), bundel <id of geen>' },
   // wv2430 MrLean (wo 10:00, Sonnet; David 4-11-2026): meet wat controles, vragen, vingerafdrukken en regels kosten en opleveren en
   // legt voorstellen voor (Voor jou-kaarten); schrapt nooit zelf. Ontwerp: 01_Ontwikkeling/MrLean - de lean-manager (ontwerp 4-11-2026).md
-  { id: 'mrlean', naam: 'MrLean', skill: 'mrlean', sessie: 'mrlean', model: 'claude-sonnet-5-5', hartslag: 'mrlean', patroon: '^ML[0-9]',
+  { id: 'mrlean', naam: 'MrLean', skill: 'mrlean', sessie: 'mrlean', model: 'claude-sonnet-5-5', hartslag: 'mrlean', patroon: '^ML[0-9]', boxVan: ['mrlean'],
     bewaakt: 'Of alles lean blijft: controles, nacontroles, vragen aan jou, vingerafdrukken en regels die niets opleveren.',
     rooster: { dag: 3, uur: 10, min: 0 }, slot: 'MRLEAN', slotRe: /^MRLEAN \d{4}-\d{2}-\d{2}: \d+ checks/,
     slotFormaat: 'MRLEAN <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <k> kandidaten, voorstellen <v>, kaarten geen' },
@@ -137,9 +143,64 @@ function volgendeWeekronde(m, t) {
   }
   return null;
 }
+// laatste geplande ronde vóór (of op) t
+function vorigeWeekronde(m, t) {
+  const x = amsDelen(t);
+  for (let i = 0; i <= 14; i++) {
+    const dag = new Date(Date.UTC(x.j, x.m - 1, x.d - i));
+    if (!m.rooster.dagelijks && dag.getUTCDay() !== m.rooster.dag) continue;
+    if (!m.rooster.dagelijks && !rondeWeek(m, dag)) continue;
+    const ms = amsNaarMs(dag.getUTCFullYear(), dag.getUTCMonth() + 1, dag.getUTCDate(), m.rooster.uur, m.rooster.min);
+    if (ms <= t) return ms;
+  }
+  return null;
+}
 const DAGNAMEN = ['zondag', 'maandag', 'dinsdag', 'woensdag', 'donderdag', 'vrijdag', 'zaterdag'];
-// De vaste vraagzin voor Socev (skills § Op afroep); alleen een Ja op precies deze zin geeft een ronde vrij (Fable diffreview #3).
-function vraagZin(m) { return 'Zal ik de ' + m.naam + ' nu een ronde laten draaien?'; }
+function dagDatum(t) { const x = amsDelen(t); return DAGNAMEN[x.wd] + ' ' + x.d + '-' + x.m; }
+
+// ── wv4128 (3C29): een gemiste ronde in gewone taal ──
+// Vaste redenen; n8n (Toets antwoord, Voortgang, Startfout in de vier managerworkflows) schrijft dezelfde zinnen.
+const GEMIST_REDEN = {
+  poort: 'de controle vooraf zag een wijziging in zijn instructies, dus hij startte niet; Socev haalt hem in zodra dat weer klopt',
+  onbekend: 'de reden is niet vastgelegd; de machinekamer zoekt het uit',
+};
+function gemistZin(m, tGepland, reden, nu) {
+  const v = volgendeWeekronde(m, Math.max(nu, tGepland) + 60000);
+  return m.naam + ' heeft ' + DAGNAMEN[amsDelen(tGepland).wd] + ' niet gedraaid: ' + (GEMIST_REDEN[reden] || String(reden || GEMIST_REDEN.onbekend)) +
+    '; volgende ronde ' + (v ? dagDatum(v) : 'onbekend') + '; je hoeft niets te doen.';
+}
+// De zin terugvinden in een bericht (n8n Meld fout → /bericht, kanaal machinekamer): {id, zin} of null
+const GEMIST_RE = /^(Data Manager|Design Manager|CISO|MrLean|Bibliothecaris) heeft (zondag|maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|vannacht) niet gedraaid: [^\n]{3,400}?; volgende ronde [^;\n]{3,40}; je hoeft niets te doen\./;
+function gemistUitTekst(tekst) {
+  const x = GEMIST_RE.exec(String(tekst || '').trim());
+  if (!x) return null;
+  const m = MANAGERS.find(function (y) { return y.naam === x[1]; });
+  return m ? { id: m.id, zin: x[0] } : null;
+}
+function managerLink(m) { return '/?app=managers&manager=' + m.id; }
+
+// ── wv4128 (3C136): rapporten = box-rijen van een ronde ──
+// teksten: inhoud van de box en de archiefmaanden (nieuwste eerst maakt niet uit; er wordt op datum gesorteerd). Een rij hoort bij m als
+// hij een regel "- van: wachter:<boxVan> (ronde <JJJJ-MM-DD>…)" heeft. Max n, nieuwste eerst; tekst hooguit 20000 tekens.
+const RAPPORT_MAX = 20000;
+function rapporten(teksten, m, n) {
+  if (!m || !m.boxVan) return [];
+  const uit = [], gezien = {};
+  (teksten || []).forEach(function (s) {
+    String(s || '').split(/^(?=## )/m).forEach(function (rij) {
+      if (rij.slice(0, 3) !== '## ') return;
+      const v = /^- van: wachter:([a-z-]+) \(ronde (\d{4}-\d{2}-\d{2})([^)\n]*)\)/m.exec(rij);
+      if (!v || m.boxVan.indexOf(v[1]) < 0) return;
+      const kop = rij.split('\n')[0].replace(/^## (\[[a-z]+\] )?/, '').replace(/(\s+#[\w-]+)+\s*$/, '').trim();
+      const sl = v[1] + ' ' + v[2] + v[3];
+      if (gezien[sl]) return;   // dezelfde rij in box én archief (archiefstap halverwege)
+      gezien[sl] = true;
+      const body = rij.split('\n').slice(1).join('\n').replace(/\s+$/, '');
+      uit.push({ datum: v[2], wie: v[1], titel: kop.slice(0, 200), tekst: body.length > RAPPORT_MAX ? body.slice(0, RAPPORT_MAX) + '\n…' : body });
+    });
+  });
+  return uit.sort(function (a, b) { return b.datum.localeCompare(a.datum) || b.titel.localeCompare(a.titel); }).slice(0, n || 5);
+}
 function roosterTekst(m) { return (m.rooster.dagelijks ? 'elke nacht' : (m.rooster.omDeWeekVanaf ? 'om de week op ' : 'elke ') + DAGNAMEN[m.rooster.dag]) + ' ' + String(m.rooster.uur).padStart(2, '0') + ':' + String(m.rooster.min).padStart(2, '0'); }
 
 // ── de prompt (vast; alleen naam en wie) ──
@@ -233,35 +294,20 @@ function maak(o) {
     let tekst;
     if (goed) tekst = kop(m, a) + ' is klaar.\n\n' + (rr.regels.length ? rr.regels.join('\n') + '\n\n' : '') + 'Telling: ' + rr.telling;
     else tekst = kop(m, a) + ' is niet goed afgerond (' + String((r && r.error) || 'onverwacht slot' ).slice(0, 160) + '). Job ' + a.job_id + '; de machinekamer kijkt het na.';
-    return bericht(m, a, tekst);
+    return bericht(m, a, tekst + '\n\n[Bekijk bij ' + (m.id === 'ciso' ? 'de CISO' : m.naam) + '](' + managerLink(m) + ')');   // wv4128 (3C136)
   }
-  // Socev: Davids Ja (app-knop, hoofdkanaal) op precies de vaste vraagzin; ≤ 15 min; niet eerder gebruikt (de pod kiest de nieuwste
-  // ongebruikte Ja met dat vraag-id: dezelfde zin op een andere dag heeft hetzelfde id).
-  async function davidZeiJa(m, vraagId) {
-    if (!/^[a-f0-9]{8}$/.test(String(vraagId || ''))) return 'Socev start een manager alleen na Davids Ja: zet eerst de vraag (VRAAG AAN DAVID: Zal ik de ' + m.naam + ' nu een ronde laten draaien?) en geef daarna het vraag-id van zijn Ja mee';
-    let b;
-    try { b = await o.knopJa(String(vraagId), lees().gebruikt || []); } catch (e) { b = { ok: false, fout: 'vragenregister onleesbaar' }; }
-    if (!b || !b.ok) return (b && b.fout) || 'geen Ja van David gevonden';
-    if (!(nu() - b.t <= KNOP_MS)) return 'Davids Ja is ouder dan 15 minuten; vraag het opnieuw';
-    if (String(b.tekst || '').trim().toLowerCase() !== vraagZin(m).toLowerCase()) return 'Davids Ja hoort bij een andere vraag; de vraag moet precies zijn: VRAAG AAN DAVID: ' + vraagZin(m);
-    if ((lees().gebruikt || []).indexOf(b.sleutel) >= 0) return 'die Ja is al gebruikt voor een ronde';
-    return { sleutel: b.sleutel };
-  }
-  async function start(id, door, reden, vraagId) {
+  async function start(id, door, reden) {
     const m = PER_ID[String(id || '')];
     if (!m) return { status: 404, j: { ok: false, fout: 'onbekende manager' } };
     if (!DOOR[door]) return { status: 400, j: { ok: false, fout: 'onbekende aanroeper' } };
-    const rd = reden == null || reden === '' ? (door === 'david' ? 'david-vroeg' : 'controle') : String(reden);
+    // wv4128 (C64): op afroep alleen nog door de machinekamer
+    if (door !== 'machinekamer') return { status: 403, j: { ok: false, fout: 'een ronde op afroep loopt alleen nog via de machinekamer; vraag daar "draai de ' + m.naam + '-ronde"' } };
+    const rd = reden == null || reden === '' ? 'controle' : String(reden);
     if (!REDENEN[rd]) return { status: 400, j: { ok: false, fout: 'reden is een van: ' + Object.keys(REDENEN).join(', ') } };
     const k = kan(m, door);
     if (!k.ok) return { status: k.status, j: { ok: false, fout: k.fout, weer_om: k.weer_om ? new Date(k.weer_om).toISOString() : undefined } };
     bezig[m.id] = true;
     try {
-      let ja = null;
-      if (door === 'socev') {
-        ja = await davidZeiJa(m, vraagId);
-        if (typeof ja === 'string') return { status: 403, j: { ok: false, fout: ja } };
-      }
       let v;
       if (m.soort === 'script') v = { mag: true };   // geen taalmodel, dus geen weekquotum
       else try { v = await o.vangnet(); } catch (e) { v = { mag: false, reden: 'quotum niet te meten' }; }
@@ -278,11 +324,20 @@ function maak(o) {
       }
       const a = { id: m.id, t: t, door: door, reden: rd, job_id: run.job_id, uitkomst: null };
       const s = lees(); s.afroepen.push(a);
-      if (ja) s.gebruikt = (s.gebruikt || []).concat([ja.sleutel]).slice(-100);
       try { schrijf(s); } catch (e) { o.fout('manager-staat', e); }
       Promise.resolve(run.klaar).then(function (r) { return naRun(m, a, r); }, function (e) { o.fout('manager-run', e); return naRun(m, a, { ok: false, error: 'pod-fout' }); });
       return { status: 202, j: { ok: true, manager: m.id, naam: m.naam, job_id: run.job_id, rapport: 'machinekamer' } };
     } finally { delete bezig[m.id]; }
+  }
+  // wv4128 (3C29): de zin van een gemiste ronde onthouden (uit het bericht van n8n) voor de kaart bij "te laat"
+  function noteerGemist(tekst) {
+    const g = gemistUitTekst(tekst);
+    if (!g) return false;
+    const s = lees();
+    s.gemist = Object.assign({}, s.gemist || {});
+    s.gemist[g.id] = { t: nu(), zin: g.zin };
+    try { schrijf(s); } catch (e) { o.fout('manager-staat', e); return false; }
+    return true;
   }
   // Na een herstart: afroepen zonder uitkomst zijn afgebroken (jobs leven alleen in het geheugen). David/Socev krijgen één regel.
   function opstart() {
@@ -311,7 +366,13 @@ function maak(o) {
       const hl = h && h.laatste_ronde ? Date.parse(h.laatste_ronde) : 0;
       let hst = 'onbekend';
       if (d) hst = !hl ? 'nog nooit' : (h.drempel_min && t - hl > h.drempel_min * 60000 ? 'te laat' : 'op tijd');
-      const k = lj ? { loopt: true } : kan(m, 'david');
+      // wv4128 (3C29): bij "te laat" één gewone zin: de onthouden zin als die na de laatst geplande ronde kwam, anders "niet vastgelegd"
+      let gemist = null;
+      if (hst === 'te laat') {
+        const vr = vorigeWeekronde(m, t);
+        const g = s.gemist && s.gemist[m.id];
+        gemist = g && vr && g.t >= vr - 5 * 60000 ? g.zin : gemistZin(m, vr || t, 'onbekend', t);
+      }
       let bev = null;
       if (d) {
         const punt = function (b) {
@@ -337,14 +398,14 @@ function maak(o) {
         laatste_ronde: (function () { const x = Math.max(hl, laatsteGoed); return x ? new Date(x).toISOString() : null; })(),
         lopend: lj ? { sinds: new Date(lj.created || t).toISOString(), afroep: !!(la && la.job_id === lj.id) } : null,
         laatste_afroep: la ? { t: new Date(la.t).toISOString(), door: la.door, uitkomst: la.uitkomst } : null,
-        kan: !!k.ok, waarom_niet: k.ok ? null : (k.loopt ? 'loopt nu' : k.fout), weer_om: k.weer_om ? new Date(k.weer_om).toISOString() : null,
+        gemist: gemist, rapport: !!m.boxVan, link: managerLink(m),
         bevindingen: bev };
     });
   }
   function health() {
     return { aan: true, managers: MANAGERS.map(function (m) { return m.id; }), lopend: MANAGERS.filter(function (m) { return !!lopendJob(m); }).map(function (m) { return m.id; }) };
   }
-  return { start: start, stand: stand, opstart: opstart, health: health, kan: function (id, door) { const m = PER_ID[id]; return m ? kan(m, door) : { status: 404, fout: 'onbekende manager' }; } };
+  return { start: start, stand: stand, opstart: opstart, health: health, noteerGemist: noteerGemist, kan: function (id, door) { const m = PER_ID[id]; return m ? kan(m, door) : { status: 404, fout: 'onbekende manager' }; } };
 }
 
 // Wat de RPC mk_managers_stand per manager nodig heeft (geen vrije invoer: alleen deze vaste lijst).
@@ -356,5 +417,6 @@ function rpcInvoer() {
   });
 }
 
-module.exports = { maak: maak, MANAGERS: MANAGERS, DELEN: DELEN, samenvoegen: samenvoegen, ONDERHOUD_ZIN: ONDERHOUD_ZIN, vraagZin: vraagZin, REDENEN: REDENEN, prompt: prompt, rapportRegels: rapportRegels, kort: kort, volgendeWeekronde: volgendeWeekronde,
+module.exports = { maak: maak, MANAGERS: MANAGERS, DELEN: DELEN, samenvoegen: samenvoegen, ONDERHOUD_ZIN: ONDERHOUD_ZIN, REDENEN: REDENEN, prompt: prompt, rapportRegels: rapportRegels, kort: kort, volgendeWeekronde: volgendeWeekronde,
+  vorigeWeekronde: vorigeWeekronde, gemistZin: gemistZin, gemistUitTekst: gemistUitTekst, rapporten: rapporten, managerLink: managerLink, GEMIST_REDEN: GEMIST_REDEN,
   amsNaarMs: amsNaarMs, rpcInvoer: rpcInvoer, VOOR_WEEKRONDE_MS: VOOR_WEEKRONDE_MS };

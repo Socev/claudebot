@@ -3201,6 +3201,8 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
         j.status = 'done'; j.done_at = Date.now();
         j.result = { ok: false, error: 'manager-poort', output: 'Managerronde ' + chatId + ' niet gestart: de voorpoort (wv904) zag ' + (poort.fouten || []).length +
           ' afwijking(en), eerste: ' + String((poort.fouten || [])[0] || '?').slice(0, 200) + '. Zie de box-rij in de machinekamer.', files: [] };
+        // wv4128 (3C29): dezelfde weigering in gewone taal; n8n (Toets antwoord) stuurt deze zin in plaats van een codemelding
+        try { const mm = MANAGERS_MOD && MANAGERS_MOD.MANAGERS.find(function (x) { return x.sessie === String(chatId); }); if (mm) j.result.melding = MANAGERS_MOD.gemistZin(mm, Date.now(), 'poort', Date.now()); } catch (e) {}
         jobEindLog(jobId, j, ws);
         return;
       }
@@ -6407,7 +6409,6 @@ APP_GLIJD_ROUTES.add('POST /app/briefing/punt');   // wv3685: een tik onder een 
 APP_GLIJD_ROUTES.add('POST /app/voor-jou/wachter');   // wv4124: een wachterknop is David die werkt
 APP_GLIJD_ROUTES.add('POST /app/voor-jou/woord');   // wv3250: een steekwoordkeuze is David die werkt   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
-APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/rekening');   // wv2292: Bewerk in Saldi = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/stroom');   // wv2596: stroom kiezen = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/financien/doel');
@@ -17404,7 +17405,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk' || route === 'POST /app/intake/geschiedenis' || route === 'POST /app/intake/verwijder' || route === 'POST /app/intake/bundel') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
         if (route === 'GET /app/brain/entiteiten' || route === 'GET /app/brain/entiteiten/nu' || route.indexOf('GET /app/brain/entiteit/') === 0 || route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
-        if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
+        if (route === 'GET /app/managers' || route.indexOf('GET /app/managers/rapporten/') === 0) return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers; wv4128: Nu draaien weg (C64), rapporten erbij (3C136)
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
         if (route === 'POST /app/werkers/schakel') return typeof appWerkerSchakel === 'function' ? appWerkerSchakel(req, res, a, s, d) : appWeiger(res, 404, 'onbekend', 'schakel');   // wv1733 (OVIS M4b): schakelaar per werker
         if (route === 'GET /app/forum/teller') return typeof appForumTellerRoute === 'function' ? appForumTellerRoute(req, res) : appWeiger(res, 404, 'onbekend', 'forum teller');   // wv4201 (3C169): getal op de tegel Forum
@@ -18913,6 +18914,8 @@ async function berichtNieuw(res, d) {
   if (d.knoppen !== undefined && typeof d.knoppen !== 'boolean') return berichtStuur(res, 400, { ok: false, fout: 'knoppen is true of false' });
   if (d.sleutel !== undefined && (typeof d.sleutel !== 'string' || !d.sleutel || d.sleutel.length > 200)) return berichtStuur(res, 400, { ok: false, fout: 'ongeldige sleutel' });
   if (d.agent_job !== undefined && d.agent_job !== '' && !APP_JOB_RE.test(String(d.agent_job))) return berichtStuur(res, 400, { ok: false, fout: 'ongeldige agent_job' });
+  // wv4128 (3C29): een gemiste managerronde (zin van n8n) onthouden voor de kaart bij "te laat"; alleen kanaal machinekamer, nooit blokkerend
+  if (kanaal === 'machinekamer' && managers) { try { managers.noteerGemist(d.tekst); } catch (e) { logError('managers-gemist', e); } }
   // wv804 (ontwerp § 1): optioneel veld soort van de bron
   if (d.soort !== undefined && !(typeof d.soort === 'string' && Object.prototype.hasOwnProperty.call(MELD_SOORTEN, d.soort))) return berichtStuur(res, 400, { ok: false, fout: 'soort is vraag, antwoord, dag of archief' });
   // wv315 (§ 4.13): een agendaknop (✅ uitvoeren of ↩️ ongedaan) van AI - Agenda-knoppen; alleen bij bron agenda. De nonce blijft hier.
@@ -27371,7 +27374,7 @@ function ovisKnopHaak(p, toelichting) {
 
 // ── Managers op afroep (wv895, 23-10-2026; ontwerp + Fable-review: mk-scripts/wv895/ontwerp.md) ──
 // App "Managers": per manager (Data, Design, CISO) wat hij bewaakt, laatste en volgende ronde, open bevindingen en Nu draaien. Logica in
-// managers.js; hier de koppeling: routes /app/managers(*) na de app-poort, POST /smal/manager-ronde (Socev alleen met Davids verse Ja-knop
+// managers.js; hier de koppeling: routes /app/managers(*) na de app-poort (sinds wv4128 alleen lezen: stand en rapporten), POST /smal/manager-ronde (wv4128: alleen de machinekamer; vroeger Socev met Davids verse Ja-knop
 // op een vraag die de manager noemt; de machinekamer met API_SECRET direct), de run op de eigen sessie van de manager (zoals n8n: sessie
 // wissen, dan dezelfde processJob; dus dezelfde omgeving via runIsMk/SOCEV_ENV_EXTRA), het rapport naar de machinekamer (bron manager) en
 // /health.managers. Ontbreekt managers.js in de release (terugrol), dan 404 op de routes en managers.aan=false in /health.
@@ -27426,7 +27429,7 @@ const MANAGERS_MOD = (function () { const p = path.join(__dirname, 'managers.js'
 const managers = (function () {
   if (!MANAGERS_MOD) return null;
   try {
-    return MANAGERS_MOD.maak({ dir: MANAGERS_DIR, fout: logError, jobsOpSessie: managersJobs, startRun: managersStartRun, knopJa: managersKnopJa,
+    return MANAGERS_MOD.maak({ dir: MANAGERS_DIR, fout: logError, jobsOpSessie: managersJobs, startRun: managersStartRun,
       startScript: ovisStartScript,   // wv979: Bibliothecaris (soort script)
       scriptLoopt: function (id) { return id === 'bibliothecaris' && ovisLoopt.nu === 'bibliothecaris' ? { job_id: 'tijdklok', created: ovisLoopt.sinds } : null; },   // diffreview #11
       rolPrimair: rolPrimair, uitrolWacht: function () { return !!uitrolWacht().wacht || onderhoud.stand().aan; }, vangnet: account1Vangnet,   // wv1271: ook onderhoudsstand
@@ -27441,6 +27444,29 @@ const managers = (function () {
 // na een herstart: een afgebroken ronde op afroep krijgt één regel (na 60 s: app en rol zijn dan klaar)
 if (managers) setTimeout(function () { try { managers.opstart(); } catch (e) { logError('managers-opstart', e); } }, 60000).unref();
 function managersInfo() { if (!managers) return { aan: false }; try { return managers.health(); } catch (e) { return { aan: true, fout: true }; } }
+// wv4128 (3C136): box en de archiefmaanden (Meldingen/Archief/machinekamer-JJJJ-MM.md) van de laatste drie maanden; ontbreekt er één, dan
+// gewoon zonder. Cache op mtime, zodat 30 s-verversen niet elke keer megabytes leest.
+const managersBoxCache = {};
+async function managersBoxTeksten() {
+  const map = path.join(VAULT, '00_Systeem', 'Meldingen');
+  const paden = [path.join(map, 'machinekamer.md')];
+  const t = new Date();
+  for (let i = 0; i < 3; i++) {
+    const x = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() - i, 1));
+    paden.push(path.join(map, 'Archief', 'machinekamer-' + x.getUTCFullYear() + '-' + String(x.getUTCMonth() + 1).padStart(2, '0') + '.md'));
+  }
+  const uit = [];
+  for (const p of paden) {
+    let st;
+    try { st = await fs.promises.stat(p); } catch (e) { continue; }
+    const c = managersBoxCache[p];
+    if (c && c.mtime === st.mtimeMs && c.size === st.size) { uit.push(c.tekst); continue; }
+    const tekst = await fs.promises.readFile(p, 'utf8');
+    managersBoxCache[p] = { mtime: st.mtimeMs, size: st.size, tekst: tekst };
+    uit.push(tekst);
+  }
+  return uit;
+}
 async function appManagers(req, res, a, d, route) {
   if (!managers) return appWeiger(res, 404, 'Managers zit niet in deze versie van de pod', 'managers ontbreekt');
   if (route === 'GET /app/managers') {
@@ -27450,14 +27476,15 @@ async function appManagers(req, res, a, d, route) {
     catch (e) { logError('app-managers', e); fout = 'bevindingen en hartslag zijn nu niet leesbaar'; }
     return appStuur(res, 200, { ok: true, managers: managers.stand(sb), fout: fout });
   }
-  if (route === 'POST /app/managers/ronde') {
-    if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
-    if (!appTeller('managers', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 20)', 'grens managers');
-    let r;
-    try { r = await managers.start(String(d && d.id || ''), 'david', 'david-vroeg'); }
-    catch (e) { logError('app-managers', e); return appWeiger(res, 500, 'fout op de pod', 'managers uitzondering'); }
-    res._app.reden = 'manager-ronde ' + String(d && d.id || '').slice(0, 20) + ' ' + r.status;
-    return appStuur(res, r.status === 202 ? 200 : r.status, r.j);
+  // wv4128 (3C136): de vijf nieuwste rapporten van één manager (box-rijen van zijn rondes; box + archief van de laatste drie maanden)
+  const rm = /^GET \/app\/managers\/rapporten\/([a-z]{2,20})$/.exec(route);
+  if (rm) {
+    const m = MANAGERS_MOD.MANAGERS.find(function (x) { return x.id === rm[1]; });
+    if (!m) return appWeiger(res, 404, 'onbekende manager', 'managers rapporten');
+    let lijst = [];
+    try { lijst = MANAGERS_MOD.rapporten(await managersBoxTeksten(), m, 5); }
+    catch (e) { logError('app-managers', e); return appWeiger(res, 503, 'de rapporten zijn nu niet leesbaar', 'managers rapporten'); }
+    return appStuur(res, 200, { ok: true, manager: m.id, naam: m.naam, rapporten: lijst });
   }
   return appWeiger(res, 404, 'onbekend', 'managers route');
 }
@@ -33610,8 +33637,8 @@ function socevSmalOpts(runOpts, chatId) {
 //   POST /smal/telegram     {opdracht: dialogen|lees, chat, dagen, aantal} -> telegram-reader.js (zelf alleen-lezen)
 //   POST /smal/health-opgaven  {} -> health-import.py --alleen-opgaven als claude (wv887; zie healthOpgaven)
 //   POST /smal/mk-noodknop     {vraag_id? | opdracht: 'stand'} -> stopt de lopende machinekamerbeurt (wv3083; zie mkNoodknop): Socev alleen met Davids verse Ja.
-//   POST /smal/manager-ronde   {naam, reden?, vraag_id?} -> ronde op afroep van een manager (wv895; zie managers.js): Socev alleen met
-//                              het vraag-id van Davids verse Ja-knop; API_SECRET (machinekamer) direct. Rapport in de machinekamer.
+//   POST /smal/manager-ronde   {naam, reden?} -> ronde op afroep van een manager (wv895; zie managers.js): sinds wv4128 (C64) alleen
+//                              API_SECRET (machinekamer); de Socev-sleutel krijgt 403. Rapport in de machinekamer.
 // Fable wv424b: géén script uit de vault met de volle omgeving (de vault is schrijfbaar voor elke smalle sessie: drie regels
 // erin en de hele omgeving kwam terug). Lessen schrijft server.js zelf; telegram-reader.js komt uit de release en krijgt alleen
 // zijn eigen drie sleutels. Een les via deze route is altijd domein 'pa' (een machine-les zou anders als persistente injectie in
@@ -33921,10 +33948,10 @@ async function smalActie(actie, d, wie) {
     return { status: r.fout && !r.opgeslagen ? 400 : 200, j: r };
   }
   if (actie === 'mk-noodknop') return mkNoodknop(d, socevAgentSleutelOk(d.secret) ? 'socev' : 'machinekamer');
-  // wv895: een manager-ronde op afroep. Socev-sleutel = door socev (alleen met vraag_id van Davids verse Ja); API_SECRET = machinekamer.
+  // wv895: een manager-ronde op afroep. Sinds wv4128 (C64) alleen de machinekamer (API_SECRET); de Socev-sleutel krijgt 403 van managers.start.
   if (actie === 'manager-ronde') {
     if (!managers) return { status: 404, j: { ok: false, fout: 'Managers zit niet in deze versie van de pod' } };
-    return managers.start(String(d.naam || ''), socevAgentSleutelOk(d.secret) ? 'socev' : 'machinekamer', d.reden, d.vraag_id);
+    return managers.start(String(d.naam || ''), socevAgentSleutelOk(d.secret) ? 'socev' : 'machinekamer', d.reden);
   }
   // wv944: Facturen lezen voor Socev (skill facturen-lezen): zoeken, hoe wordt X betaald, is een factuur betaald, controles. Alleen lezen,
   // alleen op de primaire Olares-kant (facturenOpen geeft anders null → 409). Salarisregels op zakelijke rekeningen gewoon mee (David

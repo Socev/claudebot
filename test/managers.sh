@@ -50,22 +50,22 @@ const wacht = () => new Promise((r) => setImmediate(r));
   // ── 2. loopt al, uurgrens, weekvenster, tellers ──
   { const { m, st } = omgeving();
     st.jobs.push({ id: 'n8n1', sessie: 'design-manager', status: 'running', created: st.nu - 5 * 60000 });
-    let r = await m.start('design', 'david');
+    let r = await m.start('design', 'machinekamer');
     toets('2 n8n-weekronde loopt → 409 loopt al', r.status === 409 && /loopt al/.test(r.j.fout), r);
     st.jobs[0].status = 'done';
-    r = await m.start('design', 'david');
+    r = await m.start('design', 'machinekamer');
     toets('2 job op de sessie < 1 uur geleden (ook n8n) → 429 met weer_om', r.status === 429 && r.j.weer_om === new Date(st.nu - 5 * 60000 + 3600000).toISOString(), r);
     st.nu += 56 * 60000;
-    r = await m.start('design', 'david');
+    r = await m.start('design', 'machinekamer');
     toets('2 na een uur weer → 202', r.status === 202, r);
     st.jobs.forEach((j) => { j.status = 'done'; });
     st.nu += 30 * 60000;
-    r = await m.start('design', 'david');
+    r = await m.start('design', 'machinekamer');
     toets('2 eigen afroep < 1 uur → 429', r.status === 429, r);
     st.nu += 31 * 60000; st.jobs.forEach((j) => { j.status = 'done'; });
-    r = await m.start('design', 'david'); st.jobs.forEach((j) => { j.status = 'done'; }); st.nu += 61 * 60000;
-    const r3 = await m.start('design', 'david'); st.jobs.forEach((j) => { j.status = 'done'; }); st.nu += 61 * 60000;
-    const r4 = await m.start('design', 'david');
+    r = await m.start('design', 'machinekamer'); st.jobs.forEach((j) => { j.status = 'done'; }); st.nu += 61 * 60000;
+    const r3 = await m.start('design', 'machinekamer'); st.jobs.forEach((j) => { j.status = 'done'; }); st.nu += 61 * 60000;
+    const r4 = await m.start('design', 'machinekamer');
     toets('2 vierde afroep binnen 24 u → 429 (3 per manager)', r.status === 202 && r3.status === 202 && r4.status === 429 && /3 keer/.test(r4.j.fout), [r, r3, r4]);
     // totaal 6 over alle managers
     const t2 = omgeving(); const s2 = t2.st;
@@ -76,47 +76,55 @@ const wacht = () => new Promise((r) => setImmediate(r));
     toets('2 zes rondes over alle managers mogen, de zevende niet (429)', alles && zevende.status === 429 && /alle managers samen/.test(zevende.j.fout), zevende);
   }
   { const { m, st } = omgeving({ nu: ms('2026-10-24T07:00:00Z') });   // za 09:00 Amsterdam (zomertijd), Design-weekronde 10:00
-    const r = await m.start('design', 'david');
+    const r = await m.start('design', 'machinekamer');
     toets('2 binnen 90 min vóór de weekronde → 409 met tijd', r.status === 409 && /10:00/.test(r.j.fout), r);
-    const d = await m.start('data', 'david');
+    const d = await m.start('data', 'machinekamer');
     toets('2 andere manager mag dan wel', d.status === 202, d);
   }
   { const { m, st } = omgeving();
-    st.uitrol = true; toets('2 uitrol wacht → 503', (await m.start('ciso', 'david')).status === 503);
-    st.uitrol = false; st.primair = false; toets('2 reservekant → 409', (await m.start('ciso', 'david')).status === 409);
+    st.uitrol = true; toets('2 uitrol wacht → 503', (await m.start('ciso', 'machinekamer')).status === 503);
+    st.uitrol = false; st.primair = false; toets('2 reservekant → 409', (await m.start('ciso', 'machinekamer')).status === 409);
     st.primair = true; st.vangnet = { mag: false, reden: 'account 1 onder Davids reserve (9% over)' };
-    const r = await m.start('ciso', 'david');
+    const r = await m.start('ciso', 'machinekamer');
     toets('2 onder Davids reserve → 429, geen run, niets geteld', r.status === 429 && /reserve/.test(r.j.fout) && st.runs.length === 0, r);
   }
-  // ── 3. Socev alleen met Davids verse Ja ──
+  // ── 3. wv4128 (C64): op afroep alleen nog de machinekamer; David (app) en Socev krijgen 403, er start niets ──
   { const { m, st } = omgeving();
-    let r = await m.start('design', 'socev', 'david-vroeg');
-    toets('3 Socev zonder vraag-id → 403 met de vraagzin', r.status === 403 && /VRAAG AAN DAVID: Zal ik de Design Manager/.test(r.j.fout), r);
-    st.knop = { hash: 'abcd1234', antwoord: { ok: true, tekst: 'Zal ik de Design Manager nu een ronde laten draaien?', t: st.nu - 20 * 60000, sleutel: 'j1:abcd1234' } };
-    r = await m.start('design', 'socev', 'david-vroeg', 'abcd1234');
-    toets('3 Ja ouder dan 15 min → 403', r.status === 403 && /15 minuten/.test(r.j.fout), r);
-    st.knop.antwoord.t = st.nu - 2 * 60000;
-    r = await m.start('data', 'socev', 'david-vroeg', 'abcd1234');
-    toets('3 Ja op een vraag over een andere manager → 403 met de juiste zin', r.status === 403 && /andere vraag; de vraag moet precies zijn: VRAAG AAN DAVID: Zal ik de Data Manager nu een ronde laten draaien\?/.test(r.j.fout), r);
-    st.knop.antwoord.tekst = 'Zal ik de Design Manager-bevindingen van de laatste ronde samenvatten?';
-    r = await m.start('design', 'socev', 'david-vroeg', 'abcd1234');
-    toets('3 losse zin met naam en "ronde" telt niet (alleen de vaste vraagzin)', r.status === 403 && /andere vraag/.test(r.j.fout), r);
-    st.knop.antwoord.tekst = 'Zal ik de Design Manager nu een ronde laten draaien?';
-    st.knop.antwoord = { ok: false, fout: 'David drukte geen Ja op die vraag' };
-    r = await m.start('design', 'socev', 'david-vroeg', 'abcd1234');
-    toets('3 Nee → 403', r.status === 403 && /geen Ja/.test(r.j.fout), r);
-    st.knop.antwoord = { ok: true, tekst: 'Zal ik de Design Manager nu een ronde laten draaien?', t: st.nu - 60000, sleutel: 'j1:abcd1234' };
-    r = await m.start('design', 'socev', 'david-vroeg', 'abcd1234');
-    toets('3 verse Ja op de juiste vraag → 202', r.status === 202, r);
-    st.jobs.forEach((j) => { j.status = 'done'; }); st.nu += 61 * 60000; st.knop.antwoord.t = st.nu - 60000;
-    r = await m.start('design', 'socev', 'david-vroeg', 'abcd1234');
-    toets('3 dezelfde Ja nog eens → 403 al gebruikt', r.status === 403 && /al gebruikt/.test(r.j.fout), r);
-    toets('3 de gebruikte Ja gaat mee naar knopJa (pod kiest de nieuwste ongebruikte)', Array.isArray(st.knopGebruikt) && st.knopGebruikt.includes('j1:abcd1234'), st.knopGebruikt);
-    st.knop = { hash: 'ffff0000', antwoord: { ok: true, tekst: '  zal ik de CISO nu een ronde laten draaien?', t: st.nu - 60000, sleutel: 'j2:ffff0000' } };
-    r = await m.start('ciso', 'socev', 'controle', 'ffff0000');
-    toets('3 CISO: vaste zin (hoofdletters en spaties maken niet uit)', r.status === 202, r);
-    toets('3 vraagZin per manager', M.MANAGERS.map((x) => M.vraagZin(x)).join('|') === 'Zal ik de Data Manager nu een ronde laten draaien?|Zal ik de Design Manager nu een ronde laten draaien?|Zal ik de CISO nu een ronde laten draaien?|Zal ik de MrLean nu een ronde laten draaien?|Zal ik de Bibliothecaris nu een ronde laten draaien?');
-    toets('3 ongeldig vraag-id → 403 zonder register te lezen', (await m.start('data', 'socev', '', '../../x')).status === 403);
+    const a = await m.start('design', 'socev', 'david-vroeg', 'abcd1234');
+    const b = await m.start('ciso', 'david');
+    toets('3 Socev en David → 403 met verwijzing naar de machinekamer, geen run', a.status === 403 && b.status === 403 && /alleen nog via de machinekamer/.test(a.j.fout) && /draai de CISO-ronde/.test(b.j.fout) && st.runs.length === 0, [a, b]);
+    toets('3 vraagZin bestaat niet meer', typeof M.vraagZin === 'undefined');
+  }
+  // ── 3b. wv4128 (3C29): gemiste ronde in gewone taal; (3C136) rapporten uit de box ──
+  { const ml = M.MANAGERS.find((x) => x.id === 'mrlean');
+    const t = ms('2026-11-25T09:00:21Z');
+    const z = M.gemistZin(ml, t, 'poort', t);
+    toets('3b gemistZin: dag, reden, volgende ronde, niets doen', z === 'MrLean heeft woensdag niet gedraaid: ' + M.GEMIST_REDEN.poort + '; volgende ronde woensdag 2-12; je hoeft niets te doen.', z);
+    const n8n = 'Data Manager heeft zondag niet gedraaid: Socev was op dat moment niet bereikbaar, dus de ronde kon niet beginnen; volgende ronde zondag 6-12; je hoeft niets te doen.\n\n[Bekijk bij de Data Manager](/?app=managers&manager=data)';
+    const g = M.gemistUitTekst(n8n);
+    toets('3b de zin van n8n wordt herkend (met link erachter)', g && g.id === 'data' && /niet bereikbaar/.test(g.zin) && !/Bekijk/.test(g.zin), g);
+    toets('3b een codemelding of vrije tekst wordt niet herkend', !M.gemistUitTekst('MrLean: onverwacht antwoord of fout (manager-poort) - job 775912ffa7b5ec07.') && !M.gemistUitTekst('Iemand heeft maandag niet gedraaid: x; volgende ronde maandag 1-12; je hoeft niets te doen.'));
+    const des = M.MANAGERS.find((x) => x.id === 'design');
+    toets('3b vorigeWeekronde: Design om de week (anker 28-11)', new Date(M.vorigeWeekronde(des, ms('2026-12-10T12:00:00Z'))).toISOString() === '2026-11-28T09:00:00.000Z');
+    // stand: te laat → onthouden zin als hij na de laatst geplande ronde kwam, anders "niet vastgelegd"
+    const { m, st } = omgeving({ nu: ms('2026-11-27T12:00:00Z') });
+    const sb = { mrlean: { aantal: 0, per_ernst: {}, top: [], hartslag: { laatste_ronde: '2026-11-11T09:00:12Z', drempel_min: 12960 } } };
+    let k = m.stand(sb).find((x) => x.id === 'mrlean');
+    toets('3b te laat zonder bericht → zin "niet vastgelegd" met woensdag en 2-12', k.hartslag === 'te laat' && /^MrLean heeft woensdag niet gedraaid: de reden is niet vastgelegd.*volgende ronde woensdag 2-12/.test(k.gemist) && k.rapport === true && k.link === '/?app=managers&manager=mrlean' && !('kan' in k), k);
+    st.nu = ms('2026-11-25T09:10:00Z');
+    toets('3b noteerGemist neemt alleen de vaste zin', m.noteerGemist('MrLean heeft woensdag niet gedraaid: Socev was op dat moment niet bereikbaar, dus de ronde kon niet beginnen; volgende ronde woensdag 2-12; je hoeft niets te doen.') === true && m.noteerGemist('iets anders') === false);
+    st.nu = ms('2026-11-27T12:00:00Z');
+    k = m.stand(sb).find((x) => x.id === 'mrlean');
+    toets('3b te laat na het bericht → de zin uit het bericht', /niet bereikbaar/.test(k.gemist), k.gemist);
+    st.nu = ms('2026-12-03T12:00:00Z');
+    k = m.stand(sb).find((x) => x.id === 'mrlean');
+    toets('3b een week later (nieuwe gemiste ronde) → weer "niet vastgelegd"', /niet vastgelegd/.test(k.gemist) && /woensdag 9-12/.test(k.gemist), k.gemist);
+    const box = '## [week] 2026-11-23 06:2x — CISO-ronde 2026-11-23: 7 open #ciso\n- status: bezig\n- van: wachter:ciso (ronde 2026-11-23)\n- wat ik zag: x\n\n## [log] iets anders\n- van: wachter:ciso-dag (2026-11-23)\n\n## [week] 2026-11-20 10:04 — UI Manager 2026-11-20: 1 open\n- van: wachter:ui-manager (ronde 2026-11-20)\n';
+    const arch = '## [week] 2026-11-16 06:12 — CISO-ronde 2026-11-16: 5 open\n- van: wachter:ciso (ronde 2026-11-16)\n## [week] 2026-11-23 06:2x — CISO-ronde 2026-11-23: 7 open #ciso\n- van: wachter:ciso (ronde 2026-11-23)\n';
+    const rc = M.rapporten([box, arch], M.MANAGERS.find((x) => x.id === 'ciso'), 5);
+    toets('3b rapporten CISO: nieuwste eerst, dubbel uit archief één keer, dagcheck niet mee, kop zonder [week] en #tag', rc.length === 2 && rc[0].datum === '2026-11-23' && rc[0].titel === '2026-11-23 06:2x — CISO-ronde 2026-11-23: 7 open' && /wat ik zag/.test(rc[0].tekst) && rc[1].datum === '2026-11-16', rc);
+    const rd = M.rapporten([box], des, 5);
+    toets('3b rapporten Design nemen het UI-deel mee; Bibliothecaris heeft er geen', rd.length === 1 && rd[0].wie === 'ui-manager' && M.rapporten([box], M.MANAGERS.find((x) => x.id === 'bibliothecaris'), 5).length === 0, rd);
   }
   // ── 4. twee tegelijk ──
   {
@@ -125,14 +133,14 @@ const wacht = () => new Promise((r) => setImmediate(r));
     const mm = M.maak({ dir, nu: () => ms('2026-10-21T10:00:00Z'), fout: () => {}, jobsOpSessie: (x) => s.jobs.filter((j) => j.sessie === x),
       startRun: (o) => { s.runs++; s.jobs.push({ id: 'j' + s.runs, sessie: o.sessie, status: 'pending', created: ms('2026-10-21T10:00:00Z') }); return { job_id: 'j' + s.runs, klaar: new Promise(() => {}) }; },
       knopJa: async () => ({ ok: false }), rolPrimair: () => true, uitrolWacht: () => false, vangnet: () => new Promise((r) => setTimeout(() => r({ mag: true }), 20)), bericht: async () => ({}) });
-    const [a, b] = await Promise.all([mm.start('data', 'david'), mm.start('data', 'david')]);
+    const [a, b] = await Promise.all([mm.start('data', 'machinekamer'), mm.start('data', 'machinekamer')]);
     toets('4 twee starts tegelijk → precies één run', s.runs === 1 && [a.status, b.status].sort().join() === '202,409', [a, b]);
     // hercontrole na het wachten: komt er tijdens de quotummeting een weekronde op de sessie, dan geen run
     const s3 = { runs: 0, jobs: [] };
     const m3 = M.maak({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'mgr3-')), nu: () => ms('2026-10-21T10:00:00Z'), fout: () => {}, jobsOpSessie: (x) => s3.jobs.filter((j) => j.sessie === x),
       startRun: () => { s3.runs++; return { job_id: 'x', klaar: new Promise(() => {}) }; }, knopJa: async () => ({ ok: false }), rolPrimair: () => true, uitrolWacht: () => false,
       vangnet: () => new Promise((r) => setTimeout(() => { s3.jobs.push({ id: 'n8n', sessie: 'ciso', status: 'running', created: ms('2026-10-21T10:00:00Z') }); r({ mag: true }); }, 10)), bericht: async () => ({}) });
-    const c3 = await m3.start('ciso', 'david');
+    const c3 = await m3.start('ciso', 'machinekamer');
     toets('4 weekronde start tijdens de quotummeting → 409, geen run', c3.status === 409 && s3.runs === 0, c3);
     // totaal 6 atomair: zes verschillende starts tegelijk na vijf eerdere → hooguit één erbij
     const s4 = { runs: 0, jobs: [] }, d4 = fs.mkdtempSync(path.join(os.tmpdir(), 'mgr4-'));
@@ -141,19 +149,19 @@ const wacht = () => new Promise((r) => setImmediate(r));
     const m4 = M.maak({ dir: d4, nu: () => ms('2026-10-21T10:00:00Z'), fout: () => {}, jobsOpSessie: (x) => s4.jobs.filter((j) => j.sessie === x),
       startRun: (o) => { s4.runs++; s4.jobs.push({ id: 'n' + s4.runs, sessie: o.sessie, status: 'pending', created: ms('2026-10-21T10:00:00Z') }); return { job_id: 'n' + s4.runs, klaar: new Promise(() => {}) }; },
       knopJa: async () => ({ ok: false }), rolPrimair: () => true, uitrolWacht: () => false, vangnet: () => new Promise((r) => setTimeout(() => r({ mag: true }), 10)), bericht: async () => ({}) });
-    const r4 = await Promise.all([m4.start('ciso', 'david'), m4.start('data', 'david'), m4.start('design', 'david')]);
+    const r4 = await Promise.all([m4.start('ciso', 'machinekamer'), m4.start('data', 'machinekamer'), m4.start('design', 'machinekamer')]);
     toets('4 totaal 6 per 24 u ook bij gelijktijdige starts van verschillende managers', s4.runs === 1, r4.map((x) => x.status));
   }
   // ── 5. rapport ──
   { const { m, st } = omgeving();
-    await m.start('design', 'david');
+    await m.start('design', 'machinekamer');
     st.runs[0].los({ ok: true, output: 'Ik begin.\nTwee **nieuwe** losse kleuren in `Financiën`.\n- De nieuwe App Managers heeft nog geen nepgegevens.\nsleutel sk-abcdefghijklmnopqrstuvwxyz123456 gezien\nDESIGN-MANAGER 2026-10-21: 9 checks, 0 niet vast te stellen, 4 open (2 nieuw), kaart geen, wv geen' });
     await wacht(); await wacht();
     const b = st.berichten[0] || {};
-    toets('5 goed: kop met wie en tijd, ≤ 3 regels, telling', /^\*\*Design Manager\*\* — ronde op afroep \(door jou, 12:00\) is klaar\./.test(b.tekst) && /Twee nieuwe losse kleuren in Financiën\./.test(b.tekst)
-      && /Telling: 9 checks, 0 niet vast te stellen, 4 open \(2 nieuw\), kaart geen, wv geen$/.test(b.tekst) && !/Ik begin/.test(b.tekst), b);
+    toets('5 goed: kop met wie en tijd, ≤ 3 regels, telling', /^\*\*Design Manager\*\* — ronde op afroep \(door de machinekamer, controle, 12:00\) is klaar\./.test(b.tekst) && /Twee nieuwe losse kleuren in Financiën\./.test(b.tekst)
+      && /Telling: 9 checks, 0 niet vast te stellen, 4 open \(2 nieuw\), kaart geen, wv geen\n\n\[Bekijk bij Design Manager\]\(\/\?app=managers&manager=design\)$/.test(b.tekst) && !/Ik begin/.test(b.tekst), b);
     toets('5 opsommingsteken weg, sleutelachtige regel weggelaten', /\nDe nieuwe App Managers/.test(b.tekst) && !/sk-abc/.test(b.tekst) && /leek op een sleutel/.test(b.tekst), b.tekst);
-    toets('5 David → soort antwoord, sleutel manager:<job>', b.soort === 'antwoord' && b.sleutel === 'manager:' + st.runs[0].id, b);
+    toets('5 machinekamer → soort archief, sleutel manager:<job> (wv4128: David start niet meer)', b.soort === 'archief' && b.sleutel === 'manager:' + st.runs[0].id, b);
   }
   { const { m, st, dir } = omgeving();
     await m.start('ciso', 'machinekamer', 'na-bouwstap');
@@ -166,20 +174,20 @@ const wacht = () => new Promise((r) => setImmediate(r));
     toets('5 staat: uitkomst fout, bestand 0600', s.afroepen[0].uitkomst === 'fout' && (fs.statSync(path.join(dir, 'staat.json')).mode & 0o777) === 0o600, s);
   }
   { const { m, st } = omgeving();
-    await m.start('data', 'david');
+    await m.start('data', 'machinekamer');
     st.runs[0].los({ ok: false, error: 'claude exit 1', output: '' });
     await wacht(); await wacht();
     toets('5 fout van de run → melding met de fout', /niet goed afgerond \(claude exit 1\)/.test((st.berichten[0] || {}).tekst || ''), st.berichten);
   }
   // ── 6. herstart ──
   { const { m, st, dir } = omgeving();
-    await m.start('design', 'david'); await m.start('data', 'machinekamer');
+    await m.start('design', 'machinekamer'); await m.start('data', 'machinekamer');
     st.jobs = [];   // na een herstart zijn de jobs weg
     const m2 = M.maak({ dir, nu: () => st.nu + 10 * 60000, fout: () => {}, jobsOpSessie: () => [], startRun: () => ({}), knopJa: async () => ({}), rolPrimair: () => true,
       uitrolWacht: () => false, vangnet: async () => ({ mag: true }), bericht: async (b) => { st.berichten.push(b); } });
     const n = m2.opstart(); await wacht();
     const s = JSON.parse(fs.readFileSync(path.join(dir, 'staat.json'), 'utf8'));
-    toets('6 herstart: beide afgebroken, alleen David krijgt een regel', n === 2 && s.afroepen.every((a) => a.uitkomst === 'afgebroken') && st.berichten.length === 1 && /onderbroken doordat Socev opnieuw opstartte\. Mogelijk loopt hij op de achtergrond nog af/.test(st.berichten[0].tekst), [n, st.berichten]);
+    toets('6 herstart: beide afgebroken, de machinekamer krijgt geen regel (wv4128: alleen nog machinekamer-afroepen)', n === 2 && s.afroepen.every((a) => a.uitkomst === 'afgebroken') && st.berichten.length === 0, [n, st.berichten]);
     toets('6 tweede opstart doet niets', m2.opstart() === 0);
   }
   // ── 7. volgende weekronde en zomertijd ──
@@ -208,19 +216,19 @@ const wacht = () => new Promise((r) => setImmediate(r));
     toets('8 vijf kaarten in vaste volgorde (wv2430: MrLean; wv4116: UI zit in Design)', k.map((x) => x.id).join() === 'data,design,ciso,mrlean,bibliothecaris', k.map((x) => x.id));
     toets('8 wv4116: Design-kaart telt het UI-deel mee, rooster om de week', ds.bevindingen.aantal === 1 && ds.bevindingen.top[0].id === 'UI2-x' && ds.rooster === 'om de week op zaterdag 10:00', ds);
     toets('8 hartslag op tijd / te laat / nog nooit', c.hartslag === 'op tijd' && d.hartslag === 'te laat' && ds.hartslag === 'nog nooit', k.map((x) => x.hartslag));
-    toets('8 CISO: top met detail op de telefoon, kan draaien, rooster', c.bevindingen.top.length === 1 && c.bevindingen.top[0].detail === 'pad /opt/data/x' && c.kan === true && c.rooster === 'elke maandag 06:00', c);
+    toets('8 CISO: top met detail op de telefoon, kan draaien, rooster', c.bevindingen.top.length === 1 && c.bevindingen.top[0].detail === 'pad /opt/data/x' && !('kan' in c) && c.rooster === 'elke maandag 06:00', c);
     k = m.stand(sb, { vast: true });
     toets('8 wv3446: ook met de oude vaste-plekvlag detail en CISO-top (geen afscherming)', JSON.stringify(k.map((x) => x.bevindingen)) === JSON.stringify(m.stand(sb).map((x) => x.bevindingen)) && k.find((x) => x.id === 'ciso').bevindingen.top.length > 0);
     toets('8 databank onleesbaar → kaarten zonder bevindingen, hartslag onbekend', m.stand(null, {}).every((x) => x.bevindingen === null && x.hartslag === 'onbekend'));
-    await m.start('data', 'david');
+    await m.start('data', 'machinekamer');
     k = m.stand(sb, {});
     const d2 = k.find((x) => x.id === 'data');
-    toets('8 lopend: sinds, afroep, kan niet (loopt nu)', d2.lopend && d2.lopend.afroep === true && d2.kan === false && d2.waarom_niet === 'loopt nu' && d2.laatste_afroep.door === 'david', d2);
+    toets('8 lopend: sinds, afroep, kan niet (loopt nu)', d2.lopend && d2.lopend.afroep === true && d2.laatste_afroep.door === 'machinekamer' && !('kan' in d2), d2);
     st.runs[0].los({ ok: true, output: 'a\nDATA-MANAGER 2026-10-21: 7 bronnen gemeten, 0 niet vast te stellen, 0 open (0 nieuw), kaart geen' });
     st.jobs[0].status = 'done'; await wacht(); await wacht();
     k = m.stand(sb, {});
     const d3 = k.find((x) => x.id === 'data');
-    toets('8 na afloop: laatste_ronde = afroep, weer_om over een uur', d3.laatste_afroep.uitkomst === 'goed' && d3.laatste_ronde === new Date(st.nu).toISOString() && d3.kan === false && d3.weer_om === new Date(st.nu + 3600000).toISOString(), d3);
+    toets('8 na afloop: laatste_ronde = afroep, weer_om over een uur', d3.laatste_afroep.uitkomst === 'goed' && d3.laatste_ronde === new Date(st.nu).toISOString() && !('weer_om' in d3), d3);
     toets('8 rapport bij "1 bron" (data vereist ≥ 1) goed', /is klaar/.test((st.berichten[0] || {}).tekst || ''), st.berichten);
   }
   // ── 8d. wv4123 (3C13/3C35/3C43): groepen, besloten, uitleg en onderhoud ──
@@ -300,30 +308,30 @@ const wacht = () => new Promise((r) => setImmediate(r));
       knopJa: async () => ({ ok: false }), rolPrimair: () => true, uitrolWacht: () => false, vangnet: async () => { st.vangnet++; return { mag: false, reden: 'leeg' }; },
       startScript: (mm, o) => { let los; const klaar = new Promise((r) => { los = r; }); st.scripts.push({ mm, o, los }); return { job_id: 'script' + st.scripts.length, klaar }; },
       bericht: async (x) => { st.berichten.push(x); return { status: 200 }; } });
-    let r = await m.start('bibliothecaris', 'david');
+    let r = await m.start('bibliothecaris', 'machinekamer');
     toets('8c afroep start het script, zonder quotumtoets, ook als een sessiejob loopt', r.status === 202 && st.scripts.length === 1 && st.vangnet === 0, r);
     let k = m.stand({ bibliothecaris: { aantal: 0, per_ernst: {}, hartslag: null, top: [] } }, {}).find((x) => x.id === 'bibliothecaris');
-    toets('8c loopt: kan niet, soort script, rooster elke nacht 02:30', k.lopend && k.kan === false && k.soort === 'script' && k.rooster === 'elke nacht 02:30', k);
-    toets('8c tweede start terwijl hij loopt → 409', (await m.start('bibliothecaris', 'david')).status === 409);
+    toets('8c loopt: kan niet, soort script, rooster elke nacht 02:30', k.lopend && k.soort === 'script' && k.rooster === 'elke nacht 02:30', k);
+    toets('8c tweede start terwijl hij loopt → 409', (await m.start('bibliothecaris', 'machinekamer')).status === 409);
     st.scripts[0].los({ ok: true, zin: 'register en pagina\'s gelijk (12 pagina\'s)', open: 0, nieuw: 0 }); await wacht(); await wacht();
     toets('8c rapport naar David: klaar + zin + telling', st.berichten.length === 1 && /Bibliothecaris\*\* — ronde op afroep/.test(st.berichten[0].tekst) && /gelijk/.test(st.berichten[0].tekst) && /0 open \(0 nieuw\)/.test(st.berichten[0].tekst), st.berichten);
-    toets('8c daarna binnen het uur → 429', (await m.start('bibliothecaris', 'david')).status === 429);
+    toets('8c daarna binnen het uur → 429', (await m.start('bibliothecaris', 'machinekamer')).status === 429);
     st.nu = ms('2026-10-26T01:10:00Z');
     toets('8c 30 min vóór de nachtronde → 409', (await m.start('bibliothecaris', 'machinekamer')).status === 409);
     const m2 = M.maak({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'mgr-')), nu: () => st.nu, fout: () => {}, jobsOpSessie: () => [], startRun: () => {}, knopJa: async () => ({}),
       rolPrimair: () => true, uitrolWacht: () => false, vangnet: async () => ({ mag: true }), bericht: async () => ({ status: 200 }) });
     st.nu = ms('2026-10-25T12:00:00Z');
-    toets('8c zonder startScript (oude server) → 503', (await m2.start('bibliothecaris', 'david')).status === 503);
+    toets('8c zonder startScript (oude server) → 503', (await m2.start('bibliothecaris', 'machinekamer')).status === 503);
   }
   toets('9 rpc-invoer: vaste patronen die de RPC accepteert', M.rpcInvoer().every((x) => /^[a-z]{2,20}$/.test(x.id) && /^\^[A-Z]{1,3}\[0-9\]$/.test(x.patroon)), M.rpcInvoer());
 
   // ── 10. server.js-koppeling (tekst) ──
   const s = fs.readFileSync('server.js', 'utf8');
   const knip = (naam) => { const i = s.indexOf(naam); let d = 0, j = s.indexOf('{', i); for (let k = j; k < s.length; k++) { if (s[k] === '{') d++; else if (s[k] === '}') { d--; if (d === 0) return s.slice(i, k + 1); } } };
-  toets('10 dispatch GET/POST /app/managers', /route === 'GET \/app\/managers' \|\| route === 'POST \/app\/managers\/ronde'\) return typeof appManagers === 'function'/.test(s));
+  toets('10 dispatch GET /app/managers en /rapporten/<id>; geen POST-ronde meer (wv4128)', /route === 'GET \/app\/managers' \|\| route\.indexOf\('GET \/app\/managers\/rapporten\/'\) === 0\) return typeof appManagers === 'function'/.test(s) && !/'POST \/app\/managers\/ronde'/.test(s));
   toets('10 teller managers bestaat in appStaat (anders faalt appTeller)', /tellers: \{[^}]*managers: \[\][,} ]/.test(s));
-  toets('10 Nu draaien is een glijdroute', /APP_GLIJD_ROUTES\.add\('POST \/app\/managers\/ronde'\)/.test(s));
-  toets('10 SMAL_GRENS manager-ronde 6 en smalActie', /'manager-ronde': 6, 'harvester\/kaart': 8 \}/.test(s) && /actie === 'manager-ronde'/.test(s) && /socevAgentSleutelOk\(d\.secret\) \? 'socev' : 'machinekamer', d\.reden, d\.vraag_id/.test(s));
+  toets('10 wv4128: rapporten lezen box + drie archiefmaanden, met mtime-cache', /async function managersBoxTeksten\(\)/.test(s) && /'machinekamer-' \+ x\.getUTCFullYear\(\)/.test(s) && /c\.mtime === st\.mtimeMs/.test(s));
+  toets('10 SMAL_GRENS manager-ronde 6 en smalActie', /'manager-ronde': 6, 'harvester\/kaart': 8 \}/.test(s) && /actie === 'manager-ronde'/.test(s) && /socevAgentSleutelOk\(d\.secret\) \? 'socev' : 'machinekamer', d\.reden\)/.test(s));
   toets('10 bron manager in BERICHT_BRONNEN, geen MELD_SOORT-regel', /\n  'manager',\s+\/\/ wv895/.test(s) && !/MELD_SOORT = \{[^}]*manager/.test(s));
   toets('10 rapport altijd kanaal machinekamer', /berichtIntern\(\{ kanaal: 'machinekamer', bron: 'manager'/.test(s) && !/kanaal: 'hoofd', bron: 'manager'/.test(s));
   toets('10 reset noteert tijd; processJob bewaart sessie niet na een reset tijdens de beurt',
