@@ -1166,7 +1166,7 @@ function nuEnBinnenkort(x) {
   bk.push(...wozBinnenkort(vandaag, x.eigen));
   const gezien = new Set();
   const binnenkort = bk.filter((b) => b.datum >= vandaag && b.datum <= tot).sort((a, b) => a.datum.localeCompare(b.datum))
-    .filter((b) => { const k = b.soort + b.datum; if (gezien.has(k)) return false; gezien.add(k); return true; }).slice(0, BK_MAX);
+    .filter((b) => { const k = b.soort === 'alv' ? 'alv' + b.datum : [b.soort, b.object, b.tekst, b.datum].join('|'); if (gezien.has(k)) return false; gezien.add(k); return true; }).slice(0, BK_MAX);
   loopt.sort((a, b) => (b.kelder - a.kelder) || String(b.sinds || '').localeCompare(String(a.sinds || '')));
   return { loopt: loopt.slice(0, LOOPT_MAX), binnenkort, nieuw: (x.nieuw || []).length, nieuw_aantal: Number.isInteger(x.nieuw_aantal) ? x.nieuw_aantal : (x.nieuw || []).length };
 }
@@ -1179,16 +1179,42 @@ const BK_ACTIE = {
   rentevast: ['[jij] op tijd een renteaanbod vragen en vergelijken', 120],
   toekomst: ['[jij] nagaan of er iets moet gebeuren', 30],
 };
+// De vaste stam van een gebeurtenis (zonder datum): ALV en rentevast één per huis, energielabel per object, een toekomstige datum per object + tekst.
+// Verschuift de datum, dan vervangt de nieuwe regel de oude onder ## Actueel (binnenkortErbij); twee zaken op één dag houden elk hun regel.
+function binnenkortStam(b) {
+  if (b.soort === 'alv' || b.soort === 'rentevast') return `vastgoed-${b.soort}`;
+  const obj = String(b.object || 'huis').replace(/[^a-z0-9-]/g, '');
+  return b.soort === 'toekomst' ? `vastgoed-toekomst-${obj}-${fnv(b.tekst).slice(0, 8)}` : `vastgoed-${b.soort}-${obj}`;
+}
 function binnenkortRegels(binnenkort) {
   const cel = (t) => String(t).replace(/\|/g, '/').replace(/\s+/g, ' ').trim();
   const uit = [];
   for (const b of binnenkort || []) {
     if (b.soort === 'woz') { uit.push({ sleutel: `vastgoed-woz-seintje-${b.jaar}`, regel: wozSeintjeRegel(b.jaar), datum: `${b.jaar}-03-31`, soort: 'woz' }); continue; }
     const a = BK_ACTIE[b.soort]; if (!a) continue;
-    const sl = `vastgoed-${b.soort}-${b.datum}`;
-    uit.push({ sleutel: sl, datum: b.datum, soort: b.soort, regel: `| ${b.datum} | Privé / Huis | **${cel(b.tekst).replace(/\.$/, '')} (${NL_DAG(b.datum)}).** Staat ook in Apps › Vastgoed › Binnenkort. | ${a[0]} | ${a[1]} | Vastgoed (${sl}) |` });
+    const stam = binnenkortStam(b), sl = `${stam}-${b.datum}`;
+    uit.push({ sleutel: sl, stam, datum: b.datum, soort: b.soort, regel: `| ${b.datum} | Privé / Huis | **${cel(b.tekst).replace(/\.$/, '')} (${NL_DAG(b.datum)}).** Staat ook in Apps › Vastgoed › Binnenkort. | ${a[0]} | ${a[1]} | Vastgoed (${sl}) |` });
   }
   return uit;
+}
+// Zet de regels in het register: een nieuwe datum voor een gebeurtenis die al onder ## Actueel staat (zelfde stam, andere datum) vervangt die
+// regel (review Codex MOET 2); de rest via deadlineErbij (sleutel ergens in het register = niet opnieuw). Geeft de nieuwe tekst of null.
+function binnenkortErbij(tekst, regels) {
+  const rg = String(tekst || '').split('\n');
+  const a = rg.findIndex((r) => /^## Actueel\s*$/.test(r));
+  if (a < 0) return null;
+  let b = a + 1; while (b < rg.length && !/^## /.test(rg[b])) b++;
+  const t = rg.join('\n'), rest = [];
+  let veranderd = false;
+  for (const r of regels) {
+    if (!r.stam || t.includes(`(${r.sleutel})`)) { rest.push(r); continue; }
+    const re = new RegExp(`\\(${r.stam.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d{4}-\\d{2}-\\d{2}\\)`);
+    const i = rg.findIndex((x, j) => j > a && j < b && x.startsWith('|') && re.test(x));
+    if (i >= 0) { rg[i] = r.regel; veranderd = true; } else rest.push(r);
+  }
+  const t2 = rg.join('\n');
+  const n = rest.length ? deadlineErbij(t2, rest) : null;
+  return n !== null ? n : (veranderd ? t2 : null);
 }
 function binnenkortNodig(tekst, regels) {
   const rg = String(tekst || '').split('\n').filter((r) => r.startsWith('|'));
@@ -1760,4 +1786,4 @@ function maak(o) {
 
 module.exports = { maak, geldKern, leesWoning, leesBox, leesDossierMap, dossierstand, indicatie, soortStuk, euroUit, datumUit, bagSoort, SCHEMA_VERSIE,
   leesHypotheek, hypotheekReeksen, laatsteStand, leesKelder, kelderDossier, kelderMd, kenmerken, kenmerkenMetOud, vergelijk, wijzigingBericht, buurtNieuw, leesKosten, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink,
-  looptUit, toekomstUit, alvUit, wozBinnenkort, nuEnBinnenkort, binnenkortRegels, binnenkortNodig };
+  looptUit, toekomstUit, alvUit, wozBinnenkort, nuEnBinnenkort, binnenkortRegels, binnenkortNodig, binnenkortErbij };

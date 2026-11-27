@@ -68,19 +68,19 @@ test('nuEnBinnenkort: Loopt nu, Binnenkort (gesorteerd, horizon), registerregels
   assert.strictEqual(r.binnenkort[1].wanneer, 'eind februari 2027');
   assert.strictEqual(r.nieuw_aantal, 3);
   const regels = V.binnenkortRegels(r.binnenkort);
-  assert.deepStrictEqual(regels.map((x) => x.sleutel), ['vastgoed-alv-2027-01-27', 'vastgoed-woz-seintje-2027', 'vastgoed-energielabel-2028-11-06', 'vastgoed-rentevast-2031-05-01']);
+  assert.deepStrictEqual(regels.map((x) => x.sleutel), ['vastgoed-alv-2027-01-27', 'vastgoed-woz-seintje-2027', 'vastgoed-energielabel-woning-2028-11-06', 'vastgoed-rentevast-2031-05-01']);
   for (const x of regels) assert.ok(!/€/.test(x.regel), 'geen bedragen in het register');
   const nodig = V.binnenkortNodig(REGISTER, regels);
   assert.ok(!nodig.some((x) => x.soort === 'rentevast'), 'rentevast staat er al met de hand');
-  const een = V.deadlineErbij(REGISTER, nodig);
+  const een = V.binnenkortErbij(REGISTER, nodig);
   assert.ok(een, 'eerste ronde zet regels');
   const act = een.split('## Afgehandeld')[0];
-  for (const s of ['vastgoed-alv-2027-01-27', 'vastgoed-woz-seintje-2027', 'vastgoed-energielabel-2028-11-06']) assert.strictEqual(act.split('(' + s + ')').length - 1, 1, s + ' één keer onder Actueel');
-  assert.strictEqual(V.deadlineErbij(een, V.binnenkortNodig(een, regels)), null, 'tweede ronde verandert niets');
+  for (const s of ['vastgoed-alv-2027-01-27', 'vastgoed-woz-seintje-2027', 'vastgoed-energielabel-woning-2028-11-06']) assert.strictEqual(act.split('(' + s + ')').length - 1, 1, s + ' één keer onder Actueel');
+  assert.strictEqual(V.binnenkortErbij(een, V.binnenkortNodig(een, regels)), null, 'tweede ronde verandert niets');
   // naar Afgehandeld verplaatst = niet opnieuw
   const regel = een.split('\n').find((l) => l.includes('(vastgoed-alv-2027-01-27)'));
   const verplaatst = een.replace(regel + '\n', '') + regel + '\n';
-  assert.strictEqual(V.deadlineErbij(verplaatst, V.binnenkortNodig(verplaatst, regels)), null, 'afgehandeld blijft afgehandeld');
+  assert.strictEqual(V.binnenkortErbij(verplaatst, V.binnenkortNodig(verplaatst, regels)), null, 'afgehandeld blijft afgehandeld');
 });
 
 test('WOZ in Binnenkort: na 31-3 volgend jaar; een bevestigde beschikking met lopende bezwaartermijn staat erbij', () => {
@@ -122,4 +122,31 @@ test('onmogelijke datums (maand 13, dag 40) gooien niet: overgeslagen', () => {
   const r = V.nuEnBinnenkort({ vandaag: '2026-11-27', paginas: [{ pad: '20_Prive/Huis/X.md', md: '---\nstatus: lopend\nupdated: 2026-13-01\n---\n# X\n\n## Toekomstige data\n\n- **40-11-2028:** kapot.\n- **6-11-2028:** het energielabel verloopt.\n' }], kern: { rentevast: { datum: '2031-02-30' } }, eigen: [], nieuw: [] });
   assert.strictEqual(r.loopt[0].sinds, null);
   assert.deepStrictEqual(r.binnenkort.filter((b) => b.soort !== 'woz').map((b) => b.datum), ['2028-11-06']);
+});
+
+test('review Codex MOET 1: twee zaken op dezelfde dag houden elk hun regel (scherm en register)', () => {
+  const md = '# Woning\n\n## Toekomstige data\n\n- **1-6-2030:** het onderhoudscontract loopt af.\n- **1-6-2030:** de garantie op het dak loopt af.\n';
+  const r = V.nuEnBinnenkort({ vandaag: '2026-11-27', paginas: [{ pad: '20_Prive/Huis/Woning.md', md, object: 'woning' }], eigen: [], nieuw: [] });
+  const t = r.binnenkort.filter((b) => b.datum === '2030-06-01');
+  assert.strictEqual(t.length, 2, 'beide in Binnenkort');
+  const regels = V.binnenkortRegels(t);
+  assert.strictEqual(new Set(regels.map((x) => x.sleutel)).size, 2, 'twee sleutels');
+  const een = V.binnenkortErbij(REGISTER, V.binnenkortNodig(REGISTER, regels));
+  assert.strictEqual(een.split('## Afgehandeld')[0].split('\n').filter((l) => l.startsWith('| 2030-06-01 |')).length, 2, 'twee regels in het register');
+});
+
+test('review Codex MOET 2: een verschoven datum vervangt de regel onder Actueel (geen oude en nieuwe naast elkaar); afgehandeld blokkeert een volgende niet', () => {
+  const alv = (d) => V.binnenkortRegels([{ datum: d, tekst: 'Digitale ALV van de VvE van de garageboxen', soort: 'alv', object: null }]);
+  const een = V.binnenkortErbij(REGISTER, V.binnenkortNodig(REGISTER, alv('2027-01-27')));
+  const twee = V.binnenkortErbij(een, V.binnenkortNodig(een, alv('2027-02-03')));
+  assert.ok(twee, 'verschoven = gewijzigd');
+  const act = twee.split('## Afgehandeld')[0];
+  assert.ok(!act.includes('(vastgoed-alv-2027-01-27)'), 'oude datum weg');
+  assert.strictEqual(act.split('(vastgoed-alv-2027-02-03)').length - 1, 1, 'nieuwe datum één keer');
+  assert.strictEqual(V.binnenkortErbij(twee, V.binnenkortNodig(twee, alv('2027-02-03'))), null, 'daarna stil');
+  // oude regel naar Afgehandeld (David): een ALV van volgend jaar komt er gewoon bij
+  const regel = twee.split('\n').find((l) => l.includes('(vastgoed-alv-2027-02-03)'));
+  const af = twee.replace(regel + '\n', '') + regel + '\n';
+  const drie = V.binnenkortErbij(af, V.binnenkortNodig(af, alv('2028-01-26')));
+  assert.ok(drie && drie.split('## Afgehandeld')[0].includes('(vastgoed-alv-2028-01-26)'), 'volgende ALV erbij');
 });

@@ -31750,7 +31750,7 @@ async function vastgoedBinnenkortRegister(dag) {
     let gezet = 0, tabel = true;
     VV().wijzig(dlRegister(), function (t) {
       const nodig = V.binnenkortNodig(t, regels);
-      const n = nodig.length ? V.deadlineErbij(t, nodig) : null;
+      const n = nodig.length ? V.binnenkortErbij(t, nodig) : null;   // review Codex MOET 2: een verschoven datum vervangt de oude regel
       if (n === null && nodig.some(function (r) { return String(t).indexOf('(' + r.sleutel + ')') < 0; })) tabel = false;
       gezet = n === null ? 0 : nodig.filter(function (r) { return String(t).indexOf('(' + r.sleutel + ')') < 0; }).length;
       return n;
