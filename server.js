@@ -6025,7 +6025,11 @@ async function spOpslaan(req, res, sessie, velden) {
       taken.push({ plek: 'kluis', naam: naam || '(geen naam)', nieuw: true, waarde: waarde, v: { naam: naam } });
     } else taken.push({ plek: v.plek, naam: v.naam, waarde: waarde, v: v });
   });
-  for (const t of taken) uitkomsten.push(await spSchrijfTaak(sessie.kenmerk, t, meta));
+  for (const t of taken) {
+    const u = await spSchrijfTaak(sessie.kenmerk, t, meta);
+    if (u.ok) u.nazorg = sleutelNaSchrijven(t, u, 'het sleutelportaal (sessie ' + sessie.kenmerk + ')', 'sleutelportaal');   // wv4172
+    uitkomsten.push(u);
+  }
   if (taken.length) {
     const goed = uitkomsten.filter(function (u) { return u.ok; }).map(function (u) { return u.naam; });
     const fout = uitkomsten.filter(function (u) { return !u.ok; }).map(function (u) { return u.naam; });
@@ -6159,6 +6163,78 @@ function sleutelportaal(req, res) {
       return spStuur(res, 500, spPagina('Fout', '<p>Er ging iets mis.</p>'));
     }
   });
+}
+// ── wv4172 (besluitenpagina nr 198 = 2C98, David Ja 25-11-2026): Sleutelbos zonder huiswerk ──
+// "Zal ik Sleutelbos zo maken dat je na het toevoegen of vervangen van een sleutel niets meer hoeft door te geven en bovenaan ziet wat er
+// te doen is?" Na een GESLAAGDE schrijfactie (app of sleutelportaal; niet bij 'ongewijzigd') werkt de pod zelf het register bij
+// (portaalgegevens.json: vervangen_op of toegevoegd_op, klasse B, vervangen_voor = vandaag + 180 d) en zet hij één box-rij #sleutelbos-nazorg
+// voor de machinekamer (waarvoor, Sleutelregister.md, witte lijst/herstart). Draait pas na het schrijven en kan het niet terugdraaien of
+// tegenhouden: een fout hier wordt gelogd en eerlijk in de nazorg gezegd. Nooit een waarde: alleen namen en datums.
+// Ontwerp + review: mk-scripts/wv4172/ontwerp.md (Codex GO; MOET 1 vervalt: met vervangen_voor + 180 d is de stand "op tijd", ook bij een lek van vandaag).
+const SLEUTEL_PERIODE_DAGEN = 180;
+const SLEUTEL_VERBODEN_NAAM = new Set(['__proto__', 'constructor', 'prototype']);
+const sleutelVandaag = function () { return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(Date.now()); };
+const sleutelPlus = function (ymd, n) { return new Date(Date.parse(ymd + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10); };
+// → { ok, voor, bestond, waarvoor, afhandeling } | { ok: false, reden }
+function sleutelRegisterBij(plek, naam, soort, via) {
+  const vandaag = sleutelVandaag(), voor = sleutelPlus(vandaag, SLEUTEL_PERIODE_DAGEN), sec = plek === 'kluis' ? 'kluis' : 'n8n';
+  if (typeof naam !== 'string' || !naam || naam.length > 200 || SLEUTEL_VERBODEN_NAAM.has(naam)) return { ok: false, reden: 'naam niet bruikbaar als registersleutel' };
+  let reden = null, info = null;
+  try {
+    const ok = VV().wijzig(SP_META_PAD, function (t) {
+      let j = null;
+      try { j = JSON.parse(t); } catch (e) { reden = 'register onleesbaar'; return null; }
+      if (!j || typeof j !== 'object' || !j[sec] || typeof j[sec] !== 'object' || Array.isArray(j[sec])) { reden = 'register zonder sectie ' + sec; return null; }
+      const oud = Object.prototype.hasOwnProperty.call(j[sec], naam) ? j[sec][naam] : undefined;
+      if (oud !== undefined && (!oud || typeof oud !== 'object' || Array.isArray(oud))) { reden = 'registerrij heeft een onbekende vorm'; return null; }
+      const m = oud || {};
+      if (soort === 'nieuw') { if (!oud) m.waarvoor = ''; m.toegevoegd_op = vandaag; }
+      else m.vervangen_op = vandaag;
+      m.klasse = 'B'; m.vervangen_voor = voor; m.vervangen_via = via;
+      if (!oud) j[sec][naam] = m;
+      info = { bestond: !!oud, waarvoor: typeof m.waarvoor === 'string' && m.waarvoor.trim() !== '', afhandeling: typeof m.afhandeling === 'string' ? m.afhandeling.slice(0, 20) : null };
+      return JSON.stringify(j, null, 1) + '\n';   // het bestand staat in precies dit formaat (gemeten: rondgang identiek)
+    }, { grendel: 5, geenGrendel: boxGeenGrendel });
+    return ok && info ? Object.assign({ ok: true, voor: voor }, info) : { ok: false, reden: reden || 'niet geschreven' };
+  } catch (e) { logError('sleutel-register', e); return { ok: false, reden: 'schrijffout' }; }
+}
+function sleutelBoxRij(soort, plek, naam, wie, reg, witteLijst) {
+  const nm = String(naam).replace(/[\r\n\u2028\u2029]+/g, ' ').slice(0, 120), w = String(wie || '').replace(/[\r\n\u2028\u2029]+/g, ' ').slice(0, 80);
+  const doen = [];
+  if (!reg.ok) doen.push('registerrij zelf bijwerken (klasse B, ' + (soort === 'nieuw' ? 'toegevoegd_op' : 'vervangen_op') + ' vandaag, vervangen_voor + 180 d)');
+  if (!reg.ok || !reg.waarvoor) doen.push('waarvoor invullen in het register (portaalgegevens.json)');
+  if (reg.ok && reg.bestond && soort === 'nieuw') doen.push('registerrij bestond al (oude sleutel met deze naam' + (reg.afhandeling ? ', afhandeling ' + reg.afhandeling : '') + '): standvelden nakijken');
+  doen.push('Sleutelregister.md bijwerken (overzicht/logboek)');
+  if (soort === 'nieuw') doen.push('moet de pod hem lezen: op de witte lijst zetten en een Voor jou-kaart voor de herstart');
+  else if (witteLijst) doen.push('de pod leest hem pas na een herstart: Voor jou-kaart voor de herstart als die nog niet loopt');
+  if (plek === 'n8n') doen.push('oude sleutel bij de dienst pas intrekken na een geslaagde productierun');
+  doen.push('heeft de dienst een eigen einddatum (GitHub, Cloudflare): vervangen_voor daarop zetten');
+  return werkerBoxRij('Sleutelbos: ' + (soort === 'nieuw' ? 'nieuwe sleutel ' : 'sleutel vervangen ') + nm + ' #sleutelbos-nazorg', [
+    'status: open',
+    'van: pod (server.js sleutelNaSchrijven, wv4172)',
+    'wat: ' + (soort === 'nieuw' ? 'nieuwe sleutel' : 'vervangen') + ' in ' + (plek === 'kluis' ? 'de Supabase-kluis' : 'n8n') + ', door David via ' + w + '; geen waarde in deze rij',
+    'register: ' + (reg.ok ? 'vanzelf bijgewerkt (klasse B, vervangen vóór ' + reg.voor + ')' : 'NIET bijgewerkt (' + reg.reden + ')'),
+    'te doen (machinekamer): ' + doen.join('; '),
+  ]);
+}
+// Vaste huiswerkzinnen uit spSchrijfTaak/spNazorgKluis die vervallen zodra de box-rij er staat
+const SLEUTEL_HUISWERK = [/^Nieuw in de kluis\. Moet de pod hem lezen\?/, /vraag het de machinekamer \(de pod kan zichzelf niet herstarten\)/];
+// t = schrijftaak, u = uitkomst van spSchrijfTaak, wie = 'de app ("<apparaat>")' of 'het sleutelportaal'. → nieuwe nazorg (array)
+function sleutelNaSchrijven(t, u, wie, via) {
+  const nazorg = Array.isArray(u && u.nazorg) ? u.nazorg.slice() : [];
+  if (!u || !u.ok || u.actie === 'ongewijzigd' || (t.plek !== 'kluis' && t.plek !== 'n8n')) return nazorg;
+  const soort = t.nieuw ? 'nieuw' : 'vervangen';
+  let reg = { ok: false, reden: 'niet geprobeerd' }, box = false;
+  try { reg = sleutelRegisterBij(t.plek, t.naam, soort, via); } catch (e) { logError('sleutel-register', e); }
+  try { box = !!sleutelBoxRij(soort, t.plek, t.naam, wie, reg, !!(t.v && t.v.witte_lijst)); } catch (e) { logError('sleutel-box', e); }
+  const uit = box ? nazorg.filter(function (x) { return !SLEUTEL_HUISWERK.some(function (r) { return r.test(String(x)); }); }) : nazorg;
+  if (box && t.v && t.v.witte_lijst && soort === 'vervangen') uit.unshift('De pod gebruikt de nieuwe waarde pas na een herstart van de claudebot-app; Socev heeft dat doorgegeven aan de machinekamer.');
+  const voorNL = reg.ok ? Number(reg.voor.slice(8, 10)) + '-' + Number(reg.voor.slice(5, 7)) + '-' + reg.voor.slice(0, 4) : '';
+  if (reg.ok) uit.push(soort === 'nieuw' ? 'Staat in het sleutelregister; volgende keer vervangen vóór ' + voorNL + '.' : 'Het sleutelregister is bijgewerkt: vervangen vandaag, volgende keer vóór ' + voorNL + '.');
+  else uit.push('Het sleutelregister kon niet vanzelf worden bijgewerkt (' + reg.reden + ').');
+  uit.push(box ? 'Socev heeft het doorgegeven aan de machinekamer' + (soort === 'nieuw' ? ' (uitleg in het register en, als de pod hem moet lezen, de witte lijst)' : '') + '. Jij hoeft niets meer door te geven.'
+    : 'Doorgeven aan de machinekamer lukte niet; meld het daar even.');
+  return uit;
 }
 // ── einde sleutelportaal ─────────────────────────────────────────────────────
 
@@ -17428,7 +17504,7 @@ function appSleutelStandVelden(m) {
 async function appSleutelLijst() {
   const meta = spMeta();
   const mk = (meta.kluis && typeof meta.kluis === 'object') ? meta.kluis : {}, mn = (meta.n8n && typeof meta.n8n === 'object') ? meta.n8n : {};
-  const [kluis, n8n] = await Promise.all([spRpc('sb_sleutelportaal_overzicht', {}), spN8nLijst()]);
+  const [kluis, n8n, gebruik] = await Promise.all([spRpc('sb_sleutelportaal_overzicht', {}), spN8nLijst(), sleutelGebruikKaart()]);
   const fouten = [], uit = [];
   if (!kluis.ok || !Array.isArray(kluis.sleutels)) fouten.push('kluis');
   else kluis.sleutels.forEach(function (x) {
@@ -17454,15 +17530,65 @@ async function appSleutelLijst() {
         klasse: appSleutelTekst(m.klasse || '', 4), in_register: m.klasse !== undefined, gewijzigd: c.gewijzigd || null,
         vervangen_voor: appSleutelTekst(m.vervangen_voor || null, 10), let_op: appSleutelTekst(m.nazorg || null, 400),
         kan: !!veld[c.type] && !APP_SLEUTEL_PORTAAL_N8N_TYPEN.has(c.type),
-        waarom_niet: APP_SLEUTEL_PORTAAL_N8N_TYPEN.has(c.type) ? APP_SLEUTEL_PORTAAL_TEKST : veld[c.type] ? null : 'dit soort sleutel kan alleen in n8n zelf'  }, appSleutelStandVelden(m)));
+        waarom_niet: APP_SLEUTEL_PORTAAL_N8N_TYPEN.has(c.type) ? APP_SLEUTEL_PORTAAL_TEKST : veld[c.type] ? null : 'dit soort sleutel kan alleen in n8n zelf',
+        gebruik: sleutelGebruikVan(gebruik, c.id)  }, appSleutelStandVelden(m)));
     });
   }
-  return { sleutels: uit, fouten: fouten };
+  // wv4172 (e): de handmatige sleutels (chart, pod-env, bij een dienst) alleen-lezen, in een eigen veld zodat een oudere app ze niet als n8n-rij tekent
+  const handmatig = (Array.isArray(meta.handmatig) ? meta.handmatig : []).filter(function (h) { return h && typeof h === 'object' && typeof h.naam === 'string' && h.naam.trim(); }).slice(0, 100)
+    .map(function (h) { return Object.assign({ naam: appSleutelTekst(h.naam, 120), waar: appSleutelTekst(h.plek || '', 160), waarvoor: appSleutelTekst(h.waarvoor || '', 200), klasse: appSleutelTekst(h.klasse || '', 4),
+      vervangen_voor: appSleutelTekst(h.vervangen_voor || null, 10), instructie: appSleutelTekst(h.instructie || null, 400) }, appSleutelStandVelden(h)); });
+  return { sleutels: uit, fouten: fouten, handmatig: handmatig };
+}
+
+// wv4172 (d) en (e) hieronder; (a) en (c) — register + box-rij na schrijven — staan in het sleutelportaal-blok (sleutelNaSchrijven), gedeeld met het portaal.
+// (d) Per n8n-koppeling: in welke (niet-gearchiveerde) werkstromen hij zit. Alleen lezen, met de API-sleutel die de lijst al gebruikt;
+// tussenopslag 1 uur in het geheugen (oude kaart meteen geven, op de achtergrond verversen); meetfout = null (de app toont dan niets).
+const SLEUTEL_GEBRUIK_MS = 3600000, SLEUTEL_GEBRUIK_FOUT_MS = 300000;
+const sleutelGebruik = { op: 0, kaart: null, bezig: null, fout_op: 0 };
+async function sleutelGebruikMeet() {
+  const per = new Map(); let cursor = null;
+  for (let i = 0; i < 30; i++) {
+    const r = await spN8n('GET', '/workflows?limit=100&excludePinnedData=true' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+    if (r.status !== 200 || !r.json || !Array.isArray(r.json.data)) return null;
+    r.json.data.forEach(function (w) {
+      if (!w || w.isArchived === true) return;
+      const ids = new Set();
+      (Array.isArray(w.nodes) ? w.nodes : []).forEach(function (n) {
+        if (n && n.credentials && typeof n.credentials === 'object') Object.keys(n.credentials).forEach(function (k) { const c = n.credentials[k]; if (c && c.id != null) ids.add(String(c.id)); });
+      });
+      ids.forEach(function (id) {
+        const g = per.get(id) || { aantal: 0, actief: 0, namen: [] };
+        g.aantal++; if (w.active === true) g.actief++;
+        g.namen.push({ naam: String(w.name || '').replace(/[\r\n]+/g, ' ').slice(0, 80), actief: w.active === true });
+        per.set(id, g);
+      });
+    });
+    cursor = r.json.nextCursor; if (!cursor) return per;
+  }
+  return null;   // meer dan 3000 workflows: onvolledig telt niet als meting
+}
+async function sleutelGebruikKaart() {
+  const c = sleutelGebruik, nu = Date.now();
+  if (c.kaart && nu - c.op < SLEUTEL_GEBRUIK_MS) return c.kaart;
+  if (!c.bezig && nu - c.fout_op >= SLEUTEL_GEBRUIK_FOUT_MS) {
+    c.bezig = sleutelGebruikMeet().catch(function (e) { logError('sleutel-gebruik', e); return null; })
+      .then(function (k) { if (k) { c.kaart = k; c.op = Date.now(); } else c.fout_op = Date.now(); c.bezig = null; return k; });
+  }
+  if (c.kaart) return c.kaart;   // verouderd maar bruikbaar; de verversing loopt op de achtergrond
+  return c.bezig ? await c.bezig : null;
+}
+function sleutelGebruikVan(kaart, id) {
+  if (!kaart) return null;
+  const g = kaart.get(String(id));
+  if (!g) return { aantal: 0, actief: 0, namen: [] };
+  const namen = g.namen.slice().sort(function (a, b) { return (b.actief ? 1 : 0) - (a.actief ? 1 : 0) || a.naam.localeCompare(b.naam, 'nl'); }).slice(0, 8);
+  return { aantal: g.aantal, actief: g.actief, namen: namen };
 }
 async function appSleutels(req, res, a) {
   // wv1901/wv3446: de lijst (namen, nooit waarden) op elk apparaat; vast blijft het echte soort (vervangen en weggooien zijn beheer)
   const l = await appSleutelLijst();
-  appStuur(res, 200, { ok: true, sleutels: l.sleutels, fouten: l.fouten, vast: appVastBeheerDicht(a), primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
+  appStuur(res, 200, { ok: true, sleutels: l.sleutels, fouten: l.fouten, handmatig: l.handmatig, vast: appVastBeheerDicht(a), primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
 }
 async function appSleutelVervang(req, res, reg, a, s, d) {
   // De waarde meteen uit het verzoekobject halen; vanaf hier bestaat hij alleen in deze functie.
@@ -17508,8 +17634,8 @@ async function appSleutelVervang(req, res, reg, a, s, d) {
       ' vanuit de app ("' + a.naam + '"). Niet jij? /app-noodstop en meld het de machinekamer.');
   }
   if (!u.ok) return appStuur(res, 422, { ok: false, fout: String(u.uitkomst).slice(0, 200), naam: t.naam, plek: t.plek });   // geen 502: de app leest dat als 'pod weg'
-  // de knop "Vorige terugzetten" bestaat alleen in het portaal
-  const nazorg = (u.nazorg || []).map(function (x) { return /Vorige terugzetten/.test(x) ? 'De vorige waarde blijft bewaard; terugzetten kan in het sleutelportaal (/sleutels) of via de machinekamer.' : String(x).slice(0, 400); });
+  // wv4172: register + box-rij vanzelf (geen huiswerk); de knop "Vorige terugzetten" bestaat alleen in het portaal
+  const nazorg = sleutelNaSchrijven(t, u, 'de app ("' + a.naam + '")', 'sleutelbos').map(function (x) { return /Vorige terugzetten/.test(x) ? 'De vorige waarde blijft bewaard; terugzetten kan in het sleutelportaal (/sleutels) of via de machinekamer.' : String(x).slice(0, 400); });
   appStuur(res, 200, { ok: true, naam: t.naam, plek: t.plek, uitkomst: String(u.uitkomst).slice(0, 200), nazorg: nazorg });
 }
 
@@ -17546,8 +17672,9 @@ async function appSleutelNieuw(req, res, reg, a, s, d) {
     ' vanuit de app ("' + a.naam + '"). Niet jij? /app-noodstop en meld het de machinekamer.');
   // review wv2481 MOET 1: twee tabbladen tegelijk -> de kluis weigert de tweede met 'naam bestaat al'; dat is een conflict (409), geen 422
   if (!u.ok) return appStuur(res, /bestaat al/.test(String(u.uitkomst)) ? 409 : 422, { ok: false, fout: String(u.uitkomst).slice(0, 200), naam: naam });
+  // wv4172: geen "laat de machinekamer hem in het register zetten" meer; de pod zet hem er zelf in en geeft de rest door (box-rij)
   appStuur(res, 200, { ok: true, naam: naam, plek: 'kluis', uitkomst: String(u.uitkomst).slice(0, 200),
-    nazorg: (u.nazorg || []).map(function (x) { return String(x).slice(0, 400); }).concat(['Laat de machinekamer hem in het sleutelregister zetten (waarvoor en wanneer vervangen); tot dan staat hij in Sleutelbos zonder uitleg.']) });
+    nazorg: sleutelNaSchrijven(t, u, 'de app ("' + a.naam + '")', 'sleutelbos').map(function (x) { return String(x).slice(0, 400); }) });
 }
 
 // wv1786 (Sleutelwissel 2 § C): POST /app/sleutels/weg { naam } — een proef_-rij of de vorige-kopie van een sleutel weggooien.

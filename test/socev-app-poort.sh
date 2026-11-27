@@ -228,6 +228,7 @@ async function nepFetch(url, opt) {
       c.updatedAt = new Date().toISOString(); return antw(200, { id, name: c.name, type: c.type });
     }
     if (u.pathname.startsWith('/api/v1/workflows/')) { const w = (n8nStaat.workflows || {})[u.pathname.slice('/api/v1/workflows/'.length)]; return w ? antw(200, w) : antw(404, {}); }
+    if (u.pathname === '/api/v1/workflows' && spNep.wf && (!opt.method || opt.method === 'GET')) { spNep.wfLees = (spNep.wfLees || 0) + 1; return antw(200, { data: spNep.wf, nextCursor: null }); }   // wv4172 (alleen sectie 18)
     return antw(404, {});
   }
   if (url.startsWith(N8N + '/webhook/agenda-knop-')) {   // wv315: AI - Agenda-knoppen (Knop (app)), zoals de echte: sleutel als kop, {n, a}
@@ -4623,7 +4624,22 @@ async function bewijs(o) {
       fs.mkdirSync(MB, { recursive: true });
       fs.writeFileSync(path.join(MB, 'Sleutelregister - portaalgegevens.json'), JSON.stringify({ kluis: { proef_een: { waarvoor: 'proef <b>vet</b>', klasse: 'A', vervangen_voor: '2026-10-18', nazorg: 'nazorg-proef' } },
         n8n: { 'Locatie Tasker (header)': { waarvoor: 'Tasker-locatie', klasse: 'A', vervangen_voor: '2026-10-18', lek_op: '2026-06-09', vervangen_op: '2026-10-28', afhandeling: 'vervangen', stand_op: '2026-10-28' },
-          'Gmail OAuth': { klasse: 'A', vervangen_voor: '2026-10-18', lek_op: '9-6-2026', vervangen_op: '2026-13-45', afhandeling: 'weg', stand_op: 7 } } }));   // wv2491: tweede rij met foute vormen
+          'Gmail OAuth': { klasse: 'A', vervangen_voor: '2026-10-18', lek_op: '9-6-2026', vervangen_op: '2026-13-45', afhandeling: 'weg', stand_op: 7 } },
+        handmatig: [{ naam: 'PROEF_CHART_SECRET', plek: 'proefchart (Helm)', waarvoor: 'proefgeheim', klasse: 'B', vervangen_voor: '2027-01-01', vervangen_op: '2026-07-05', instructie: 'Via de machinekamer.', geheim: 'NOOIT-MEE' }, { naam: '' }, 'kapot'] }));   // wv2491: tweede rij met foute vormen; wv4172: handmatig
+      // wv4172: de box van de machinekamer (de pod zet er na toevoegen/vervangen zelf een rij in)
+      // werkerBoxRij en boxGeenGrendel staan buiten het knipsel: de echte functie hier inladen (VV = de echte vault-veilig)
+      ctx.VV = () => require('./vault-veilig.js'); ctx.boxGeenGrendel = () => {};
+      vm.runInContext(src.slice(src.indexOf('function werkerBoxRij('), src.indexOf('const werkerKlok')).replace('function werkerBoxRij(', 'this.werkerBoxRij = function (') , ctx);
+      const BOX18 = path.join(VAULT_T, '00_Systeem', 'Meldingen', 'machinekamer.md');
+      fs.mkdirSync(path.dirname(BOX18), { recursive: true });
+      fs.writeFileSync(BOX18, '# box (proef)\n\n## [log] 2026-11-01 10:00 — proefrij\n- status: open\n');
+      const REG18 = () => JSON.parse(fs.readFileSync(path.join(MB, 'Sleutelregister - portaalgegevens.json'), 'utf8'));
+      const VANDAAG18 = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(Date.now());
+      const PLUS180 = new Date(Date.parse(VANDAAG18 + 'T00:00:00Z') + 180 * 86400000).toISOString().slice(0, 10);
+      const boxRijen18 = () => fs.readFileSync(BOX18, 'utf8').split('\n## ').filter((x) => /#sleutelbos-nazorg/.test(x));
+      spNep.wf = [{ id: 'wfA', name: 'Proef Tasker-locatie', active: true, isArchived: false, nodes: [{ credentials: { httpHeaderAuth: { id: 'TaskerAbc123', name: 'Locatie Tasker (header)' } } }, { credentials: { httpHeaderAuth: { id: 'TaskerAbc123' } } }] },
+        { id: 'wfB', name: 'Proef oud uit', active: false, isArchived: false, nodes: [{ credentials: { httpHeaderAuth: { id: 'TaskerAbc123' } } }] },
+        { id: 'wfC', name: 'Proef gearchiveerd', active: false, isArchived: true, nodes: [{ credentials: { gmailOAuth2: { id: 'OauthXyz789' } } }] }];
       if (!ECHT_SP) {   // nagebootst; met ECHT_SLEUTEL=1 alleen de proef tegen de echte kluis hieronder
       spNep.kluis = [
         { naam: 'proef_een', omschrijving: 'x', gewijzigd: '2026-10-01T10:00:00Z', witte_lijst: true, gemaskeerd: '••••Q9Z8', vingerafdruk: 'f00baa', geweigerd: null, w: 'OUDE-WAARDE-proef-een-123456' },
@@ -4643,6 +4659,15 @@ async function bewijs(o) {
       // wv2491: afhandeling uit het register mee, alleen in vaste vorm; ontbreekt het, dan null
       toets('18 wv2491 lijst: vervangen_op, stand_op, lek_op en afhandeling uit het register', tas && tas.vervangen_op === '2026-10-28' && tas.stand_op === '2026-10-28' && tas.lek_op === '2026-06-09' && tas.afhandeling === 'vervangen'
         && oa && oa.vervangen_op === null && oa.stand_op === null && oa.lek_op === null && oa.afhandeling === null && een && een.afhandeling === null && een.vervangen_op === null, JSON.stringify([tas, oa, een]));
+      toets('18 wv4172 lijst: per n8n-koppeling gebruik (2 werkstromen, 1 aan; twee knopen in één werkstroom = 1; gearchiveerd telt niet = 0)',
+        tas && tas.gebruik && tas.gebruik.aantal === 2 && tas.gebruik.actief === 1 && tas.gebruik.namen[0].naam === 'Proef Tasker-locatie' && tas.gebruik.namen[0].actief === true && tas.gebruik.namen.length === 2
+        && oa && oa.gebruik && oa.gebruik.aantal === 0 && !('gebruik' in een), JSON.stringify([tas && tas.gebruik, oa && oa.gebruik]));
+      const hm = r.j.handmatig || [];
+      toets('18 wv4172 lijst: handmatige sleutels apart, alleen vaste velden (geen onbekend veld, lege/kapotte rij weg)', hm.length === 1 && hm[0].naam === 'PROEF_CHART_SECRET' && hm[0].waar === 'proefchart (Helm)' && hm[0].vervangen_op === '2026-07-05'
+        && hm[0].instructie === 'Via de machinekamer.' && !JSON.stringify(hm).includes('NOOIT-MEE') && ls.every((x) => x.plek !== 'handmatig'), JSON.stringify(hm));
+      const wfL = spNep.wfLees;
+      await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+      toets('18 wv4172 werkstromen uit de tussenopslag (tweede lijst leest n8n-workflows niet opnieuw)', spNep.wfLees === wfL && wfL === 1, [wfL, spNep.wfLees]);
       toets('18 lijst: geweigerde kluisnaam en OAuth-type niet vervangbaar, met reden', boot && boot.kan === false && /chart/.test(boot.waarom_niet) && oa && oa.kan === false && /n8n zelf/.test(oa.waarom_niet), JSON.stringify([boot, oa]));
       const lijstTekst = JSON.stringify(r.j);
       toets('18 lijst: geen waarde, geen masker, geen vingerafdruk (ook geen begin/eind)', !/gemaskeerd|vingerafdruk|Q9Z8|f00baa|OUDE-WAARDE|••••/.test(lijstTekst) && !('w' in een), lijstTekst.slice(0, 300));
@@ -4665,6 +4690,14 @@ async function bewijs(o) {
       toets('18 kluis: 200, via sb_sleutelportaal_schrijven (portaalsleutel, sessie app-<apparaat>, bestaand, waarde afgeknipt)', r.status === 200 && r.j.ok === true && spNep.schrijf.length === 1 && sc.p_naam === 'proef_een' && sc.p_waarde === W1
         && sc.p_nieuw === false && sc.p_sessie === 'app-' + aId.slice(0, 12) && spNep.kluis[0].w === W1, JSON.stringify(r.j));
       toets('18 kluis: antwoord zonder waarde, met nazorg (herstart pod + register-nazorg)', !JSON.stringify(r.j).includes(W1) && r.j.nazorg.some((x) => /herstart/.test(x)) && r.j.nazorg.includes('nazorg-proef'), JSON.stringify(r.j));
+      const reg1 = REG18().kluis.proef_een, bx1 = boxRijen18();
+      toets('18 wv4172 kluis vervangen: register vanzelf bij (vervangen_op vandaag, klasse B, vervangen vóór +180 d, via sleutelbos), rest ongemoeid',
+        reg1.vervangen_op === VANDAAG18 && reg1.klasse === 'B' && reg1.vervangen_voor === PLUS180 && reg1.vervangen_via === 'sleutelbos' && reg1.nazorg === 'nazorg-proef' && reg1.waarvoor === 'proef <b>vet</b>', JSON.stringify(reg1));
+      toets('18 wv4172 kluis vervangen: één box-rij #sleutelbos-nazorg (status open, register bijgewerkt, herstart), zonder waarde', bx1.length === 1 && /Sleutelbos: sleutel vervangen proef_een/.test(bx1[0]) && /- status: open/.test(bx1[0])
+        && /register: vanzelf bijgewerkt/.test(bx1[0]) && /herstart/.test(bx1[0]) && !bx1[0].includes(W1) && fs.readFileSync(BOX18, 'utf8').indexOf('#sleutelbos-nazorg') < fs.readFileSync(BOX18, 'utf8').indexOf('proefrij'), bx1.join('|'));
+      toets('18 wv4172 kluis vervangen: geen huiswerk in de nazorg ("Jij hoeft niets meer door te geven", register met datum; geen "vraag het de machinekamer")',
+        r.j.nazorg.some((x) => /Jij hoeft niets meer door te geven/.test(x)) && r.j.nazorg.some((x) => x.includes(Number(PLUS180.slice(8, 10)) + '-' + Number(PLUS180.slice(5, 7)) + '-' + PLUS180.slice(0, 4)) && /sleutelregister is bijgewerkt/.test(x)) && !r.j.nazorg.some((x) => /vraag het de machinekamer/.test(x))
+        && r.j.nazorg.some((x) => /herstart/.test(x) && /doorgegeven aan de machinekamer/.test(x)), JSON.stringify(r.j.nazorg));
       toets('18 kluis: één Telegram-regel met naam, apparaat en noodstop, zonder waarde', telegram.length === nT + 1 && /sleutel "proef_een" \(Supabase-kluis\) vervangen vanuit de app/.test(telegram[nT]) && /\/app-noodstop/.test(telegram[nT]) && !telegram[nT].includes(W1), telegram[nT]);
       // dezelfde vingerafdruk is verbruikt
       r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: W1 + 'x' }, { pot: P.jar });
@@ -4682,6 +4715,10 @@ async function bewijs(o) {
       const pa = spNep.patch[0] || {};
       toets('18 n8n: PATCH met alleen value + isPartialData, credential-test, 200 zonder waarde', r.status === 200 && spNep.patch.length === 1 && pa.id === 'TaskerAbc123' && JSON.stringify(pa.body) === JSON.stringify({ data: { value: W2 }, isPartialData: true })
         && spNep.test.length === 1 && /niet te testen/.test(r.j.nazorg[0]) && !JSON.stringify(r.j).includes(W2), JSON.stringify(r.j));
+      const reg2 = REG18().n8n['Locatie Tasker (header)'], bx2 = boxRijen18();
+      toets('18 wv4172 n8n vervangen: register bij (vervangen_op vandaag, +180 d), afhandeling en lek_op blijven; tweede box-rij (n8n, intrekken na productierun)',
+        reg2.vervangen_op === VANDAAG18 && reg2.vervangen_voor === PLUS180 && reg2.klasse === 'B' && reg2.afhandeling === 'vervangen' && reg2.lek_op === '2026-06-09' && bx2.length === 2
+        && /Locatie Tasker \(header\)/.test(bx2[0]) && /productierun/.test(bx2[0]) && !bx2[0].includes(W2), JSON.stringify(reg2) + ' ' + bx2[0]);
       toets('18 n8n: auditregel in sleutelportaal_log (sessie app-…, zonder waarde)', spNep.log.some((x) => x.p_plek === 'n8n' && x.p_naam === 'Locatie Tasker (header)' && x.p_sessie === 'app-' + aId.slice(0, 12)) && !JSON.stringify(spNep.log).includes(W2), JSON.stringify(spNep.log).slice(0, 300));
       await vers(P);
       r = await vraag('POST', '/app/sleutels/vervang', { plek: 'n8n', id: 'OauthXyz789', waarde: W2 }, { pot: P.jar });
@@ -4762,6 +4799,11 @@ async function bewijs(o) {
         toets('18N nieuw: 200 aangemaakt via sb_sleutelportaal_schrijven (p_nieuw true, sessie app-<apparaat>, naam en waarde afgeknipt)', r.status === 200 && r.j.ok === true && /aangemaakt/.test(r.j.uitkomst)
           && spNep.schrijf.length === nN + 1 && sn.p_nieuw === true && sn.p_naam === 'proef_nieuw' && sn.p_waarde === WN && sn.p_sessie === 'app-' + aId.slice(0, 12), JSON.stringify(r.j));
         toets('18N antwoord zonder waarde, nazorg witte lijst + register', !JSON.stringify(r.j).includes(WN) && r.j.nazorg.some((x) => /witte lijst/.test(x)) && r.j.nazorg.some((x) => /sleutelregister/.test(x)), JSON.stringify(r.j));
+        const regNw = REG18().kluis.proef_nieuw, bxN = boxRijen18();
+        toets('18N wv4172 geen huiswerk: geen "Laat de machinekamer"/"Vraag de machinekamer", wel "Jij hoeft niets meer door te geven"', !r.j.nazorg.some((x) => /Laat de machinekamer|Vraag de machinekamer/.test(x)) && r.j.nazorg.some((x) => /Jij hoeft niets meer door te geven/.test(x)), JSON.stringify(r.j.nazorg));
+        toets('18N wv4172 register: nieuwe rij (waarvoor leeg, klasse B, toegevoegd_op vandaag, vervangen vóór +180 d); box-rij "nieuwe sleutel proef_nieuw" met witte lijst + waarvoor, zonder waarde',
+          regNw && regNw.waarvoor === '' && regNw.klasse === 'B' && regNw.toegevoegd_op === VANDAAG18 && regNw.vervangen_voor === PLUS180 && !('vervangen_op' in regNw) && bxN.length >= 3 && /nieuwe sleutel proef_nieuw/.test(bxN[0])
+          && /witte lijst/.test(bxN[0]) && /waarvoor invullen/.test(bxN[0]) && !bxN[0].includes(WN), JSON.stringify(regNw) + ' ' + bxN[0]);
         toets('18N één Telegram-regel met naam en noodstop, zonder waarde', telegram.length === nTg + 1 && /nieuwe kluissleutel "proef_nieuw" toegevoegd vanuit de app/.test(telegram[nTg]) && /\/app-noodstop/.test(telegram[nTg]) && !telegram[nTg].includes(WN), telegram[nTg]);
         r = await vraag('POST', '/app/sleutels/nieuw', { naam: 'proef_nieuw2', waarde: WN }, { pot: P.jar });
         toets('18N tweede toevoeging met dezelfde vingerafdruk -> 403 vers_nodig', r.status === 403 && r.j.vers_nodig === true && spNep.schrijf.length === nN + 1, JSON.stringify(r.j));
@@ -4804,7 +4846,7 @@ async function bewijs(o) {
         toets('18N auditlog: apparaat + naam + uitkomst', /"route":"\/app\/sleutels\/nieuw","m":"POST","status":200,"apparaat":"[a-f0-9]{16}","reden":"sleutel nieuw proef_nieuw: aangemaakt"/.test(auditN), auditN.slice(-400));
         r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
         const xn = (r.j.sleutels || []).find((x) => x.id === 'proef_nieuw');
-        toets('18N lijst toont de nieuwe sleutel (naam, niet in register, vervangbaar), zonder waarde', xn && xn.kan === true && xn.in_register === false && !JSON.stringify(r.j).includes(WN), JSON.stringify(xn));
+        toets('18N lijst toont de nieuwe sleutel (naam, sinds wv4172 meteen in het register met klasse B, vervangbaar), zonder waarde', xn && xn.kan === true && xn.in_register === true && xn.klasse === 'B' && !JSON.stringify(r.j).includes(WN), JSON.stringify(xn));
         spNep.kluis = spNep.kluis.filter((x) => !/^proef_nieuw/.test(x.naam));
       }
       // ── 18W. wv1786: weggooien (POST /app/sleutels/weg): alleen proef_-rijen en vorige-kopieën, verse vingerafdruk, de kluis beslist
