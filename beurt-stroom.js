@@ -14,14 +14,22 @@ const MAX_DEEL = 256 * 1024;           // ruwe kop van het lopende tekstblok (Co
 const APP_DEEL_MAX = 8 * 1024;         // wat /app/uitslag hooguit meegeeft
 
 // o: { opDeel(tekst), opLeven() }. opLeven = elke regel behalve een ping (watchdog: een hangende API mag de inactiviteitsgrens niet ontlopen).
+// wv4180 (besluitenpagina nr 444 = 3C144): fasen() = wanneer (Date.now()) elke fase van de beurt voor het eerst gebeurde, alleen tijden en
+// aantallen, nooit inhoud: init (CLI opgestart, system/init), model (eerste message_start van de hoofdagent), denk (eerste thinking-blok),
+// werk (eerste tool_use), tekst (eerste tekstblok), antwoord (begin van het LAATSTE tekstblok), result; stappen = message_starts en tools =
+// tool_use-blokken van de hoofdagent; sub = er liep een subagent.
 function maakLezer(o) {
   o = o || {};
   let rest = '', weg = false, result = null, tekst = '', deel = '', blokTekst = false;
+  const f = { stappen: 0, tools: 0 };
+  function eerst(naam) { if (f[naam] == null) f[naam] = Date.now(); }
   // Codex ZOU 1: de KOP bewaren (boven MAX_DEEL groeit deel niet meer), zodat een eerdere VRAAG AAN DAVID- of [-regel nooit wegvalt
   // en de tekst erna in deelVoorApp dus verborgen blijft; herlees (vervang-uit) bouwt dezelfde kop opnieuw op.
   function zetDeel(d) { deel = d.length > MAX_DEEL ? d.slice(0, MAX_DEEL) : d; if (o.opDeel) o.opDeel(deel); }
   function regel(l) {
     if (!l.trim()) return;
+    // wv4180: de init-regel zonder JSON.parse herkennen (assistant-/user-regels kunnen MB's zijn en worden hier niet geparst)
+    if (f.init == null && l.indexOf('"subtype":"init"') >= 0 && l.indexOf('"type":"system"') >= 0) eerst('init');
     const kans = l.indexOf('"stream_event"') >= 0 || l.indexOf('"result"') >= 0;
     let j = null;
     if (kans || l.charAt(0) !== '{') { try { j = JSON.parse(l); } catch (e) { j = undefined; } }
@@ -31,14 +39,18 @@ function maakLezer(o) {
       return;
     }
     if (!j || typeof j !== 'object') { if (o.opLeven) o.opLeven(); return; }
-    if (j.type === 'result') { result = l; if (o.opLeven) o.opLeven(); return; }
+    if (j.type === 'result') { result = l; eerst('result'); if (o.opLeven) o.opLeven(); return; }
     if (j.type !== 'stream_event') { if (o.opLeven) o.opLeven(); return; }
     const ev = j.event || {};
     if (ev.type === 'ping') return;
     if (o.opLeven) o.opLeven();
-    if (j.parent_tool_use_id) return;   // subagent
+    if (j.parent_tool_use_id) { f.sub = true; return; }   // subagent
+    if (ev.type === 'message_start') { eerst('model'); f.stappen++; return; }
     if (ev.type === 'content_block_start') {
       const t = ev.content_block && ev.content_block.type;
+      if (t === 'thinking' || t === 'redacted_thinking') eerst('denk');
+      else if (t === 'tool_use' || t === 'server_tool_use') { eerst('werk'); f.tools++; }
+      else if (t === 'text') { eerst('tekst'); f.antwoord = Date.now(); }
       if (t === 'text') { blokTekst = true; zetDeel(typeof ev.content_block.text === 'string' ? ev.content_block.text : ''); }
       else blokTekst = false;   // tool_use / thinking: het vorige tekstblok blijft staan tot er een nieuw begint
       return;
@@ -66,12 +78,16 @@ function maakLezer(o) {
     slot: function () { return result != null ? result : tekst; },
     heeftResult: function () { return result != null; },
     deel: function () { return deel; },
+    fasen: function () { return Object.assign({}, f); },
+    // herlees: tijden van de vorige lezer winnen (deze lezer las alles opnieuw in één keer), aantallen komen van de volledige buffer
+    neemFasen: function (oud) { if (!oud) return; Object.keys(oud).forEach(function (k) { if (k !== 'stappen' && k !== 'tools' && oud[k] != null) f[k] = oud[k]; }); f.herlezen = true; },
   };
 }
 // Hele buffer opnieuw (loper slot-volg): nieuwe lezer, en de oude result-regel blijft als de nieuwe er geen vond (afgekapte buffer).
 function herlees(oud, buf, o) {
   const n = maakLezer(o);
   n.voeg(buf); n.sluit();
+  if (oud && oud.fasen) n.neemFasen(oud.fasen());   // wv4180
   if (!n.heeftResult() && oud && oud.heeftResult()) {
     const r = oud.slot();
     return Object.assign({}, n, { slot: function () { return r; }, heeftResult: function () { return true; } });

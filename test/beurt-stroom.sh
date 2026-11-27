@@ -71,6 +71,18 @@ if (S) {
   toets('A9 herlees zonder result houdt de oude result-regel', l5.heeftResult() && JSON.parse(l5.slot()).session_id === 'sid1' && l5.deel() === 'abc');
   const l6 = S.herlees(l4, Buffer.from(JSON.stringify(Object.assign({}, res, { result: 'nieuw' })) + '\n'), {});
   toets('A10 herlees met result neemt de nieuwe', JSON.parse(l6.slot()).result === 'nieuw');
+  // wv4180: fasen (alleen tijden en aantallen)
+  const fa = l.fasen();
+  toets('A11 fasen: init, model, werk, denk, tekst, antwoord, result gezet; stappen 1, tools 1, sub', ['init', 'model', 'werk', 'denk', 'tekst', 'antwoord', 'result'].every((k) => typeof fa[k] === 'number')
+    && fa.stappen === 1 && fa.tools === 1 && fa.sub === true && fa.init <= fa.model && fa.model <= fa.tekst && fa.tekst <= fa.werk && fa.antwoord >= fa.tekst, fa);
+  toets('A12 fasen bevatten geen inhoud', !/Hallo|geheim|MAILINHOUD|DENKWERK|SUBAGENT/.test(JSON.stringify(fa)) && Object.values(fa).every((x) => typeof x === 'number' || typeof x === 'boolean'), fa);
+  const l8 = S.maakLezer({}); l8.voeg(JSON.stringify({ type: 'system', subtype: 'init', session_id: 's' }) + '\n' + SE({ type: 'message_start', message: {} }) + '\n');
+  const oudF = l8.fasen();
+  const l9 = S.herlees(l8, Buffer.from(JSON.stringify({ type: 'system', subtype: 'init' }) + '\n' + SE({ type: 'message_start', message: {} }) + '\n' + SE({ type: 'message_start', message: {} }) + '\n' + blokStart(0, 'tool_use') + '\n'), {});
+  const nf = l9.fasen();
+  toets('A13 herlees: oude tijden winnen, aantallen van de hele buffer, merk herlezen', nf.init === oudF.init && nf.model === oudF.model && nf.stappen === 2 && nf.tools === 1 && typeof nf.werk === 'number' && nf.herlezen === true, [oudF, nf]);
+  const l10 = S.maakLezer({}); l10.voeg('{"type":"assistant","message":{"content":[{"type":"text","text":"\\"subtype\\":\\"init\\""}]}}\n');
+  toets('A14 tekst met "subtype":"init" in een assistant-regel telt niet als init', l10.fasen().init == null, l10.fasen());
   // knip
   const K = S.deelVoorApp;
   toets('K1 gewone tekst blijft', K('Goedemorgen.\nTwee regels.') === 'Goedemorgen.\nTwee regels.');
@@ -228,6 +240,20 @@ sb.listen(0, '127.0.0.1', async () => {
     toets('C1 nooit een (half getoonde) vraagregel in deel', c1.delen.length > 0 && !c1.delen.some((x) => /VRAAG|DAVID:|fiets/.test(x)), c1.delen);
     toets('C1 klaar: antwoord = gestroomde tekst + vraag, geen deel meer', c1.u.klaar === true && c1.u.gelukt !== false && String(c1.u.antwoord || '').startsWith(c1.delen[c1.delen.length - 1]) && c1.u.deel === undefined,
       { u: Object.assign({}, c1.u, { antwoord: String(c1.u.antwoord).slice(0, 120) }), laatste: c1.delen[c1.delen.length - 1] });
+    // wv4180: de regel in het app-log krijgt fasen (alleen tijden, oplopend), de app krijgt ze niet
+    let regelC1 = null;
+    for (let i = 0; i < 30 && !regelC1; i++) {
+      try { regelC1 = fs.readFileSync(path.join(d, 'app-log', 'hoofd.' + 'jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((x) => x.job_id === c1.r.job_id) || null; } catch (e) {}
+      if (!regelC1) await slaap(100);
+    }
+    const fz = regelC1 && regelC1.fasen;
+    const volg = fz ? ['rij', 'voor', 'gestart', 'init', 'model', 'tekst', 'antwoord', 'result', 'eind'].map((k) => fz[k]) : [];
+    toets('C3 app-log: fasen per beurt, oplopend van rij tot eind', !!fz && volg.every((x) => typeof x === 'number') && volg.every((x, i) => i === 0 || x >= volg[i - 1]) && fz.werk === null && fz.stappen === 1 && fz.tools === 0 && fz.hervat === false, fz);
+    toets('C3 fasen zonder inhoud', !!fz && !/Goed|David|fiets|proefvraag|SLEUTEL/.test(JSON.stringify(fz)), fz);
+    toets('C3 eind ≈ duur van de beurt (traag: ≥ 9 × 600 ms)', !!fz && fz.eind >= 5000 && fz.eind - fz.model >= 4800, fz);
+    const gesch = await req('GET', '/app/geschiedenis/hoofd', null, K());
+    const gs = JSON.stringify(gesch);
+    toets('C3 geschiedenis voor de app zonder fasen (en de beurt staat erin)', gesch._status === 200 && gs.includes(c1.r.job_id) && !gs.includes('"fasen"') && !gs.includes('"stappen"'), gs.slice(0, 300));
     const c2 = await beurt('breek', 'proef-stroom-002');
     toets('C2 afgebroken beurt: fout, geen deel na afloop', c2.u.klaar === true && c2.u.gelukt === false && c2.u.deel === undefined && !String(c2.u.antwoord || '').includes('Het weer'),
       Object.assign({}, c2.u, { delen: c2.delen }));

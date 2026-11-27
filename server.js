@@ -1677,6 +1677,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   const maxMs = (opts && opts.maxMs) || FG_MAX_MS;
   const vroegMs = (opts && opts.vroegMs) || 0;
   const progress = (opts && opts.progress) || {};
+  const tAanroep = Date.now();   // wv4180: fasen van een app-beurt (zie beurtFasenVan)
   return new Promise(function (resolve) {
     // Review-fix A1 (5-9-2026): `--` vóór de prompt, anders wordt een bericht dat
     // met '-' begint (Telegram-bullet) als vlag gelezen. Getest met claude -p.
@@ -1739,6 +1740,8 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       : metOomEerst(function () { return spawn('claude', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); });
     if (viaLoper) child.once('spawn', function () { weesSpawnMeld(opts, child, eigenId, path.join(projDir, eigenId + '.jsonl')); });
     else weesSpawnMeld(opts, child, eigenId, path.join(projDir, eigenId + '.jsonl'));
+    let tSpawn = null;   // wv4180: proces draait (loper: start bevestigd)
+    child.once('spawn', function () { if (tSpawn == null) tSpawn = Date.now(); });
     const t0 = Date.now();
     let out = '', err = '', lastStdout = t0, killedReason = null;
     // wv3824: in stroommodus (args bevatten stream-json) leest beurtStroom stdout regel voor regel; out wordt pas in finalize de result-regel.
@@ -1836,6 +1839,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       progress.deel = '';   // wv3824: na het einde telt alleen het echte antwoord (of de fout)
       if (r && r.exit_code === undefined) r.exit_code = laatsteCode;
       if (r) { r.account = account; if (fs.existsSync(pinned)) r.eigen_sessie = eigenId; }   // wv781: account + sessie voor de terugval
+      if (r && lezer && lezer.fasen) { try { r.fasen = Object.assign({ aanroep: tAanroep, spawn: tSpawn, eind: Date.now() }, lezer.fasen()); } catch (e) {} }   // wv4180
       resolve(r);
     }
     function finalize(code) {
@@ -3129,6 +3133,21 @@ async function lessenBlok(prompt, chatId, label) {
   }
 }
 
+// wv4180 (besluitenpagina nr 444 = 3C144, David Ja 25-11-2026 22:22): waar zit het wachten op Socev? Per app-beurt de tijd per fase, in ms
+// vanaf "bericht binnen" (j.created), alleen tijden en aantallen, nooit inhoud; gaat als veld fasen mee in de regel van het app-log (30 d,
+// niet naar de app). rij = uit de wachtrij, voor = prompt klaar (lessen, overdracht), gestart = proces draait, init = CLI opgestart (MCP,
+// sessie), model = eerste modelantwoord, denk/werk/tekst = eerste denk-, gereedschap- en tekstblok, antwoord = begin laatste tekstblok,
+// result = antwoord compleet, eind = proces klaar. null = kwam niet voor. Tabel: mk-scripts/wv4180/fasen-tabel.py.
+function beurtFasenVan(j, tVerwerk, r, hervat, loper) {
+  const b = j.created, f = r.fasen || {}, v = r.verbruik || {};
+  const rel = function (x) { return typeof x === 'number' && x >= b ? x - b : null; };
+  const o = { v: 1, rij: rel(tVerwerk), voor: rel(j.started), gestart: rel(f.spawn), init: rel(f.init), model: rel(f.model), denk: rel(f.denk),
+    werk: rel(f.werk), tekst: rel(f.tekst), antwoord: rel(f.antwoord), result: rel(f.result), eind: rel(f.eind),
+    cli_ms: v.ms || null, api_ms: v.api_ms || null, stappen: f.stappen || 0, tools: f.tools || 0, sub: f.sub ? true : undefined,
+    hervat: hervat, loper: loper, ctx_lees: v.cache_lees || 0, ctx_schrijf: v.cache_schrijf || 0, in: v.in || 0, uit: v.uit || 0,
+    vernieuwd: r.sessie_vernieuwd ? true : undefined, herlezen: f.herlezen ? true : undefined };
+  return o;
+}
 async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keuze, gereedschap) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
@@ -3136,6 +3155,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
   const space = WORKSPACES[ws];
   const key = sessionKey(ws, chatId);
   const j = jobs[jobId];
+  const tVerwerk = Date.now();   // wv4180: uit de wachtrij
   // Verharding: de 24-uursopruiming kan een job wissen die nog in de
   // enqueue-wachtrij staat (lange wachtrij, of een pod die een etmaal
   // achterloopt). Zonder deze guard werd hieronder j.status gezet op undefined:
@@ -3241,6 +3261,8 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     if (j.app) runOpts.stappen = true;   // wv3693: stappen in de wachtbel   // wv716: pid en transcript in beurt-lopend.json
     if (j.app) runOpts.stroom = true;    // wv3824: de tekst van het antwoord stroomt in de wachtbel (stream-json; niet bij gereedschap lezen)
     const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, lezen ? base : (managerCwd || space.dir), runOpts);
+    if (j.app && r.fasen) { try { j.fasen = beurtFasenVan(j, tVerwerk, r, !!sessionId, !!runOpts.loper); } catch (e) { logError('beurt-fasen', e); } }   // wv4180
+    delete r.fasen;
     if (lezen) r.gereedschap = 'lezen';
     r.files = collectFiles(outdir);
     if (lezen) {
@@ -8297,7 +8319,7 @@ async function appNaBeurt(jobId) {
       getypt: new Date(j.created).toISOString(), antwoord_op: j.app.antwoord_op || undefined,   // wv628: typtijd (sorteren) en Antwoord hierop
       apparaat: j.app.apparaat, tekst: j.app.tekst, invoer: (j.app.invoer && j.app.invoer.length) ? j.app.invoer : undefined, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
       vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [],
-      open: j.app.open || undefined, draad: j.app.draad || undefined });   // wv1712: alleen het veld; uitgeleverd alleen aan j.app.apparaat (appGeschiedenis); wv3156: draad
+      open: j.app.open || undefined, draad: j.app.draad || undefined, fasen: j.fasen || undefined });   // wv1712: alleen het veld; uitgeleverd alleen aan j.app.apparaat (appGeschiedenis); wv3156: draad; wv4180: fasen (alleen tijden)
     j.app.gelogd = goed;
     // wv3156: een antwoord van OVIS NZa wordt (of komt in) een vraagdraad; fail-open, het app-log blijft de bron (lijst() haalt in)
     if (j.app.kanaal === 'ovis-nza' && NZA_VRAGEN) {
