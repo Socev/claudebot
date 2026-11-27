@@ -201,3 +201,35 @@ test('wv3940: server.js weigert Laat rusten buiten Gambia, telt het voor de corr
   assert.match(s, /naam: 'briefing-rust', start_na: \[6, 45\][^\n]*appBriefingRustStap\(ctx\)/);
   assert.match(s, /BP\.rustLopend\(appBriefingPuntenLees\(\), gisteren\)/);
 });
+
+// wv4260: de databank eist titel 3..90 en waarom <= 400; een te lange briefingvraag gaf geen kaart (25..27-11). Toetsdata verzonnen.
+test('kaartVanVraag: titel <= 90 met ?, waarom <= 400, volle vraag vooraan bij inkorten', () => {
+  const lang = 'Zal ik de nepafspraak bij de proefgarage in je Werk-agenda zetten, vrijdag 11-12 van 14:00 tot 17:45 in Proefstad?';
+  const geen = 'Zal ik op de proefrekening nakijken of de nepaangifte over oktober van € 1.234 al helemaal betaald is?';
+  const uitlegLang = 'Lange uitleg met veel woorden. '.repeat(40);
+  const gevallen = [lang, geen, 'a'.repeat(84) + ' abcde?', 'a'.repeat(85) + ' abcde?', 'b'.repeat(200) + '?', 'Zal ik het doen?', 'c'.repeat(89) + '?'];
+  for (const v of gevallen) {
+    for (const u of ['Korte uitleg van genoeg tekens.', uitlegLang]) {
+      const k = P.kaartVanVraag(v, u);
+      assert.ok(k.titel.length >= 3 && k.titel.length <= P.KAART_TITEL_MAX, 'titel ' + k.titel.length + ': ' + k.titel);
+      assert.ok(/\?$/.test(k.titel), 'titel zonder ?: ' + k.titel);
+      assert.ok(k.waarom.length <= P.KAART_WAAROM_MAX, 'waarom ' + k.waarom.length);
+      assert.strictEqual(k.kort, v.length > 90);
+      if (k.kort) assert.ok(k.waarom.indexOf(v) === 0 || v.length > 360, 'volle vraag vooraan');
+      else assert.strictEqual(k.titel, v);
+    }
+  }
+  assert.strictEqual(P.kaartVanVraag(lang, 'x'.repeat(30)).titel, 'Zal ik de nepafspraak bij de proefgarage in je Werk-agenda zetten?');
+  assert.ok(/ al…\?$/.test(P.kaartVanVraag(geen, 'x'.repeat(30)).titel), 'woordgrens');
+  assert.ok(/…$/.test(P.kaartVanVraag(lang, uitlegLang).waarom), 'uitleg ingekort met …');
+  // samen met autovragen: een vraag van 300 tekens + uitleg van 900 past daarna altijd
+  const av = P.autovragen('```socev-autovragen\n' + JSON.stringify([{ punt: 'x', vraag: 'd'.repeat(400) + '?', uitleg: 'e '.repeat(600), gevoelig: '-' }]) + '\n```');
+  assert.strictEqual(av.vragen.length, 0);   // na slice(0,300) geen ? meer aan het eind: valt al in autovragen weg (bestaand gedrag)
+});
+
+test('server: briefingAutovragenZet gebruikt kaartVanVraag en slaat niet-briefingkaarten over', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const f = src.slice(src.indexOf('async function briefingAutovragenZet'), src.indexOf('const TEL_GESPREK_PER_UUR'));
+  assert.ok(/BP\.kaartVanVraag\(v\.vraag, v\.uitleg\)/.test(f) && /titel: kt\.titel, waarom: kt\.waarom/.test(f));
+  assert.ok(/const b = appVjBriefing\(p\);\s*\n\s*if \(!b\) continue;/.test(f), 'null-kaart overslaan');
+});

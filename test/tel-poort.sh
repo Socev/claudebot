@@ -103,7 +103,7 @@ const ctxGlobals = () => ({ require, fs, path, crypto, Buffer, console, URL, set
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TEL_UIT_BESTAND: TELUIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
     APP_BUS_PAD: path.join(W, 'bus.md'), SUPABASE_URL: 'https://sb.toets', SUPABASE_SERVICE_ROLE: 'nep', APP_BESTANDEN_DIR: path.join(W, 'bew'), APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: 'https://n8n.toets/mcp-server/http', N8N_API_KEY: 'nep-n8n', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: path.join(W, 'vault') }, pid: process.pid },
-  VAULT: path.join(W, 'vault'), TOETSUUR: () => 12, agentsReg: {},
+  VAULT: path.join(W, 'vault'), TOETSUUR: () => 12, agentsReg: {}, managers: null,   // wv4260: berichtNieuw leest managers (wv4128) buiten het app-blok
   __ochtendKlok: () => ({ ymd: new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' }), uur: 12, werkdag: true }),   // wv4152
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => c, resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100, ROL_KANT: 'olares', SPAARSTAND: false, SPAAR_STIL_TEKST: '',   // wv4017: zoals socev-app-poort (wv3909)
@@ -1509,7 +1509,7 @@ srv.listen(0, '127.0.0.1', async () => {
     const VR = [
       { punt: 'Proefgarage bellen', vraag: 'Zal ik je om tien uur herinneren aan de proefgarage?', uitleg: 'De proefkeuring verloopt vrijdag. Bij Ja zet ik een herinnering om tien uur, bij Nee doe ik niets.', gevoelig: '-' },
       { punt: 'Proefoverleg', vraag: 'Zal ik het proefoverleg naar donderdag verschuiven?', uitleg: 'Woensdag botst het met de proefdienst. Bij Ja zet ik het voorstel klaar, bij Nee blijft het staan.', gevoelig: 'agenda' },
-      { punt: 'iets dat er niet staat', vraag: 'Zal ik de proefvoorraad laten uitzoeken?', uitleg: 'Er speelt een vraag over de voorraad. Bij Ja zoek ik het uit, bij Nee niet.', gevoelig: 'raar' },
+      { punt: 'iets dat er niet staat', vraag: 'Zal ik de proefvoorraad laten uitzoeken bij de nepleverancier in Proefstad, met de prijzen van vorig jaar en de levertijden erbij?', uitleg: 'Er speelt een vraag over de voorraad. Bij Ja zoek ik het uit, bij Nee niet.', gevoelig: 'raar' },
       { punt: 'x', vraag: 'Een vierde vraag?', uitleg: 'Deze is er één te veel en valt weg.', gevoelig: '-' }];
     const avA = BPm.autovragen('Kop\n\n' + blokTekst(VR) + '\n'), avB = BPm.autovragen('Kop\n' + blokTekst(VR.slice(0, 1), 'oud')), avK = BPm.autovragen('Kop\n```socev-autovragen\n{kapot\n```');
     toets('8y autovragen: blok weg, hooguit 3, onbekend label = versturen, oude vorm ook, kapot blok ook weg', avA.tekst === 'Kop' && avA.vragen.length === 3 && avA.vragen[2].gevoelig === 'versturen' && avA.fouten.length === 1 &&
@@ -1518,12 +1518,15 @@ srv.listen(0, '127.0.0.1', async () => {
     // zet-oproepen vangen (de rest van de databank zoals in de toets)
     const sbOrig = H.__haal('appSbRpc'), zetten = [], statussen = [];
     H.__zet('appSbRpc', async (fn, b) => {
-      if (fn === 'mk_voor_jou_zet') { zetten.push(b.p); return { sleutel: b.p.sleutel }; }
+      // wv4260: zoals de databank (voor_jou_titel_check 3..90, voor_jou_waarom_check <= 400): anders een 400
+      if (fn === 'mk_voor_jou_zet') { if (b.p.titel.length < 3 || b.p.titel.length > 90 || String(b.p.waarom || '').length > 400) throw new Error('rpc mk_voor_jou_zet http 400'); zetten.push(b.p); return { sleutel: b.p.sleutel }; }
       if (fn === 'mk_voor_jou_status') { statussen.push(b); return { ok: true }; }
       return sbOrig(fn, b);
     });
     const dagY = ymdNu, gisteren = new Date(Date.now() - 86400000).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
-    H.__zet('appVjPunten', async () => [{ id: 51, sleutel: 'briefing-' + gisteren + '-1', soort: 'besluit', status: 'open', prive: true, titel: 'Zal ik iets van gisteren doen?', waarom: 'Oude uitleg van gisteren hier.',
+    // wv4260: ook een gewone kaart in de lijst (die gaf de TypeError in de opruimlus)
+    H.__zet('appVjPunten', async () => [{ id: 50, sleutel: 'gewone-kaart', soort: 'doen', status: 'open', prive: false, titel: 'Een gewone kaart', waarom: 'Niets met de briefing.', herkomst: { wv: 1 } },
+      { id: 51, sleutel: 'briefing-' + gisteren + '-1', soort: 'besluit', status: 'open', prive: true, titel: 'Zal ik iets van gisteren doen?', waarom: 'Oude uitleg van gisteren hier.',
       herkomst: { module: 'briefing', briefing: { dag: gisteren, punt: null, gevoelig: '-' } } }]);
     H.appStaat.vjCache = null;
     const briefTekst = '**🌅 Ochtendbericht**\n\n**Goedemorgen David**\n\nVandaag:\n• Proefgarage bellen over de keuring\n• Proefoverleg woensdag om 10:00\n\nPrioriteit: de keuring.\n\n' + blokTekst(VR);
@@ -1539,6 +1542,8 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('8y drie besluitkaarten: hoofdkanaal (prive), uitleg als waarom, deadline vandaag, module briefing, punt-id', zetten.length === 3 && z1 && z1.soort === 'besluit' && z1.prive === true && z1.deadline === dagY &&
       z1.waarom === VR[0].uitleg && z1.titel === VR[0].vraag && z1.herkomst.module === 'briefing' && z1.herkomst.briefing.punt === pGarage.id && z2.herkomst.briefing.punt === pOverleg.id &&
       z2.herkomst.briefing.gevoelig === 'agenda' && z3.herkomst.briefing.punt === null && z3.herkomst.briefing.gevoelig === 'versturen', zetten);
+    toets('8y wv4260 te lange vraag (' + VR[2].vraag.length + '): titel <= 90 eindigt op ?, volle vraag vooraan in waarom en in herkomst', z3 && z3.titel.length <= 90 && /…\?$|\?$/.test(z3.titel) &&
+      z3.waarom.indexOf(VR[2].vraag) === 0 && z3.waarom.indexOf(VR[2].uitleg) > 0 && z3.herkomst.briefing.vraag === VR[2].vraag && !('vraag' in z1.herkomst.briefing), z3);
     toets('8y de vraag van gisteren gaat op vervallen', statussen.some((s) => s.p_sleutel === 'briefing-' + gisteren + '-1' && s.p_naar === 'vervallen' && s.p_door === 'agent'), statussen);
     const zN = zetten.length;
     bx = bres();
@@ -1573,6 +1578,7 @@ srv.listen(0, '127.0.0.1', async () => {
     const iG = sk.findIndex((s) => s.punt_id === pGarage.id && s.soort === 'punt'), iO = sk.findIndex((s) => s.punt_id === pOverleg.id && s.soort === 'punt');
     toets('8y gesprek: punten in volgorde, de vraag direct na zijn punt, de losse vraag na het laatste punt, nog 1 (alleen hoofdkanaal)', r.status === 200 && iG >= 0 && sk[iG + 1].soort === 'vraag' && sk[iG + 1].kaart.id === 61 &&
       sk[iO + 1].soort === 'vraag' && sk[iO + 1].kaart.id === 62 && sk[iO + 2].soort === 'vraag' && sk[iO + 2].kaart.id === 63 && r.j.gesprek.nog === 1 && sk.every((s) => /^[a-f0-9]{12}$/.test(s.stem)), r.j);
+    toets('8y wv4260 gesprek: de ingekorte kaart spreekt de volle vraag uit, uitleg zonder herhaling', sk[iO + 2].tekst === VR[2].vraag && sk[iO + 2].uitleg === VR[2].uitleg, sk[iO + 2]);
     toets('8y gesprek: vraagstuk met uitleg, tekst_id en gevoelig van de kaart; geen wikilink of blok in de tekst', sk[iG + 1].uitleg === VR[0].uitleg && sk[iG + 1].kaart.tekst_id === vj[61].tekst_id && sk[iG + 1].kaart.gevoelig === false &&
       sk[iO + 1].kaart.gevoelig === true && sk[iO + 1].kaart.reden === 'agenda' && !sk.some((s) => /\[\[|socev-autovragen/.test(s.tekst)), sk);
     await wacht(400);

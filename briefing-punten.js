@@ -201,6 +201,31 @@ function autovragen(tekst) {
   }).replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '');
   return { tekst: n ? schoon : String(tekst || ''), vragen: vragen, blokken: n, fouten: fouten };
 }
+// wv4260: een vraag als Voor jou-kaart. De databank eist titel 3..90 en waarom <= 400 (voor_jou_titel_check, voor_jou_waarom_check);
+// autovragen laat een vraag tot 300 en een uitleg tot 900 tekens toe (25..27-11 weigerde mk_voor_jou_zet daardoor vragen van 92..118).
+// Past de vraag: titel = vraag, waarom = uitleg (op een woordgrens ingekort). Te lang: titel = de kern vóór de eerste komma, puntkomma,
+// dubbele punt of gedachtestreep (als die 20..89 tekens is) + '?', anders op een woordgrens + '…?'; de volle vraag staat dan vooraan in
+// waarom (de uitleg wordt ingekort, nooit de vraag) en kort = true (server zet de volle vraag ook in herkomst.briefing.vraag).
+const KAART_TITEL_MAX = 90, KAART_WAAROM_MAX = 400;
+function woordKort(t, max, staart) {
+  t = String(t || '').trim();
+  if (t.length <= max) return t;
+  let k = t.slice(0, max - staart.length + 1);
+  const sp = k.lastIndexOf(' ');
+  k = sp >= Math.floor((max - staart.length) / 2) ? k.slice(0, sp) : k.slice(0, max - staart.length);
+  return k.replace(/[\s,;:—–\-(]+$/, '') + staart;
+}
+function kaartVanVraag(vraag, uitleg) {
+  vraag = plat(vraag); uitleg = plat(uitleg);
+  if (vraag.length <= KAART_TITEL_MAX) return { titel: vraag, waarom: woordKort(uitleg, KAART_WAAROM_MAX, '…'), kort: false };
+  const romp = vraag.replace(/\?+$/, '').trim();
+  const m = /^(.*?)\s*(?:[,;:]|\s[—–-]\s)/.exec(romp);
+  const kern = m ? m[1].replace(/[\s,;:—–\-(]+$/, '') : '';
+  const titel = kern.length >= 20 && kern.length <= KAART_TITEL_MAX - 1 ? kern + '?' : woordKort(romp, KAART_TITEL_MAX - 1, '…') + '?';
+  const kop = vraag.slice(0, KAART_WAAROM_MAX - 40);
+  const rest = KAART_WAAROM_MAX - kop.length - 2;
+  return { titel: titel, waarom: uitleg && rest >= 20 ? kop + '\n\n' + woordKort(uitleg, rest, '…') : kop, kort: true };
+}
 // Bij welk punt hoort de vraag: het punt waarvan de platte tekst begint met (of bevat) het opgegeven begin (hoofdletterongevoelig, de
 // eerste 60 tekens); anders het punt met de meeste gedeelde woorden (>= 3, woorden van 4+ letters). null = geen.
 function norm(s) { return plat(s).toLowerCase().replace(/[^\p{L}\p{N} ]+/gu, ' ').replace(/\s+/g, ' ').trim(); }
@@ -277,4 +302,4 @@ function correctiesVoorWachter(m, vandaag, dagen) {
 }
 
 module.exports = { STANDEN, STAND_TEKST, RUST_DAGEN, punten, puntId, plat, vaultPad, bronVan, editieSleutel, snoei, zetStand, standenVan, correctieTekst, rustLopend, volgendeDag, correctiesVoorWachter,
-  AV_MAX, AV_GEVOELIG, autovragen, puntBij, gesprek };
+  AV_MAX, AV_GEVOELIG, autovragen, puntBij, gesprek, KAART_TITEL_MAX, KAART_WAAROM_MAX, kaartVanVraag };

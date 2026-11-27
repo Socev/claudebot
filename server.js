@@ -21575,14 +21575,23 @@ async function briefingAutovragenZet(av, tekst, dag) {
   let gezet = 0, fouten = 0, vervallen = 0;
   for (let i = 0; i < av.vragen.length && i < BP.AV_MAX; i++) {
     const v = av.vragen[i];
-    const p = { sleutel: 'briefing-' + dag + '-' + (i + 1), soort: 'besluit', titel: v.vraag, waarom: v.uitleg, stappen: [], deadline: dag, waar: 'overal', prive: true,
-      herkomst: { module: 'briefing', briefing: { dag: dag, punt: model ? BP.puntBij(model, v.punt) : null, gevoelig: v.gevoelig } } };
-    try { const r = await appSbRpc('mk_voor_jou_zet', { p: p }); if (r && r.sleutel) gezet++; else fouten++; } catch (e) { fouten++; logError('briefing-autovragen', e); }
+    // wv4260: titel <= 90 en waarom <= 400 (databankgrenzen); een ingekorte titel krijgt de volle vraag vooraan in waarom én in herkomst
+    const kt = BP.kaartVanVraag(v.vraag, v.uitleg);
+    const hb = { dag: dag, punt: model ? BP.puntBij(model, v.punt) : null, gevoelig: v.gevoelig };
+    if (kt.kort) hb.vraag = v.vraag;
+    const p = { sleutel: 'briefing-' + dag + '-' + (i + 1), soort: 'besluit', titel: kt.titel, waarom: kt.waarom, stappen: [], deadline: dag, waar: 'overal', prive: true,
+      herkomst: { module: 'briefing', briefing: hb } };
+    try { const r = await appSbRpc('mk_voor_jou_zet', { p: p }); if (r && r.sleutel) gezet++; else fouten++; }
+    catch (e) {
+      fouten++; logError('briefing-autovragen', e);
+      if (typeof schrijfLog === 'function') schrijfLog(nu() + ' briefing-autovragen-fout ' + velden({ n: i + 1, titel: kt.titel.length, waarom: kt.waarom.length, fout: String((e && e.message) || e).slice(0, 120) }));
+    }
   }
   appStaat.vjCache = null;
   try {
     for (const p of await appVjPunten()) {
       const b = appVjBriefing(p);
+      if (!b) continue;   // wv4260: geen briefingkaart (gaf elke ochtend een TypeError, waardoor oude briefingvragen nooit vervielen)
       // eerdere dag, of (Codex ZOU 1) een vervangende briefing van vandaag met minder vragen: de overtollige van vandaag ook dicht
       const weg = b.dag < dag || (b.dag === dag && b.n > Math.min(av.vragen.length, BP.AV_MAX));
       if (!weg || (p.status !== 'open' && p.status !== 'later')) continue;
@@ -21619,7 +21628,11 @@ async function telGesprekStukken() {
     try { k = await telVjKaart(p, afMap); } catch (e) { logError('tel-gesprek', e); }
     if (!k) continue;   // al beantwoord of geen knop: niet meer vragen
     kaarten[p.id] = k;
-    vragen.push({ n: bv.n, punt_id: bv.punt, vraag: k.vraag || k.titel, uitleg: k.waarom || '', kaart_id: p.id });
+    // wv4260: ingekorte titel → de volle vraag uit herkomst gesproken, en uit de uitleg weggelaten (die begint dan met dezelfde vraag)
+    const hv = typeof p.herkomst.briefing.vraag === 'string' ? appKort(appVjGewoon(appVjOpmaakWeg(p.herkomst.briefing.vraag)), 600) : null;
+    let uitleg = k.waarom || '';
+    if (hv && uitleg.indexOf(hv) === 0) uitleg = uitleg.slice(hv.length).trim();
+    vragen.push({ n: bv.n, punt_id: bv.punt, vraag: hv || k.vraag || k.titel, uitleg: uitleg, kaart_id: p.id });
   }
   vragen.sort(function (x, y) { return x.n - y.n; });
   const stukken = BP.gesprek(b.p, vragen, { spreek: appSpreektekst, kaart: function (v) { const k = kaarten[v.kaart_id]; return k ? { id: k.id, tekst_id: k.tekst_id, gevoelig: k.gevoelig, reden: k.reden } : null; } });
