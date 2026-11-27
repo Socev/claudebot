@@ -472,6 +472,7 @@ function maak(deps) {
     const velden = Object.assign(zonderPod(d.velden), vb.velden);
     const opdracht = s.opdracht ? schoon(velden.opdracht, GRENS.opdracht_max) : null;
     const extra = { naad: vb.naad, masker: vb.masker, refs: vb.refs, vergelijk: groep || null };
+    if (ketenGestopt(ex)) { open().prepare('DELETE FROM taak WHERE id = ?').run(id); return { status: 409, fout: 'de keten is gestopt', keten_gestopt: true }; }   // wv4104
     let r;
     try {
       r = await S.maakGeheugen({ flow: vb.flow, velden: velden, beeld: vb.beeld, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
@@ -481,6 +482,7 @@ function maak(deps) {
     if (r.status !== 200) return r;
     if (r.al) { const t = open().prepare('SELECT * FROM taak WHERE studio = ?').get(r.taak.id); return { status: 200, taak: t ? taakUit(t) : null, al: true }; }
     open().prepare('UPDATE taak SET studio = ? WHERE id = ?').run(r.taak.id, id);
+    if (ketenGestopt(ex)) { try { S.stopGeheugen(r.taak.id); } catch (e) {} }   // wv4104: Stop kwam tijdens het indienen
     log('imagine bewerk taak=' + id + ' stand=' + s.id + (vb.masker ? ' masker=1' : '') + (vb.refs ? ' refs=' + vb.refs : '') + (groep ? ' vergelijk=' + groep : ''));
     return { status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(id)) };
   }
@@ -629,6 +631,7 @@ function maak(deps) {
     const instel = JSON.stringify({ soort: 'bewegen', versie: v.id, model: bm.model, beweging: eigen });   // wv4092
     // wv4092 (L17): in de stapel = alleen vastleggen; de ronde start hem als de server stil is (geen motoraanroep nu)
     if (d.stapel === true) {
+      if (ketenGestopt(ex)) return { status: 409, fout: 'de keten is gestopt', keten_gestopt: true };   // wv4104
       if (!fs.existsSync(bestand(v))) return { status: 410, fout: 'het beeldbestand is weg' };
       const db = open();
       if (db.prepare("SELECT COUNT(*) AS n FROM taak WHERE status = 'stapel'").get().n >= STAPEL.max) return { status: 429, fout: 'de stapel is vol (hooguit ' + STAPEL.max + ' filmpjes); wacht tot er een klaar is' };
@@ -654,6 +657,7 @@ function maak(deps) {
     bytes = null;
     if (!m.ok || !m.bytes || !(m.breed > 0) || !(m.hoog > 0)) { terug(); return { status: 400, fout: 'de foto kon niet klaargezet worden' + (m.reden ? ': ' + m.reden : '') }; }
     const velden = { opdracht: eigen || BEWEGEN_STANDAARD, pod_b: m.breed, pod_h: m.hoog };
+    if (ketenGestopt(ex) || (ex.rij && ketenVanRij(ex.rij))) { if (ex.rij) { open().prepare("UPDATE taak SET status = 'gestopt', reden = 'de keten is gestopt', eind = ?, instel = NULL WHERE id = ? AND status = 'wacht'").run(iso(), id); stapelAf(id); } else terug(); return { status: 409, fout: 'de keten is gestopt', keten_gestopt: true }; }   // wv4104
     let r;
     try {
       r = await S.maakGeheugen({ flow: bm.flow, velden: velden, beeld: m.bytes, beurt_id: String(d.beurt_id || ''), geheim: false, apparaat: apparaat,
@@ -663,6 +667,7 @@ function maak(deps) {
     if (r.status !== 200) return r;
     if (r.al) { const t = open().prepare('SELECT * FROM taak WHERE studio = ?').get(r.taak.id); return { status: 200, taak: t ? taakUit(t) : null, al: true }; }
     open().prepare('UPDATE taak SET studio = ? WHERE id = ?').run(r.taak.id, id);
+    if (ketenGestopt(ex) || (ex.rij && ketenVanRij(ex.rij))) { try { S.stopGeheugen(r.taak.id); } catch (e) {} }   // wv4104: Stop kwam tijdens het indienen
     log('imagine bewegen taak=' + id + ' model=' + bm.model + ' maat=' + m.breed + 'x' + m.hoog + (eigen ? ' eigen=1' : ''));
     return { status: 200, taak: taakUit(open().prepare('SELECT * FROM taak WHERE id = ?').get(id)) };
   }
@@ -1217,6 +1222,7 @@ function maak(deps) {
     try { r = await ketenStap(k, i, t.versie, ''); } catch (e) { r = { status: 500, fout: 'starten lukte niet' }; }
     finally { ketenBezig.delete(k.id); }
     if (r.status === 200) { log('imagine keten stap keten=' + k.id + ' stap=' + (i + 1) + '/' + stappen.length); return; }
+    if (r.keten_gestopt || ketenGestopt({ keten: { id: k.id } })) return;   // Stop kwam tussendoor (ook als de motor daardoor weigerde): geen foutrij
     ketenFout(k, i, t.versie, r);
   }
   // De volgende stap kwam niet op gang: een mislukte taak met Opnieuw (dezelfde instellingen, in de keten), nooit een stille stilstand.
@@ -1249,6 +1255,9 @@ function maak(deps) {
   function pogingVan(ex) { return ex && Number.isInteger(ex.poging) && ex.poging > 0 ? ex.poging : 0; }
   function kId(ex) { return ex && ex.keten && HEX16.test(String(ex.keten.id)) ? ex.keten.id : null; }   // wv4104
   function kStap(ex) { return kId(ex) && Number.isInteger(ex.keten.stap) ? ex.keten.stap : null; }
+  function ketenVanRij(rij) { const t = open().prepare('SELECT keten FROM taak WHERE id = ?').get(rij); return !!(t && t.keten && ketenGestopt({ keten: { id: t.keten } })); }
+  // review Codex MOET 1: Stop kan binnenkomen terwijl de volgende stap wordt klaargezet; vlak vóór en na het starten opnieuw kijken
+  function ketenGestopt(ex) { const id = kId(ex); if (!id) return false; const k = open().prepare('SELECT gestopt FROM keten WHERE id = ?').get(id); return !!(k && k.gestopt); }
   // Eindstand van een taak; klaar = de instellingen zijn niet meer nodig (geen masker of opdracht langer bewaren dan nodig)
   function taakAf(taakId, status, reden, versieId) {
     open().prepare('UPDATE taak SET status = ?, reden = ?, eind = ?, versie = ?, instel = CASE WHEN ? = \'klaar\' THEN NULL ELSE instel END WHERE id = ?')

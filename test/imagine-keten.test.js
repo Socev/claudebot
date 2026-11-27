@@ -8,7 +8,7 @@
 //   5. volgende stap kon niet starten (rij vol) → mislukte taak met Opnieuw en vanzelf opnieuw; herstart tussen stappen → hervat.
 //   6. laad met hergebruik: dezelfde Immich-foto = hetzelfde beeld; zonder hergebruik = een nieuw; niets naar Immich zonder tik.
 // Kruisproeven (moeten ROOD): IMAGINE_KRUIS=kverder (geen volgende stap), =kvers (de vingerafdruk geldt niet voor de volgende stappen),
-// =kvolg (volgende stap op het origineel i.p.v. op het resultaat).
+// =kvolg (volgende stap op het origineel i.p.v. op het resultaat), =kstop (geen controle na het indienen).
 const fs = require('fs'), path = require('path'), os = require('os');
 const ROOT = path.join(__dirname, '..');
 const KRUIS = process.env.IMAGINE_KRUIS || '';
@@ -23,6 +23,7 @@ fs.copyFileSync(path.join(ROOT, 'imagine.js'), path.join(MOD, 'imagine.js'));
 function wijzig(oud, nieuw) { const p = path.join(MOD, 'imagine.js'); const s = fs.readFileSync(p, 'utf8'); if (s.indexOf(oud) < 0) throw new Error('kruisproef: tekst niet gevonden'); fs.writeFileSync(p, s.split(oud).join(nieuw)); }
 if (KRUIS === 'kverder') wijzig("    if (t.status !== 'klaar' || !t.versie) return;   // uitgevallen", "    return;   // uitgevallen");
 if (KRUIS === 'kvers') wijzig('return !!t && klok() - t < KETEN_T.vers_ms;', 'return false;');
+if (KRUIS === 'kstop') wijzig("    if (ketenGestopt(ex)) { try { S.stopGeheugen(r.taak.id); } catch (e) {} }   // wv4104: Stop kwam tijdens het indienen\n    log('imagine bewerk", "    log('imagine bewerk");
 if (KRUIS === 'kvolg') wijzig('try { r = await ketenStap(k, i, t.versie, \'\'); }', 'try { r = await ketenStap(k, i, k.start, \'\'); }');
 const I = require(path.join(MOD, 'imagine.js'));
 
@@ -32,7 +33,7 @@ const UUID = '0a1b2c3d-1111-4222-8333-444455556666';
 function stub() {
   const live = new Map();
   const S = {
-    live: live, starts: [], proef: true, weiger: 0, immichN: 0,
+    live: live, starts: [], proef: true, weiger: 0, immichN: 0, voorStart: null,
     beeldPijp: async function (args, buf) {
       if (args[0] === 'pijp-toon') return { ok: true, formaat: buf[0] === 0xff ? 'JPEG' : 'PNG', breed: 64, hoog: 48, bytes: JPG };
       if (args[0] === 'pijp-maat') return { ok: true, bytes: PNG, breed: 64, hoog: 48 };
@@ -41,6 +42,7 @@ function stub() {
     flowVan: async function (id) { const film = /^video-/.test(id); return { id: id, klaar: true, reden: null, tijd: '', status: film || !S.proef ? 'actief' : 'proef', vers_per_keer: !film && S.proef, velden: [] }; },
     maakGeheugen: async function (o, ctx) {
       for (const t of live.values()) if (t.beurt === o.beurt_id) return { status: 200, taak: { id: t.id }, al: true };
+      if (S.voorStart) { const f = S.voorStart; S.voorStart = null; await f(o); }
       if (S.weiger) { S.weiger--; return { status: 429, fout: 'er staan al 5 taken in de rij; wacht tot er een klaar is' }; }
       const proef = !/^video-/.test(o.flow) && S.proef;
       if (proef && !ctx.versOk()) return { status: 403, fout: 'deze bewerking is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
@@ -159,6 +161,24 @@ const ketenVan = async (im, bron) => (await app(im, '/app/imagine/bron/' + bron)
     await slaap(40);
     const k = await ketenVan(im, l.bron);
     toets('4a. stop tijdens stap 2: keten gestopt, geen stap 3, versie van stap 1 blijft', st.status === 200 && k.status === 'gestopt' && S.starts.length === 2 && im._db().prepare('SELECT COUNT(*) AS n FROM versie').get().n === 2, { st: st, k: k });
+    // review Codex MOET 1: Stop komt binnen terwijl stap 2 wordt ingediend. (a) flow op proef: de motor weigert (vingerafdruk weg), geen foutrij;
+    // (b) flow zonder vingerafdruk: de motor nam hem al aan → meteen gestopt. In beide gevallen geen stap 3 en niets dat doorloopt.
+    for (const proef of [true, false]) {
+      S.proef = proef;
+      const lr = await laadFoto(im);
+      const rk = await app(im, '/app/imagine/keten', 'POST', { versie: lr.versie, stappen: ['krassen', 'inkleuren', 'opknappen'], beurt_id: beurt() }, eenVinger());
+      const nR = S.starts.length;
+      let stopAntw = null;
+      S.voorStart = async () => { const tw = im._db().prepare("SELECT id FROM taak WHERE keten = ? AND keten_stap = 1 AND status = 'wacht'").get(rk.body.keten.id); stopAntw = await app(im, '/app/imagine/stop/' + tw.id, 'POST', {}); };
+      await rondaf(S, nR, beeld);
+      await totDat(() => stopAntw);
+      await slaap(60);
+      const rs = im._db().prepare('SELECT keten_stap, status FROM taak WHERE keten = ? ORDER BY rowid').all(rk.body.keten.id);
+      const kk = await ketenVan(im, lr.bron);
+      toets('4d' + (proef ? 'a' : 'b') + '. Stop tijdens het indienen van stap 2 (' + (proef ? 'flow op proef' : 'flow zonder vingerafdruk') + '): niets loopt, geen foutrij, geen stap 3, keten gestopt',
+        !!stopAntw && S.live.size === 0 && kk.status === 'gestopt' && !rs.some((x) => x.status === 'mislukt' || x.keten_stap === 2) && (proef ? rs.length === 1 : rs.length === 2 && rs[1].status === 'gestopt'), { rs: rs, k: kk.status, live: S.live.size });
+    }
+    S.proef = true;
     const l2 = await laadFoto(im);
     const r = await app(im, '/app/imagine/keten', 'POST', { versie: l2.versie, stappen: ['bewegen', 'inkleuren'], beurt_id: beurt() }, eenVinger());
     toets('4b. keuze ongeordend gestuurd = vaste volgorde, alleen de gekozen', r.status === 200 && JSON.stringify(r.body.keten.stappen.map((x) => x.id)) === '["inkleuren","bewegen"]' && laatste(S).flow === 'foto-inkleuren', r.body);
