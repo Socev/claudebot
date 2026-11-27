@@ -15123,6 +15123,92 @@ function appPotPrognose(rijen) {
 }
 // ── einde heden en toekomst ──
 
+// ── Naast elkaar (wv4155, besluitenpagina nr 146 = 2C46, David Ja 25-11-2026 22:14) ──
+// Tolgaarde naast Groenhouten per 1000 ingeschreven patiënten, per jaar (de laatste drie jaren met een VIP-export), uit de aantallen van de
+// VIP-export (fin `declaratie`, verzekeraar 'totaal', alleen de laatste export per entiteit en jaar). Noemer = gemiddeld aantal ingeschreven
+// patiënten per kwartaal uit dezelfde export (fin `patienten`, declaratie_kwartaalgemiddelde; intake.py telt 11115–11118 / kwartalen).
+// VIP geeft per jaar één stand: een jaar dat niet op 31-12 eindigt is lopend ("t/m <datum>") en krijgt geen verschil met het jaar ervoor
+// (zou als daling gelezen worden). Een PMA-export komt hier later naast, nooit opgeteld. Alleen tellingen per praktijk; geen patiënten.
+const APP_NAAST_GROEPEN = [
+  { titel: 'Consulten huisarts (regulier)', rijen: [{ label: 'korter dan 5 min', codes: ['12010'] }, { label: '5 tot 20 min', codes: ['12011'] },
+    { label: '20 min en langer', codes: ['12001'] }, { label: 'samen', codes: ['12010', '12011', '12001'], som: true }] },
+  { titel: 'Visites huisarts (regulier)', rijen: [{ label: 'korter dan 20 min', codes: ['12002'] }, { label: '20 min en langer', codes: ['12003'] },
+    { label: 'samen', codes: ['12002', '12003'], som: true }] },
+  { titel: 'POH-GGZ', rijen: [{ label: 'consult korter dan 5 min', codes: ['12117'] }, { label: 'consult 5 tot 20 min', codes: ['12118'] },
+    { label: 'consult 20 min en langer', codes: ['12111'] }, { label: 'visite', codes: ['12113'] }, { label: 'groepsconsult', codes: ['12116'] },
+    { label: 'samen', codes: ['12117', '12118', '12111', '12113', '12116'], som: true }] },
+  { titel: 'M&I per soort', mi: true },   // elke code met categorie mi die in een van de jaren voorkomt, op code
+];
+const APP_NAAST_LEEFTIJD = [{ g: '<65', label: 'jonger dan 65' }, { g: '65-75', label: '65 tot 75' }, { g: '75-85', label: '75 tot 85' }, { g: '85+', label: '85 en ouder' }];
+const APP_NAAST_KLEIN = 30;
+const appNaastPer1000 = function (n, pat) { return pat > 0 && appIsGetal(n) ? Math.round(n / pat * 10000) / 10 : null; };
+function appNaastLabel(oms, code) {
+  const t = String(oms || '').replace(/\s+/g, ' ').trim();
+  const k = t.indexOf(' (') > 3 ? t.slice(0, t.indexOf(' (')) : t;
+  return appKort(k || code, 60);
+}
+// codeRijen: { entiteit, jaar, tot, code, oms, cat, aantal }; patRijen: { entiteit, peildatum, leeftijdsgroep, aantal } (alle exports)
+function appNaast(codeRijen, patRijen, jaarNu) {
+  const codes = APP_HEDEN_CODES, n = {}, tot = {}, info = {};
+  (codeRijen || []).forEach(function (x) {
+    const jr = Number(x.jaar);
+    if (codes.indexOf(x.entiteit) < 0 || !appIsGetal(jr) || jr < jaarNu - 2 || jr > jaarNu || !/^\d{5}$/.test(String(x.code))) return;
+    const k = x.entiteit + ':' + jr;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(x.tot))) tot[k] = String(x.tot);
+    n[k + ':' + x.code] = (n[k + ':' + x.code] || 0) + (appIsGetal(x.aantal) ? x.aantal : 0);
+    if (!info[x.code]) info[x.code] = { oms: x.oms, cat: String(x.cat || '') };
+  });
+  const pat = {}, lft = {};
+  (patRijen || []).forEach(function (p) {
+    const jr = Number(String(p.peildatum || '').slice(0, 4)), k = p.entiteit + ':' + jr;
+    if (codes.indexOf(p.entiteit) < 0 || !appIsGetal(p.aantal) || String(p.peildatum).slice(4) !== '-01-01') return;
+    if (p.leeftijdsgroep == null) pat[k] = p.aantal; else (lft[k] = lft[k] || {})[String(p.leeftijdsgroep)] = p.aantal;
+  });
+  const jaren = [];
+  for (let jr = jaarNu - 2; jr <= jaarNu; jr++) if (codes.some(function (c) { return tot[c + ':' + jr]; })) jaren.push(jr);
+  if (!jaren.length) return null;
+  const kolommen = [];
+  jaren.forEach(function (jr) { codes.forEach(function (c) {
+    const k = c + ':' + jr, t = tot[k] || null;
+    kolommen.push({ code: c, jaar: jr, tot: t, heel: !!t && t.slice(5) === '12-31', patienten: t && appIsGetal(pat[k]) ? Math.round(pat[k]) : null });
+  }); });
+  // waarde per kolom; verschil (procent per 1000) alleen als dit jaar en het jaar ervoor allebei heel zijn
+  const cellen = function (som) {
+    return kolommen.map(function (kol) {
+      const k = kol.code + ':' + kol.jaar;
+      if (!kol.tot) return null;
+      const a = som(k), p = pat[k];
+      const uit = { aantal: a, per1000: appNaastPer1000(a, p) };
+      const vk = kol.code + ':' + (kol.jaar - 1), vt = tot[vk];
+      // kleine aantallen (< 30 in een van beide jaren) geven toevalsprocenten: dan geen verschil (zelfde grens als KLEIN_AANTAL in PMA)
+      if (kol.heel && vt && vt.slice(5) === '12-31' && a >= APP_NAAST_KLEIN && som(vk) >= APP_NAAST_KLEIN) { const v = appNaastPer1000(som(vk), pat[vk]); if (v && uit.per1000 != null) uit.verschil = appPct(uit.per1000, v); }
+      return uit;
+    });
+  };
+  const somCodes = function (lijst) { return function (k) { return lijst.reduce(function (s, c) { return s + (n[k + ':' + c] || 0); }, 0); }; };
+  const komtVoor = function (lijst) { return lijst.some(function (c) { return kolommen.some(function (kol) { return n[kol.code + ':' + kol.jaar + ':' + c]; }); }); };
+  const groepen = APP_NAAST_GROEPEN.map(function (g) {
+    let rijen = g.rijen;
+    if (g.mi) {
+      const mi = Object.keys(info).filter(function (c) { return info[c].cat === 'mi'; }).sort();
+      rijen = mi.map(function (c) { return { label: appNaastLabel(info[c].oms, c), codes: [c] }; });
+      if (rijen.length > 1) rijen = rijen.concat([{ label: 'samen', codes: mi, som: true }]);
+    }
+    const uit = rijen.filter(function (r) { return komtVoor(r.codes); }).map(function (r) {
+      return { label: r.label, codes: r.som ? [] : r.codes, som: !!r.som, cellen: cellen(somCodes(r.codes)) };
+    });
+    return uit.length ? { titel: g.titel, rijen: uit } : null;
+  }).filter(Boolean);
+  // leeftijdsopbouw: aandeel per 1000 ingeschreven patiënten (zelfde export)
+  const lrijen = APP_NAAST_LEEFTIJD.filter(function (l) { return kolommen.some(function (kol) { return lft[kol.code + ':' + kol.jaar] && appIsGetal(lft[kol.code + ':' + kol.jaar][l.g]); }); })
+    .map(function (l) { return { label: l.label, codes: [], som: false, cellen: cellen(function (k) { return lft[k] ? lft[k][l.g] : null; }) }; });
+  if (lrijen.length) groepen.push({ titel: 'Leeftijdsopbouw', rijen: lrijen, aandeel: true });
+  return { jaren: jaren, kolommen: kolommen, groepen: groepen, label: 'VIP (toegezegd)', soort: 'berekend',
+    bron: 'fin-datahub: aantallen uit de VIP-export Overzicht gedeclareerde prestaties (laatste export per jaar), gedeeld door het gemiddeld aantal ingeschreven patiënten per kwartaal uit dezelfde export, × 1000',
+    uitleg: 'Per 1000 ingeschreven patiënten (gemiddeld per kwartaal) uit de VIP-export. Een jaar dat niet tot 31 december loopt is nog niet af: dat cijfer is lager omdat het jaar korter is, niet omdat er minder gebeurt, en krijgt geen verschil met het jaar ervoor. Alleen reguliere consulten en visites (geen passanten). Een PMA-export komt hier later naast, nooit opgeteld.' };
+}
+// ── einde Naast elkaar ──
+
 async function appPraktijkenVerzamel() {
   let zdFout = false;
   const dichtbijBezig = appDichtbij();   // vangt zelf zijn fouten (wordt nooit afgewezen); loopt naast de datahub
@@ -15159,6 +15245,13 @@ async function appPraktijkenVerzamel() {
     ]).catch(function (e) { logError('app-praktijken', e); return null; }) : Promise.resolve([[], []]),
     (typeof potDhD1 === 'function' ? potDhD1 : function () { return Promise.reject(new Error('pot: geen D1')); })([{ sql: "SELECT jaar, COUNT(*) AS n, SUM(bedrag) AS totaal, MIN(bron) AS bron, MAX(bron) AS bron2 FROM subsidie WHERE soort = 'prognose' GROUP BY jaar ORDER BY jaar", params: [] }], 10000)
       .then(function (r) { return r[0].results; }, function (e) { logError('app-praktijken', e); return null; }),
+    // wv4155: Naast elkaar — aantallen per code (laatste export per entiteit en jaar) en patiënten per leeftijdsgroep
+    Promise.all([
+      appFinSql("SELECT d.entiteit, d.jaar, d.periode_tot AS tot, d.code, p.omschrijving AS oms, p.categorie AS cat, d.aantal FROM declaratie d LEFT JOIN prestatie p ON p.code = d.code"
+        + " JOIN (SELECT entiteit, jaar, MAX(periode_tot) AS m FROM declaratie WHERE verzekeraar='totaal' AND entiteit IN (" + ht + ") AND jaar >= " + (appJaarNu() - 2) + " GROUP BY entiteit, jaar) x"
+        + " ON x.entiteit = d.entiteit AND x.jaar = d.jaar AND x.m = d.periode_tot WHERE d.verzekeraar='totaal'"),
+      appFinSql("SELECT entiteit, peildatum, leeftijdsgroep, aantal FROM patienten WHERE soort='declaratie_kwartaalgemiddelde' AND entiteit IN (" + ht + ")"),
+    ]).catch(function (e) { logError('app-praktijken', e); return null; }),
   ]);
   const jaarNu = appJaarNu();
   let pmaRijen = null;
@@ -15181,6 +15274,7 @@ async function appPraktijkenVerzamel() {
   if (!pmaRijen) fouten.push('OVIS PMA is nu niet te lezen; dit jaar tot nu zonder PMA');
   if (!extra[1]) fouten.push('de modelprognose is nu niet te lezen');
   if (!extra[2]) fouten.push('de subsidieprognose van POT is nu niet te lezen');
+  if (!extra[3]) fouten.push('de cijfers voor Naast elkaar zijn nu niet te lezen');
   const reeksPer = {};
   const entiteiten = APP_PRAKTIJKEN.map(function (def) {
     const reeksen = appFinReeksen(f.reeks, def);
@@ -15206,7 +15300,10 @@ async function appPraktijkenVerzamel() {
   const patPer = {};
   APP_HEDEN_CODES.forEach(function (c) { patPer[c] = appPatJaren(APP_PRAKTIJKEN.find(function (d) { return d.code === c; }), f); });
   const toekomst = extra[1] ? appToekomst(extra[1][0], extra[1][1], reeksPer, patPer) : [];
-  return { entiteiten: entiteiten, dichtbij: dichtbij.blokken, heden: heden, toekomst: toekomst, fouten: fouten, op: Date.now() };
+  let naast = null;
+  try { naast = extra[3] ? appNaast(extra[3][0], extra[3][1], jaarNu) : null; } catch (e) { logError('app-praktijken', new Error('naast elkaar faalde')); naast = null; }
+  if (naast) naast.namen = APP_HEDEN_CODES.reduce(function (o, c) { const d = APP_PRAKTIJKEN.find(function (x) { return x.code === c; }); o[c] = d ? d.naam : c; return o; }, {});
+  return { entiteiten: entiteiten, dichtbij: dichtbij.blokken, heden: heden, toekomst: toekomst, naast: naast, fouten: fouten, op: Date.now() };
 }
 // 30 min bewaard; met een fout (zorgdata weg) hooguit 2 min, zodat Ververs echt opnieuw leest. Mislukt een vernieuwing terwijl er
 // oudere cijfers zijn, dan die cijfers met een regel erbij in plaats van een 503 (Fable-review wv174 M4).
@@ -15230,7 +15327,7 @@ async function appPraktijkenRoute(req, res, a) {
   let d;
   try { d = await appPraktijken(); } catch (e) { logError('app-praktijken', e); return appWeiger(res, 503, 'de cijfers zijn nu niet te lezen', 'praktijken fout'); }
   appStuur(res, 200, { ok: true, vaste_plek: false, entiteiten: d.entiteiten, dichtbij: d.dichtbij || [], fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString(),
-    heden: d.heden || null, toekomst: d.toekomst || [] });   // wv3098
+    heden: d.heden || null, toekomst: d.toekomst || [], naast: d.naast || null });   // wv3098; wv4155 naast
 }
 
 // ── Cijfer-Meester › Rapporten (wv3729, besluitenpagina nr 153 = 2C53, David Ja 21-11) ──

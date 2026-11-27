@@ -647,6 +647,10 @@ jobs:
       - name: "pod-klok (wv4126, C71 stap a)"
         if: ${{ !cancelled() }}
         run: node --test test/pod-klok.test.js
+      # wv4155: PMA › Naast elkaar (2C46) — Tolgaarde naast Groenhouten per 1000 patiënten uit de VIP-aantallen; ECG sluit op de handtelling.
+      - name: "praktijken-naast (wv4155, 2C46)"
+        if: ${{ !cancelled() }}
+        run: node --test test/praktijken-naast.test.js
       # wv4105: Socev-labels in Gmail (2C62) — één agent per label, tweede label geen tweede agent, herkansing, afloop → CONCEPT_KLAAR-bron.
       - name: "gmail-opdracht (wv4105, 2C62)"
         if: ${{ !cancelled() }}

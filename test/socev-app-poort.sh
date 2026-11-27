@@ -4517,7 +4517,8 @@ async function bewijs(o) {
       const j = r.j || {}, E = {};
       (j.entiteiten || []).forEach((e) => { E[e.code] = e; });
       toets('20 200, vijf entiteiten in vaste volgorde, geen fouten', r.status === 200 && (j.entiteiten || []).map((e) => e.code).join() === 'TG,GH,POT,KM,HOLD' && j.fouten.length === 0 && j.vaste_plek === false && !!j.bijgewerkt, JSON.stringify(j).slice(0, 300));
-      toets('20 alleen vaste SELECTs naar D1 fin, zonder parameters, met het pod-token', finStaat.sql.length === 7 && finStaat.sql.every((x) => /^SELECT /.test(x.q) && !/;|--|INSERT|UPDATE|DELETE|DROP/i.test(x.q) && Array.isArray(x.params) && x.params.length === 0) && finStaat.auth.every((x) => x === 'Bearer nep-cf'), JSON.stringify(finStaat.sql.map((x) => x.q.slice(0, 50))));
+      // wv4155: 9 = 7 + de twee vragen van Naast elkaar (aantallen per code, patiënten per leeftijdsgroep)
+      toets('20 alleen vaste SELECTs naar D1 fin, zonder parameters, met het pod-token', finStaat.sql.length === 9 && finStaat.sql.every((x) => /^SELECT /.test(x.q) && !/;|--|INSERT|UPDATE|DELETE|DROP/i.test(x.q) && Array.isArray(x.params) && x.params.length === 0) && finStaat.auth.every((x) => x === 'Bearer nep-cf'), JSON.stringify(finStaat.sql.map((x) => x.q.slice(0, 50))));
       const qR = finStaat.sql.find((x) => / FROM reeks /.test(x.q)).q;
       toets("20 reeks: alleen versie='jaarrekening', maat IS NULL (geen modeluitkomst, geen winstdeel per maat), alleen de vijf entiteiten", /versie='jaarrekening' AND maat IS NULL/.test(qR) && /entiteit IN \('TG','GH','POT','KM','HOLD'\)/.test(qR) && !/PHBV|SLOEL/.test(qR), qR);
       toets('20 patiënten: alleen totalen (leeftijdsgroep IS NULL), declaraties: verzekeraar totaal', finStaat.sql.some((x) => / FROM patienten /.test(x.q) && /leeftijdsgroep IS NULL/.test(x.q)) && finStaat.sql.some((x) => / FROM declaratie /.test(x.q) && /verzekeraar='totaal'/.test(x.q)));
@@ -4609,7 +4610,7 @@ async function bewijs(o) {
       zdStaat.kapot = false; const nZ = finStaat.sql.length;
       H.appStaat.praktijken.data.op = Date.now() - 3 * 60000;
       r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
-      toets('20 M4 met een fout hooguit 2 min bewaard: Ververs leest opnieuw en de sector is terug', r.status === 200 && finStaat.sql.length === nZ + 7 && r.j.fouten.length === 0 && r.j.entiteiten[0].sector, finStaat.sql.length - nZ);
+      toets('20 M4 met een fout hooguit 2 min bewaard: Ververs leest opnieuw en de sector is terug', r.status === 200 && finStaat.sql.length === nZ + 9 && r.j.fouten.length === 0 && r.j.entiteiten[0].sector, finStaat.sql.length - nZ);
       H.appStaat.praktijken = null;
     }
 
