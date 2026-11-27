@@ -182,6 +182,53 @@ test('wv3676: punten uit het register met de jongste naloop; vijf zwakste; bronl
   assert.deepStrictEqual([l.punten.length, l.zwakste.length], [0, 0]);
 });
 
+// wv4221: tab Scorekaart — het echte nza.py op een verzonnen scorekaart naast het proefdossier; elk citaat gecontroleerd
+test('wv4221: scorekaart met citaatcontrole per bron, telling en fouten; geen bestand = er false', { skip: echtAan ? false : 'nza.py niet aanwezig (CI)' }, async () => {
+  const db = path.join(T, 'proef-sk.db');
+  execFileSync('python3', ['-I', path.join(__dirname, 'nza-proef.py'), db]);
+  const reg = path.join(T, 'reg-sk', 'Verweerpunten');
+  fs.mkdirSync(path.join(reg, 'Scorekaart'), { recursive: true });
+  const b = (stuk, plek, citaat) => ({ stuk, plek, citaat });
+  fs.writeFileSync(path.join(reg, 'Scorekaart', 'scorekaart.json'), JSON.stringify({
+    bijgewerkt: '2026-11-27', thema_namen: { proef: 'Proefthema' },
+    proef_rollen: { rechter: ['cbb-2099-901'], regiebrief: ['cbb-2099-901'], antwoord: ['kpo-proef-2024'], rechts: ['bob-proef-2025'], eerste: { regiebrief: 'cbb-2099-901' } },   // alleen op een proefdossier
+    regels: [
+      { id: 'SK-P01', groep: 'rechter', thema: 'proef', vraag: 'Opnieuw beslissen.', oordeel: 'gedaan', wat_deed: 'Besloten.', verweerpunten: ['VP-01', 'fout'],
+        links: [b('cbb-2099-901', '1.3', 'De NZa zal opnieuw moeten beslissen op het bezwaar')],
+        rechts: [b('bob-proef-2025', '17', 'De NZa handhaaft het proefbesluit')] },
+      { id: 'SK-P02', groep: 'regiebrief', thema: 'proef', vraag: 'Vraag.', oordeel: 'niet', wat_deed: 'Niets gevonden.', gezocht: 'proefwoord',
+        links: [b('cbb-2099-901', '1.1', 'Dit geschil gaat over de verzonnen proeftarieven')],
+        nza_antwoord: { kort: 'Antwoord.', bronnen: [b('kpo-proef-2024', '2', 'Dit staat er niet in, verzonnen')] }, rechts: [] },
+      { id: 'SK-P03', groep: 'rechter', thema: 'proef', vraag: 'Verkeerd stuk rechts.', oordeel: 'deels', wat_deed: 'x',
+        links: [b('cbb-2099-901', '1.2', 'de proeftarieven niet deugdelijk heeft gemotiveerd')],
+        rechts: [b('kpo-proef-2024', '2', 'Regel 2 over de proefprestatie')] },
+    ] }));
+  const m = maak({ script: ECHT, db, register: reg, vandaag: '2026-11-27' });
+  const u = await m.app({ pad: '/app/nza/scorekaart', methode: 'GET' });
+  assert.strictEqual(u.status, 200);
+  const o = u.body;
+  assert.strictEqual(o.er, true);
+  assert.deepStrictEqual(o.telling, { gedaan: 1, deels: 1, niet: 1, 'geen opdracht': 0 });
+  assert.deepStrictEqual(o.themas, [{ thema: 'proef', naam: 'Proefthema' }]);
+  const r = Object.fromEntries(o.regels.map((x) => [x.id, x]));
+  assert.strictEqual(r['SK-P01'].links[0].ok, true);
+  assert.strictEqual(r['SK-P01'].rechts[0].ok, true);
+  assert.strictEqual(r['SK-P01'].rechts[0].stuk_datum, '2025-03-10');
+  assert.deepStrictEqual(r['SK-P01'].verweerpunten, ['VP-01'], 'alleen VP-nn');
+  assert.strictEqual(r['SK-P02'].nza_antwoord.bronnen[0].ok, false, 'verzonnen citaat: geen vinkje');
+  assert.strictEqual(r['SK-P02'].gezocht, 'proefwoord');
+  assert.strictEqual(r['SK-P03'].rechts[0].ok, false, 'letterlijk juist citaat uit een stuk dat niet rechts hoort: geen vinkje (Codex MOET 1/2)');
+  assert.ok(r['SK-P03'].rechts[0].reden.includes('hoort niet op deze kant'), r['SK-P03'].rechts[0].reden);
+  assert.strictEqual(o.citaten, 6);
+  assert.strictEqual(o.citaten_ok, 4);
+  assert.ok(o.fouten.some((f) => f.startsWith('SK-P02 nza-antwoord')), JSON.stringify(o.fouten));
+  assert.ok(o.fouten.some((f) => f.startsWith('SK-P03 rechts: kpo-proef-2024') && f.includes('hoort niet op deze kant')), JSON.stringify(o.fouten));
+  assert.ok(o.md.includes('## Niet (meer) letterlijk teruggevonden of verkeerd stuk'), 'fouten in de download');
+  assert.strictEqual(o.fouten.length, 2, JSON.stringify(o.fouten));
+  const leeg = (await maak({ script: ECHT, db, register: path.join(T, 'bestaat-niet'), vandaag: '2026-11-27' }).app({ pad: '/app/nza/scorekaart', methode: 'GET' })).body;
+  assert.deepStrictEqual([leeg.ok, leeg.er, leeg.regels.length], [true, false, 0]);
+});
+
 test('wv3153: index_leesbaar_agent in info() uit toegang.py (achtergrond, nooit wachten; fout = null)', async () => {
   const nepT = (naam, inhoud) => { const p = path.join(T, naam); fs.writeFileSync(p, inhoud); return p; };
   const goed = nepT('toegang-goed.py', 'import json; print(json.dumps({"index_leesbaar_agent": True, "log_schrijfbaar_agent": False, "fouten": ["x"]}))');

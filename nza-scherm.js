@@ -10,6 +10,9 @@
 // wv3676 (21-11-2026, besluitenpagina nr 128): GET /app/nza/punten = tab Punten (nza.py scherm punten): de verweerpunten uit het register
 // (vault 10_Zakelijk/DBH/Verweerpunten, of opts.register in een toets) met de jongste naloop per punt. Geen cache: ± 0,2 s, en een naloop
 // die de agent net bewaarde moet meteen zichtbaar zijn.
+// wv4221 (27-11-2026, besluitenpagina nr 933 = L33): GET /app/nza/scorekaart = tab Scorekaart (nza.py scherm scorekaart): wat de rechter
+// opdroeg en het CBb in de regiebrief vroeg tegenover wat het besluit van 30-06-2026 en de eindrapportage deden, elk citaat gecontroleerd
+// (bron <register>/Scorekaart/scorekaart.json). Geen cache: de controle loopt elke keer opnieuw tegen de index.
 // Alleen child_process (execFile zonder shell, python3 -I) en fs.
 const { execFile } = require('child_process');
 const fs = require('fs');
@@ -115,6 +118,7 @@ function maak(opts) {
     if (v.methode === 'GET' && v.pad === '/app/nza') return overzicht();
     if (v.methode === 'POST' && v.pad === '/app/nza/stuk') return stuk(v.body);
     if (v.methode === 'GET' && v.pad === '/app/nza/punten') return draai(['punten']);   // wv3676
+    if (v.methode === 'GET' && v.pad === '/app/nza/scorekaart') return draai(['scorekaart']);   // wv4221: tab Scorekaart (geen cache: ± 1 s, 190+ citaatcontroles)
     return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'nza onbekend' };
   }
 
