@@ -3397,7 +3397,9 @@ const AGENT_EINDREGEL = '[Systeem, eindregel: eindig je beurt nooit met een wach
   'Achtergrondwerk (run_in_background) mag voor parallel werk: aan het eind wacht de CLI erop (Bash tot zijn eigen timeout, ' +
   'standaard 10 min, max 2 uur) en je krijgt het resultaat; verwerk dat in je eindrapport. Na 20 min zonder enig teken van leven stopt de pod de hele run. ' +
   // wv3732 (besluitenpagina nr 374 = 3C74): de app toont per afgeronde klus deze ene zin (Agents › Wat is er af, Wat ik vroeg, OVIS Code)
-  'Begin je eindrapport met één regel "Uitkomst: …": één zin in gewone taal over wat er nu af of anders is, of wat je vond; lukte het niet, zeg dat in die zin.]';
+  'Begin je eindrapport met één regel "Uitkomst: …": één zin in gewone taal over wat er nu af of anders is, of wat je vond; lukte het niet, zeg dat in die zin. ' +
+  // wv4175 (besluitenpagina nr 375 = 3C75): de app maakt van deze slotregel een merkje in Te lezen (te-lezen.js slotregel); Mislukt en Probeer het staan bovenaan
+  'Eindig je eindrapport met één regel "Voor David: …" met precies één van: "Niets doen", "Probeer het: <App › plek>", "Wacht: <waarop, bv. uitrol of zijn kaart>" of "Mislukt: <wat>".]';
 
 function eindSlaap(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
@@ -10592,6 +10594,9 @@ function appBewaar(jobId, outdir, meta) {
 function appBewaarAgent(jobId, entry, outdir, rapport, ok, naHerstart) {
   if (entry && entry.app_bewaard) return null;
   const route = appRoute(entry && entry.label);
+  // wv4175 (3C75): alleen het merkje van de slotregel (woord + plek, geen rapporttekst) in het register, ook voor route socev (waarvan de
+  // tekst bewust niet bewaard wordt); Te lezen leest het via slotVan. try: het herstartpad kan vóór het laden van te-lezen.js lopen.
+  if (entry) { try { entry.slot = ok === false ? { merk: 'mislukt', plek: null } : (teLezenMod && typeof rapport === 'string' ? teLezenMod.slotregel(rapport) : null) || undefined; } catch (e) { /* geen merkje */ } }
   const m = appBewaar(jobId, outdir, { soort: 'agent', label: entry && entry.label, ok: ok,
     rapport: (route === 'machinekamer' || route === 'david') ? rapport : null,
     na_herstart: !!naHerstart, op: naHerstart && entry ? entry.ended : null });
@@ -13303,7 +13308,8 @@ async function appTeLezen(a, moet, nu) {
   const g = appGezienDavid();
   const moetJobs = new Set((moet || []).map(function (m) { return m.job_id; }));
   const uit = teLezenMod.uit({ per: per, klussen: klussen, staat: appTeLezenStaat(), tabs: g ? g.tabs : {}, inBeeld: g ? g.punten : {},
-    vraag: appTeLezenVraag, moet: moetJobs, nu: nu, mkKlussen: false, momentSinds: vjMoment ? vjMoment.laatsteMoment(nu) : null });   // wv3967
+    vraag: appTeLezenVraag, moet: moetJobs, nu: nu, mkKlussen: false, momentSinds: vjMoment ? vjMoment.laatsteMoment(nu) : null,   // wv3967
+    slotVan: function (job) { const e = agentsReg && Object.prototype.hasOwnProperty.call(agentsReg, job) ? agentsReg[job] : null; return e && e.slot ? e.slot : null; } });   // wv4175 (3C75)
   // gezien-david.json onleesbaar: dan geen tabtijden, dus antwoorden die David misschien al zag; zeg dat (de app toont geen getal)
   return Object.assign(uit, { fout: klussen === null ? 'de rapporten van je klussen zijn nu niet te lezen' : null, gezien_bekend: !!g });
 }
@@ -18223,10 +18229,14 @@ const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielij
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
-function meldSoort(kanaal, bron, klasse, vraag, agenda, gegeven) {
+// wv4175 (besluitenpagina nr 308 = 3C08, David Ja 25-11-2026 22:26): de uitkomst van een achtergrondklus die Socev in het gesprek startte
+// (bron socev-spreekt mét agent_job, uit "AI - Agent-rapport") = antwoord: seintje "Antwoord van Socev klaar" (wv4121). Zonder klusnummer
+// (o.a. "AI - Mail volgen") blijft socev-spreekt archief.
+function meldSoort(kanaal, bron, klasse, vraag, agenda, gegeven, agentJob) {
   if (klasse === 'stil') return 'archief';
   if (vraag || agenda) return 'vraag';
   if (gegeven) return gegeven;
+  if (kanaal === 'hoofd' && bron === 'socev-spreekt' && /^[a-f0-9]{16}$/.test(String(agentJob || ''))) return 'antwoord';
   if (kanaal === 'hoofd' && klasse === 'dringend') return 'dag';
   return Object.prototype.hasOwnProperty.call(MELD_SOORT, bron) ? MELD_SOORT[bron] : 'archief';
 }
@@ -18612,7 +18622,7 @@ async function berichtNieuw(res, d) {
   try { appDoel = berichtAppDoel(kanaal, bron, agentJob, tekst, !!vraag, typeof agentsReg === 'object' ? agentsReg : null, CODE_APPS); }
   catch (e) { logError('bericht-app', e); appDoel = null; }
   let doelKanaal = appDoel ? appDoel.kanaal : kanaal;
-  const soort = meldSoort(kanaal, bron, klasse, !!vraag, !!ag, opKaart && d.soort === 'vraag' ? undefined : d.soort), seintje = meldSeintje(kanaal, soort);   // wv804 (ontwerp § 1)
+  const soort = meldSoort(kanaal, bron, klasse, !!vraag, !!ag, opKaart && d.soort === 'vraag' ? undefined : d.soort, agentJob), seintje = meldSeintje(kanaal, soort);   // wv804 (ontwerp § 1)
   if (vraag) {
     const gev = appGevoelig(vraag.tekst);
     try { const v = appVragen(); v[vsl] = { kanaal: kanaal, t: t, antwoord: null, gevoelig: !!gev, gevoelig_reden: gev || undefined, soort: 'socev' }; appVragenSchrijf(v); }
@@ -18629,6 +18639,8 @@ async function berichtNieuw(res, d) {
   }
   const regel = { t: t, job_id: id, soort: 'socev', bron: bron, klasse: klasse, tekst: '', antwoord: tekst, ok: true,
     vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, bron_job: bronJob, bestanden: [], meld: soort };   // wv804: meld = soort (fase 4 c)
+  // wv4175 (3C75): het merkje van de klus mee in de logregel (30 dagen), want het agentregister houdt maar ± 50 klare klussen vast
+  if (agentJob && agentsReg && Object.prototype.hasOwnProperty.call(agentsReg, agentJob) && agentsReg[agentJob] && agentsReg[agentJob].slot) regel.slot = agentsReg[agentJob].slot;
   let goed = await appLogSchrijf(doelKanaal, regel);
   if (!goed && appDoel) {   // wv3316: bezorging bij de app mislukt → het hele rapport naar de machinekamer, zoals vroeger
     logError('bericht-app', new Error('app-log ' + doelKanaal + ' niet schrijfbaar; rapport naar de machinekamer'));

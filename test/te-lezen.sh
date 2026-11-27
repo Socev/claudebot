@@ -140,6 +140,62 @@ toets('13c één ongeldig item: hele aanroep geweigerd', z13c.fout === 'ongeldig
 toets('13d bewaar/niet-bewaren in bulk: geweigerd; leeg en meer dan VEEL_MAX: geweigerd', T.zetVeel({}, v13, 'bewaar', NU).fout === 'onbekende actie'
   && T.zetVeel({}, [], 'gezien', NU).fout === 'ongeldig bericht' && T.zetVeel({}, Array.from({ length: T.VEEL_MAX + 1 }, () => v13[0]), 'gezien', NU).fout === 'ongeldig bericht');
 toets('13e verkeerd gesprek in bulk: geweigerd', T.zetVeel({}, [{ job_id: r1.job_id, kanaal: 'socev' }], 'gezien', NU).fout === 'onbekend gesprek');
+// ── 14. wv4175 (3C08): de uitkomst van Socevs achtergrondklus; (3C75) het merkje van de slotregel ──
+const SJ = 'b1b1b1b1b1b1b1b1', SJ2 = 'b2b2b2b2b2b2b2b2';
+const sp = (t, x) => Object.assign({ t: iso(t), job_id: job(), soort: 'socev', bron: 'socev-spreekt', klasse: 'normaal', tekst: '', antwoord: 'De vergelijking van de drie proefopties is klaar: optie B is het goedkoopst.', ok: true, agent_job: SJ, meld: 'antwoord' }, x || {});
+const s1 = sp(NU - 3 * U), s2 = sp(NU - U, { agent_job: undefined }), s3 = sp(NU - 2 * U, { agent_job: SJ2, antwoord: 'Ik heb de proefreis uitgezocht.\n\nVRAAG AAN DAVID: Zal ik optie B vastleggen?' });
+const g14 = beurt('bericht', NU - 10 * 60000), a14 = rap(null, NU - 20 * 60000, { bron: 'agentrapport-david', antwoord: '🤖 Agentrapport — proef\n\nUitkomst: iets gebouwd.\n\nVoor David: Niets doen' });
+const u14 = T.uit({ per: { hoofd: [s1, s2, s3, g14, a14], machinekamer: [] }, klussen: {}, staat: { sinds: iso(NU - D) }, tabs: {}, vraag, nu: NU, mkKlussen: false, momentSinds: NU - 4 * U });
+const p14 = (x) => u14.punten.find((p) => p.job_id === x.job_id);
+toets('14a socev-spreekt mét klusnummer: punt soort klus met socev true, ook na het vaste moment', !!p14(s1) && p14(s1).soort === 'klus' && p14(s1).socev === true, u14.punten);
+toets('14b socev-spreekt zonder klusnummer (Mail volgen) en met een vraag: niet in Te lezen', !p14(s2) && !p14(s3));
+toets('14c Socev-uitkomst staat bovenaan, ook boven een nieuwer gewoon antwoord', u14.punten[0].job_id === s1.job_id && !!p14(g14) && !p14(g14).socev, u14.punten.map((p) => p.job_id));
+toets('14d een gewoon antwoord en een agentrapport-david na het vaste moment: zoals vroeger (antwoord wel, rapport wacht)', p14(g14).soort === 'antwoord' && !p14(a14));
+toets('14e socevKlus alleen in het hoofdkanaal', T.socevKlus(s1, 'hoofd') && !T.socevKlus(s1, 'machinekamer') && !T.socevKlus(s2, 'hoofd'));
+// slotregel
+const sl = T.slotregel;
+toets('14f slotregel: de vier woorden', sl('x\nVoor David: Niets doen').merk === 'niets' && sl('Voor David: Wacht: op de uitrol').merk === 'wacht'
+  && sl('Voor David: Mislukt: de toets bleef rood').merk === 'mislukt' && sl('**Voor David:** Probeer het: Financiën › Overzicht.').merk === 'probeer');
+toets('14g Probeer het geeft de plek (geschoond, zonder link en punt)', sl('- Voor David: Probeer het — [Tripper](https://x.y) › Reis.').plek === 'Tripper › Reis' && sl('Voor David: Probeer het').plek === null);
+toets('14h vrije tekst, geen regel, of alleen in een codeblok: geen merkje', sl('Voor David: kijk er eens naar') === null && sl('Uitkomst: klaar.') === null
+  && sl('Uitkomst: x\n```\nVoor David: Mislukt\n```') === null && sl('') === null && sl(null) === null);
+toets('14i de laatste regel telt', sl('Voor David: Mislukt: eerste poging\n\nherstel gedaan\n\nVoor David: Probeer het: Socev › Te lezen').merk === 'probeer'
+  && sl('Voor David: Niets doen\nVoor David: zie hierboven') === null);
+toets('14j lange plek ingekort tot 80 tekens', Array.from(sl('Voor David: Probeer het: ' + 'Financiën › '.repeat(20)).plek).length <= 80);
+// merk op het punt en de volgorde
+const m1 = sp(NU - 5 * U, { agent_job: 'c1c1c1c1c1c1c1c1', slot: { merk: 'probeer', plek: 'Financiën › Overzicht' } });
+const m2 = rap(null, NU - 6 * U, { bron: 'agentrapport-david', antwoord: '🤖 Agentrapport — proef\n\nUitkomst: toets rood.\n\nVoor David: Mislukt: de toets bleef rood' });
+const m3 = rap(null, NU - 30 * 60000, { bron: 'agentrapport-david', antwoord: '🤖 Agentrapport — proef\n\nUitkomst: klaar.\n\nVoor David: Niets doen' });
+const m4 = rap(null, NU - 40 * 60000, { bron: 'agentrapport-david', antwoord: '🤖 Agentrapport — oud\n\nGedaan: iets gebouwd.' });
+const m5 = sp(NU - 7 * U, { agent_job: 'c5c5c5c5c5c5c5c5', antwoord: 'Socev vertelt het in eigen woorden.' });
+const m6 = beurt('bericht', NU - 50 * 60000, { ok: false, antwoord: 'De beurt liep vast.' });
+const per14 = { hoofd: [m1, m2, m3, m4, m5, m6], machinekamer: [] };
+const slotVan = (j) => (j === 'c5c5c5c5c5c5c5c5' ? { merk: 'wacht', plek: 'genegeerd' } : null);
+const u14b = T.uit({ per: per14, klussen: {}, staat: { sinds: iso(NU - D) }, tabs: {}, vraag, nu: NU, mkKlussen: false, slotVan });
+const q = (x) => u14b.punten.find((p) => p.job_id === x.job_id) || {};
+toets('14k merk uit de logregel (slot), uit de rapporttekst, uit het register (slotVan, plek alleen bij probeer)', q(m1).merk === 'probeer' && q(m1).plek === 'Financiën › Overzicht'
+  && q(m2).merk === 'mislukt' && q(m3).merk === 'niets' && q(m5).merk === 'wacht' && q(m5).plek === null, u14b.punten.map((p) => [p.job_id, p.merk, p.plek]));
+toets('14l rapport zonder slotregel (oud): geen merkje, zoals vroeger', q(m4).merk === null && q(m4).soort === 'klus' && q(m4).socev === false);
+toets('14m mislukte beurt: merk mislukt (ook zonder slotregel)', q(m6).merk === 'mislukt' && q(m6).ok === false);
+const volg = u14b.punten.map((p) => p.job_id);
+const rang0 = [m1, m2, m5, m6].map((x) => x.job_id), rang1 = [m3, m4].map((x) => x.job_id);
+toets('14n Mislukt, Probeer het en Socev bovenaan (op tijd), daarna de rest (op tijd)', volg.slice(0, 4).every((j) => rang0.includes(j)) && volg.slice(4).every((j) => rang1.includes(j))
+  && volg[0] === m6.job_id && volg[4] === m3.job_id, volg);
+toets('14o een onzinnig slot uit het log telt niet', T.slotNorm({ merk: 'altijd' }) === null && T.slotNorm(null) === null && T.slotNorm({ merk: 'niets', plek: 'x' }).plek === null);
+const S14 = fs.readFileSync('server.js', 'utf8');
+toets('14p server.js: socev-spreekt mét klusnummer = antwoord (seintje); eindregel vraagt "Voor David:"; slot in register en logregel', /bron === 'socev-spreekt' && \/\^\[a-f0-9\]\{16\}\$\/\.test\(String\(agentJob/.test(S14)
+  && /Eindig je eindrapport met één regel "Voor David: …"/.test(S14) && /entry\.slot = ok === false/.test(S14) && /regel\.slot = agentsReg\[agentJob\]\.slot/.test(S14) && /slotVan: function \(job\)/.test(S14));
+// meldSoort zelf (statisch uit server.js)
+{
+  const vm = require('vm');
+  const i = S14.indexOf('function meldSoort('), e = S14.indexOf('\n}\n', i) + 3, ms = S14.indexOf('const MELD_SOORT = {'), me = S14.indexOf('\n', ms);
+  const ctx = {}; vm.createContext(ctx); vm.runInContext(S14.slice(ms, me) + '\n' + S14.slice(i, e) + '\nthis.f = meldSoort;', ctx);
+  const f = ctx.f;
+  toets('14q meldSoort: socev-spreekt met klus = antwoord; zonder klus of in de machinekamer = archief; vraag gaat voor; stil blijft stil',
+    f('hoofd', 'socev-spreekt', 'normaal', false, false, undefined, SJ) === 'antwoord' && f('hoofd', 'socev-spreekt', 'normaal', false, false, undefined, undefined) === 'archief'
+    && f('machinekamer', 'socev-spreekt', 'normaal', false, false, undefined, SJ) === 'archief' && f('hoofd', 'socev-spreekt', 'normaal', true, false, undefined, SJ) === 'vraag'
+    && f('hoofd', 'socev-spreekt', 'stil', false, false, undefined, SJ) === 'archief' && f('hoofd', 'socev-spreekt', 'normaal', false, false, undefined, 'geen-klus') === 'archief');
+}
 // ── 10. koppeling in server.js en de release ──
 const S = fs.readFileSync('server.js', 'utf8'), UR = fs.readFileSync('uitrol.sh', 'utf8');
 toets('10a route POST /app/te-lezen bestaat en glijdt (David die leest), niet in APP_SLOT_VRIJ', /route === 'POST \/app\/te-lezen'\) return appTeLezenZet/.test(S) && /'POST \/app\/aanwezig', 'POST \/app\/te-lezen'\]\)/.test(S) && !/APP_SLOT_VRIJ = new Set\(\[[^\]]*te-lezen/.test(S));
