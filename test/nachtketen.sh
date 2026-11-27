@@ -392,6 +392,39 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     toets('server.js: avg-spiegel in de keten om 04:00, kindstap, meldt via de keten (meldtZelf false) (wv2526)', /naam: 'avg-spiegel', start_na: \[4, 0\], limiet_min: 5, pogingen: 2, meldtZelf: false, doe: function \(ctx\) \{ return avgSpiegelRonde\(ctx\); \}/.test(sv) && !/naam: 'avg-spiegel'[^\n]*inProces/.test(sv));
   }
 
+  // 12d. wv4178: werkbomenOpruimRonde uit server.js als echt kindproces (nepscript): nieuw overgeslagen → één box-rij en register om;
+  // box mislukt → register blijft; niets nieuw → geen rij; exit 1, tijdslimiet, script weg
+  {
+    const vm = require('vm');
+    const b = sv.indexOf('const WBO_SCRIPT'), e = sv.indexOf('\n// ── Takeout-wachter', b);
+    toets('werkbomen-opruim: knipsel gevonden in server.js', b > 0 && e > b);
+    const nep = path.join(d, 'wbo-nep.py'), st = path.join(d, 'wbo-staat');
+    const knip = sv.slice(b, e).replace("'/opt/data/mk-scripts/werkbomen-opruim/opruim.py'", JSON.stringify(nep)).replace("'/opt/data/scripts-staat/werkbomen-opruim'", JSON.stringify(st)).replace('WBO_MAX_S = 540', 'WBO_MAX_S = 1') + '\n;({ werkbomenOpruimRonde });';
+    const boxen = []; let lukt = true;
+    const mk = () => vm.runInContext(knip, vm.createContext({ fs: fs, path: path, spawn: require('child_process').spawn, process: process, setTimeout: setTimeout, clearTimeout: clearTimeout, JSON: JSON, String: String, Array: Array, Date: Date, Promise: Promise, Math: Math,
+      ovisAms: () => ({ klok: '2026-11-28 04:25' }), ovisBoxRij: (t) => { if (!lukt) return false; boxen.push(t); return true; } })).werkbomenOpruimRonde;
+    const nepUit = (n) => fs.writeFileSync(nep, 'import json,sys,os\nst=sys.argv[sys.argv.index("--staat")+1]\nopen(os.path.join(st,"gemeld.nieuw.json"),"w").write("[]")\nprint(json.dumps({"ok":True,"weg":3,"takken_weg":5,"overgeslagen":2,"overgeslagen_nieuw":' + n + ',"vrij_gekomen_mb":12,"nieuw_voorbeeld":["wt-wv1-x: niet gemerged in origin/main"]}))\n');
+    nepUit(1); let pids = [];
+    let r = await mk()({ opSpawn: (pid) => pids.push(pid) });
+    toets('werkbomen-opruim: nieuw overgeslagen → ok, één box-rij #werkbomen-opruim, register om, opSpawn', r.ok === true && r.detail.box === true && r.detail.weg === 3 && boxen.length === 1 && /#werkbomen-opruim/.test(boxen[0]) && /^\n## \[log\] 2026-11-28 04:25 — /.test(boxen[0]) && fs.existsSync(path.join(st, 'gemeld.json')) && pids.length === 1, [r, boxen]);
+    fs.unlinkSync(path.join(st, 'gemeld.json')); lukt = false;
+    r = await mk()({});
+    toets('werkbomen-opruim: box-rij mislukt → register blijft oud (morgen opnieuw)', r.ok === true && r.detail.box === null && !fs.existsSync(path.join(st, 'gemeld.json')), r);
+    lukt = true; nepUit(0);
+    r = await mk()({});
+    toets('werkbomen-opruim: niets nieuw → geen rij, register om', r.ok === true && r.detail.box === false && boxen.length === 1 && fs.existsSync(path.join(st, 'gemeld.json')), r);
+    fs.writeFileSync(nep, 'import json,sys\nprint(json.dumps({"ok":False,"fout":"RuntimeError: databank"}))\nsys.exit(1)\n');
+    r = await mk()({});
+    toets('werkbomen-opruim: exit 1 → ok false met de fout in de reden', r.ok === false && /^exit 1 \(RuntimeError: databank/.test(r.reden), r);
+    fs.writeFileSync(nep, 'import time\ntime.sleep(30)\n');
+    const t0 = Date.now(); r = await mk()({});
+    toets('werkbomen-opruim: tijdslimiet → ok false (tijdslimiet)', r.ok === false && /^tijdslimiet/.test(r.reden) && Date.now() - t0 < 10000, r);
+    fs.unlinkSync(nep);
+    r = await mk()({});
+    toets('werkbomen-opruim: script weg → al_gedaan', r.ok === true && r.al_gedaan === true, r);
+    toets('server.js: werkbomen-opruim in de keten om 04:25, kindstap, meldt via de keten (meldtZelf false) (wv4178)', /naam: 'werkbomen-opruim', start_na: \[4, 25\], limiet_min: 11, pogingen: 2, meldtZelf: false, doe: function \(ctx\) \{ return werkbomenOpruimRonde\(ctx\); \}/.test(sv) && !/naam: 'werkbomen-opruim'[^\n]*inProces/.test(sv));
+  }
+
   // 12c. wv3304: takeoutWachterRonde uit server.js als echt kindproces (nepscript): exit 0 met samenvatting, exit 1 met fout, script weg
   {
     const vm = require('vm');
@@ -449,6 +482,7 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
       sb2BerichtenAan: () => plAan, sb2BerichtenRonde: async () => { roep.push('berichten'); return { ok: true, detail: {} }; },   // wv2383
       avgSpiegelRonde: async (c) => { roep.push('avg:' + c.datum + ':' + typeof c.opSpawn); return { ok: true, detail: { praktijken: {} } }; },   // wv2526
       takeoutWachterRonde: async (c) => { roep.push('takeout:' + c.datum + ':' + typeof c.opSpawn); return { ok: true, detail: {} }; },   // wv3304
+      werkbomenOpruimRonde: async () => ({ ok: true, detail: {} }),   // wv4178 (eigen toets: 12d)
       loketOchtendEditie: async (c) => { roep.push('apps:' + c.datum); return { ok: true, detail: { regels: 0 } }; },   // wv3815
       appBriefingRustStap: async (c) => { roep.push('rust:' + c.datum); return { ok: true, detail: { lopend: 1 } }; },   // wv3940
       gezondheidWeekStap: async (c) => { roep.push('gezondheid:' + c.datum); return { ok: true, detail: { afwijkingen: 0, nieuw: 0 } }; },   // wv3936
@@ -509,9 +543,9 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     roep.length = 0; await zetT(6, 45, 2);   // wv3940: briefing-rust om 06:45
     toets('vm: briefing-rust om 06:45 (wv3940), apps-editie nog niet', roep.join('|') === 'rust:2026-11-11', roep);
     roep.length = 0; await zetT(6, 50, 3);   // wv3815: apps-editie om 06:50
-    toets('vm: apps-editie om 06:50 (wv3815), daarna afgesloten met één hartslag sb2_nachtketen (30 klaar, 0 bevindingen; wv3715 entiteit-nu, wv3750 secondbrain-schik, wv3893 uitwijk-sleutelkopie erbij, wv3936 gezondheid-week, wv3940 briefing-rust, wv3955 ghawa-ochtend: 33), geen box', roep.join('|') === 'apps:2026-11-11|rpc:mk_hartslag_stempel:sb2_nachtketen:33:0', roep);
+    toets('vm: apps-editie om 06:50 (wv3815), daarna afgesloten met één hartslag sb2_nachtketen (30 klaar, 0 bevindingen; wv3715 entiteit-nu, wv3750 secondbrain-schik, wv3893 uitwijk-sleutelkopie erbij, wv3936 gezondheid-week, wv3940 briefing-rust, wv3955 ghawa-ochtend, wv4178 werkbomen-opruim: 34), geen box', roep.join('|') === 'apps:2026-11-11|rpc:mk_hartslag_stempel:sb2_nachtketen:34:0', roep);
     const inf = K2.nachtketenInfo();
-    toets('vm: /health-info zonder inhoud: stand per stap, lopend 0, afgesloten', inf.lopend === 0 && !!inf.afgesloten && Object.keys(inf.stappen).length === 33 && inf.stappen['entiteit-nu'] === 'klaar:al_gedaan' && inf.stappen['sb2-steekwoorden'] === 'klaar:al_gedaan' && inf.stappen['intake-publicatie'] === 'klaar:al_gedaan' && inf.stappen['intake-voorstel'] === 'klaar:al_gedaan' && inf.stappen['sb2-berichten'] === 'klaar:al_gedaan' && inf.stappen['sb2-synapsen'] === 'klaar:al_gedaan' && inf.stappen['sb2-proefloper'] === 'klaar:al_gedaan' && Object.entries(inf.stappen).every(([k, x]) => x === 'klaar' || k === 'entiteit-nu' || k === 'sb2-steekwoorden' || k === 'intake-publicatie' || k === 'intake-voorstel' || k === 'sb2-berichten' || k === 'sb2-synapsen' || k === 'sb2-proefloper' || k === 'secondbrain-schik'), inf);   // wv3750: de nep-secondbrain kent geen schikNacht = al_gedaan (eigen toets: test/brein-schik.sh)
+    toets('vm: /health-info zonder inhoud: stand per stap, lopend 0, afgesloten', inf.lopend === 0 && !!inf.afgesloten && Object.keys(inf.stappen).length === 34 && inf.stappen['entiteit-nu'] === 'klaar:al_gedaan' && inf.stappen['sb2-steekwoorden'] === 'klaar:al_gedaan' && inf.stappen['intake-publicatie'] === 'klaar:al_gedaan' && inf.stappen['intake-voorstel'] === 'klaar:al_gedaan' && inf.stappen['sb2-berichten'] === 'klaar:al_gedaan' && inf.stappen['sb2-synapsen'] === 'klaar:al_gedaan' && inf.stappen['sb2-proefloper'] === 'klaar:al_gedaan' && Object.entries(inf.stappen).every(([k, x]) => x === 'klaar' || k === 'entiteit-nu' || k === 'sb2-steekwoorden' || k === 'intake-publicatie' || k === 'intake-voorstel' || k === 'sb2-berichten' || k === 'sb2-synapsen' || k === 'sb2-proefloper' || k === 'secondbrain-schik'), inf);   // wv3750: de nep-secondbrain kent geen schikNacht = al_gedaan (eigen toets: test/brein-schik.sh)
     // wv1430: tweede nacht met de schakelaar aan — sb2-steekwoorden loopt na zoekleer, vóór de kalender van 06:35
     swAan = true; plAan = true; roep.length = 0;
     const zetT2 = async (u, m, n) => { tijd = { datum: '2026-11-12', uur: u, min: m }; for (let i = 0; i < (n || 4); i++) await tikk(); };
@@ -524,7 +558,7 @@ const k = K.maak({ staatMap: ${JSON.stringify(echt)}, ams: () => ({ datum: '2026
     toets('vm: schakelaar aan — feitenlijst → zoekindex → zoekleer → steekwoorden (via socev-run-object)', roep.filter(x => !/^n8n:/.test(x)).join('|') === 'feitenlijst:2026-11-12:function|zoekindex:2026-11-12:function|zoekleer:2026-11-12:function|datumcontrole:2026-11-12:function|steekwoorden:2026-11-12:function', roep);
     toets('vm: steekwoorden wacht op de n8n-run van de nachtconsolidatie', roep.indexOf('n8n:/workflows/lKcF3Oxt8WVeELPJ') >= 0 && roep.indexOf('n8n:/workflows/lKcF3Oxt8WVeELPJ') < roep.indexOf('steekwoorden:2026-11-12:function'), roep);
     roep.length = 0; await zetT2(6, 35, 4); await zetT2(6, 40, 4); await zetT2(6, 45, 2); await zetT2(6, 50, 3);
-    toets('vm: tweede nacht: kalender, gezondheid-week, ghawa-ochtend, weer-ochtend, contactringen, briefing-rust, apps-editie, daarna hartslag (33 klaar)', roep.join('|') === 'kalender:2026-11-12:function|gezondheid:2026-11-12|ghawa:2026-11-12|weer:2026-11-12:6:40|contactringen:2026-11-12:6:40|rust:2026-11-12|apps:2026-11-12|rpc:mk_hartslag_stempel:sb2_nachtketen:33:0', roep);
+    toets('vm: tweede nacht: kalender, gezondheid-week, ghawa-ochtend, weer-ochtend, contactringen, briefing-rust, apps-editie, daarna hartslag (34 klaar)', roep.join('|') === 'kalender:2026-11-12:function|gezondheid:2026-11-12|ghawa:2026-11-12|weer:2026-11-12:6:40|contactringen:2026-11-12:6:40|rust:2026-11-12|apps:2026-11-12|rpc:mk_hartslag_stempel:sb2_nachtketen:34:0', roep);
     toets('vm: nachtAmsVan zet UTC om naar Nederlandse tijd (winter +1)', JSON.stringify(K2.nachtAmsVan('2026-11-11T04:00:31Z')) === '{"datum":"2026-11-11","uur":5,"min":0}');
     ctx.jobs.x = { status: 'running', chat_id: '40687' };
     toets('vm: lopende /run-beurt in 40687 = nachtrij bezig', K2.nachtrijPodBezig() === true);

@@ -26255,6 +26255,66 @@ function avgSpiegelNietMee(lijst) {
   bewaar();
   return true;
 }
+// ── Werkbomen-opruim (wv4178, besluitenpagina nr 62 = C52, David Ja 25-11-2026 met vingerafdruk) ──
+// Nachtketen-stap: mk-scripts/werkbomen-opruim/opruim.py (geen taalmodel; regels en waarom in het script) haalt werkbomen /opt/data/wt-*
+// en wt/* weg die schoon, gemerged en 7 dagen stil zijn en waarvan de rij (wvNNNN in de naam) al 7 dagen af is, plus gemergde lokale
+// takken die nergens uitgecheckt zijn. Nooit vuil of ongemerged werk: dat komt in overgeslagen.json; wat daarvan nieuw is, geeft hier één
+// box-rij (#werkbomen-opruim); pas als die rij er staat, wordt het meldregister omgezet (gemeld.nieuw.json → gemeld.json), anders morgen
+// opnieuw. Zelfde vorm als avgSpiegelRonde: harde grens in het kind, uitvoer naar een bestand; een fout meldt de keten (meldtZelf false).
+const WBO_SCRIPT = '/opt/data/mk-scripts/werkbomen-opruim/opruim.py';
+const WBO_STAAT = '/opt/data/scripts-staat/werkbomen-opruim';
+const WBO_UIT = WBO_STAAT + '/laatste.json';
+const WBO_MAX_S = 540;
+function werkbomenOpruimRonde(ctx) {
+  return new Promise(function (resolve) {
+    if (!fs.existsSync(WBO_SCRIPT)) return resolve({ ok: true, al_gedaan: true, detail: { niet_aanwezig: true } });
+    const t0 = Date.now();
+    let klaar = false, k, fd = null, vangnet = null;
+    const groep = function (sig) { try { process.kill(-k.pid, sig); } catch (e) { try { k.kill(sig); } catch (e2) {} } };
+    try {
+      fs.mkdirSync(WBO_STAAT, { recursive: true, mode: 0o700 });
+      try { fs.unlinkSync(WBO_UIT); } catch (e) {}
+      fd = fs.openSync(WBO_UIT, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+      k = spawn('timeout', ['-k', '15', String(WBO_MAX_S), 'python3', '-I', WBO_SCRIPT, '--deadline-s', '480', '--staat', WBO_STAAT],
+        { cwd: '/tmp', env: process.env, stdio: ['ignore', fd, 'ignore'], detached: true });
+    } catch (e) { return resolve({ ok: false, reden: 'start: ' + String(e && e.message || e).slice(0, 80) }); }
+    finally { if (fd !== null) { try { fs.closeSync(fd); } catch (e) {} } }
+    if (k.pid && ctx && typeof ctx.opSpawn === 'function') { try { ctx.opSpawn(k.pid); } catch (e) {} }
+    vangnet = setTimeout(function () { groep('SIGKILL'); }, (WBO_MAX_S + 45) * 1000);
+    const af = function (code, fout) {
+      if (klaar) return; klaar = true; clearTimeout(vangnet);
+      let j = null;
+      try { const r = fs.readFileSync(WBO_UIT, 'utf8').trim().split('\n').pop(); j = JSON.parse(r); } catch (e) {}
+      const d = { ms: Date.now() - t0 };
+      if (j && typeof j === 'object') ['weg', 'weg_fout', 'uitgesteld', 'takken_weg', 'overgeslagen', 'overgeslagen_nieuw', 'vrij_gekomen_mb', 'werkbomen'].forEach(function (x) { if (typeof j[x] === 'number') d[x] = j[x]; });
+      if (code !== 0 || !j || j.ok !== true) {
+        return resolve({ ok: false, reden: fout ? 'start: ' + fout : (code === 124 || code === 137) ? 'tijdslimiet ' + WBO_MAX_S + ' s' : 'exit ' + code + (j && j.fout ? ' (' + String(j.fout).slice(0, 80) + ')' : ''), detail: d });
+      }
+      if (j.overgeslagen === 'onderhoudsstand') return resolve({ ok: true, al_gedaan: true, detail: { onderhoudsstand: true } });
+      d.box = werkbomenOpruimMeld(j);
+      resolve({ ok: true, detail: d });
+    };
+    k.on('error', function (e) { af(127, String(e && e.message || e).slice(0, 80)); });
+    k.on('close', function (code, sig) { af(code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code); });
+  });
+}
+// → true = nieuwe box-rij, false = niets nieuws, null = rij kwam niet in de box (register blijft oud: morgen opnieuw)
+function werkbomenOpruimMeld(j) {
+  const nieuw = path.join(WBO_STAAT, 'gemeld.nieuw.json');
+  const zet = function () { try { fs.renameSync(nieuw, path.join(WBO_STAAT, 'gemeld.json')); } catch (e) {} };
+  if (!(j.overgeslagen_nieuw > 0)) { zet(); return false; }
+  const t = ovisAms();
+  const vb = Array.isArray(j.nieuw_voorbeeld) ? j.nieuw_voorbeeld.map(function (x) { return String(x).slice(0, 120); }).join('; ') : '';
+  const ok = ovisBoxRij('\n## [log] ' + t.klok + ' — werkbomen-opruim: ' + j.overgeslagen_nieuw + ' oude werkboom/-bomen niet weggehaald (vuil of niet gemerged) (automatisch, wv4178) #werkbomen-opruim\n' +
+    '- status: open\n- van: pod (nachtketen, werkbomen-opruim)\n' +
+    '- gemeten: vannacht ' + (j.weg || 0) + ' werkbomen en ' + (j.takken_weg || 0) + ' takken weg (' + (j.vrij_gekomen_mb || 0) + ' MB); nieuw overgeslagen: ' + vb.slice(0, 1200) +
+    (j.overgeslagen_nieuw > 8 ? ' …' : '') + '. Volledige lijst: /opt/data/scripts-staat/werkbomen-opruim/overgeslagen.json.\n' +
+    '- gevolg als er niets gebeurt: die mappen blijven staan (geen werk weg); dezelfde map geeft geen nieuwe rij.\n' +
+    '- voorstel: per map kijken of het werk nog nodig is (committen en mergen, of bewust laten staan); wissen van ongemerged werk alleen na David.\n');
+  if (!ok) return null;
+  zet();
+  return true;
+}
 // ── Takeout-wachter (wv3304, fase 3 van vault "01_Ontwikkeling/Takeout naar de NAS - plan (Fable 5.2, 14-11-2026).md" § 3) ──
 // Nachtketen-stap: één keer per nacht mk-scripts/takeout-nas/wachter.py (geen taalmodel; waarom en regels in het script): klaar-mail van
 // Google Takeout (leesluik, alleen lezen) + Drive-lijst (rclone lsjson --hash) → opdracht-<export>.json in het brugmapje naar de NAS;
@@ -26463,6 +26523,9 @@ const nachtketen = (function () {
         if (!boxArchief) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
         return boxArchief.ronde(ctx);
       } },
+      // wv4178 (C52): werkbomen + gemergde takken opruimen (opruim.py; regels in het script); kindproces met harde grens 540 s;
+      // een fout meldt de keten (meldtZelf false), nieuwe overgeslagen mappen meldt de stap zelf in één box-rij.
+      { naam: 'werkbomen-opruim', start_na: [4, 25], limiet_min: 11, pogingen: 2, meldtZelf: false, doe: function (ctx) { return werkbomenOpruimRonde(ctx); } },
       // wv3304: Takeout-wachter (klaar-mail + Drive → controlelijst voor de NAS, stand.json lezen, Drive-ruimte); kindproces met eigen harde
       // grens (300 s); vóór de NAS-run van 05:30. Een fout meldt alleen de keten (box-rij), meldingen per export zet het script zelf.
       { naam: 'takeout-wachter', start_na: [4, 40], limiet_min: 6, pogingen: 2, meldtZelf: false, doe: function (ctx) { return takeoutWachterRonde(ctx); } },
