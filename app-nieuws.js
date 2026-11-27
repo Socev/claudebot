@@ -333,6 +333,10 @@ function bezoekAanmelding(staat, app, zin, nu) {
   if (!APP_RE.test(String(app || ''))) throw fout('ongeldige app');
   if (z.length < 3) throw fout('lege uitkomst');
   const oud = s.regels[sleutelVan(app, BEZOEK_ONDERWERP)];
+  // review Codex MOET 2: dezelfde uitkomst nog eens (rapport dubbel bezorgd) = de bestaande regel ongewijzigd (tekst, vervaldatum, gezien)
+  if (oud && oud.laan === 'bezoek' && levend(oud, nu) && bezoekZin(String(oud.tekst || '').split('\n')[0]) === z) {
+    return { app: app, onderwerp: BEZOEK_ONDERWERP, laan: 'bezoek', tekst: oud.tekst, doel: oud.doel || { scherm: app }, vervalt: oud.vervalt };
+  }
   let regels = [z];
   if (oud && oud.laan === 'bezoek' && !oud.gezien_op && levend(oud, nu)) {
     String(oud.tekst || '').split('\n').map(bezoekZin).filter(function (r) { return r.length >= 3 && r !== z; }).forEach(function (r) { regels.push(r); });

@@ -450,3 +450,19 @@ test('wv4200: server.js meldt alleen een gelukt app-rapport bij het loket', func
   assert.ok(/if \(goed && appDoel && !appDoel\.mislukt\) loketBezoek\(appDoel\.id, tekst, regel\.slot\)/.test(SRV));
   assert.ok(/function loketBezoek\(app, tekst, slot\)[\s\S]{0,300}slot\.merk === 'mislukt'\) return/.test(SRV));
 });
+test('wv4200 review MOET 2: twee regels gezien, nieuwste uitkomst nog eens = blijft gezien en ongewijzigd', function () {
+  let s = AN.leeg();
+  s = AN.meld(s, AN.bezoekAanmelding(s, 'proef', 'Eerste verzonnen.', T0), T0).staat;
+  s = AN.meld(s, AN.bezoekAanmelding(s, 'proef', 'Tweede verzonnen.', T0 + 1), T0 + 1).staat;
+  const r = AN.lijst(s, {}, T0 + 2)[0];
+  assert.strictEqual(r.tekst, 'Tweede verzonnen.\nEerste verzonnen.');
+  s = AN.gezien(s, [{ sleutel: 'proef/gebouwd', versie: r.versie }], T0 + 3).staat;
+  const u = AN.meld(s, AN.bezoekAanmelding(s, 'proef', 'Tweede verzonnen.', T0 + UUR), T0 + UUR);
+  assert.strictEqual(u.uitkomst, 'gelijk');
+  const na = AN.lijst(u.staat, {}, T0 + UUR)[0];
+  assert.ok(na.gezien_op); assert.strictEqual(na.tekst, r.tekst); assert.strictEqual(na.versie, r.versie);
+  // ongezien en herhaald: ook gelijk (geen nieuwe versie)
+  let s2 = AN.meld(AN.leeg(), AN.bezoekAanmelding(AN.leeg(), 'proef', 'A verzonnen.', T0), T0).staat;
+  s2 = AN.meld(s2, AN.bezoekAanmelding(s2, 'proef', 'B verzonnen.', T0 + 1), T0 + 1).staat;
+  assert.strictEqual(AN.meld(s2, AN.bezoekAanmelding(s2, 'proef', 'B verzonnen.', T0 + 2), T0 + 2).uitkomst, 'gelijk');
+});
