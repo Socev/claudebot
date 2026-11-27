@@ -291,8 +291,11 @@ function overgezet(staat, sleutel) {
 // regel opnieuw met vervalt = nu (gaat uit het paneel). De App bepaalt de tekst; het loket kiest niets.
 const PAKJES_NAMEN_MAX = 8;
 function pakjeNaam(p) { return String(p.winkel || p.omschrijving || p.vervoerder || 'een pakje').replace(/\s+/g, ' ').trim().slice(0, 60); }
-function pakjesNamen(l) {
-  const n = l.map(pakjeNaam), uit = n.slice(0, PAKJES_NAMEN_MAX).join(', ');
+// wv4154 (2C58): bij Vandaag verwacht het tijdvak erachter als de vervoerder of de mail het noemt: "Coolblue (13:00–15:00)"
+const HM_RE = /^\d{2}:\d{2}$/;
+function pakjeNaamTijd(p) { const v = String(p.verwacht_van || ''), t = String(p.verwacht_tot || ''); return pakjeNaam(p) + (HM_RE.test(v) && HM_RE.test(t) && v < t ? ' (' + v + '–' + t + ')' : ''); }
+function pakjesNamen(l, naamVan) {
+  const n = l.map(naamVan || pakjeNaam), uit = n.slice(0, PAKJES_NAMEN_MAX).join(', ');
   return n.length > PAKJES_NAMEN_MAX ? uit + ' en ' + (n.length - PAKJES_NAMEN_MAX) + ' meer' : uit;
 }
 function pakjesAanmeldingen(staat, body, moment, dag, nu) {
@@ -303,12 +306,12 @@ function pakjesAanmeldingen(staat, body, moment, dag, nu) {
   const lopend = ((body && Array.isArray(body.lopend)) ? body.lopend : []).concat((body && Array.isArray(body.aandacht)) ? body.aandacht : []).filter(function (p) { return p && !p.verborgen; });
   const dagEind = eindeDagErna(dagMin1(dag));
   const uit = [];
-  const een = function (onderwerp, editie, lijstP, kop) {
+  const een = function (onderwerp, editie, lijstP, kop, naamVan) {
     const k = 'pakjes/' + onderwerp, oud = s.regels[k];
-    if (lijstP.length) uit.push({ app: 'pakjes', onderwerp: onderwerp, laan: 'editie', editie: editie, datum: dag, vervalt: dagEind, doel: { scherm: 'pakjes' }, tekst: kop + pakjesNamen(lijstP) + '.' });
+    if (lijstP.length) uit.push({ app: 'pakjes', onderwerp: onderwerp, laan: 'editie', editie: editie, datum: dag, vervalt: dagEind, doel: { scherm: 'pakjes' }, tekst: kop + pakjesNamen(lijstP, naamVan) + '.' });
     else if (oud && levend(oud, nu) && oud.datum === dag) uit.push({ app: 'pakjes', onderwerp: onderwerp, laan: 'editie', editie: oud.editie, datum: oud.datum, doel: oud.doel, tekst: oud.tekst, vervalt: iso(nu) });
   };
-  if (moment === 'ochtend') een('vandaag', 'ochtend', lopend.filter(function (p) { return p.stand === 'vandaag'; }), 'Vandaag verwacht: ');
+  if (moment === 'ochtend') een('vandaag', 'ochtend', lopend.filter(function (p) { return p.stand === 'vandaag'; }), 'Vandaag verwacht: ', pakjeNaamTijd);
   een('afhaal', 'eerstvolgende', lopend.filter(function (p) { return p.stand === 'afhaalpunt'; }), 'Ligt klaar bij een afhaalpunt: ');
   return uit;
 }

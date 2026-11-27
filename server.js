@@ -18573,7 +18573,8 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'facturen-nogbetalen',  // wv3369: betaalverzoek naar Cynthia (nogbetalen@) niet of onzeker verstuurd, dagplafond; hoofdkanaal, soort dag
   'apps-avond',           // wv3815: avondeditie "Uit je Apps" van het redactie-loket (20:30–22:29, alleen bij nieuws); hoofdkanaal, soort dag
   'pot-antwoord',          // wv3677/wv3765: herstelbericht na een mislukte Ja op de POT-aantalkaart; hoofdkanaal, soort dag (mislukte handeling op Davids knop)
-  'herinnering-david']);  // wv3906: Davids eigen herinnering uit Zet erbij (Vandaag te doen), op zijn tijdstip; hoofdkanaal, soort dag       // wv3677/wv3765: herstelbericht na een mislukte Ja op de POT-aantalkaart; hoofdkanaal, soort dag (mislukte handeling op Davids knop)
+  'herinnering-david',    // wv3906: Davids eigen herinnering uit Zet erbij (Vandaag te doen), op zijn tijdstip; hoofdkanaal, soort dag
+  'pakjes']);             // wv4154 (2C58): seintje per pakje (tijdvak bekend, aangekomen), 07–22 u, hooguit twee per pakje; hoofdkanaal, soort dag
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
 const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
@@ -18581,7 +18582,7 @@ const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
 // in Telegram tikte David 17 van 18 regels aan (mediaan 7 min), in de app 28 van 80 (mediaan 289 min).
 // wv3719 (3C04, David Ja 21-11 13:22): heartbeat = dag. 11 van de 19 heartbeat-berichten (afval, "morgen laatste dag") kwamen
 // als archief binnen, zonder seintje. Een stille ronde (NIETS) komt hier nooit: de n8n-Heartbeat stuurt dan niets.
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'beleggen-waarom': 'dag', 'pot-antwoord': 'dag', 'apps-avond': 'dag', 'herinnering-david': 'dag', 'pot-loonrun': 'dag' };
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', actielijst: 'dag', heartbeat: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag', 'weer-avond': 'dag', nieuwsbrief: 'dag', 'beleggen-week': 'dag', 'beleggen-waarom': 'dag', 'pot-antwoord': 'dag', 'apps-avond': 'dag', 'herinnering-david': 'dag', pakjes: 'dag', 'pot-loonrun': 'dag' };   // wv4154: pakjes (vóór pot-loonrun: bericht-bronnen.sh K zoekt die regel)
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
@@ -30850,7 +30851,7 @@ const pakjes = (function () {
   if (!fs.existsSync(p)) return null;
   try { return require(p).maak({ dir: PAKJES_DIR }); } catch (e) { logError('pakjes', e); return null; }
 })();
-function pakjesInfo() { if (!pakjes) return { aan: false }; try { return pakjes.info(); } catch (e) { return { aan: true, fout: true }; } }
+function pakjesInfo() { if (!pakjes) return { aan: false }; try { return Object.assign({}, pakjes.info(), { seintjes: typeof pakjesSeintjeStand === 'undefined' ? null : Object.assign({ aan: !!PAKJES_SEINTJE }, pakjesSeintjeStand) }); } catch (e) { return { aan: true, fout: true }; } }   // wv4154: seintjes
 // kandidaten: alleen de kopvelden die MailMan al bewaarde (laatste 21 dagen, privé-Gmail)
 function pakjesKandidaten() {
   const f = path.join(MAILMAN_DIR, 'mailman.' + 'sqlite');
@@ -30923,7 +30924,46 @@ function pakjesTik() {
   if (!pakjes || !SERVER_ECHT || !rolPrimair()) return;
   const hm = new Date().toLocaleTimeString('sv-SE', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' });
   if (hm < '06:30' || hm > '23:00') return;
-  pakjesRonde({ bron: 'klok' }).then(function () { return pakjesKaartRonde(); }).catch(function (e) { logError('pakjes-ronde', e); });   // wv4147: kaarten na de ronde, eens per uur
+  pakjesRonde({ bron: 'klok' }).then(function () { return pakjesKaartRonde(); }).catch(function (e) { logError('pakjes-ronde', e); })   // wv4147: kaarten na de ronde, eens per uur
+    .then(function () { return pakjesSeintjeRonde(); }).catch(function (e) { logError('pakjes-seintje', e); });   // wv4154: seintjes na de ronde
+}
+// ── wv4154 (besluitenpagina nr 158 = 2C58, David Ja 25-11-2026 22:13): per pakje hooguit twee seintjes (tijdvak bekend, aangekomen) ──
+// pakjes-seintje.js (puur) kiest de regels uit dezelfde lijst als de app; alleen 07–22 u (daarbuiten wacht het), nooit dubbel (staat per
+// pakje-id en samen_id in PAKJES_DIR/seintjes.json, 0600, alleen id's en tijden). Volgorde (Codex MOET 1+3): nieuwe staat eerst
+// wegschrijven (lukt dat niet: niets sturen), dan één bericht in het hoofdgesprek (bron pakjes, soort dag = met seintje); mislukt dat,
+// dan de oude staat terug (volgende ronde opnieuw). Log en /health: alleen aantallen.
+const PAKJES_SEINTJE = (function () { try { return require(path.join(__dirname, 'pakjes-seintje.js')); } catch (e) { logError('pakjes-seintje', e); return null; } })();
+const PAKJES_SEINTJE_STAAT = path.join(PAKJES_DIR, 'seintjes.json');
+const pakjesSeintjeStand = { laatste: null, verstuurd: 0, laatste_fout: null, nulpunt: null };
+let pakjesSeintjeBezig = false;
+async function pakjesSeintjeRonde(o) {
+  if (!pakjes || !PAKJES_SEINTJE || pakjesSeintjeBezig) return { ok: false };
+  const x = o || {};
+  pakjesSeintjeBezig = true;
+  try {
+    const nuMs = x.nu || Date.now();
+    const u = pakjes.lijst(pakjesGekocht(), null);
+    if (!u || !u.body || !Array.isArray(u.body.lopend)) throw new Error('pakjeslijst niet te lezen');
+    const oud = appLeesStreng(PAKJES_SEINTJE_STAAT, PAKJES_SEINTJE.leeg());   // onleesbaar = gooit: nooit over een kapotte staat heen schrijven
+    const p = PAKJES_SEINTJE.plan({ body: u.body, staat: oud, nu: nuMs });
+    appSchrijfJson(PAKJES_SEINTJE_STAAT, p.staat);
+    if (p.nulpunt !== undefined) pakjesSeintjeStand.nulpunt = new Date(nuMs).toISOString();
+    if (!p.regels.length) return { ok: true, regels: 0, nulpunt: p.nulpunt, buiten_uren: p.buiten_uren };
+    const r = await (x.bericht || berichtIntern)({ kanaal: 'hoofd', bron: 'pakjes', klasse: 'normaal', soort: 'dag', tekst: PAKJES_SEINTJE.tekst(p.regels),
+      sleutel: PAKJES_SEINTJE.sleutel(p.regels, appSha) });
+    if (!r || r.status !== 200) {
+      try { appSchrijfJson(PAKJES_SEINTJE_STAAT, oud); } catch (e) { logError('pakjes-seintje', new Error('oude staat niet terug te zetten; dit seintje valt weg')); }
+      throw berichtFout(r);
+    }
+    pakjesSeintjeStand.laatste = new Date(nuMs).toISOString();
+    pakjesSeintjeStand.verstuurd += p.regels.length;
+    pakjesSeintjeStand.laatste_fout = null;
+    schrijfLog(nu() + ' pakjes-seintje ' + velden({ regels: p.regels.length, tijdvak: p.regels.filter(function (g) { return g.soort === 'tijdvak'; }).length }));
+    return { ok: true, regels: p.regels.length };
+  } catch (e) {
+    pakjesSeintjeStand.laatste_fout = { op: new Date().toISOString(), reden: String(e && (e.code || e.message) || e).replace(/[^\p{L}\p{N} ._:()-]/gu, ' ').slice(0, 80) };
+    throw e;
+  } finally { pakjesSeintjeBezig = false; }
 }
 if (pakjes && SERVER_ECHT) { setTimeout(pakjesTik, 90000).unref(); setInterval(pakjesTik, 15 * 60000).unref(); }
 // gekochte zoektochten uit Shopper (wens, winkel, datum): een berekende koppeling, er wordt niets geschreven
