@@ -229,6 +229,92 @@ test('wv4221: scorekaart met citaatcontrole per bron, telling en fouten; geen be
   assert.deepStrictEqual([leeg.ok, leeg.er, leeg.regels.length], [true, false, 0]);
 });
 
+// wv4224: zittingsmap — invoercontrole (nep-script) en het echte nza.py op het verzonnen register + scorekaart
+test('wv4224: zittingsmap: thema wordt gecontroleerd vóór de aanroep; zonder thema het geheel', async () => {
+  const db = path.join(T, 'nep-zm.db');
+  fs.writeFileSync(db, 'x');
+  const m = maak({ script: NEP, db });
+  const argv = () => fs.readFileSync(db + '.argv', 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.strictEqual((await m.app({ pad: '/app/nza/zittingsmap', methode: 'POST', body: {} })).status, 200);
+  assert.strictEqual((await m.app({ pad: '/app/nza/zittingsmap', methode: 'POST', body: { thema: 'nac-hoogte' } })).status, 200);
+  for (const thema of ['../x', 'Huisvesting', 'a b', 7, 'x'.repeat(41), ['huisvesting']]) {
+    const u = await m.app({ pad: '/app/nza/zittingsmap', methode: 'POST', body: { thema } });
+    assert.strictEqual(u.status, 400, JSON.stringify(thema));
+  }
+  assert.strictEqual((await m.app({ pad: '/app/nza/zittingsmap', methode: 'GET' })).status, 404, 'alleen POST');
+  assert.deepStrictEqual(argv(), [['scherm', 'zittingsmap'], ['scherm', 'zittingsmap', '--thema', 'nac-hoogte']], 'een geweigerd thema roept het script niet aan');
+});
+
+test('wv4224: zittingsmap uit het echte nza.py: CONCEPT bovenaan, inhoudsopgave = koppen, citaten met vindplaats, thema-filter', { skip: echtAan ? false : 'nza.py niet aanwezig (CI)' }, async () => {
+  const db = path.join(T, 'proef-zm.db');
+  execFileSync('python3', ['-I', path.join(__dirname, 'nza-proef.py'), db]);
+  const reg = path.join(T, 'reg-zm', 'Verweerpunten');
+  execFileSync('python3', ['-I', path.join(__dirname, 'nza-proef-register.py'), reg]);
+  // VP-04: een citaat dat niet (meer) op zijn plek staat → LET OP in de map, niet stil weggelaten
+  const vp4 = fs.readdirSync(reg).find((n) => n.startsWith('VP-04'));
+  const t4 = fs.readFileSync(path.join(reg, vp4), 'utf8');
+  fs.writeFileSync(path.join(reg, vp4), t4.replace('verklaart het bezwaar ongegrond.', 'verklaart het bezwaar verzonnen gegrond.'));
+  fs.mkdirSync(path.join(reg, 'Scorekaart'), { recursive: true });
+  const b = (stuk, plek, citaat) => ({ stuk, plek, citaat });
+  fs.writeFileSync(path.join(reg, 'Scorekaart', 'scorekaart.json'), JSON.stringify({
+    bijgewerkt: '2026-11-27', proef_rollen: { rechter: ['cbb-2099-901'], regiebrief: ['cbb-2099-901'], antwoord: ['kpo-proef-2024'], rechts: ['bob-proef-2025'] },
+    regels: [
+      { id: 'SK-P01', groep: 'rechter', thema: 'proef', vraag: 'Opnieuw beslissen.', oordeel: 'gedaan', wat_deed: 'Proefbesluit genomen.', verweerpunten: ['VP-01'],
+        links: [b('cbb-2099-901', '1.3', 'De NZa zal opnieuw moeten beslissen op het bezwaar')], rechts: [b('bob-proef-2025', '17', 'De NZa handhaaft het proefbesluit')] },
+      { id: 'SK-P02', groep: 'rechter', thema: 'proef', vraag: 'Alleen procedure.', oordeel: 'niet', wat_deed: 'Niets.', gezocht: 'proefwoord', verweerpunten: ['VP-03'],
+        links: [b('cbb-2099-901', '1.2', 'de proeftarieven niet deugdelijk heeft gemotiveerd')], rechts: [] },
+    ] }));
+  const m = maak({ script: ECHT, db, register: reg, vandaag: '2026-11-27' });
+  const kopjes = (md) => {
+    const r = md.split('\n');
+    const i = r.indexOf('## Inhoud');
+    const toc = r.slice(i + 1).filter((x, k, a) => !a.slice(0, k).some((y) => y.startsWith('## '))).filter((x) => /^\d+\. /.test(x));
+    const kop = r.filter((x) => /^## \d+\. /.test(x)).map((x) => x.slice(3));
+    const vpToc = r.slice(i + 1, r.indexOf(kop.length ? '## ' + kop[0] : '')).filter((x) => /^ {4}- VP-/.test(x)).map((x) => x.trim().slice(2));
+    const vpKop = r.filter((x) => /^### VP-/.test(x)).map((x) => x.slice(4));
+    return { toc, kop, vpToc, vpKop };
+  };
+  const u = await m.app({ pad: '/app/nza/zittingsmap', methode: 'POST', body: {} });
+  assert.strictEqual(u.status, 200, JSON.stringify(u.body));
+  const md = u.body.md;
+  assert.ok(md.startsWith('# CONCEPT — Zittingsmap NZa-zaak (geheel)\n'), md.slice(0, 80));
+  assert.ok(md.split('\n')[2].startsWith('**CONCEPT** van OVIS NZa voor David'));
+  const k = kopjes(md);
+  assert.deepStrictEqual(k.toc, k.kop, 'inhoudsopgave = hoofdstukkoppen');
+  assert.deepStrictEqual(k.kop, ['1. Huisvesting', '2. Procedure en transparantie', '3. Scorekaart: wat de rechter opdroeg en wat de NZa deed', '4. Rekenwerk en rekenstukken', '5. Verantwoording']);
+  assert.deepStrictEqual(k.vpToc, k.vpKop, 'punten in de inhoudsopgave = puntkoppen');
+  assert.strictEqual(k.vpKop.length, 6);
+  assert.ok(md.includes('- B1 · CBb · '), 'citaat met wie');
+  assert.ok(/- B1 · CBb · [^\n]*, 1\.2: “de NZa de proeftarieven niet deugdelijk heeft gemotiveerd” \(letterlijk teruggevonden\)/.test(md), 'citaat met vindplaats en controle');
+  assert.ok(/### VP-04[\s\S]*- B2 · NZa · [^\n]*LET OP, niet letterlijk teruggevonden/.test(md), 'gewijzigd citaat: LET OP');
+  assert.strictEqual(u.body.citaten_ok, u.body.citaten - 1, 'één citaat fout');
+  assert.ok(!md.includes('/nza#'), 'geen app-links in het bestand');
+  assert.ok(md.includes('- Sterkste tegenargument: de NZa handhaaft het proefbesluit NZa 10-03-2025, p. 17'), 'linktekst blijft');
+  assert.ok(md.includes('- Berekening: proefberekening 1'), 'rekenwerk bij het punt');
+  assert.ok(/### VP-01[\s\S]*#### Scorekaart\n\n- SK-P01 \(gedaan\): Opnieuw beslissen\. — Proefbesluit genomen\./.test(md), 'scorekaart bij het punt');
+  assert.ok(!md.includes('GEHEIM-BUITEN-REGISTER'), 'een link in Naloop wordt niet gevolgd');
+  assert.ok(/^CONCEPT Zittingsmap NZa geheel \d{4}-\d\d-\d\d$/.test(u.body.naam), u.body.naam);
+  // één thema: alleen die punten, de scorekaartregels die ernaar verwijzen, nummering opnieuw vanaf 1
+  const p = (await m.app({ pad: '/app/nza/zittingsmap', methode: 'POST', body: { thema: 'procedure' } })).body;
+  assert.ok(p.md.startsWith('# CONCEPT — Zittingsmap NZa-zaak: Procedure en transparantie\n'));
+  const kp = kopjes(p.md);
+  assert.deepStrictEqual(kp.toc, kp.kop);
+  assert.deepStrictEqual(kp.vpKop.map((x) => x.slice(0, 5)), ['VP-03', 'VP-04', 'VP-05', 'VP-06']);
+  assert.ok(p.md.includes('### SK-P02 — Alleen procedure.') && !p.md.includes('SK-P01'), 'alleen de scorekaartregels bij dit thema');
+  assert.strictEqual(p.punten, 4);
+  assert.deepStrictEqual(u.body.let_op, []);
+  // Codex MOET 2: een onleesbare scorekaart valt niet stil weg — LET OP bovenaan en in let_op
+  fs.writeFileSync(path.join(reg, 'Scorekaart', 'scorekaart.json'), '{ kapot');
+  const kp2 = (await m.app({ pad: '/app/nza/zittingsmap', methode: 'POST', body: {} })).body;
+  assert.strictEqual(kp2.ok, true);
+  assert.ok(kp2.let_op.length === 1 && kp2.let_op[0].includes('scorekaart was niet te lezen'), JSON.stringify(kp2.let_op));
+  assert.ok(/^\*\*LET OP:\*\* de scorekaart was niet te lezen/m.test(kp2.md.split('## Inhoud')[0]), 'boven de inhoud');
+  assert.ok(kp2.md.includes('LET OP: de scorekaart was niet te lezen; zie bovenaan.'));
+  const onb = await m.app({ pad: '/app/nza/zittingsmap', methode: 'POST', body: { thema: 'bestaat-niet' } });
+  assert.strictEqual(onb.status, 404);
+  assert.ok(onb.body.fout.includes('onbekend thema'));
+});
+
 test('wv3153: index_leesbaar_agent in info() uit toegang.py (achtergrond, nooit wachten; fout = null)', async () => {
   const nepT = (naam, inhoud) => { const p = path.join(T, naam); fs.writeFileSync(p, inhoud); return p; };
   const goed = nepT('toegang-goed.py', 'import json; print(json.dumps({"index_leesbaar_agent": True, "log_schrijfbaar_agent": False, "fouten": ["x"]}))');

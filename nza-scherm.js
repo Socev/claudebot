@@ -13,6 +13,8 @@
 // wv4221 (27-11-2026, besluitenpagina nr 933 = L33): GET /app/nza/scorekaart = tab Scorekaart (nza.py scherm scorekaart): wat de rechter
 // opdroeg en het CBb in de regiebrief vroeg tegenover wat het besluit van 30-06-2026 en de eindrapportage deden, elk citaat gecontroleerd
 // (bron <register>/Scorekaart/scorekaart.json). Geen cache: de controle loopt elke keer opnieuw tegen de index.
+// wv4224 (27-11-2026, besluitenpagina nr 936 = L36): POST /app/nza/zittingsmap {thema?} = de zittingsmap als één CONCEPT-bestand (markdown;
+// de app maakt er Word of PDF van): per verweerpunt wij/NZa/rechter, citaten met vindplaats, naloop, rekenwerk en scorekaart.
 // Alleen child_process (execFile zonder shell, python3 -I) en fs.
 const { execFile } = require('child_process');
 const fs = require('fs');
@@ -20,6 +22,7 @@ const fs = require('fs');
 const ID_RE = /^[a-z0-9][a-z0-9.-]{0,120}$/;
 const PLEK_MAX = 80;
 const CITAAT_MAX = 1500;
+const THEMA_RE = /^[a-z0-9-]{1,40}$/;   // wv4224: thema van een verweerpunt (frontmatter), zelfde grens als nza.py
 
 function maak(opts) {
   const script = opts.script;
@@ -113,12 +116,22 @@ function maak(opts) {
     return draai(argv);
   }
 
+  // wv4224 (besluitenpagina nr 936 = L36): de zittingsmap (nza.py scherm zittingsmap [--thema x]) = markdown met CONCEPT bovenaan; de app
+  // zet hem om naar Word of PDF via de bestaande omzetter (POST /app/omzet). Geen cache: elk citaat wordt bij het maken opnieuw gecontroleerd.
+  function zittingsmap(body) {
+    const b = body && typeof body === 'object' ? body : {};
+    if (b.thema == null || b.thema === '') return draai(['zittingsmap']);
+    if (typeof b.thema !== 'string' || !THEMA_RE.test(b.thema)) return Promise.resolve({ status: 400, body: { ok: false, fout: 'onbekend thema' }, reden: 'nza thema' });
+    return draai(['zittingsmap', '--thema', b.thema]);
+  }
+
   async function app(v) {
     if (!aan()) return { status: 503, body: { ok: false, fout: 'het NZa-dossier staat niet op deze pod' }, reden: 'nza uit' };
     if (v.methode === 'GET' && v.pad === '/app/nza') return overzicht();
     if (v.methode === 'POST' && v.pad === '/app/nza/stuk') return stuk(v.body);
     if (v.methode === 'GET' && v.pad === '/app/nza/punten') return draai(['punten']);   // wv3676
     if (v.methode === 'GET' && v.pad === '/app/nza/scorekaart') return draai(['scorekaart']);   // wv4221: tab Scorekaart (geen cache: ± 1 s, 190+ citaatcontroles)
+    if (v.methode === 'POST' && v.pad === '/app/nza/zittingsmap') return zittingsmap(v.body);   // wv4224: één CONCEPT-bestand per thema of geheel
     return { status: 404, body: { ok: false, fout: 'onbekend' }, reden: 'nza onbekend' };
   }
 
