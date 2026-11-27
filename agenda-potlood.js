@@ -458,9 +458,13 @@ function maak(o) {
     // 3. nieuw
     const actief = Object.values(s.items).filter((x) => x.s === 'potlood' || x.s === 'blok').length;
     let ruimte = Math.min(o.plafondDag - (s.dagen[vandaag] || 0), o.maxActief - actief);
-    for (const k of kandidaten(g.regels, vandaag, o)) {
+    // wv4134: kandidaten waarvoor David op de Intake-kaart al koos (agenda, Deadlines of Nee) krijgen geen potlood; onleesbaar = geen nieuwe potloden
+    let intakeGekozen = new Set();
+    if (typeof o.overslaan === 'function') { try { intakeGekozen = o.overslaan(); } catch (e) { intakeGekozen = null; } }
+    for (const k of intakeGekozen ? kandidaten(g.regels, vandaag, o) : []) {
       if (ruimte <= 0 || tel.mutaties + 2 > o.mutatiesRonde) break;
       if (s.items[k.sleutel]) continue;            // ooit gezet (ook weggehaald of verlopen): nooit opnieuw
+      if ((k.ids || []).some((x) => intakeGekozen.has(Number(x)))) continue;
       const oo = await beoordeel(k);               // wv3978: alleen als David zelf de deelnemer is
       if (!oo) continue;
       const v = verzoeken(k, o.proef, oo);

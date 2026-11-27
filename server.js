@@ -18088,7 +18088,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/mail/zaken' || /^GET \/app\/mail\/zaken\/(jij|socev|weg|afgedaan|zien)\/[1-9]\d?$/.test(route)) return typeof appMailZaken === 'function' ? appMailZaken(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mail');   // wv2218: Apps › Mail (zaakregister, alleen lezen); wv2291: groep zien
         if (route === 'GET /app/werkstroom' || route.indexOf('GET /app/werkstroom/') === 0) return typeof appWerkstroom === 'function' ? appWerkstroom(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'werkstroom');   // wv2002: Werkstroom (alleen lezen)
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
-        if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk' || route === 'POST /app/intake/geschiedenis' || route === 'POST /app/intake/verwijder' || route === 'POST /app/intake/bundel' || route === 'POST /app/intake/mailman-vraag') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
+        if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk' || route === 'POST /app/intake/geschiedenis' || route === 'POST /app/intake/verwijder' || route === 'POST /app/intake/bundel' || route === 'POST /app/intake/mailman-vraag' || route === 'POST /app/intake/datum') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
         if (route === 'GET /app/brain/entiteiten' || route === 'GET /app/brain/entiteiten/nu' || route.indexOf('GET /app/brain/entiteit/') === 0 || route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
         if (route === 'GET /app/managers' || route.indexOf('GET /app/managers/rapporten/') === 0) return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers; wv4128: Nu draaien weg (C64), rapporten erbij (3C136)
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
@@ -24787,7 +24787,14 @@ async function appIntakeRouter(req, res, a, s, d, route) {
       const ov = await ir.appOverzicht(80);
       // wv4133 (3C137): "Voortaan niet meer naar Intake?" — na twee gelijke keuzes voor één afzender (MailMan telt ze); een fout daar raakt Intake niet
       try { if (ov && mailman && typeof mailman.intakeVragen === 'function') ov.mailman_vragen = mailman.intakeVragen(3); } catch (e) { logError('intake-mailman-vragen', e); }
-      return appStuur(res, 200, ov);
+      return appStuur(res, 200, await intakeDatumErbij(ov));   // wv4134: per beoordeeld stuk hooguit één afspraak of termijn (datum)
+    }
+    if (route === 'POST /app/intake/datum') {   // wv4134 (nr 442 = 3C142): Zet bij Deadlines? / Zet in agenda? / Nee op de kaart
+      if (!rolPrimair()) return appWeiger(res, 503, 'niet de actieve kant', 'intake-datum niet primair');
+      if (!intakeDatum) return appWeiger(res, 404, 'Deze knop zit niet in deze versie van de pod', 'intake-datum ontbreekt');
+      const u = await intakeDatum.keuze(d || {});
+      res._app.reden = u.reden;
+      return appStuur(res, u.status, u.j);
     }
     if (route === 'POST /app/intake/mailman-vraag') {   // wv4133: Ja = MailMan-regel (zichtbaar en uit te zetten in MailMan › Regels), Nee = niet meer vragen
       if (!rolPrimair()) return appWeiger(res, 503, 'niet de actieve kant', 'intake-mailman-vraag niet primair');
@@ -24801,7 +24808,7 @@ async function appIntakeRouter(req, res, a, s, d, route) {
     else if (route === 'POST /app/intake/stuk') { res._app.stil = true; r = await ir.appStuk(d || {}); }   // het hele stuk (ook vastgehouden): alleen David, niet in het log
     else if (route === 'POST /app/intake/geschiedenis') {   // wv2618: Geschiedenis per dag (stap 5), zelfde privacygrens als het overzicht
       if (typeof ir.appGeschiedenis !== 'function') return appWeiger(res, 404, 'Geschiedenis zit niet in deze versie van de pod', 'intake-geschiedenis');
-      res._app.stil = true; return appStuur(res, 200, await ir.appGeschiedenis(d || {}));
+      res._app.stil = true; return appStuur(res, 200, await intakeDatumErbij(await ir.appGeschiedenis(d || {})));
     } else if (route === 'POST /app/intake/verwijder') {   // wv2618: alleen een verzoek; de machinekamer volgt de verwijderroute (kaart met vingerafdruk)
       if (!rolPrimair()) return appWeiger(res, 503, 'niet de actieve kant', 'intake-verwijder niet primair');
       if (typeof ir.verwijderMag !== 'function') return appWeiger(res, 404, 'Verwijderen zit niet in deze versie van de pod', 'intake-verwijder');
@@ -30028,6 +30035,35 @@ async function appKalender(req, res, a, route, d) {
 // vertrek-/voorbereidblokken uit Davids agenda (lees-luik, alleen lezen; toestemmingsrij agenda-socev-blokken, tot dan doet dat deel niets).
 const AGENDA_LOG_TABEL = 'e44op6x4bAuOAm7N';   // n8n Data Table socev_agenda_log (AI - Socev Agenda / Agenda-knoppen)
 const SOCEV_AGENDA_WF = process.env.SOCEV_AGENDA_WF || '3oiAigcCz6LNmeBd';   // AI - Socev Agenda (schrijfluik)
+// ── wv4134 (besluitenpagina nr 442 = 3C142, David Ja 25-11-2026 21:54): Intake-kaart met "Zet bij Deadlines?" / "Zet in agenda?" ──
+// Waarom en werking in intake-datum.js. Bron = de kandidaten van de datumdetector met bron.stuk (sb_kalender_gevonden); agenda alleen via een
+// Poortwachter-kaart (Davids ✅ met vingerafdruk, rij agenda-socev); geen tweede voorstel naast een potlood (agenda-potlood.json).
+// Staat: KLOKKEN_DIR/intake-datum.json. Uit: bestand intake-datum.uit in KLOKKEN_DIR (dan geen veld en 404 op de knop).
+const intakeDatum = (function () {
+  const p = path.join(__dirname, 'intake-datum.js');
+  if (!fs.existsSync(p) || !kalenderApp) return null;
+  try {
+    return require(p).maak({
+      rpc: function (fn, body) { return appSbRpc(fn, body); },
+      potloodIds: function () {
+        let s;
+        try { s = JSON.parse(fs.readFileSync(path.join(KLOKKEN_DIR, 'agenda-potlood.json'), 'utf8')); } catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+        const uit = [];
+        for (const it of Object.values((s && s.items) || {})) if (it && Array.isArray(it.ids)) for (const x of it.ids) uit.push(Number(x));
+        return uit;
+      },
+      oordeel: function (id, oordeel) { return kalenderApp.app({ methode: 'POST', pad: '/app/kalender/gevonden', nu: Date.now(), body: { id: id, oordeel: oordeel } }); },
+      luik: function (body) { return socevAgendaLuik(body); },
+      vv: VV(), vault: VAULT, staatPad: path.join(KLOKKEN_DIR, 'intake-datum.json'),
+      fout: function (w, e) { logError(w, e); },
+    });
+  } catch (e) { logError('intake-datum', e); return null; }
+})();
+function intakeDatumUit() { return fs.existsSync(path.join(KLOKKEN_DIR, 'intake-datum.uit')); }
+async function intakeDatumErbij(body) {
+  if (!intakeDatum || intakeDatumUit()) return body;
+  try { return await intakeDatum.erbij(body); } catch (e) { logError('intake-datum-erbij', e); return body; }
+}
 async function socevAgendaLuik(body) {
   const geheim = process.env.N8N_WEBHOOK_SOCEV_AGENDA;
   if (!geheim) throw new Error('socev-agendaluik niet ingericht');
@@ -30051,6 +30087,7 @@ const agendaPotlood = (function () {
       gevonden: async function (nu) { const u = await kalenderApp.app({ methode: 'GET', pad: '/app/kalender/gevonden', nu: nu }); return u && u.status === 200 ? u.body : null; },
       oordeel: function (id, oordeel) { return kalenderApp.app({ methode: 'POST', pad: '/app/kalender/gevonden', nu: Date.now(), body: { id: id, oordeel: oordeel } }); },
       luik: socevAgendaLuik,
+      overslaan: intakeDatum ? function () { return intakeDatum.gekozenIds(); } : null,   // wv4134: David koos al via de Intake-kaart
       // wv3978: het stuk (vaultpad, al gecontroleerd door stukLink) en één modelvraag per kandidaat (harvesterClaude: Sonnet, abonnement, geen gereedschap;
       // geen patiëntfilter: Davids afspraak). Haiku is in de pod nergens beproefd: niet gekozen (een stille modelfout = nooit meer een potlood).
       lees: function (pad) {

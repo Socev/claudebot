@@ -595,6 +595,10 @@ jobs:
       - name: "agenda-potlood (wv3741, potloodlaag Socev-kalender)"
         if: ${{ !cancelled() }}
         run: bash test/agenda-potlood.sh
+      # Intake-kaart met Zet bij Deadlines? / Zet in agenda? (wv4134, besluit nr 442): intake-datum.js met nep-luik en tijdelijke Deadlines-pagina.
+      - name: "intake-datum (wv4134, knop Deadlines/agenda op de Intake-kaart)"
+        if: ${{ !cancelled() }}
+        run: bash test/intake-datum.sh
       # OVIS Shopper S3 (wv2264): shopper.js (alleen zoektochtpagina's in de vaste mappen, entiteit uit de map, id = hash, geen symlink, koop-link
       # alleen https) en het server.js-blok (routes, Niet meer nodig = enige schrijfactie, gekocht niet via de App, /health aantallen + tijdstip).
       - name: "shopper (wv2264, zoektochten in de app)"

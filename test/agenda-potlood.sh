@@ -379,6 +379,18 @@ fs.writeFileSync(REG, JSON.stringify({ rijen: [{ id: 'agenda-socev-potlood', sta
     u = await m.ronde({ nu: NU });
     toets('hooguit 6 modelvragen per ronde', nm === 6 && u.model === 6, { nm, u });
   }
+  // wv4134: kandidaten waarvoor David op de Intake-kaart al koos → geen potlood; overslaan onleesbaar → geen nieuwe potloden
+  {
+    const R4 = [r(401, '2026-11-26'), r(402, '2026-11-27')];
+    let L4 = nepLuik();
+    let m4 = maak(() => R4, L4, { naam: 'intake-gekozen', mutatiesRonde: 6, overslaan: () => new Set([401]) });
+    let u4 = await m4.ronde({ nu: NU });
+    toets('wv4134: Intake-keuze → geen potlood voor die kandidaat', u4.nieuw === 1 && acties(L4, 'socev_plaatsen').every((x) => !/Proefoverleg 401/.test(x.titel)), acties(L4, 'socev_plaatsen').map((x) => x.titel));
+    L4 = nepLuik();
+    m4 = maak(() => R4, L4, { naam: 'intake-kapot', mutatiesRonde: 6, overslaan: () => { throw new Error('kapot'); } });
+    u4 = await m4.ronde({ nu: NU });
+    toets('wv4134: Intake-staat onleesbaar → geen nieuw potlood', u4.nieuw === 0 && acties(L4, 'socev_plaatsen').length === 0, u4);
+  }
   // geen titels in de staat
   const st = fs.readFileSync(path.join(TMP, 'p.json'), 'utf8');
   toets('register zonder titels', !/Proefoverleg/.test(st));
