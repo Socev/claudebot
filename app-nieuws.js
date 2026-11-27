@@ -5,7 +5,8 @@
 // of (voor geziene regels zonder vervaldatum) 30 dagen na zien. Drie lanen: editie (ochtend/avond), teller (getal op de tegel), kaart
 // (bundeling in Voor jou, fase 2). Het loket laat nooit zelf iets weg op inhoud en kort nooit in: ongeldige invoer is een harde fout.
 
-const LANEN = ['editie', 'teller', 'kaart'];
+// wv4200 (3C164): laan bezoek = "Nieuw hier sinds je vorige bezoek" (stip op de tegel + strook bovenin de App); niet in editie, teller of paneel
+const LANEN = ['editie', 'teller', 'kaart', 'bezoek'];
 const EDITIES = ['ochtend', 'avond', 'eerstvolgende'];
 const APP_RE = /^[a-z0-9-]{2,30}$/;
 const ONDERWERP_RE = /^[a-z0-9][a-z0-9_.:-]{0,79}$/;
@@ -317,5 +318,28 @@ function pakjesAanmeldingen(staat, body, moment, dag, nu) {
 }
 function dagMin1(dag) { const d = new Date(dag + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); }
 
-module.exports = { ooit, overgezet, pakjesAanmeldingen, dagAms, leeg, normaal, meld, lijst, tellers, gezien, opruim, schaduwTel, schaduwAanmelding, bufferZet, pakjesVandaag, eindeDagErna,
+// ── wv4200 (besluitenpagina nr 464 = 3C164, David Ja 25-11-2026 22:26): de App laat zelf zien wat er nieuw is ──
+// Een klaar bouwrapport over een App (OVIS Code-gesprek code-<id>) wordt één regel app/gebouwd in de laan bezoek: de app zet een stip op
+// de tegel zolang hij ongezien is en toont hem bovenin de App als strook "Nieuw hier sinds je vorige bezoek"; bij openen gezien. Bijwerken
+// in plaats van herhalen: de nieuwste uitkomst bovenaan, de vorige nog niet geziene eronder (hooguit twee regels). Geen "staat nu live": de
+// regel zegt alleen wat het rapport zei. Puur: de aanroeper geeft de staat (binnen de keten) en de tijd.
+const BEZOEK_ONDERWERP = 'gebouwd';
+const BEZOEK_REGELS = 2;
+const BEZOEK_ZIN_MAX = 300;
+const BEZOEK_VERVALT_MS = 30 * 86400000;   // een App die David een maand niet opent: de stip gaat vanzelf weg
+function bezoekZin(z) { const t = String(z || '').replace(/\s+/g, ' ').trim(); return t.length > BEZOEK_ZIN_MAX ? t.slice(0, BEZOEK_ZIN_MAX - 1) + '…' : t; }
+function bezoekAanmelding(staat, app, zin, nu) {
+  const s = normaal(staat), z = bezoekZin(zin);
+  if (!APP_RE.test(String(app || ''))) throw fout('ongeldige app');
+  if (z.length < 3) throw fout('lege uitkomst');
+  const oud = s.regels[sleutelVan(app, BEZOEK_ONDERWERP)];
+  let regels = [z];
+  if (oud && oud.laan === 'bezoek' && !oud.gezien_op && levend(oud, nu)) {
+    String(oud.tekst || '').split('\n').map(bezoekZin).filter(function (r) { return r.length >= 3 && r !== z; }).forEach(function (r) { regels.push(r); });
+  }
+  regels = regels.slice(0, BEZOEK_REGELS);
+  return { app: app, onderwerp: BEZOEK_ONDERWERP, laan: 'bezoek', tekst: regels.join('\n'), doel: { scherm: app }, vervalt: iso(nu + BEZOEK_VERVALT_MS) };
+}
+
+module.exports = { bezoekAanmelding, BEZOEK_ONDERWERP, ooit, overgezet, pakjesAanmeldingen, dagAms, leeg, normaal, meld, lijst, tellers, gezien, opruim, schaduwTel, schaduwAanmelding, bufferZet, pakjesVandaag, eindeDagErna,
   BUFFER_BRONNEN, MAX_ONGEZIEN, MAX_TEKST, editieRegels, editieTekst, editieMarkeer, avondMoment, instelZet, appNaam, EDITIE_MAX };

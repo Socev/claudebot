@@ -10552,6 +10552,19 @@ async function loketPakjesMeld(moment, dag) {
   } catch (e) { logError('app-nieuws-pakjes', e); }
   return n;
 }
+// wv4200 (besluitenpagina nr 464 = 3C164): een klaar bouwrapport over een App (OVIS Code-gesprek) → één regel app/gebouwd in de laan bezoek
+// (app-nieuws.js bezoekAanmelding; de uitkomstzin uit het rapport, agents-af.js). Mislukt (merk of klus) = niets. Nooit gooien, nooit wachten:
+// het rapport staat al in het gesprek; een fout hier kost alleen de stip. Log: alleen app en uitkomst van het loket.
+function loketBezoek(app, tekst, slot) {
+  if (!AN || typeof AN.bezoekAanmelding !== 'function' || !AGENTS_AF) return;
+  if (slot && slot.merk === 'mislukt') return;
+  let u = null;
+  try { u = AGENTS_AF.uitkomstUitRapport(String(tekst || '')); } catch (e) { u = null; }
+  if (!u || !u.zin) return;
+  appNieuwsWijzig(function (s, nu) { return AN.meld(s, AN.bezoekAanmelding(s, app, u.zin, nu), nu); })
+    .then(function (r) { schrijfLog(nu() + ' app-nieuws bezoek ' + velden({ app: app, uitkomst: r && r.uitkomst })); })
+    .catch(function (e) { logError('app-nieuws-bezoek', e); });
+}
 // Fase 1: dezelfde regel die een oude schrijver net in ochtend_buffer zette, ook in het loket. Nooit await-en in de oude weg; nooit gooien.
 function loketSchaduw(bron, datum, tekst) {
   if (!AN) return;
@@ -19958,6 +19971,7 @@ async function berichtNieuw(res, d) {
     if (!goed2) logError('bericht-app', new Error('foutregel in de machinekamer niet geschreven (' + appDoel.id + ')'));
   }
   if (appDoel) schrijfLog(berichtLogTijd() + ' ovis-code rapport ' + velden({ bericht: id, app: appDoel.id, agent: agentJob, mislukt: appDoel.mislukt ? 'ja' : 'nee' }));
+  if (goed && appDoel && !appDoel.mislukt) loketBezoek(appDoel.id, tekst, regel.slot);   // wv4200 (3C164): stip op de tegel + strook in de App
   if (!goed) {
     if (vsl) { try { const v = appVragen(); delete v[vsl]; appVragenSchrijf(v); } catch (e) { logError('bericht-vragen', e); } }
     if (ag) { delete agk[id]; appAgendaKnoppenBewaar(); }   // wv315

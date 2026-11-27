@@ -414,3 +414,39 @@ test('fase 3 bedrading: Beleggen-weekbericht eerst het loket, oude bericht allee
   const r = SRV.slice(SRV.indexOf("req.url === '/nieuws/meld'"), SRV.indexOf("req.url === '/heartbeat/moment'"));
   assert.match(r, /ooit: o, overgezet: oz/);
 });
+
+// ── wv4200 (3C164): laan bezoek = stip op de tegel + strook "Nieuw hier sinds je vorige bezoek" ──
+test('wv4200: bouwrapport wordt één regel app/gebouwd; nieuwste boven, hooguit twee; na zien alleen de nieuwe', function () {
+  let s = AN.leeg();
+  s = AN.meld(s, AN.bezoekAanmelding(s, 'proef', 'Tabblad Verzonnen erbij.', T0), T0).staat;
+  s = AN.meld(s, AN.bezoekAanmelding(s, 'proef', 'Knop Probeer verzonnen.', T0 + UUR), T0 + UUR).staat;
+  s = AN.meld(s, AN.bezoekAanmelding(s, 'proef', 'Derde verzonnen wijziging.', T0 + 2 * UUR), T0 + 2 * UUR).staat;
+  let l = AN.lijst(s, { laan: 'bezoek', ongezien: true }, T0 + 2 * UUR);
+  assert.strictEqual(l.length, 1);
+  assert.strictEqual(l[0].sleutel, 'proef/gebouwd');
+  assert.strictEqual(l[0].tekst, 'Derde verzonnen wijziging.\nKnop Probeer verzonnen.');
+  assert.deepStrictEqual(l[0].doel, { scherm: 'proef' });
+  s = AN.gezien(s, [{ sleutel: 'proef/gebouwd', versie: l[0].versie }], T0 + 3 * UUR).staat;
+  assert.strictEqual(AN.lijst(s, { laan: 'bezoek', ongezien: true }, T0 + 3 * UUR).length, 0, 'App geopend = weg');
+  s = AN.meld(s, AN.bezoekAanmelding(s, 'proef', 'Vierde verzonnen wijziging.', T0 + 4 * UUR), T0 + 4 * UUR).staat;
+  l = AN.lijst(s, { laan: 'bezoek', ongezien: true }, T0 + 4 * UUR);
+  assert.strictEqual(l[0].tekst, 'Vierde verzonnen wijziging.', 'wat David al zag komt niet terug');
+});
+test('wv4200: laan bezoek niet in editie, teller of paneel-laan; zelfde uitkomst nog eens = geen nieuwe stip', function () {
+  let s = AN.leeg();
+  s = AN.meld(s, AN.bezoekAanmelding(s, 'proef', 'Verzonnen.', T0), T0).staat;
+  assert.deepStrictEqual(AN.tellers(s, T0 + 1), {});
+  assert.strictEqual(AN.editieRegels(s, 'ochtend', '2026-11-22', T0 + 1).length, 0);
+  assert.strictEqual(AN.editieRegels(s, 'avond', '2026-11-22', T0 + 1).length, 0);
+  const v = AN.lijst(s, {}, T0)[0].versie;
+  s = AN.gezien(s, [{ sleutel: 'proef/gebouwd', versie: v }], T0 + 2).staat;
+  const u = AN.meld(s, AN.bezoekAanmelding(s, 'proef', 'Verzonnen.', T0 + 3), T0 + 3);
+  assert.ok(AN.lijst(u.staat, {}, T0 + 3)[0].gezien_op, 'dubbel rapport: gezien blijft');
+  assert.throws(function () { AN.bezoekAanmelding(s, 'Fout App', 'x x x', T0); });
+  assert.throws(function () { AN.bezoekAanmelding(s, 'proef', '  ', T0); });
+  assert.strictEqual(AN.lijst(AN.meld(AN.leeg(), AN.bezoekAanmelding(AN.leeg(), 'proef', 'Verzonnen.', T0), T0).staat, { ongezien: true }, T0 + 31 * DAG).length, 0, 'vervalt na 30 dagen');
+});
+test('wv4200: server.js meldt alleen een gelukt app-rapport bij het loket', function () {
+  assert.ok(/if \(goed && appDoel && !appDoel\.mislukt\) loketBezoek\(appDoel\.id, tekst, regel\.slot\)/.test(SRV));
+  assert.ok(/function loketBezoek\(app, tekst, slot\)[\s\S]{0,300}slot\.merk === 'mislukt'\) return/.test(SRV));
+});
