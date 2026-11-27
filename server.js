@@ -23186,6 +23186,15 @@ async function appStudio(req, res, a, s, d, route) {
     if (!appTeller('studio-immich', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens studio-immich');
   }
   if (route === 'GET /app/studio/immich/nieuwste') { res._app.stil = true; const r = await studio.immichNieuwste(); return stuur(r, { fotos: r.fotos }); }
+  // wv4185 (2C74, Film → 3D): de kiezer "Kies een filmpje" — nieuwste filmpjes van de eigen tijdlijn en de filmpjes in een album (zelfde uurteller)
+  if (route === 'GET /app/studio/immich/filmpjes' || new RegExp('^GET /app/studio/immich/album/' + UU + '/filmpjes$').test(route)) {
+    if (typeof studio.immichFilmpjes !== 'function') return appWeiger(res, 404, 'dit zit niet in deze versie van de pod', 'studio filmpjes ontbreekt');
+    if (route === 'GET /app/studio/immich/filmpjes' && !appTeller('studio-immich', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens studio-immich');
+    res._app.stil = true;
+    const am = new RegExp('^GET /app/studio/immich/album/' + UU + '/filmpjes$').exec(route);
+    const r = am ? await studio.immichAlbumFilmpjes(am[1]) : await studio.immichFilmpjes();
+    return stuur(r, { fotos: r.fotos });
+  }
   if ((m = new RegExp('^GET /app/studio/immich/album/' + UU + '/geschikt$').exec(route))) { res._app.stil = true; const r = await studio.immichGeschikt(m[1]); return stuur(r, { oordeel: r.oordeel, regel: r.regel, n: r.n }); }
   if ((m = new RegExp('^GET /app/studio/immich/album/' + UU + '$').exec(route))) { res._app.stil = true; const r = await studio.immichFotos(m[1]); return stuur(r, { fotos: r.fotos }); }
   m = /^POST \/app\/studio\/taak\/([a-f0-9]{16})\/immich$/.exec(route);

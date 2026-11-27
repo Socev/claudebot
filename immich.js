@@ -343,13 +343,14 @@ function maak(o) {
   }
   // wv4173 (Studio): de nieuwste foto's van Davids eigen tijdlijn (geen video's, archief, vergrendelde map of prullenbak), nieuwste eerst.
   // → [{ id, ratio, dag }], hooguit max (≤ 60); leest hooguit drie maanden. Geen namen, plaatsen of coördinaten.
-  async function nieuwsteFotos(max) {
+  // wv4185 (Film → 3D): met video = true dezelfde tijdlijn, maar alleen de video's, met hun duur (seconden); → [{ id, ratio, dag, duur }].
+  async function nieuwsteFotos(max, video) {
     const grens = Math.max(1, Math.min(60, max || 24));
     const bakken = await verzoek('GET', '/api/timeline/buckets', { order: 'desc', visibility: 'timeline' });
     const uit = [];
     let gelezen = 0;
     for (const b of Array.isArray(bakken) ? bakken : []) {
-      if (uit.length >= grens || gelezen >= 3) break;
+      if (uit.length >= grens || gelezen >= (video ? 12 : 3)) break;   // wv4185: video's zijn zeldzamer: een jaar
       const tb = b && typeof b.timeBucket === 'string' ? b.timeBucket : null;
       if (!tb || !BUCKET_RE.test(tb) || !(Number(b.count) > 0)) continue;
       gelezen++;
@@ -358,9 +359,11 @@ function maak(o) {
       const kol = (k) => (r && Array.isArray(r[k]) ? r[k] : []);
       const fc = kol('fileCreatedAt'), off = kol('localOffsetHours'), isb = kol('isImage'), tr = kol('isTrashed'), vis = kol('visibility'), rat = kol('ratio');
       for (let i = 0; i < ids.length && uit.length < grens; i++) {
-        if (!u(ids[i]) || tr[i] === true || isb[i] === false) continue;
+        if (!u(ids[i]) || tr[i] === true || (video ? isb[i] !== false : isb[i] === false)) continue;
         if (vis.length && vis[i] !== 'timeline') continue;   // dubbel: ook als Immich de query ooit ruimer leest
-        uit.push({ id: ids[i], ratio: Number.isFinite(rat[i]) ? Math.round(rat[i] * 1000) / 1000 : null, dag: plaatselijkeDag(fc[i], off[i]) });
+        const x = { id: ids[i], ratio: Number.isFinite(rat[i]) ? Math.round(rat[i] * 1000) / 1000 : null, dag: plaatselijkeDag(fc[i], off[i]) };
+        if (video) x.duur = duurSec(kol('duration')[i]);
+        uit.push(x);
       }
     }
     return uit;
@@ -405,7 +408,8 @@ function maak(o) {
     return { id: a.id, beeld: a.type === 'IMAGE', mime: typeof a.originalMimeType === 'string' ? a.originalMimeType.toLowerCase() : null,
       grootte: Number.isFinite(ex.fileSizeInByte) ? ex.fileSizeInByte : null, opname: typeof a.fileCreatedAt === 'string' && DATUM_RE.test(a.fileCreatedAt) ? a.fileCreatedAt : null,
       stapel: !!(a.stack && typeof a.stack === 'object' && a.stack.id), eigenaar: u(a.ownerId) ? a.ownerId : null, prullenbak: a.isTrashed === true,
-      naam: typeof a.originalFileName === 'string' ? a.originalFileName : '', beschrijving: typeof ex.description === 'string' ? ex.description : '' };
+      naam: typeof a.originalFileName === 'string' ? a.originalFileName : '', beschrijving: typeof ex.description === 'string' ? ex.description : '',
+      duur: a.type === 'VIDEO' ? duurSec(a.duration) : null };   // wv4185: lengte van een video in seconden (Film → 3D)
   }
   let mijn = null;
   async function mijnId() { if (mijn) return mijn; const r = await verzoek('GET', '/api/users/me'); mijn = r && u(r.id) ? r.id : null; return mijn; }   // alleen het id

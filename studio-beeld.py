@@ -30,6 +30,11 @@
 #                                         lange zijde ≤ 1600 px, opnieuw opgeslagen als JPEG 92 uit alleen de pixels (geen EXIF, XMP, ICC, GPS),
 #                                         als <uit-map>/01.jpg … 32.jpg; plus voorbeeld.jpg (eerste foto, 480 px). Toets na afloop: geen APP1/APP2/
 #                                         APP13-segment in de uitvoer. Een onleesbare foto wordt overgeslagen (geteld); JSON: n, overgeslagen.
+#   video-kies <in-map> <uit-map> <n>     (wv4185, Film → 3D) <in-map> = beeldjes die ffmpeg gelijkmatig uit één filmpje haalde (JPEG, op
+#                                         volgorde). Verdeelt ze in n gelijke stukken en kiest per stuk het SCHERPSTE beeldje (variantie van de
+#                                         randen op 320 px grijs): bij lopen door een kamer is een deel van de beeldjes bewogen. Schrijft de
+#                                         gekozen bytes ongewijzigd als <uit-map>/01.jpg … (splat-voor maakt ze daarna schoon). JSON: n,
+#                                         kandidaten, scherpte (mediaan alle / mediaan gekozen / laagste gekozen), bewogen (gekozen < 1/3 mediaan).
 #   voor <in> <uit.png> <soort>           voorbewerking vóór ComfyUI (wv2679), soort uit een vaste lijst:
 #                                         grijs-niveaus = rechtop (EXIF), grijs, niveaus 1 %–99 % gemeten in het binnenste zonder egale
 #                                         scanrand en toegepast op het hele beeld (de rand wordt wit; de maten blijven gelijk)
@@ -438,8 +443,61 @@ def splat_voor(in_map, uit_map):
     klaar(0, ok=True, n=n, overgeslagen=over, lange_zijde_max=max(max(b, h) for b, h in maten))
 
 
+VIDEO_KANDIDATEN_MAX = 400
+
+
+def scherpte(pad):
+    from PIL import Image, ImageFilter, ImageStat
+    im = Image.open(pad, formats=["JPEG"])
+    if im.size[0] * im.size[1] > DECODE_MAX_MP * 1_000_000:
+        raise ValueError("te groot")
+    im.draft("L", (320, 320))
+    im = im.convert("L")
+    f = 320 / max(im.size)
+    if f < 1:
+        im = im.resize((max(1, int(im.size[0] * f)), max(1, int(im.size[1] * f))))
+    return ImageStat.Stat(im.filter(ImageFilter.FIND_EDGES)).var[0]
+
+
+def video_kies(in_map, uit_map, n):
+    namen = sorted(x for x in os.listdir(in_map) if not x.startswith(".") and x.endswith(".jpg"))[:VIDEO_KANDIDATEN_MAX]
+    lijst = []
+    for naam in namen:
+        p = os.path.join(in_map, naam)
+        try:
+            st = os.lstat(p)
+            if not os.path.isfile(p) or os.path.islink(p) or st.st_size > SPLAT_BYTES_MAX or st.st_size < 12:
+                continue
+            lijst.append((naam, scherpte(p)))
+        except Exception:
+            continue
+    if len(lijst) < 2:
+        klaar(2, ok=False, reden="er kwamen minder dan 2 bruikbare beeldjes uit het filmpje", kandidaten=len(lijst))
+    k = min(n, len(lijst))
+    gekozen = []
+    for j in range(k):
+        stuk = lijst[j * len(lijst) // k:(j + 1) * len(lijst) // k]
+        gekozen.append(max(stuk, key=lambda x: x[1]))
+    for i, (naam, _) in enumerate(gekozen):
+        with open(os.path.join(in_map, naam), "rb") as f:
+            data = f.read()
+        fd = os.open(os.path.join(uit_map, "%02d.jpg" % (i + 1)), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+
+    def med(l):
+        l = sorted(l)
+        return l[len(l) // 2]
+    alle = med([x[1] for x in lijst])
+    gs = [x[1] for x in gekozen]
+    klaar(0, ok=True, n=k, kandidaten=len(lijst), scherpte_alle=round(alle, 1), scherpte_gekozen=round(med(gs), 1),
+          scherpte_laagste=round(min(gs), 1), bewogen=sum(1 for x in gs if x < alle / 3))
+
+
 def main(a):
-    grenzen(600 if a[:1] == ["splat-voor"] else 90)
+    grenzen(600 if a[:1] in (["splat-voor"], ["video-kies"]) else 90)
+    if len(a) == 4 and a[0] == "video-kies" and a[3].isdigit() and 2 <= int(a[3]) <= SPLAT_MAX:
+        video_kies(a[1], a[2], int(a[3]))
     if len(a) == 3 and a[0] == "splat-voor":
         splat_voor(a[1], a[2])
     if a and a[0].startswith("pijp-"):

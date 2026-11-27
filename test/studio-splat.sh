@@ -127,7 +127,7 @@ const loperTimer = setInterval(lopertik, 30);
   const BEW = path.join(W, 'bestanden'); fs.mkdirSync(BEW);
   const bewaard = {}, gewistBewaard = [], boxen = [], logs = [], fouts = [];
   const bewaar = (id, out, meta) => { const l = fs.readdirSync(out); fs.mkdirSync(path.join(BEW, id), { recursive: true }); l.forEach((n) => fs.copyFileSync(path.join(out, n), path.join(BEW, id, n))); bewaard[id] = { namen: l, meta }; return { bestanden: l.map((n, i) => ({ n: i + 1, naam: n, grootte: fs.statSync(path.join(out, n)).size })) }; };
-  const SPC = { taken: TAKEN, opslag: OPSLAG, bundel: BUNDEL, uid: process.getuid(), st_cmd: [process.execPath, NEPST], claim_ms: 700, stop_bevestig_ms: 700, hangt_box_ms: 900, wees_ms: 1000, vrij_min: 1024 * 1024 };   // vrije schijf: eigen toets (S3)
+  const SPC = { taken: TAKEN, opslag: OPSLAG, bundel: BUNDEL, uid: process.getuid(), st_cmd: [process.execPath, NEPST], olares_hosts_vast: ['192.168.20.54'], claim_ms: 700, stop_bevestig_ms: 700, hangt_box_ms: 900, wees_ms: 1000, vrij_min: 1024 * 1024 };   // vrije schijf: eigen toets (S3)
   const S = studioMod.maak({ dir: DIR, bewaar, primair: () => true, sleutel: async () => null, routerUrl: 'http://127.0.0.1:1', comfyUrl: CURL, flowstudioUrl: 'http://127.0.0.1:1',
     taalmodelUrl: null, immich: () => immich, log: (r) => logs.push(r), fout: (w, e) => fouts.push(w + ': ' + (e && e.message)), splat: SPC,
     box: (kop, regels) => boxen.push({ kop, regels }), wisBewaard: (id) => { gewistBewaard.push(id); return true; },
@@ -409,12 +409,19 @@ const loperTimer = setInterval(lopertik, 30);
   toets('leesJsonVeilig: FIFO → null zonder te hangen', fj === null && Date.now() - t0 < 1000);
 
   // 14. netwerk-duiding
-  const nt = L.netwerkToets({ netwerk: { verbindingen_naar_buiten: 3, details: ['tcp 10.233.98.66:8086 01', 'tcp6 ::ffff:192.168.20.54:443 06', 'udp 0.0.0.0:0 07'], rekenproces_sockets: 0, rekenproces_details: [] } }, { netwerkpogingen: 0 });
+  const nt = L.netwerkToets({ netwerk: { verbindingen_naar_buiten: 3, details: ['tcp 10.233.98.66:8086 01', 'tcp6 ::ffff:192.168.20.54:443 06', 'udp 0.0.0.0:0 07'], rekenproces_sockets: 0, rekenproces_details: [] } }, { netwerkpogingen: 0 }, ['192.168.20.54']);
   const nt2 = L.netwerkToets({ netwerk: { verbindingen_naar_buiten: 60, details: ['tcp 10.233.98.66:8086 01'], rekenproces_sockets: 0, rekenproces_details: [] } }, { netwerkpogingen: 0 });
   const nt3 = L.netwerkToets({ netwerk: { verbindingen_naar_buiten: 1, details: ['tcp6 2a00:1450::1:443 01'], rekenproces_sockets: 0, rekenproces_details: [] } }, { netwerkpogingen: 0 });
   const nt4 = L.netwerkToets({ netwerk: { verbindingen_naar_buiten: 0, details: [], rekenproces_sockets: 1, rekenproces_details: ['tcp 192.168.20.1:53 01'] } }, { netwerkpogingen: 0 });
   toets('netwerk: Olares-cluster, Olares-host (ook als ::ffff:) en geen tegenpartij = ok', nt.ok, nt);
   toets('netwerk: meer sockets dan opgesomd / extern IPv6 / router in het rekenproces = afwijking', nt2.afwijking && nt3.afwijking && nt4.afwijking, [nt2, nt3, nt4]);
+  // wv4185: het host-adres komt van buiten (DNS per taak); zonder host-lijst is ook het oude vaste .54 buiten, een openbaar antwoord telt nooit
+  const nt5 = L.netwerkToets({ netwerk: { verbindingen_naar_buiten: 1, details: ['tcp 192.168.20.54:443 06'], rekenproces_sockets: 0, rekenproces_details: [] } }, { netwerkpogingen: 0 });
+  const nt6 = L.netwerkToets({ netwerk: { verbindingen_naar_buiten: 1, details: ['tcp 192.168.20.71:443 06'], rekenproces_sockets: 0, rekenproces_details: [] } }, { netwerkpogingen: 0 }, ['192.168.20.71']);
+  const hv = await L.hostAdressen({ olares_hosts_vast: ['192.168.20.71', '8.8.8.8', '127.0.0.1', '172.32.0.1', '172.20.1.1'] });
+  const hz = await L.hostAdressen({ olares_host: 'Geen Naam!' });
+  toets('netwerk wv4185: zonder host-lijst = .54 buiten; met de opgezochte host (.71) = ok; alleen privé-IPv4 telt; ongeldige naam = []', nt5.afwijking && nt6.ok
+    && JSON.stringify(hv) === '["192.168.20.71","172.20.1.1"]' && JSON.stringify(hz) === '[]', [nt5, nt6, hv, hz]);
 
   // 15. echte splat-transform 2.6.0 op een kleine verzonnen scène (alleen als hij er is)
   if (fs.existsSync(L.SPLAT.st_cli)) {

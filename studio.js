@@ -144,6 +144,12 @@ const IMMICH = { albums_max: 20, fotos_max: 500, upload_max: 25 * 1024 * 1024, n
 // vrij_na), anders weigert de motor hem.
 const VIDEO = { beelden_max: 160, bytes_max: 800 * 1024 * 1024, ram_wacht_bytes: 12e9, ram_wacht_ms: 2000, ffmpeg_ms: 180 * 1000, crf: 20,
   ffmpeg: '/opt/data/tools/ffmpeg/ffmpeg' };
+// wv4185 (Film → 3D, besluitenpagina 2C74): één filmpje uit Immich in plaats van losse foto's. De pod haalt de afspeelversie op (Immichs
+// /video/playback, in een eigen werkmap, ≤ 2 GB), ffmpeg haalt er ± 192 beeldjes gelijkmatig uit (lange zijde ≤ 1600, alleen het beeld,
+// alleen een gewoon filmformaat als invoer), studio-beeld.py video-kies kiest per 1/32 van het filmpje het scherpste en daarna gaat het
+// verder als bij losse foto's (splat-voor, taakmap, InfiniSplat). Filmpje en beeldjes staan alleen kort in de werkmap van de taak.
+const FILM = { min_s: 3, max_s: 180, bytes_max: 2 * 1024 ** 3, haal_ms: 10 * 60 * 1000, kandidaten: 192, kandidaten_max: 400, fps_max: 12,
+  ffmpeg_ms: 5 * 60 * 1000, zijde: 1600, formaten: 'mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts' };
 function pngMaat(b) {
   if (!b || b.length < 24 || b[0] !== 0x89 || b.subarray(1, 4).toString('latin1') !== 'PNG' || b.subarray(12, 16).toString('latin1') !== 'IHDR') return null;
   return { breed: b.readUInt32BE(16), hoog: b.readUInt32BE(20) };
@@ -581,7 +587,7 @@ function maak(deps) {
       });
       o.verplicht = true;
     }
-    if (soort === 'beelden') { o.min = 2; o.max = 32; o.verplicht = true; o.bron = ['immich_album', 'immich']; }   // wv3272
+    if (soort === 'beelden') { o.min = 2; o.max = 32; o.verplicht = true; o.bron = ['immich_album', 'immich', 'immich_video']; o.film = { min_s: FILM.min_s, max_s: FILM.max_s }; }   // wv3272; wv4185 film
     if (v.pad !== undefined) o.pad = (Array.isArray(v.pad) ? v.pad : [v.pad]).map(String).filter(function (p) { return /^[A-Za-z0-9_:]{1,40}\.inputs\.[A-Za-z0-9_.]{1,80}$/.test(p); });
     if (v.associateRole === 'prompt' || v.rol === 'prompt') o.rol = 'prompt';
     return o;
@@ -786,7 +792,11 @@ function maak(deps) {
           if (!l.every(function (x) { return UUID_RE.test(x); })) return { fout: v.label + ': onbekende foto in Immich' };
           if (new Set(l).size !== l.length) return { fout: v.label + ': een foto staat er twee keer in' };
           w = { los: l };
-        } else return { fout: v.label + ': kies een album of foto\'s uit Immich' };
+        } else if (w && typeof w === 'object' && !Array.isArray(w) && typeof w.immich_video === 'string') {
+          // wv4185: één filmpje uit Immich
+          if (!UUID_RE.test(w.immich_video)) return { fout: v.label + ': onbekend filmpje in Immich' };
+          w = { video: w.immich_video };
+        } else return { fout: v.label + ': kies een album, foto\'s of een filmpje uit Immich' };
       } else if (v.soort === 'beeld') {
         // wv2482: alleen het nummer van een klaarstaande upload van dít apparaat; naam en inhoud komen van de pod
         // wv2614: of het id van een foto in Immich (de pod haalt hem zelf)
@@ -1139,6 +1149,10 @@ function maak(deps) {
         const a = await splatAlbum(kz.album);
         if (a.fout) return a;
         sp = { veld: v.naam, bron: 'album', ids: a.ids, in_album: a.in_album };
+      } else if (kz.video) {
+        const vi = await splatFilmToets(kz.video);   // wv4185
+        if (vi.fout) return vi;
+        sp = { veld: v.naam, bron: 'video', ids: [], video: kz.video, duur: vi.duur };
       } else sp = { veld: v.naam, bron: 'los', ids: kz.los.slice() };
     }
     // wv2482: foto overnemen en toetsen vóór het synchrone stuk (async: Pillow). Elke weigering hieronder ruimt de map weer op.
@@ -1190,10 +1204,12 @@ function maak(deps) {
     }
     if (sp) {
       // wv3272: in velden en taken.json alleen het aantal en de bron; de ids alleen in het geheugen (st.splatIds)
-      t.velden[sp.veld] = '(' + sp.ids.length + ' foto\'s ' + (sp.bron === 'album' ? 'uit een album' : 'uit Immich') + ')';
+      t.velden[sp.veld] = sp.bron === 'video' ? '(één filmpje uit Immich' + (sp.duur ? ', ' + sp.duur + ' s' : '') + ')'
+        : '(' + sp.ids.length + ' foto\'s ' + (sp.bron === 'album' ? 'uit een album' : 'uit Immich') + ')';
       t.splat = { bron: sp.bron, fotos: sp.ids.length };
       if (sp.in_album) t.splat.in_album = sp.in_album;
-      st.splatIds.set(t.id, sp.ids);
+      if (sp.bron === 'video' && sp.duur) t.splat.film_s = sp.duur;   // wv4185
+      st.splatIds.set(t.id, sp.bron === 'video' ? { video: sp.video } : sp.ids);
     }
     if (f.betaald) {
       // write-ahead: eerst reserveren, dan pas in de rij (lukt het schrijven niet, dan geen taak en dus geen aanroep)
@@ -2394,14 +2410,107 @@ function maak(deps) {
     for (let j = 0; j < k; j++) ids.push(beelden[k === 1 ? 0 : Math.round(j * (beelden.length - 1) / (k - 1))].id);
     return { ids: Array.from(new Set(ids)), in_album: beelden.length };
   }
+  // ── wv4185: Film → 3D ──
+  // Bij Maak: is het een filmpje van Davids eigen Immich, niet in de prullenbak, en (als Immich de duur kent) 3 s tot 3 min?
+  async function splatFilmToets(id) {
+    const im = immichClient();
+    if (!im || typeof im.videoNaarBestand !== 'function') return { status: 409, fout: 'Immich is hier niet gekoppeld' };
+    let info;
+    try { info = await im.fotoInfo(id); } catch (e) { return immichNiet(e); }
+    if (!info) return { status: 404, fout: 'dit filmpje staat niet (meer) in Immich' };
+    if (info.beeld) return { status: 415, fout: 'dit is een foto; kies een filmpje (of kies foto\'s)' };
+    if (info.prullenbak) return { status: 409, fout: 'dit filmpje ligt in de prullenbak van Immich' };
+    // review Codex MOET 1: alleen Davids eigen filmpjes (niet een gedeeld filmpje van een ander in een gedeeld album)
+    let mijn = null;
+    try { mijn = typeof im.mijnId === 'function' ? await im.mijnId() : null; } catch (e) { return immichNiet(e); }
+    if (!mijn || info.eigenaar !== mijn) return { status: 403, fout: 'dit filmpje is niet van jou (gedeeld door iemand anders); kies een eigen filmpje' };
+    const d = Number(info.duur) || null;
+    if (d && d < FILM.min_s) return { status: 409, fout: 'dit filmpje is korter dan ' + FILM.min_s + ' seconden; loop langzaam rond, ± 20 seconden' };
+    if (d && d > FILM.max_s) return { status: 409, fout: 'dit filmpje is langer dan ' + Math.round(FILM.max_s / 60) + ' minuten; neem er een van ± 20 seconden' };
+    return { duur: d };
+  }
+  // Nieuwste filmpjes van de eigen tijdlijn (kiezer "Kies een filmpje"); → { fotos: [{ id, ratio, dag, duur }] }
+  async function immichFilmpjes() {
+    const im = immichClient();
+    if (!im || typeof im.nieuwsteFotos !== 'function') return { status: 409, fout: 'Immich is hier niet gekoppeld' };
+    try { const l = await im.nieuwsteFotos(IMMICH.nieuwste, true); return { status: 200, fotos: l.map(function (x) { return { id: x.id, ratio: x.ratio, dag: x.dag, duur: x.duur }; }) }; }
+    catch (e) { return immichNiet(e); }
+  }
+  // De filmpjes in een album (zelfde lijst als de foto's, alleen de video's)
+  async function immichAlbumFilmpjes(albumId) {
+    if (!UUID_RE.test(String(albumId || ''))) return { status: 400, fout: 'onbekend album' };
+    const im = immichClient();
+    if (!im) return { status: 409, fout: 'Immich is hier niet gekoppeld' };
+    try { const l = await im.albumFotos(albumId, IMMICH.fotos_max); return { status: 200, fotos: l.filter(function (x) { return x.beeld === false; }).map(function (x) { return { id: x.id, ratio: x.ratio, dag: x.dag, duur: x.duur }; }) }; }
+    catch (e) { if (e && e.code === 'HTTP' && (e.status === 404 || e.status === 400)) return { status: 404, fout: 'dit album bestaat niet (meer)' }; return immichNiet(e); }
+  }
+  // ffmpeg los draaien met tijdgrens en Stop; → { code, err } of { fout }
+  function ffmpegDraai(args, ms, ctl) {
+    return new Promise(function (klaar) {
+      try { if (!fs.statSync(FFMPEG).isFile()) return klaar({ fout: 'geen ffmpeg op de pod' }); } catch (e) { return klaar({ fout: 'geen ffmpeg op de pod' }); }
+      let k, af = false, err = '', tm = null, stopTik = null;
+      const eind = function (r) { if (af) return; af = true; clearTimeout(tm); clearInterval(stopTik); klaar(r); };
+      try { k = spawn('nice', ['-n', '10', FFMPEG].concat(args), { env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' }, stdio: ['ignore', 'ignore', 'pipe'] }); }
+      catch (e) { return eind({ fout: 'ffmpeg start niet' }); }
+      tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} eind({ fout: 'ffmpeg deed er langer over dan ' + Math.round(ms / 1000) + ' s' }); }, ms);
+      stopTik = setInterval(function () { if (ctl && ctl.gestopt && !af) { try { k.kill('SIGKILL'); } catch (e) {} eind({ fout: 'gestopt' }); } }, 250);
+      k.stderr.on('data', function (b) { if (err.length < 4000) err += b; });
+      k.on('error', function () { eind({ fout: 'ffmpeg start niet' }); });
+      k.on('close', function (code) { eind({ code: code, err: err }); });
+    });
+  }
+  async function filmBeeldjes(id, werk, ruwIn, ctl, t) {
+    const im = immichClient();
+    if (!im || typeof im.videoNaarBestand !== 'function') return { fout: 'Immich is hier niet gekoppeld' };
+    let info;
+    try { info = await im.fotoInfo(id); } catch (e) { return { fout: 'Immich is nu niet bereikbaar' }; }
+    if (!info || info.beeld || info.prullenbak) return { fout: 'het filmpje staat niet (meer) in Immich' };
+    let mijn = null;
+    try { mijn = typeof im.mijnId === 'function' ? await im.mijnId() : null; } catch (e) { mijn = null; }
+    if (!mijn || info.eigenaar !== mijn) return { fout: 'het filmpje is niet (meer) van jou in Immich' };   // review Codex MOET 1
+    const filmPad = path.join(werk, 'film'), kand = path.join(werk, 'kand');
+    const weg = function () { try { fs.rmSync(filmPad, { force: true }); } catch (e) {} try { fs.rmSync(kand, { recursive: true, force: true }); } catch (e) {} };
+    const t0 = klok();
+    try { await im.videoNaarBestand(id, filmPad, FILM.bytes_max, FILM.haal_ms); }
+    catch (e) { weg(); return { fout: e && e.code === 'GROOT' ? 'het filmpje is groter dan ' + Math.round(FILM.bytes_max / 1024 ** 3) + ' GB' : e && e.code === 'SOORT' ? 'Immich gaf geen filmpje terug' : 'het filmpje ophalen uit Immich mislukte' }; }
+    if (ctl.gestopt) { weg(); return { fout: 'gestopt' }; }
+    // duur uit de kop (ffmpeg -i zonder uitvoer eindigt met code 1; de regel Duration staat dan wel in stderr)
+    const inv = ['-hide_banner', '-nostdin', '-protocol_whitelist', 'file', '-format_whitelist', FILM.formaten, '-i', filmPad];
+    const kop = await ffmpegDraai(inv, 60000, ctl);
+    if (kop.fout) { weg(); return { fout: kop.fout }; }
+    const m = /Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(kop.err || '');
+    const duur = m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) : NaN;
+    if (!isFinite(duur) || duur <= 0) { weg(); return { fout: 'dit filmpje kan de pod niet lezen' }; }
+    if (duur < FILM.min_s) { weg(); return { fout: 'het filmpje is korter dan ' + FILM.min_s + ' seconden' }; }
+    if (duur > FILM.max_s + 1) { weg(); return { fout: 'het filmpje is langer dan ' + Math.round(FILM.max_s / 60) + ' minuten' }; }
+    const fps = Math.max(0.5, Math.min(FILM.fps_max, FILM.kandidaten / duur));
+    t.fase = 'beeldjes uit het filmpje halen';
+    fs.mkdirSync(kand, { mode: 0o700 });
+    const z = FILM.zijde;
+    const r = await ffmpegDraai(inv.concat(['-map', '0:v:0', '-an', '-sn', '-dn', '-map_metadata', '-1',
+      '-vf', 'fps=' + fps.toFixed(4) + ",scale='if(gte(iw,ih),min(" + z + ",iw),-2)':'if(gte(iw,ih),-2,min(" + z + ",ih))'",
+      '-frames:v', String(FILM.kandidaten_max), '-q:v', '2', '-threads', '2', '-f', 'image2', path.join(kand, '%04d.jpg')]), FILM.ffmpeg_ms, ctl);
+    try { fs.rmSync(filmPad, { force: true }); } catch (e) {}
+    if (r.fout || r.code !== 0) { weg(); return { fout: r.fout || 'ffmpeg kon het filmpje niet lezen (code ' + r.code + ')' }; }
+    if (ctl.gestopt) { weg(); return { fout: 'gestopt' }; }
+    t.fase = 'de scherpste beeldjes kiezen';
+    const pk = await beeldPy(['video-kies', kand, ruwIn, String(SP.fotos_max)], SP.voor_ms);
+    weg();
+    if (!pk.ok) return { fout: 'beeldjes geweigerd: ' + pk.reden };
+    log('studio splat taak=' + t.id + ' film_s=' + Math.round(duur * 10) / 10 + ' kandidaten=' + pk.kandidaten + ' gekozen=' + pk.n + ' bewogen=' + pk.bewogen + ' ms=' + (klok() - t0));
+    return { duur_s: Math.round(duur * 10) / 10, kandidaten: pk.kandidaten, bewogen: Number(pk.bewogen) || 0, ms_s: Math.round((klok() - t0) / 100) / 10,
+      scherpte: { alle: pk.scherpte_alle, gekozen: pk.scherpte_gekozen, laagste: pk.scherpte_laagste } };
+  }
   function splatBox(kop, regels) { try { if (typeof deps.box === 'function') deps.box(kop, regels); } catch (e) { fout('studio-splat-box', e); } }
   async function motorSplat(t, f, out, ctl) {
     const L = splatLib();
-    const ids = st.splatIds.get(t.id);
+    const keuze = st.splatIds.get(t.id);
     st.splatIds.delete(t.id);
+    const film = keuze && !Array.isArray(keuze) && UUID_RE.test(String(keuze.video)) ? keuze.video : null;   // wv4185
+    const ids = Array.isArray(keuze) ? keuze : film ? [] : null;
     if (!L || !SP) return { fout: 'de 3D-onderdelen ontbreken in deze versie van de pod' };
     if (st.splatHangt) return { fout: 'de 3D-app heeft een vorige stop nog niet bevestigd; er is niets gestart' };
-    if (!ids || ids.length < SP.fotos_min) return { fout: 'de lijst met foto\'s is er niet meer (pod herstart?); kies ze opnieuw' };
+    if (!film && (!ids || ids.length < SP.fotos_min)) return { fout: 'de lijst met foto\'s is er niet meer (pod herstart?); kies ze opnieuw' };
     t.splat = Object.assign({}, t.splat || {});
     // 1. poort: ruimte, hartslag, ComfyUI-rij leeg en genoeg vrij videogeheugen (zelfde wacht als ComfyUI-flows)
     const rz = L.ruimteToets(SP);
@@ -2426,6 +2535,14 @@ function maak(deps) {
     mkdir(ruwIn); mkdir(klaarMap);
     t.fase = 'foto\'s ophalen uit Immich'; t.procent = 0;
     let mis = 0, voorbeeldNoot = 0;
+    if (film) {
+      // wv4185: filmpje → beeldjes (ffmpeg) → per stuk het scherpste (video-kies) → ruwIn/01.jpg …; daarna als bij foto's
+      t.fase = 'filmpje ophalen uit Immich';
+      const fb = await filmBeeldjes(film, werk, ruwIn, ctl, t);
+      if (fb.fout) { try { fs.rmSync(ruwIn, { recursive: true, force: true }); } catch (e) {} return { fout: fb.fout === 'gestopt' ? 'gestopt' : fb.fout + '; er is niets klaargezet' }; }
+      Object.assign(t.splat, { film_s: fb.duur_s, kandidaten: fb.kandidaten, scherpte: fb.scherpte, bewogen: fb.bewogen, film_beeldjes_s: fb.ms_s });
+      t.procent = 30;
+    }
     for (let i = 0; i < ids.length; i++) {
       if (ctl.gestopt) return { fout: 'gestopt' };
       const hi = await immichHaal(ids[i]);
@@ -2490,7 +2607,9 @@ function maak(deps) {
     }
     // klaar.json of bevestigde stop
     const k = s && s.klaar ? s.klaar : null;
-    const nt = k ? L.netwerkToets(k, s.meting) : null;
+    const hosts = k ? await L.hostAdressen(SP) : [];   // wv4185: adres van de Olares-host per taak (wisselt na een herstart)
+    const nt = k ? L.netwerkToets(k, s.meting, hosts) : null;
+    if (k && !hosts.length) log('studio splat taak=' + t.id + ' adres van de Olares-host niet op te zoeken; alleen het cluster telt als binnen');
     if (k) {
       t.meting = Object.assign(t.meting || {}, { rekenen: L.metingKort(s.meting), loper_duur_s: Number(k.duur_s) || null, loper: schoon(k.loper, 12),
         netwerk: { pogingen: nt.pogingen, sockets: nt.sockets, rekenproces: nt.rekenproces, buiten: nt.buiten } });
@@ -2502,6 +2621,7 @@ function maak(deps) {
       splatBox('Studio 3D-taak: netwerkafwijking bij de 3D-app (' + nt.reden + ') #infinisplat (pod, automatisch)', ['status: open',
         'van: pod studio.js motorSplat, taak ' + t.id, 'gemeten: netwerkpogingen ' + nt.pogingen + ', sockets ' + nt.sockets + ', rekenproces ' + nt.rekenproces + ', buiten Olares ' + nt.buiten,
         'gevolg: de taak is als mislukt gemarkeerd en de scène is niet bewaard; de taakmap is gewist',
+        'host nu: ' + (hosts.length ? hosts.join(', ') : 'niet op te zoeken') + ' (' + SP.olares_host + ')',
         'voorstel: klaar.json/meting.json van de volgende taak naast fase 1 leggen (plan InfiniSplat § Log); adressen duiden met gethostbyaddr']);
       return { fout: 'netwerkafwijking bij de 3D-app (' + nt.reden + '); de scène is niet bewaard' };
     }
@@ -2542,6 +2662,7 @@ function maak(deps) {
     }
     bytes['ruw.ply'] = ruw.bytes; sha['ruw.ply'] = ruw.sha256;
     const kaart = { taak: t.id, gemaakt: new Date(klok()).toISOString(), fotos: t.splat.fotos, bron: t.splat.bron,
+      film: t.splat.bron === 'video' ? { s: t.splat.film_s || null, kandidaten: t.splat.kandidaten || null, scherpte: t.splat.scherpte || null, bewogen: t.splat.bewogen || 0 } : undefined,   // wv4185
       model: { bundel_git: L.bundelGit(SP), gewichten_sha256: SP.gewichten_sha256, loper: k.loper ? schoon(k.loper, 12) : null },
       puntjes: { ruw: puntjes, vol: maten.vol, licht: maten.licht }, bytes: bytes, sha256: sha,
       meting: L.metingKort(s.meting), netwerk: t.meting.netwerk, duur: { rekenen_s: Number(k.duur_s) || null, inpakken_s: Math.round((klok() - t0) / 1000) },
@@ -2641,7 +2762,7 @@ function maak(deps) {
       if (!sc) return;
       const k = sc.kaart, b = k.bytes || {};
       const vb = (function () { try { const x = fs.lstatSync(path.join(sc.dir, 'voorbeeld.jpg')); return x.isFile() && x.size <= 4 * 1024 * 1024; } catch (e) { return false; } })();
-      uit.push({ id: id, gemaakt: typeof k.gemaakt === 'string' ? k.gemaakt : null, fotos: Number(k.fotos) || 0, bron: k.bron === 'album' ? 'album' : 'los',
+      uit.push({ id: id, gemaakt: typeof k.gemaakt === 'string' ? k.gemaakt : null, fotos: Number(k.fotos) || 0, bron: k.bron === 'album' ? 'album' : k.bron === 'video' ? 'video' : 'los',
         puntjes: k.puntjes && typeof k.puntjes === 'object' ? { ruw: Number(k.puntjes.ruw) || 0, vol: Number(k.puntjes.vol) || 0, licht: Number(k.puntjes.licht) || 0 } : null,
         bytes: { licht: Number(b['licht.sog']) || 0, vol: Number(b['vol.sog']) || 0 }, voorbeeld: vb, bezig: !!(st.bezig && st.bezig.id === id) });
     });
@@ -2791,7 +2912,9 @@ function maak(deps) {
     incognito: function () { return { nog_te_wissen: nogTeWissen(), blok: st.blok, herstart: st.herstartMerk }; },
     beeldPijp: beeldPijp, immichHaal: immichHaal, flowVan: async function (id) { const c = await catalogus(false); const f = c.flows.find(function (x) { return x.id === id; }); return f ? flowUit(f) : null; },
     splatKaart: splatKaart, splatBestand: splatBestand, splatWis: splatWis, _splatRonde: splatRonde,   // wv3272
-    splatLijst: splatLijst, splatVoorbeeld: splatVoorbeeld, immichNieuwste: immichNieuwste, immichGeschikt: immichGeschikt, _geschiktOordeel: geschiktOordeel,   // wv4173
+    splatLijst: splatLijst, splatVoorbeeld: splatVoorbeeld, immichNieuwste: immichNieuwste, immichGeschikt: immichGeschikt,
+    immichFilmpjes: immichFilmpjes, immichAlbumFilmpjes: immichAlbumFilmpjes,   // wv4185
+    _geschiktOordeel: geschiktOordeel,   // wv4173
     stopTimers: function () { clearInterval(st.timer); },
     _st: st,
   };

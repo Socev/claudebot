@@ -28,6 +28,9 @@ const SPLAT = {
   hartslag_max_s: 60, claim_ms: 2 * 60 * 1000, grens_ms: 16 * 60 * 1000, stop_bevestig_ms: 2 * 60 * 1000, hangt_box_ms: 10 * 60 * 1000,
   plafond: 10 * 1024 ** 3, reservering: 1024 ** 3, vrij_min: 5 * 1024 ** 3, ruw_max: 600 * 1000 * 1000, ruw_ms: 30 * 86400000,
   wees_ms: 3600 * 1000, licht: 1000000, vol_max: 3000000, inpak_ms: 6 * 60 * 1000, voor_ms: 5 * 60 * 1000,
+  // wv4185: het thuisnetwerkadres van de Olares-host wisselt (26-11: .54 → .71 na een herstart). Per taak opgezocht via deze naam;
+  // alleen privé-IPv4 telt (een openbaar antwoord zet nooit het internet open). Lukt het opzoeken niet: geen host toegestaan (dicht).
+  olares_host: 'primumnonnocere.olares.com',
 };
 const TAAK_RE = /^[a-f0-9]{16}$/;
 const O = fs.constants;
@@ -177,18 +180,33 @@ function sha256Bestand(p) {
 }
 
 // ── netwerk (ontwerp § 2) ──
-function ipToegestaan(ip) {
+function privIPv4(a) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(a || ''));
+  if (!m || [m[1], m[2], m[3], m[4]].some(function (x) { return Number(x) > 255; })) return false;
+  const a1 = Number(m[1]), a2 = Number(m[2]);
+  return a1 === 10 || (a1 === 192 && a2 === 168) || (a1 === 172 && a2 >= 16 && a2 <= 31);
+}
+// wv4185: de adressen van de Olares-host nu (DNS, alleen privé-IPv4, hooguit 4). → [] bij een fout of zonder naam.
+async function hostAdressen(cfg) {
+  if (cfg && Array.isArray(cfg.olares_hosts_vast)) return cfg.olares_hosts_vast.filter(privIPv4).slice(0, 4);   // alleen voor toetsen
+  if (!cfg || typeof cfg.olares_host !== 'string' || !/^[a-z0-9.-]{3,100}$/.test(cfg.olares_host)) return [];
+  try {
+    const l = await require('dns').promises.lookup(cfg.olares_host, { all: true, family: 4 });
+    return Array.from(new Set((Array.isArray(l) ? l : []).map(function (x) { return x && x.address; }).filter(privIPv4))).slice(0, 4);
+  } catch (e) { return []; }
+}
+function ipToegestaan(ip, hosts) {
   let a = String(ip || '').toLowerCase();
   if (a.indexOf('::ffff:') === 0) a = a.slice(7);
   if (a === '0.0.0.0' || a === '::' || a === '::1' || /^127\./.test(a)) return true;   // geen tegenpartij / eigen pod
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(a);
   if (!m) return false;   // elk ander IPv6-adres: buiten
   if (m[1] === '10' && m[2] === '233') return true;   // cluster van Olares
-  return a === '192.168.20.54';                        // de Olares-host
+  return Array.isArray(hosts) && hosts.indexOf(a) >= 0;   // de Olares-host (wv4185: opgezocht, niet meer vast .54)
 }
 // → { ok, afwijking, ontbreekt, pogingen, sockets, rekenproces, buiten: n, reden }. afwijking = iets gezien dat niet mag (mislukt + box-rij);
 // ontbreekt = geen (volledige) meting (bij een geslaagde taak: mislukt zonder box-rij; bij een mislukte taak normaal).
-function netwerkToets(klaar, meting) {
+function netwerkToets(klaar, meting, hosts) {
   const nw = klaar && klaar.netwerk && typeof klaar.netwerk === 'object' ? klaar.netwerk : null;
   const pog = meting && Number.isInteger(meting.netwerkpogingen) ? meting.netwerkpogingen : null;
   const uit = { ok: false, afwijking: false, ontbreekt: false, pogingen: pog, sockets: nw ? Number(nw.verbindingen_naar_buiten) || 0 : null,
@@ -200,7 +218,7 @@ function netwerkToets(klaar, meting) {
     if (Number(n) > lijst.length) { uit.afwijking = true; uit.reden = 'meer verbindingen dan de 3D-app kon opsommen'; return uit; }
     for (const r of lijst) {
       const m = /^(tcp6?|udp6?) (\S+):(\d+)(?: |$)/.exec(String(r));
-      if (!m || !ipToegestaan(m[2])) uit.buiten++;
+      if (!m || !ipToegestaan(m[2], hosts)) uit.buiten++;
     }
   }
   if (pog > 0) uit.reden = pog + ' netwerkpoging(en) van het rekenproces';
@@ -275,5 +293,5 @@ function bundelGit(cfg) {
 }
 
 module.exports = { SPLAT, TAAK_RE, cfgVan, mapNaam, mapToets, echteMap, bestaatL, maakExcl, leesJsonVeilig, leesHartslag, maakTaakmap, schrijfStop,
-  wisTaakmap, leesTaakmap, kopieerRuw, plyPuntjes, sha256Bestand, ipToegestaan, netwerkToets, metingKort, du, vrijeRuimte, ruimteToets,
+  wisTaakmap, leesTaakmap, kopieerRuw, plyPuntjes, sha256Bestand, ipToegestaan, netwerkToets, hostAdressen, privIPv4, metingKort, du, vrijeRuimte, ruimteToets,
   splatTransform, bundelGit };
