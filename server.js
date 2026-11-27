@@ -17219,6 +17219,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/pakjes' || route === 'POST /app/pakjes/ververs' || route.indexOf('POST /app/pakjes/') === 0) return typeof appPakjes === 'function' ? appPakjes(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pakjes');   // wv2593: OVIS Pakjes (lijst, nu verversen, naar Eerder)
         if (route === 'GET /app/osint' || route === 'POST /app/osint/zoek' || route === 'POST /app/osint/bestand' || route === 'GET /app/osint/instelling' || route === 'POST /app/osint/instelling' || route === 'GET /app/osint/grafiek' || /^GET \/app\/osint\/bewaard\/\d{1,9}$/.test(route)) return typeof appOsint === 'function' ? appOsint(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'osint');   // wv2698: + bestand, instelling, grafiek   // wv2694: OVIS OSINT (logboek, zoeken)
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
+        if (route === 'POST /app/luisterrij') return appLuisterrij(req, res, a, d);   // wv4127
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
         if (route === 'GET /app/naast') return appNaastRoute(req, res);   // wv201
@@ -18126,6 +18127,12 @@ function appWavDuur(b) {
 // alleen JSON van de pod door, zoals bij GET /app/bestand).
 async function appVoorlees(req, res, a, d) {
   if (!process.env.GEMINI_API_KEY_AUTO) return appWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'voorlees: geen sleutel');
+  // wv4127: een stuk uit de luisterrij komt op verwijzing (de tekst staat op de pod, niet op het toestel)
+  if (d.stuk !== undefined) {
+    const st = appLuisterLees(d.stuk);
+    if (!st) return appWeiger(res, 404, 'dit stuk is niet meer bewaard (de luisterrij houdt een voorgelezen stuk ' + APP_LUISTER_DAGEN + ' dagen)', 'voorlees: stuk weg');
+    d = { tekst: st.tekst, deel: d.deel };
+  }
   if (typeof d.tekst !== 'string' || !d.tekst.trim()) return appWeiger(res, 400, 'geen tekst', 'voorlees leeg');
   if (d.tekst.length > APP_VOORLEES_TEKST_MAX) return appWeiger(res, 413, 'te lang om voor te lezen (max ' + APP_VOORLEES_TEKST_MAX + ' tekens)', 'voorlees te lang');
   const deel = d.deel === undefined ? 1 : d.deel;
@@ -18142,6 +18149,64 @@ async function appVoorlees(req, res, a, d) {
   }
   res._app.reden = 'voorlees deel ' + deel + '/' + delen.length + ' (' + delen[deel - 1].length + ' tekens)';
   appStuur(res, 200, { ok: true, deel: deel, delen: delen.length, type: 'audio/wav', audio: wav.toString('base64') });
+}
+
+// ── wv4127 (besluitenpagina nr 179 = 2C79, David Ja 25-11-2026 21:59): de luisterrij ──
+// POST /app/luisterrij { tekst }: "Zet in luisterrij" naast Voorlezen. De pod bewaart de tekst (APP_DATA/luisterrij/<id>.json, 0600,
+// APP_LUISTER_DAGEN dagen, hooguit APP_LUISTER_MAX stukken) en geeft {id, delen, titel}; de muziekspeler van de app houdt alleen die
+// verwijzing (review ontwerp MOET 1: geen volledige teksten in localStorage) en speelt het stuk deel voor deel via POST /app/voorlees
+// { stuk, deel }. Bewaren kost geen stemaanroep; elk afgespeeld deel kost er één, met dezelfde grenzen als Voorlezen.
+const APP_LUISTER_DIR = path.join(APP_DATA, 'luisterrij');
+const APP_LUISTER_DAGEN = 7;
+const APP_LUISTER_MAX = 200;
+const APP_LUISTER_PER_UUR = 60;
+const APP_LUISTER_ID = /^[a-f0-9]{16}$/;
+appStaat.tellers.luisterrij = [];
+function appLuisterLees(id) {
+  if (typeof id !== 'string' || !APP_LUISTER_ID.test(id)) return null;
+  let j;
+  try { j = appLeesStreng(path.join(APP_LUISTER_DIR, id + '.json'), null); } catch (e) { logError('app-luisterrij', e); return null; }
+  if (!j || j.v !== 1 || typeof j.tekst !== 'string' || !j.tekst.trim() || !Number.isFinite(j.t)) return null;
+  if (Date.now() - j.t > APP_LUISTER_DAGEN * 86400000) return null;
+  return j;
+}
+function appLuisterOpruimen() {
+  let namen = [];
+  try { namen = fs.readdirSync(APP_LUISTER_DIR); } catch (e) { return; }
+  const grens = Date.now() - APP_LUISTER_DAGEN * 86400000;
+  const st = [];
+  namen.forEach(function (n) {
+    const f = path.join(APP_LUISTER_DIR, n);
+    let m = 0;
+    try { m = fs.statSync(f).mtimeMs; } catch (e) { return; }
+    if (!/^[a-f0-9]{16}\.json$/.test(n)) { if (/\.nieuw\./.test(n) && m < Date.now() - 3600000) try { fs.unlinkSync(f); } catch (e) { /* */ } return; }
+    st.push({ f: f, m: m });
+  });
+  st.sort(function (x, y) { return y.m - x.m; });
+  st.forEach(function (x, i) { if (x.m < grens || i >= APP_LUISTER_MAX) try { fs.unlinkSync(x.f); } catch (e) { logError('app-luisterrij', e); } });
+}
+// titel voor Hierna: de eerste regel van de spreektekst, kort
+function appLuisterTitel(spreek) {
+  const r = (String(spreek || '').split('\n').find(function (x) { return x.trim(); }) || '').trim().replace(/[.:;,]$/, '');
+  return r.length > 60 ? r.slice(0, 57).replace(/\s+\S*$/, '') + '…' : r || 'Voorgelezen stuk';
+}
+function appLuisterrij(req, res, a, d) {
+  if (typeof d.tekst !== 'string' || !d.tekst.trim()) return appWeiger(res, 400, 'geen tekst', 'luisterrij leeg');
+  if (d.tekst.length > APP_VOORLEES_TEKST_MAX) return appWeiger(res, 413, 'te lang om voor te lezen (max ' + APP_VOORLEES_TEKST_MAX + ' tekens)', 'luisterrij te lang');
+  const spreek = appSpreektekst(d.tekst);
+  const delen = appVoorleesDelen(spreek);
+  if (!delen.length) return appWeiger(res, 422, 'hier staat niets in om voor te lezen', 'luisterrij niets');
+  if (!appTeller('luisterrij', APP_LUISTER_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel stukken in de luisterrij gezet dit uur', 'grens luisterrij');
+  const id = crypto.createHash('sha256').update('wv4127\n' + d.tekst).digest('hex').slice(0, 16);
+  try {
+    appSchrijfJson(path.join(APP_LUISTER_DIR, id + '.json'), { v: 1, t: Date.now(), tekst: d.tekst });   // dezelfde tekst opnieuw = zelfde id, 7 dagen vanaf nu
+    appLuisterOpruimen();
+  } catch (e) {
+    logError('app-luisterrij', e);
+    return appWeiger(res, 503, 'bewaren lukte niet', 'luisterrij schrijven');
+  }
+  res._app.reden = 'luisterrij ' + delen.length + ' delen (' + d.tekst.length + ' tekens)';
+  appStuur(res, 200, { ok: true, id: id, delen: delen.length, titel: appLuisterTitel(spreek) });
 }
 
 function appInfo() {
