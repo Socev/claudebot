@@ -408,6 +408,45 @@ function maak(o) {
   return { start: start, stand: stand, opstart: opstart, health: health, noteerGemist: noteerGemist, kan: function (id, door) { const m = PER_ID[id]; return m ? kan(m, door) : { status: 404, fout: 'onbekende manager' }; } };
 }
 
+// ── wv4135 (besluitenpagina nr 424 = 3C124, nr 373 = 3C73, David Ja 25-11-2026): Jouw besluiten en Dit mag ik zelf ──
+// Jouw besluiten = Davids beantwoorde managerkaarten (machinekamer.voor_jou met herkomst.manager, wv3610) met één effectregel zodra
+// gemeten (machinekamer.manager_besluit; RPC mk_managers_besluiten). Dit mag ik zelf = rijen afspraak-<manager>-<soort> in het
+// toestemmingenregister (status aan), met de laatste regel uit afspraken-log.jsonl (mk-scripts/managers-besluiten/besluiten.py doe).
+// Alleen lezen; Intrekken (server.js) zet de registerrij via toestemming.py op uit.
+function besluitIds(id) {
+  const m = PER_ID[id];
+  if (!m) return [];
+  return [m.id].concat(m.delen || []);
+}
+const ANTWOORDEN = ['Ja', 'Nee', 'Anders', 'Gedaan', 'Niet meer nodig', 'Beantwoord'];
+function besluitVorm(r) {
+  r = r && typeof r === 'object' ? r : {};
+  const lijst = (Array.isArray(r.besluiten) ? r.besluiten : []).slice(0, 100).map(function (b) {
+    return { datum: b.datum ? String(b.datum) : null, vraag: kort(String(b.vraag || ''), 200),
+      antwoord: ANTWOORDEN.indexOf(String(b.antwoord)) >= 0 ? String(b.antwoord) : 'Beantwoord',
+      effect: b.effect ? kort(String(b.effect), 300) : null, effect_op: b.effect_op ? String(b.effect_op) : null };
+  });
+  return { aantal: Number(r.aantal) || 0, besluiten: lijst };
+}
+const AFSPRAAK_RE = /^afspraak-([a-z]{2,20})-[a-z][a-z0-9-]{2,60}$/;
+// reg = inhoud van toestemmingen.json (of null), log = regels uit afspraken-log.jsonl (strings), id = manager-id
+function afspraken(reg, log, id) {
+  const ids = besluitIds(id);
+  if (!ids.length || !reg || !Array.isArray(reg.rijen)) return [];
+  const laatst = {};
+  (log || []).forEach(function (l) {
+    let x; try { x = JSON.parse(l); } catch (e) { return; }
+    if (x && typeof x.rij === 'string' && typeof x.regel === 'string') laatst[x.rij] = { t: String(x.t || ''), regel: kort(x.regel, 200) };
+  });
+  return reg.rijen.filter(function (r) {
+    const m = r && AFSPRAAK_RE.exec(String(r.id || ''));
+    return m && ids.indexOf(m[1]) >= 0 && r.manager === m[1] && r.status === 'aan';
+  }).map(function (r) {
+    const bron = Array.isArray(r.bron) && r.bron.length ? r.bron[r.bron.length - 1] : {};
+    return { id: String(r.id), tekst: kort(Array.isArray(r.tekst) ? r.tekst.join(' ') : String(r.tekst || ''), 600),
+      sinds: bron && bron.datum ? String(bron.datum) : null, laatst: laatst[r.id] || null };
+  });
+}
 // Wat de RPC mk_managers_stand per manager nodig heeft (geen vrije invoer: alleen deze vaste lijst).
 function rpcInvoer() {
   return MANAGERS.concat(DELEN).filter(function (m) { return m.patroon; }).map(function (m) {
@@ -419,4 +458,4 @@ function rpcInvoer() {
 
 module.exports = { maak: maak, MANAGERS: MANAGERS, DELEN: DELEN, samenvoegen: samenvoegen, ONDERHOUD_ZIN: ONDERHOUD_ZIN, REDENEN: REDENEN, prompt: prompt, rapportRegels: rapportRegels, kort: kort, volgendeWeekronde: volgendeWeekronde,
   vorigeWeekronde: vorigeWeekronde, gemistZin: gemistZin, gemistUitTekst: gemistUitTekst, rapporten: rapporten, managerLink: managerLink, GEMIST_REDEN: GEMIST_REDEN,
-  amsNaarMs: amsNaarMs, rpcInvoer: rpcInvoer, VOOR_WEEKRONDE_MS: VOOR_WEEKRONDE_MS };
+  amsNaarMs: amsNaarMs, rpcInvoer: rpcInvoer, VOOR_WEEKRONDE_MS: VOOR_WEEKRONDE_MS, besluitIds: besluitIds, besluitVorm: besluitVorm, afspraken: afspraken, AFSPRAAK_RE: AFSPRAAK_RE };

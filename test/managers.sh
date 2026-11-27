@@ -330,7 +330,7 @@ const wacht = () => new Promise((r) => setImmediate(r));
   // ── 10. server.js-koppeling (tekst) ──
   const s = fs.readFileSync('server.js', 'utf8');
   const knip = (naam) => { const i = s.indexOf(naam); let d = 0, j = s.indexOf('{', i); for (let k = j; k < s.length; k++) { if (s[k] === '{') d++; else if (s[k] === '}') { d--; if (d === 0) return s.slice(i, k + 1); } } };
-  toets('10 dispatch GET /app/managers en /rapporten/<id>; geen POST-ronde meer (wv4128)', /route === 'GET \/app\/managers' \|\| route\.indexOf\('GET \/app\/managers\/rapporten\/'\) === 0\) return typeof appManagers === 'function'/.test(s) && !/'POST \/app\/managers\/ronde'/.test(s));
+  toets('10 dispatch GET /app/managers en /rapporten/<id>; geen POST-ronde meer (wv4128)', /route === 'GET \/app\/managers' \|\| route\.indexOf\('GET \/app\/managers\/rapporten\/'\) === 0 \|\| route\.indexOf\('GET \/app\/managers\/besluiten\/'\) === 0 \|\| route === 'POST \/app\/managers\/afspraak\/intrekken'\) return typeof appManagers === 'function'/.test(s) && !/'POST \/app\/managers\/ronde'/.test(s));
   toets('10 teller managers bestaat in appStaat (anders faalt appTeller)', /tellers: \{[^}]*managers: \[\][,} ]/.test(s));
   toets('10 wv4128: rapporten lezen box + drie archiefmaanden, met mtime-cache', /async function managersBoxTeksten\(\)/.test(s) && /'machinekamer-' \+ x\.getUTCFullYear\(\)/.test(s) && /c\.mtime === st\.mtimeMs/.test(s));
   toets('10 SMAL_GRENS manager-ronde 6 en smalActie', /'manager-ronde': 6, 'harvester\/kaart': 8 \}/.test(s) && /actie === 'manager-ronde'/.test(s) && /socevAgentSleutelOk\(d\.secret\) \? 'socev' : 'machinekamer', d\.reden\)/.test(s));
@@ -377,6 +377,63 @@ const wacht = () => new Promise((r) => setImmediate(r));
   toets('11 knopJa: alle Ja al gebruikt → "al gebruikt"', !kj.ok && /al gebruikt/.test(kj.fout), kj);
   toets('11 knopJa: machinekamer-vraag telt niet', !(await ctx2.f('dddd0000')).ok);
   toets('11 knopJa: Nee telt niet', /geen Ja/.test((await ctx2.f('eeee1111')).fout));
+
+  // ── 12. wv4135 (3C124 Jouw besluiten, 3C73 Dit mag ik zelf + Intrekken) ──
+  toets('12 besluitIds: design neemt ui mee, onbekend leeg', JSON.stringify(M.besluitIds('design')) === '["design","ui"]' && JSON.stringify(M.besluitIds('ciso')) === '["ciso"]' && M.besluitIds('x').length === 0);
+  const bv = M.besluitVorm({ aantal: 6, besluiten: [{ datum: '2026-11-05T06:25:00Z', vraag: 'Nacontroles — minder?', antwoord: 'Ja', effect: 'Van 199 naar 32 per week.', effect_op: '2026-11-27T19:00:00Z' },
+    { datum: '2026-11-11T11:01:00Z', vraag: 'Box archiveren?', antwoord: 'Hack<script>', effect: null }] });
+  toets('12 besluitVorm: aantal, effect, onbekend antwoord → Beantwoord, geen effect = null', bv.aantal === 6 && bv.besluiten.length === 2 && bv.besluiten[0].effect === 'Van 199 naar 32 per week.' && bv.besluiten[1].antwoord === 'Beantwoord' && bv.besluiten[1].effect === null, bv);
+  toets('12 besluitVorm: rommel → leeg', M.besluitVorm(null).aantal === 0 && M.besluitVorm({ besluiten: 'x' }).besluiten.length === 0);
+  const reg = { rijen: [
+    { id: 'afspraak-ciso-sleuteldragers-wissen', manager: 'ciso', status: 'aan', tekst: ['De CISO wist zelf …'], bron: [{ datum: '2026-11-30', vraag_id: 'abcd1234' }] },
+    { id: 'afspraak-ciso-opslag-weer-prive', manager: 'ciso', status: 'uit', tekst: ['ingetrokken'], bron: [] },
+    { id: 'afspraak-ciso-vals', manager: 'data', status: 'aan', tekst: ['manager klopt niet'], bron: [] },
+    { id: 'afspraak-ui-knoppen-groter', manager: 'ui', status: 'aan', tekst: ['UI-deel'], bron: [] },
+    { id: 'pot-sloel-notas', status: 'aan', tekst: ['geen afspraak'] }] };
+  const lg = ['{"rij":"afspraak-ciso-sleuteldragers-wissen","regel":"2 logbestanden met een sleutel gewist","t":"2026-12-07T06:40:00+01:00"}', 'kapot', '{"rij":"afspraak-ciso-sleuteldragers-wissen","regel":"1 logbestand met een sleutel gewist","t":"2026-12-14T06:40:00+01:00"}'];
+  const af = M.afspraken(reg, lg, 'ciso');
+  toets('12 afspraken CISO: alleen eigen rij met status aan; laatste meldregel; uit/andere manager/geen afspraak niet', af.length === 1 && af[0].id === 'afspraak-ciso-sleuteldragers-wissen' && af[0].sinds === '2026-11-30' && af[0].laatst && af[0].laatst.regel === '1 logbestand met een sleutel gewist', af);
+  toets('12 afspraken Design toont ook het UI-deel', M.afspraken(reg, [], 'design').map((x) => x.id).join() === 'afspraak-ui-knoppen-groter');
+  toets('12 afspraken zonder register → leeg', M.afspraken(null, lg, 'ciso').length === 0);
+  toets('12 glijdroute intrekken', /APP_GLIJD_ROUTES\.add\('POST \/app\/managers\/afspraak\/intrekken'\)/.test(s));
+  // de echte appManagers in een vm: besluiten-route en Intrekken (toestemming.py vervangen door een proefscript)
+  {
+    const vm = require('vm'), cp = require('child_process');
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'mgr4135-'));
+    fs.writeFileSync(path.join(d, 'reg.json'), JSON.stringify(reg));
+    fs.writeFileSync(path.join(d, 'log.jsonl'), lg.join('\n') + '\n');
+    fs.writeFileSync(path.join(d, 'tst.py'), 'import json,sys\nr=json.load(open(sys.argv[0].replace("tst.py","reg.json")))\nopen(sys.argv[0].replace("tst.py","args.json"),"w").write(json.dumps(sys.argv[1:]))\nfor x in r["rijen"]:\n  if x["id"]==sys.argv[2]: x["status"]=sys.argv[3]\njson.dump(r,open(sys.argv[0].replace("tst.py","reg.json"),"w"))\n');
+    const blok = knip('async function appManagers(req, res, a, d, route)');
+    const helpers = s.slice(s.indexOf('function managersRegister()'), s.indexOf('async function appManagers(req, res, a, d, route)'));
+    const uit = [];
+    const c = { MANAGERS_MOD: M, managers: { stand: () => M.MANAGERS.map((m) => ({ id: m.id })) }, fs, require, JSON, Promise, Date, String, Object, Array,
+      MANAGERS_REGISTER: path.join(d, 'reg.json'), MANAGERS_AFSPRAKEN_LOG: path.join(d, 'log.jsonl'), MANAGERS_TOESTEMMING_PY: path.join(d, 'tst.py'),
+      logError: () => {}, appAudit: (o) => uit.push(['audit', o]), appRolOk: async () => true, appTellerN: 0,
+      appSbRpc: async (n, a) => { uit.push(['rpc', n, a]); return { aantal: 1, besluiten: [{ datum: '2026-11-05', vraag: 'V', antwoord: 'Ja', effect: 'E is gemeten.' }] }; },
+      appStuur: (res, st, j) => { res.st = st; res.j = j; }, appWeiger: (res, st, f) => { res.st = st; res.j = { ok: false, fout: f }; } };
+    c.appTeller = () => ++c.appTellerN <= 10;
+    vm.createContext(c);
+    vm.runInContext(helpers + '\n' + blok + '\nthis.f = appManagers;', c);
+    const rq = async (route, body) => { const res = { _app: {} }; await c.f({}, res, {}, body || {}, route); return res; };
+    let r = await rq('GET /app/managers/besluiten/design');
+    toets('12 GET besluiten/design → RPC met design+ui, vorm met effect', r.st === 200 && r.j.aantal === 1 && r.j.besluiten[0].effect === 'E is gemeten.' && JSON.stringify(uit.find((x) => x[0] === 'rpc')[2]) === '{"p_managers":["design","ui"],"p_max":50}', [r, uit]);
+    r = await rq('GET /app/managers/besluiten/onzin');
+    toets('12 GET besluiten onbekende manager → 404', r.st === 404);
+    r = await rq('POST /app/managers/afspraak/intrekken', { id: '../toestemmingen' });
+    toets('12 intrekken ongeldig id → 400', r.st === 400);
+    r = await rq('POST /app/managers/afspraak/intrekken', { id: 'afspraak-ciso-vals' });
+    toets('12 intrekken rij van een andere manager → 404, niets gewijzigd', r.st === 404 && !fs.existsSync(path.join(d, 'args.json')));
+    r = await rq('POST /app/managers/afspraak/intrekken', { id: 'afspraak-ciso-opslag-weer-prive' });
+    toets('12 intrekken al uit → 200 al, geen aanroep', r.st === 200 && r.j.al === true && !fs.existsSync(path.join(d, 'args.json')));
+    r = await rq('POST /app/managers/afspraak/intrekken', { id: 'afspraak-ciso-sleuteldragers-wissen' });
+    const args = fs.existsSync(path.join(d, 'args.json')) ? JSON.parse(fs.readFileSync(path.join(d, 'args.json'), 'utf8')) : [];
+    toets('12 intrekken → toestemming.py status <id> uit met meting en reden; rij uit; audit', r.st === 200 && r.j.status === 'uit' && args[0] === 'status' && args[1] === 'afspraak-ciso-sleuteldragers-wissen' && args[2] === 'uit' && args.includes('--gemeten') && args.includes('--reden') &&
+      JSON.parse(fs.readFileSync(path.join(d, 'reg.json'), 'utf8')).rijen[0].status === 'uit' && uit.some((x) => x[0] === 'audit'), [r, args]);
+    r = await rq('GET /app/managers');
+    const ciso = r.j && r.j.managers.find((k) => k.id === 'ciso');
+    toets('12 GET /app/managers: na intrekken geen afspraak meer op de CISO-kaart; Design toont het UI-deel', r.st === 200 && ciso && Array.isArray(ciso.afspraken) && ciso.afspraken.length === 0 && r.j.managers.find((k) => k.id === 'design').afspraken.length === 1, r.j);
+    fs.rmSync(d, { recursive: true, force: true });
+  }
 
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

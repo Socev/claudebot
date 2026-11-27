@@ -6527,7 +6527,8 @@ APP_GLIJD_ROUTES.add('POST /app/nieuws/gezien');   // wv3689: iets in het loket 
 ['POST /app/dagplan/veeg', 'POST /app/dagplan/weg', 'POST /app/dagplan/erbij'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv3906: David die zijn dag regelt
 APP_GLIJD_ROUTES.add('POST /app/briefing/punt');   // wv3685: een tik onder een briefingpunt = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/voor-jou/wachter');   // wv4124: een wachterknop is David die werkt
-APP_GLIJD_ROUTES.add('POST /app/voor-jou/regels');   // wv4195: antwoorden per regel versturen is David die antwoordt
+APP_GLIJD_ROUTES.add('POST /app/voor-jou/regels');
+APP_GLIJD_ROUTES.add('POST /app/managers/afspraak/intrekken');   // wv4135: Intrekken = David die beslist   // wv4195: antwoorden per regel versturen is David die antwoordt
 APP_GLIJD_ROUTES.add('POST /app/voor-jou/woord');   // wv3250: een steekwoordkeuze is David die werkt   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
 APP_GLIJD_ROUTES.add('POST /app/financien/rekening');   // wv2292: Bewerk in Saldi = David die werkt
@@ -18647,7 +18648,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk' || route === 'POST /app/intake/geschiedenis' || route === 'POST /app/intake/verwijder' || route === 'POST /app/intake/bundel' || route === 'POST /app/intake/mailman-vraag' || route === 'POST /app/intake/datum') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
         if (route === 'GET /app/brain/entiteiten' || route === 'GET /app/brain/entiteiten/nu' || route.indexOf('GET /app/brain/entiteit/') === 0 || route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
-        if (route === 'GET /app/managers' || route.indexOf('GET /app/managers/rapporten/') === 0) return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers; wv4128: Nu draaien weg (C64), rapporten erbij (3C136)
+        if (route === 'GET /app/managers' || route.indexOf('GET /app/managers/rapporten/') === 0 || route.indexOf('GET /app/managers/besluiten/') === 0 || route === 'POST /app/managers/afspraak/intrekken') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv4135: besluiten + Intrekken (3C124/3C73)   // wv895: App Managers; wv4128: Nu draaien weg (C64), rapporten erbij (3C136)
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
         if (route === 'POST /app/werkers/schakel') return typeof appWerkerSchakel === 'function' ? appWerkerSchakel(req, res, a, s, d) : appWeiger(res, 404, 'onbekend', 'schakel');   // wv1733 (OVIS M4b): schakelaar per werker
         if (route === 'GET /app/forum/teller') return typeof appForumTellerRoute === 'function' ? appForumTellerRoute(req, res) : appWeiger(res, 404, 'onbekend', 'forum teller');   // wv4201 (3C169): getal op de tegel Forum
@@ -29064,6 +29065,12 @@ async function managersBoxTeksten() {
   }
   return uit;
 }
+// wv4135: register (alleen lezen) en de meldregels van staande afspraken; een onleesbaar bestand = geen afspraken tonen
+const MANAGERS_REGISTER = serverPad('managers_register', process.env.MANAGERS_REGISTER, '/opt/data/mk-scripts/toestemmingen.json', serverProefDeel('toestemmingen.json'));
+const MANAGERS_AFSPRAKEN_LOG = serverPad('managers_afspraken_log', process.env.MANAGERS_AFSPRAKEN_LOG, '/opt/data/managers/afspraken-log.jsonl', serverProefDeel('afspraken-log.jsonl'));
+const MANAGERS_TOESTEMMING_PY = serverPad('managers_toestemming', process.env.MANAGERS_TOESTEMMING_PY, '/opt/data/mk-scripts/toestemming.py', serverProefDeel('toestemming.py'));
+function managersRegister() { try { return JSON.parse(fs.readFileSync(MANAGERS_REGISTER, 'utf8')); } catch (e) { if (!(e && e.code === 'ENOENT')) logError('managers-register', e); return null; } }
+function managersAfsprakenLog() { try { return fs.readFileSync(MANAGERS_AFSPRAKEN_LOG, 'utf8').split('\n').filter(Boolean).slice(-500); } catch (e) { return []; } }
 async function appManagers(req, res, a, d, route) {
   if (!managers) return appWeiger(res, 404, 'Managers zit niet in deze versie van de pod', 'managers ontbreekt');
   if (route === 'GET /app/managers') {
@@ -29071,7 +29078,45 @@ async function appManagers(req, res, a, d, route) {
     let sb = null, fout = null;
     try { sb = await appSbRpc('mk_managers_stand', { p_managers: MANAGERS_MOD.rpcInvoer() }); }
     catch (e) { logError('app-managers', e); fout = 'bevindingen en hartslag zijn nu niet leesbaar'; }
-    return appStuur(res, 200, { ok: true, managers: managers.stand(sb), fout: fout });
+    const kaarten = managers.stand(sb);
+    if (typeof MANAGERS_MOD.afspraken === 'function') {   // wv4135 (3C73): Dit mag ik zelf (registerrijen afspraak-<m>-*, status aan)
+      const reg = managersRegister(), log = managersAfsprakenLog();
+      kaarten.forEach(function (k) { k.afspraken = MANAGERS_MOD.afspraken(reg, log, k.id); });
+    }
+    return appStuur(res, 200, { ok: true, managers: kaarten, fout: fout });
+  }
+  // wv4135 (3C124): Jouw besluiten van één manager (beantwoorde kaarten + effectregel), pas bij de tik geladen
+  const bm = /^GET \/app\/managers\/besluiten\/([a-z]{2,20})$/.exec(route);
+  if (bm) {
+    const ids = typeof MANAGERS_MOD.besluitIds === 'function' ? MANAGERS_MOD.besluitIds(bm[1]) : [];
+    if (!ids.length) return appWeiger(res, 404, 'onbekende manager', 'managers besluiten');
+    let r;
+    try { r = await appSbRpc('mk_managers_besluiten', { p_managers: ids, p_max: 50 }); }
+    catch (e) { logError('app-managers', e); return appWeiger(res, 503, 'je besluiten zijn nu niet leesbaar', 'managers besluiten'); }
+    return appStuur(res, 200, Object.assign({ ok: true, manager: bm[1] }, MANAGERS_MOD.besluitVorm(r)));
+  }
+  // wv4135 (3C73): Intrekken van een staande afspraak = registerrij op uit (krapper kan altijd op Davids woord; geen vingerafdruk).
+  // Via toestemming.py status (log + leeskopie), nooit zelf in het register schrijven. Daarna vraagt de manager het weer.
+  if (route === 'POST /app/managers/afspraak/intrekken') {
+    const id = d && typeof d.id === 'string' ? d.id : '';
+    const mm = MANAGERS_MOD.AFSPRAAK_RE && MANAGERS_MOD.AFSPRAAK_RE.exec(id);
+    if (!mm) return appWeiger(res, 400, 'ongeldige afspraak', 'managers intrekken id');
+    if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
+    if (!appTeller('managers-intrekken', 10, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens managers intrekken');
+    const reg = managersRegister();
+    const rij = reg && Array.isArray(reg.rijen) ? reg.rijen.find(function (r) { return r && r.id === id; }) : null;
+    if (!rij || rij.manager !== mm[1]) return appWeiger(res, 404, 'deze afspraak bestaat niet', 'managers intrekken onbekend');
+    if (rij.status !== 'aan') return appStuur(res, 200, { ok: true, id: id, status: rij.status, al: true });
+    const tijd = new Date().toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const uit = await new Promise(function (klaar) {
+      require('child_process').execFile('python3', ['-I', MANAGERS_TOESTEMMING_PY, 'status', id, 'uit', '--gemeten', 'David tikte Intrekken in Apps › Managers (' + tijd + ')',
+        '--reden', 'David: Intrekken (app, ' + tijd + ')'], { timeout: 30000, maxBuffer: 1024 * 1024 }, function (e, so, se) {
+        klaar({ ok: !e, tekst: String(so || '') + String(se || '') });
+      });
+    });
+    if (!uit.ok) { logError('app-managers-intrekken', new Error(uit.tekst.slice(0, 300))); return appWeiger(res, 502, 'intrekken lukte nu niet; probeer het zo nog eens', 'managers intrekken'); }
+    appAudit({ route: 'managers-intrekken', m: 'tik', status: 200, apparaat: null, reden: 'afspraak ' + id + ' ingetrokken (registerrij uit)' });
+    return appStuur(res, 200, { ok: true, id: id, status: 'uit' });
   }
   // wv4128 (3C136): de vijf nieuwste rapporten van één manager (box-rijen van zijn rondes; box + archief van de laatste drie maanden)
   const rm = /^GET \/app\/managers\/rapporten\/([a-z]{2,20})$/.exec(route);
