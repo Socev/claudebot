@@ -4873,7 +4873,7 @@ function handleRequest(req, res) {
       concept_leer: typeof conceptLeerInfo === 'function' ? conceptLeerInfo() : { module: false },   // wv4107: leren van aangepaste concepten + vervangen (alleen aantallen)
       mail_voorwerk: typeof mailVoorwerkInfo === 'function' ? mailVoorwerkInfo() : { aan: false },   // wv2455: voorwerk bij vragen in Mail (tellingen, geen inhoud)   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
-      tabula: typeof tabulaInfo === 'function' ? tabulaInfo() : { aan: false },
+      tabula: typeof tabulaInfo === 'function' ? Object.assign({}, tabulaInfo(), { oogst: typeof tabulaOogstInfo === 'function' ? tabulaOogstInfo() : undefined }) : { aan: false },
       map_ingang: typeof mapIngangInfo === 'function' ? mapIngangInfo() : { module: false },   // wv3962: map → Intake (tellers, geen namen)   // wv3299: OVIS Tabula-opdrachtenloket (lijn, laatste ophaalronde, dagtellers per soort; nooit tekst, titel of code)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       tripper: typeof tripperInfo === 'function' ? tripperInfo() : { aan: false },   // wv2136: OVIS Tripper (aantal reizen, komend, onleesbaar bij de laatste lijst; geen titels of namen)
@@ -15067,7 +15067,7 @@ async function appVoorJouRegels(req, res, reg, a, s, d) {
     knop: '✓ ' + gekozen.length + (gekozen.length === 1 ? ' antwoord' : ' antwoorden') + (gevoelig ? ' (vingerafdruk)' : '') + ' — op de kaart: ' + titel
   };
   const context = '(Voor jou-kaart ' + JSON.stringify(titel) + ' (punt ' + appOntmasker(p.sleutel, 'kaart') + ')' + (rv.vraag ? ', registerrij ' + JSON.stringify(appOntmasker(rv.vraag.regSleutel, 'kaart')) : '') + (wv.length ? ', werkvoorraad ' + wv.join(', ') : '') +
-    '. David zag precies deze vragen met deze knoppen. Een agendawijziging uit deze antwoorden blijft oranje bij de Poortwachter (✅ in de app onder het volledige voorstel).)';
+    '. David zag precies deze vragen met deze knoppen. Een agendawijziging uit deze antwoorden blijft oranje bij de Poortwachter (✅ in de app onder het volledige voorstel).)' + (typeof tabulaOogstContext === 'function' ? tabulaOogstContext(p) : '');   // wv4239
   const bericht = 'Voor jou-kaart ' + JSON.stringify(titel) + ':\n' + rg.map(function (r) { return r.nr + '. ' + appOntmasker(r.vraag, 'kaart') + (r.keuzes[0].id === 'o0' ? ' (' + r.keuzes.map(function (k) { return appOntmasker(k.tekst, 'kaart'); }).join(' / ') + ')' : ''); }).join('\n');
   const bijStart = function () {
     // de kaart gaat pas dicht als na deze verzending alle regels beantwoord zijn (appKnop zette deze rij net op gestart)
@@ -15201,7 +15201,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   const context = '(Voor jou-kaart ' + JSON.stringify(titel) + ' (punt ' + appOntmasker(p.sleutel, 'kaart') + ')' + (rv.vraag ? ', registerrij ' + JSON.stringify(appOntmasker(rv.vraag.regSleutel, 'kaart')) : '') + (wv.length ? ', werkvoorraad ' + wv.join(', ') : '') +
     (voorstel ? '. Voorstel op de kaart: ' + JSON.stringify(voorstel) : '') + ((tekst + (voorstel || '')).indexOf(APP_SLEUTEL_WEG) >= 0 ? '. Op de kaart is een sleutel weggelaten (' + APP_SLEUTEL_WEG + '); de volledige tekst staat in de registerrij' : '') + '. David zag precies deze vraag' + (voorstel ? ' en dit voorstel' : '') + ' boven de knoppen; een Ja geldt voor wat er staat, niets meer. ' +
     'De kaart gaat vanzelf op beantwoord. Wacht een werkvoorraadrij op dit antwoord, geef hem vrij of zet hem bij volgens het antwoord. ' +
-    'Een agendawijziging uit deze druk blijft oranje bij de Poortwachter (✅ in de app onder het volledige voorstel).)' + appVjBriefingContext(p);
+    'Een agendawijziging uit deze druk blijft oranje bij de Poortwachter (✅ in de app onder het volledige voorstel).)' + appVjBriefingContext(p) + (typeof tabulaOogstContext === 'function' ? tabulaOogstContext(p) : '');
   const bericht = 'Voor jou-kaart ' + JSON.stringify(titel) + ':\n' + tekst + (voorstel ? '\nMijn voorstel: ' + voorstel : '');   // chat_log-rij van Socev (hoofdkanaal)
   // wv1964 (SB2 fase 6d): een gevoelige Ja (verse vingerafdruk, appKnop) staat zo in het bewijs; de verwijderroute in de databank eist dat
   const bijStart = function (kz, gevoeligJa) {
@@ -33871,6 +33871,85 @@ async function appTabula(req, res, a, route, d) {
   }
   return appWeiger(res, 404, 'onbekend', 'tabula onbekend');
 }
+// ── wv4239 (besluitenpagina nr 956 = L56 deel 2, David Ja 25-11-2026 22:25): Tabula dagoogst ──
+// Vanaf 17:00 (eens per dag, tot 22:00; hooguit 3 pogingen bij een fout) leest de pod met de lezercode de bladen waarin David vandaag
+// typte (tabula-bladen.js vandaag: alleen de regels die vandaag nieuw of gewijzigd zijn tellen), vraagt het model één keer om voorstellen
+// (overleg → Notulen-map, actieregels → Todoist, mail → Gmail-concept) en zet hooguit één Voor jou-kaart tabula-oogst-<dag> (module,
+// prive → hoofdkanaal; verschijnt op het vaste moment 17:15). Niets gaat vanzelf: een Ja wordt een [KNOP]-beurt met tabulaOogstContext.
+// Geen voorstel = geen kaart. Schakelaar: tabula.json "oogst": false. Staat TABULA_DIR/oogst.json: alleen tellingen en hashes.
+// Ontwerp + Codex-ontwerpreview: mk-scripts/wv4239/ontwerp.md. Toets: test/tabula-oogst.test.js.
+const tabulaOogstMod = (function () { try { return require(path.join(__dirname, 'tabula-oogst.js')); } catch (e) { logError('tabula-oogst', e); return null; } })();
+let tabulaOogstBezig = false;
+function tabulaOogstContext(p) { try { return tabulaOogstMod ? tabulaOogstMod.context(p) : ''; } catch (e) { logError('tabula-oogst', e); return ''; } }
+function tabulaOogstPad() { return path.join(TABULA_DIR, 'oogst.json'); }
+function tabulaOogstLees() { try { return JSON.parse(fs.readFileSync(tabulaOogstPad(), 'utf8')); } catch (e) { return null; } }
+function tabulaOogstSchrijf(s) {
+  const p = tabulaOogstPad(), t = p + '.' + process.pid + '.tmp';
+  fs.writeFileSync(t, JSON.stringify(s, null, 1), { mode: 0o600 }); fs.renameSync(t, p);
+}
+function tabulaOogstInfo() {
+  const s = tabulaOogstLees();
+  if (!s || !s.dagen) return { laatste: null };
+  const d = Object.keys(s.dagen).sort().pop();
+  const x = s.dagen[d] || {};
+  return { laatste: d, uitkomst: x.uitkomst, bladen: x.bladen, voorstellen: x.voorstellen };
+}
+function tabulaOogstConfig() { try { return JSON.parse(fs.readFileSync(path.join(TABULA_DIR, 'tabula.json'), 'utf8')) || {}; } catch (e) { return {}; } }
+// Notulen-mappen van de entiteiten (10_Zakelijk/<entiteit>/Notulen), vers gelezen
+function tabulaOogstMappen() {
+  const basis = path.join(VAULT, '10_Zakelijk');
+  try {
+    return fs.readdirSync(basis, { withFileTypes: true }).filter(function (d) { return d.isDirectory() && !d.name.startsWith('.') && fs.existsSync(path.join(basis, d.name, 'Notulen')); })
+      .map(function (d) { return '10_Zakelijk/' + d.name + '/Notulen'; }).sort();
+  } catch (e) { logError('tabula-oogst-mappen', e); return []; }
+}
+let tabulaOogstClient = null, tabulaOogstClientSleutel = null;
+async function tabulaOogstModel(systeem, tekst) {
+  let sleutel = null;
+  try { sleutel = await pdfSleutel(); } catch (e) { logError('tabula-oogst-kluis', e); }
+  if (!sleutel) return { ok: false, reden: 'sleutel' };
+  const sdk = pdfSdk();
+  if (!sdk || !sdk.klasse) return { ok: false, reden: 'sdk' };
+  if (!tabulaOogstClient || tabulaOogstClientSleutel !== sleutel) {
+    tabulaOogstClient = new sdk.klasse({ apiKey: sleutel, authToken: null, maxRetries: 1, timeout: 5 * 60 * 1000, logLevel: 'off' });
+    tabulaOogstClientSleutel = sleutel;
+  }
+  const c = tabulaOogstConfig();
+  const m = c.modellen && typeof c.modellen.oogst === 'string' && /^claude-[a-z0-9-]{3,60}$/.test(c.modellen.oogst) ? c.modellen.oogst : 'claude-sonnet-5-5';
+  let msg;
+  try {
+    msg = await tabulaOogstClient.messages.stream({ model: m, max_tokens: 6000, system: systeem, messages: [{ role: 'user', content: tekst }],
+      output_config: { effort: 'low' }, thinking: /^claude-haiku-/.test(m) ? { type: 'disabled' } : { type: 'between_tools' } }).finalMessage();
+  } catch (e) { logError('tabula-oogst-model', { message: 'HTTP ' + ((e && e.status) || '?') }); return { ok: false, reden: 'model' }; }
+  const u = msg && msg.usage ? { in: msg.usage.input_tokens || 0, uit: msg.usage.output_tokens || 0 } : undefined;
+  if (!msg || msg.stop_reason === 'refusal') return { ok: false, reden: 'weigering', u: u };
+  if (msg.stop_reason === 'max_tokens') return { ok: false, reden: 'afgekapt', u: u };
+  const t = (Array.isArray(msg.content) ? msg.content : []).filter(function (b) { return b && b.type === 'text'; }).map(function (b) { return b.text; }).join('');
+  return { ok: true, tekst: t, u: u };
+}
+async function tabulaOogstTik(opt) {
+  const o = opt || {};
+  if (!tabulaOogstMod || !tabulaBladen || tabulaOogstBezig) return null;
+  if (!o.proef && (typeof SERVER_ECHT === 'undefined' || !SERVER_ECHT || !rolPrimair())) return null;
+  const t = ovisAms();
+  const klok = String(t.uur).padStart(2, '0') + ':' + String(t.min).padStart(2, '0');
+  tabulaOogstBezig = true;
+  try {
+    return await tabulaOogstMod.ronde({ klok: klok, dag: o.dag || t.datum, moet: !!o.moet, lees: tabulaOogstLees, schrijf: tabulaOogstSchrijf,
+      aan: function () { return tabulaOogstConfig().oogst !== false; }, code: tabulaLezerCode,
+      vandaag: function (code, dag) { return tabulaBladen.vandaag(code, dag); }, mappen: tabulaOogstMappen, model: tabulaOogstModel,
+      zet: async function (p) { const r = await appSbRpc('mk_voor_jou_zet', { p: p }); appStaat.vjCache = null; return r; },
+      punten: appVjPunten,
+      vervallen: async function (p, bewijs) {
+        await appSbRpc('mk_voor_jou_status', { p_sleutel: p.sleutel, p_van: p.status, p_naar: 'vervallen', p_door: 'agent', p_later_tot: null, p_bewijs: bewijs, p_reden: 'wv4239 dagoogst verlopen' });
+        appStaat.vjCache = null;
+      },
+      log: function (r) { schrijfLog(nu() + ' ' + r); } });
+  } catch (e) { logError('tabula-oogst', e); return { fout: true }; }
+  finally { tabulaOogstBezig = false; }
+}
+if (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setInterval(function () { tabulaOogstTik().catch(function (e) { logError('tabula-oogst', e); }); }, 5 * 60000).unref(); }
+// ── einde wv4239 ──
 // ── einde Apps › Tabula ──
 
 // wv3962 (besluit nr 133 = 2C33 deel 2, David 22-11-2026): MAP-INGANG. Een los bestand in raw_input van Tolgaarde gaat via OVIS Intake

@@ -12,13 +12,15 @@
 const PULL_RONDES = 60;              // 60 × 60 bundels per opening; meer = de rest bij de volgende opening
 const VERS_MS = 10000;
 const VANG_MAX = 4000;
+const BLAD_MAX = 12000, NIEUW_MAX = 200;   // wv4239: per blad naar de dagoogst
 
 const terug = (t) => (t.indexOf('\\') < 0 ? t : t.replace(/\\([\s\S])/g, function (m, c) { return c === 'n' ? '\n' : c === 'r' ? '\r' : c === 't' ? '\t' : c; }));
 const TICKS_1970 = 621355968000000000;
 const naarMs = (ticks) => Math.round((ticks - TICKS_1970) / 10000);
 
 // Eén bundel op een tekst toepassen. Geeft { tekst, laatst } (laatst = ms van de laatste gebeurtenis, of null).
-function pasToe(tekst, body) {
+// wv4239: voor(ms, tekst) wordt vóór elke gebeurtenis aangeroepen met het moment en de tekst zoals hij er toen stond (dagbegin).
+function pasToe(tekst, body, voor) {
   let t = tekst, ticks = 0, laatst = null;
   const heel = String(body || '');
   const regels = heel.slice(0, heel.lastIndexOf('\n') + 1).split('\n');
@@ -30,6 +32,7 @@ function pasToe(tekst, body) {
     if (d.length < 5 || d[3].length !== 1 || !/^-?\d+$/.test(d[1]) || !/^-?\d+$/.test(d[2])) continue;
     ticks += Number(d[1]) * 10000;
     laatst = naarMs(ticks);
+    if (voor) voor(laatst, t);
     const pos = Number(d[2]), stuk = terug(d.slice(4).join('\t'));
     if (pos < 0 || stuk.length === 0) continue;
     if (r[0] === 'I') { if (pos <= t.length) t = t.slice(0, pos) + stuk + t.slice(pos); }
@@ -53,6 +56,22 @@ function titelVan(tekst) {
 function aangemaaktVan(id) {
   const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-/.exec(id || '');
   return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) - 3600000 : 0;
+}
+// wv4239: NL-kalenderdag (JJJJ-MM-DD) van een moment in ms
+const NL_DAG = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' });
+const nlDag = (ms) => NL_DAG.format(new Date(ms));
+// wv4239: regels die in 'nu' staan en niet (zo vaak) in 'toen': nieuw of gewijzigd. Lege regels tellen niet.
+function nieuweRegels(toen, nu) {
+  const tel = new Map();
+  for (const r of String(toen).split('\n')) { const k = r.trim(); if (k) tel.set(k, (tel.get(k) || 0) + 1); }
+  const uit = [];
+  for (const r of String(nu).split('\n')) {
+    const k = r.trim();
+    if (!k) continue;
+    const n = tel.get(k) || 0;
+    if (n > 0) tel.set(k, n - 1); else uit.push(r.replace(/\s+$/, ''));
+  }
+  return uit;
 }
 const plat = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
@@ -82,7 +101,8 @@ function maak(o) {
         if (!b || typeof b.sheet !== 'string' || typeof b.body !== 'string' || !Number.isSafeInteger(b.id)) continue;
         const blad = s.bladen.get(b.sheet) || { tekst: '', laatst: 0, seq: 0 };
         if (b.seq === blad.seq + 1) {   // zelfde regel als ApplyBatch: alleen de eerstvolgende bundel
-          const u = pasToe(blad.tekst, b.body);
+          // wv4239: dagbegin = de tekst vlak vóór de eerste gebeurtenis van een (latere) NL-dag; alleen in het geheugen
+          const u = pasToe(blad.tekst, b.body, function (ms, t) { const d = nlDag(ms); if (!blad.dagbegin || d > blad.dagbegin.dag) blad.dagbegin = { dag: d, tekst: t }; });
           blad.tekst = u.tekst; blad.seq = b.seq; if (u.laatst && u.laatst > blad.laatst) blad.laatst = u.laatst;
         }
         s.bladen.set(b.sheet, blad);
@@ -180,10 +200,26 @@ function maak(o) {
     return r.status === 200;
   }
 
+  // wv4239 (dagoogst): de bladen met gebeurtenissen op NL-dag 'dag' (JJJJ-MM-DD): tekst (afgekapt) en de regels die die dag nieuw of
+  // gewijzigd zijn. Alleen bladen met minstens één nieuwe regel. Geeft { bladen: [{ id, titel, gesloten, tekst, nieuw }] }.
+  async function vandaag(code, dag) {
+    const s = await stand(code, true);
+    const uit = [];
+    for (const id of s.bladen.keys()) {
+      const b = s.bladen.get(id);
+      if (!b.dagbegin || b.dagbegin.dag !== dag || !b.tekst.trim()) continue;
+      const nieuw = nieuweRegels(b.dagbegin.tekst, b.tekst);
+      if (!nieuw.length) continue;
+      const f = s.vlaggen.get(id) || { archief: false };
+      uit.push({ id: id, titel: titelVan(b.tekst), gesloten: !!f.archief, tekst: b.tekst.slice(0, BLAD_MAX), nieuw: nieuw.slice(0, NIEUW_MAX).map(function (r) { return r.slice(0, 1000); }) });
+    }
+    return { bladen: uit };
+  }
+
   function vergeet() { staat = null; }
   function health() { return staat ? { bladen: staat.bladen.size, bijgewerkt: staat.op ? new Date(staat.op).toISOString() : null } : { bladen: null }; }
 
-  return { lijst, blad, zoek, vang, koppel, werkt, vergeet, health };
+  return { lijst, blad, zoek, vang, koppel, werkt, vergeet, health, vandaag };
 }
 
-module.exports = { maak, pasToe, titelVan, VANG_MAX };
+module.exports = { maak, pasToe, titelVan, VANG_MAX, nieuweRegels, nlDag };
