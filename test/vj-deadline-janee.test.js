@@ -70,6 +70,7 @@ test('3C11: Ja/Nee uit de stappen (losse stappen, één stap, haakjes, dubbele p
   assert.strictEqual(H.appVjJaNee(st(['Tik op Ja als je akkoord bent.', 'Bij Nee doe ik niets.'])), null, 'vrije zin blijft een stap');
   assert.strictEqual(H.appVjJaNee(st(['Janneke = de contactpersoon.'])), null, 'woordgrens');
   assert.strictEqual(H.appVjJaNee([{ tekst: 'Ja = voer uit', commando: 'iets' }]), null, 'stap met commando blijft');
+  assert.strictEqual(H.appVjJaNee(st(['Ja = A; Nee = B; Ja = C'])), null, 'Codex ZOU 1: Ja twee keer in één stap blijft een stap');
   r = H.appVjJaNee(st(['Ja = eerst.', 'Ja = tweede keer.']));
   assert.deepStrictEqual(JSON.parse(JSON.stringify(r)), { ja: 'eerst.', nee: null, stappen: [0] }, 'tweede Ja blijft een stap');
 });

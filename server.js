@@ -12814,7 +12814,8 @@ function appVjJaNee(stappen) {
     const delen = String(s.tekst || '').split(/[;.]\s+(?=(?:ja|nee)\b\s*(?:\([^()]{1,60}\))?\s*[=:])/i);
     const m = delen.map(function (d) { return APP_VJ_JANEE_RE.exec(d); });
     if (!m.every(Boolean) || m.some(function (x) { return uit[x[1].toLowerCase()] !== null; })) return;
-    if (m.length === 2 && m[0][1].toLowerCase() === m[1][1].toLowerCase()) return;
+    const sl = m.map(function (x) { return x[1].toLowerCase(); });
+    if (sl.some(function (x, j) { return sl.indexOf(x) !== j; })) return;   // Codex ZOU 1: Ja of Nee twee keer in één stap = gewoon een stap
     m.forEach(function (x) { uit[x[1].toLowerCase()] = ((x[2] ? x[2] + ' ' : '') + x[3].trim()).replace(/[;]\s*$/, ''); });
     uit.stappen.push(i);
   });
