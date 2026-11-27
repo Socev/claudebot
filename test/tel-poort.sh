@@ -1544,6 +1544,12 @@ srv.listen(0, '127.0.0.1', async () => {
       z2.herkomst.briefing.gevoelig === 'agenda' && z3.herkomst.briefing.punt === null && z3.herkomst.briefing.gevoelig === 'versturen', zetten);
     toets('8y wv4260 te lange vraag (' + VR[2].vraag.length + '): titel <= 90 eindigt op ?, volle vraag vooraan in waarom en in herkomst', z3 && z3.titel.length <= 90 && /…\?$|\?$/.test(z3.titel) &&
       z3.waarom.indexOf(VR[2].vraag) === 0 && z3.waarom.indexOf(VR[2].uitleg) > 0 && z3.herkomst.briefing.vraag === VR[2].vraag && !('vraag' in z1.herkomst.briefing), z3);
+    const ctxB = H.__haal('appVjBriefingContext');
+    const lang4 = BPm.kaartVanVraag(VR[2].vraag, 'Lange nepuitleg met een voorwaarde aan het eind. '.repeat(12) + 'SLOTVOORWAARDE.');
+    toets('8y wv4260 Ja-context: volle uitleg uit herkomst als de kaart is ingekort (Codex MOET 2); anders waarom', !/SLOTVOORWAARDE/.test(lang4.waarom) &&
+      /SLOTVOORWAARDE/.test(ctxB({ sleutel: 'briefing-' + dagY + '-3', waarom: lang4.waarom, herkomst: { module: 'briefing', briefing: { dag: dagY, gevoelig: '-', vraag: VR[2].vraag, uitleg: 'Lange nepuitleg ' + 'x'.repeat(500) + ' SLOTVOORWAARDE.' } } })) &&
+      /Oude kaarttekst hier/.test(ctxB({ sleutel: 'briefing-' + dagY + '-1', waarom: 'Oude kaarttekst hier.', herkomst: { module: 'briefing', briefing: { dag: dagY, gevoelig: '-' } } })) &&
+      !('uitleg' in z1.herkomst.briefing) && !('uitleg' in z3.herkomst.briefing));
     toets('8y de vraag van gisteren gaat op vervallen', statussen.some((s) => s.p_sleutel === 'briefing-' + gisteren + '-1' && s.p_naar === 'vervallen' && s.p_door === 'agent'), statussen);
     const zN = zetten.length;
     bx = bres();

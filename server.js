@@ -21559,7 +21559,10 @@ function appVjBriefingVerlopen(p, vandaag) { const b = appVjBriefing(p); return 
 function appVjBriefingContext(p) {
   const b = appVjBriefing(p);
   if (!b) return '';
-  const w = appOntmasker(appVjOpmaakWeg(String(p.waarom || '')), 'kaart');
+  // wv4260: is de kaart ingekort (titel > 90 of waarom > 400), dan de volle vraag en uitleg uit herkomst.briefing
+  const hb = p.herkomst.briefing;
+  const vol = typeof hb.uitleg === 'string' ? (typeof hb.vraag === 'string' ? 'Volledige vraag: ' + hb.vraag + ' ' : '') + hb.uitleg : String(p.waarom || '');
+  const w = appOntmasker(appVjOpmaakWeg(vol), 'kaart');
   // Codex MOET 1 (ronde 1): de vraag is de opdracht, de uitleg alleen toelichting; een waarde (bedrag, datum, ontvanger) uit de uitleg geldt
   // niet als bevestigd, en alles wat gevoelig is loopt langs de gewone sloten (concept in plaats van versturen, Poortwachter, geen betaling)
   return '\n(Deze vraag stelde je zelf in je ochtendbriefing van ' + b.dag + ' (verborgen blok socev-autovragen). Je uitleg op de kaart, die David ook hoorde: ' + JSON.stringify(appKort(w, 900)) +
@@ -21579,6 +21582,7 @@ async function briefingAutovragenZet(av, tekst, dag) {
     const kt = BP.kaartVanVraag(v.vraag, v.uitleg);
     const hb = { dag: dag, punt: model ? BP.puntBij(model, v.punt) : null, gevoelig: v.gevoelig };
     if (kt.kort) hb.vraag = v.vraag;
+    if (kt.waarom.indexOf(v.uitleg) < 0) hb.uitleg = v.uitleg;   // Codex MOET 2: de ingekorte uitleg niet kwijt (Ja-context, Onderweg)
     const p = { sleutel: 'briefing-' + dag + '-' + (i + 1), soort: 'besluit', titel: kt.titel, waarom: kt.waarom, stappen: [], deadline: dag, waar: 'overal', prive: true,
       herkomst: { module: 'briefing', briefing: hb } };
     try { const r = await appSbRpc('mk_voor_jou_zet', { p: p }); if (r && r.sleutel) gezet++; else fouten++; }
@@ -21631,7 +21635,8 @@ async function telGesprekStukken() {
     // wv4260: ingekorte titel → de volle vraag uit herkomst gesproken, en uit de uitleg weggelaten (die begint dan met dezelfde vraag)
     const hv = typeof p.herkomst.briefing.vraag === 'string' ? appKort(appVjGewoon(appVjOpmaakWeg(p.herkomst.briefing.vraag)), 600) : null;
     let uitleg = k.waarom || '';
-    if (hv && uitleg.indexOf(hv) === 0) uitleg = uitleg.slice(hv.length).trim();
+    if (typeof p.herkomst.briefing.uitleg === 'string') uitleg = appKort(appVjGewoon(appVjOpmaakWeg(p.herkomst.briefing.uitleg)), 900);
+    else if (hv && uitleg.indexOf(hv) === 0) uitleg = uitleg.slice(hv.length).trim();
     vragen.push({ n: bv.n, punt_id: bv.punt, vraag: hv || k.vraag || k.titel, uitleg: uitleg, kaart_id: p.id });
   }
   vragen.sort(function (x, y) { return x.n - y.n; });
