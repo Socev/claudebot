@@ -25,7 +25,9 @@ for (const [x, y] of [['const TEL_LEASE_MS = 3 * 60 * 1000;', 'const TEL_LEASE_M
                       // wv3826: te-lezen.js laden in de vm (geen __dirname daar); de toets draait in de repo-wortel
                       ["if (typeof __dirname !== 'string') return null; return require(path.join(__dirname, 'te-lezen.js'));", "return require(path.resolve('te-lezen.js'));"],
                       // wv4016: briefing-punten.js laden in de vm (autovragen, gesprek)
-                      ["const BP = (function () { try { return require(path.join(__dirname, 'briefing-punten.js'));", "const BP = (function () { try { return require(path.resolve('briefing-punten.js'));"]]) {
+                      ["const BP = (function () { try { return require(path.join(__dirname, 'briefing-punten.js'));", "const BP = (function () { try { return require(path.resolve('briefing-punten.js'));"],
+                      // wv4152: de ochtendklok vast op 12 uur (buiten het venster), § 8o zet hem zelf
+                      ['function telOchtendKlok() {\n', 'function telOchtendKlok() {\n  if (typeof globalThis.__ochtendKlok === "function") return globalThis.__ochtendKlok();\n']]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'teltoets-'));
@@ -102,6 +104,7 @@ const ctxGlobals = () => ({ require, fs, path, crypto, Buffer, console, URL, set
     APP_BUS_PAD: path.join(W, 'bus.md'), SUPABASE_URL: 'https://sb.toets', SUPABASE_SERVICE_ROLE: 'nep', APP_BESTANDEN_DIR: path.join(W, 'bew'), APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: 'https://n8n.toets/mcp-server/http', N8N_API_KEY: 'nep-n8n', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: path.join(W, 'vault') }, pid: process.pid },
   VAULT: path.join(W, 'vault'), TOETSUUR: () => 12, agentsReg: {},
+  __ochtendKlok: () => ({ ymd: new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' }), uur: 12, werkdag: true }),   // wv4152
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => c, resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100, ROL_KANT: 'olares', SPAARSTAND: false, SPAAR_STIL_TEKST: '',   // wv4017: zoals socev-app-poort (wv3909)
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
@@ -753,6 +756,104 @@ srv.listen(0, '127.0.0.1', async () => {
     r = await tel('GET', '/tel/uit?lijst=dagbericht', { sleutel: OW2 });
     toets('8b grens per uur: 429', r.status === 429, r.j);
     H.appStaat.tellers['tel-dagbericht'] = [];
+    // ── 8o. wv4152 (3C145): het ochtendbericht aangeboden zodra je gaat rijden ──
+    {
+      const OCH = path.join(DATA, 'tel-ochtendaanbod.json');
+      const och = () => { try { return JSON.parse(fs.readFileSync(OCH, 'utf8')); } catch (e) { return null; } };
+      const klok = (uur, werkdag) => H.__zet('__ochtendKlok', () => ({ ymd: ymd(Date.now()), uur, werkdag: werkdag !== false }));
+      const ochItems = () => H.telRij().filter((x) => x.ochtend && !x.gespeeld && x.tot > Date.now());
+      const opruim = () => { H.telRij().forEach((x) => { if (x.ochtend) x.tot = 0; }); H.telOpruim(); };
+      const vers = () => { H.telStaat.ochtendAfweging = {}; };
+      const auto = async (sl) => { vers(); await tel('GET', '/tel/uit?plek=Auto', { sleutel: sl }); await wacht(80); };
+      opruim(); try { fs.unlinkSync(OCH); } catch (e) {}
+      // leeg de rij van OW2 en TK3 (eerdere secties)
+      H.telRij().forEach((x) => { if (x.apparaat) x.gespeeld = x.gespeeld || new Date().toISOString(); });
+      klok(12); await auto(OW2);
+      toets('8o 12 uur: geen aanbod', ochItems().length === 0 && !och(), och());
+      klok(7, false); await auto(OW2);
+      toets('8o weekend: geen aanbod', ochItems().length === 0 && !och(), och());
+      klok(7); vers(); await tel('GET', '/tel/uit?plek=Thuis', { sleutel: OW2 }); await wacht(80);
+      toets('8o plek niet Auto: geen aanbod', ochItems().length === 0 && !och(), och());
+      klok(7); await auto(TK3);
+      toets('8o Tasker terwijl Onderweg gekoppeld is: geen aanbod', ochItems().length === 0, ochItems());
+      const tts0 = st.tts.length;
+      await auto(OW2);
+      const o1 = och();
+      toets('8o werkdag 7 uur, Onderweg in de auto, dagbericht klaar: één aanbod vastgelegd', ochItems().length === 1 && o1 && o1.dagen[ymd(Date.now())] && o1.dagen[ymd(Date.now())].aangeboden && o1.dagen[ymd(Date.now())].soort === 'onderweg', { items: ochItems().length, o1 });
+      r = await tel('GET', '/tel/uit', { sleutel: OW2 });
+      toets('8o uitgifte: zelf, aankondigen ja, één deel', r.status === 200 && r.j.soort === 'zelf' && r.j.aankondigen === 'ja' && r.j.delen === 1 && r.j.wedervraag === 'nee', r.j);
+      const idO = r.j.id;
+      r = await tel('GET', '/tel/deel/' + idO + '/0', { sleutel: OW2 });
+      toets('8o deel 0 = de vaste aankondiging (stem, één keer gemaakt)', r.status === 200 && /audio\/wav/.test(r.ct) && st.tts.slice(tts0).filter((x) => /ochtendbericht staat klaar/.test(x)).length === 1, { status: r.status, tts: st.tts.slice(tts0) });
+      await auto(OW2); await auto(OW2);
+      toets('8o tweede en derde Auto-melding dezelfde ochtend: geen tweede aanbod', H.telRij().filter((x) => x.ochtend).length === 1, H.telRij().filter((x) => x.ochtend).length);
+      await wacht(1300);   // langer dan de verkorte herhaaltijd: het aanbod komt niet terug
+      r = await tel('GET', '/tel/uit', { sleutel: OW2 });
+      toets('8o geen herhaling van de aankondiging', !r.j.id, r.j);
+      const tts1 = st.tts.length;
+      r = await tel('GET', '/tel/deel/' + idO + '/1', { sleutel: OW2 });
+      toets('8o tik: deel 1 = de bewaarde mp3, audio/mpeg, geen stemaanroep', r.status === 200 && /audio\/mpeg/.test(r.ct) && Buffer.compare(r.b, MP3) === 0 && st.tts.length === tts1, { status: r.status, ct: r.ct, n: r.b && r.b.length, tts: st.tts.length - tts1 });
+      toets('8o teller: getikt', !!(och().dagen[ymd(Date.now())] || {}).getikt, och());
+      r = await tel('POST', '/tel/gespeeld/' + idO, { sleutel: OW2 });
+      toets('8o teller: gespeeld', r.status === 200 && !!(och().dagen[ymd(Date.now())] || {}).gespeeld, och());
+      toets('8o /health: vandaag en 14 dagen', (function () { const i = H.telInfo().ochtend; return i && i.vandaag && i.vandaag.getikt && i.dagen_14.aangeboden === 1 && i.dagen_14.getikt === 1 && i.uit === false; })(), H.telInfo().ochtend);
+      toets('8o audit: aangeboden en getikt zonder inhoud', /ochtendaanbod aangeboden/.test(audit()) && /ochtendaanbod getikt/.test(audit()) && !/proefdag/.test(audit()));
+      // na 10 uur niets (nieuwe dag nagebootst door het bestand te wissen)
+      opruim(); fs.unlinkSync(OCH);
+      klok(10); await auto(OW2);
+      toets('8o 10 uur: geen aanbod', ochItems().length === 0 && !och(), och());
+      klok(4); await auto(OW2);
+      toets('8o 4 uur: geen aanbod', ochItems().length === 0 && !och(), och());
+      // schakelaar uit
+      fs.writeFileSync(OCH, JSON.stringify({ versie: 1, dagen: {}, uit: true }));
+      klok(7); await auto(OW2);
+      toets('8o uit (bestand): geen aanbod', ochItems().length === 0, ochItems());
+      // onleesbaar bestand: niets (fail-closed), geen crash
+      fs.writeFileSync(OCH, '{kapot');
+      const logN = logs.length;
+      await auto(OW2);
+      toets('8o onleesbaar bestand: geen aanbod, wel een foutregel', ochItems().length === 0 && logs.slice(logN).some((l) => /^tel-ochtend: /.test(l)), ochItems());
+      logs.splice(logN);
+      fs.unlinkSync(OCH);
+      // de Dagbericht-knop vóór het aanbod: telt als gehoord, daarna geen aanbod
+      r = await tel('GET', '/tel/uit?lijst=dagbericht&audio=1', { sleutel: OW2 });
+      toets('8o Dagbericht-knop: teller los', r.status === 200 && !!(och().dagen[ymd(Date.now())] || {}).los, och());
+      await auto(OW2);
+      toets('8o na de Dagbericht-knop: geen aanbod', ochItems().length === 0, ochItems());
+      // aanbod staat open, dan de Dagbericht-knop: het aanbod vervalt
+      fs.unlinkSync(OCH);
+      await auto(OW2);
+      toets('8o opnieuw aangeboden (nieuwe dag nagebootst)', ochItems().length === 1, ochItems().length);
+      r = await tel('GET', '/tel/uit', { sleutel: OW2 });
+      await tel('GET', '/tel/deel/' + r.j.id + '/0', { sleutel: OW2 });   // de aankondiging is gespeeld, er is niet getikt (Codex MOET 1)
+      r = await tel('POST', '/tel/gespeeld/' + r.j.id, { sleutel: OW2 }); r = null;
+      toets('8o gespeeld zonder tik telt niet als gespeeld', !(och().dagen[ymd(Date.now())] || {}).gespeeld, och());
+      H.telRij().forEach((x) => { if (x.ochtend) delete x.gespeeld; });
+      r = await tel('GET', '/tel/uit?lijst=dagbericht&audio=1', { sleutel: OW2 });
+      toets('8o Dagbericht-knop vervalt het open aanbod', r.status === 200 && ochItems().length === 0, ochItems().length);
+      r = await tel('GET', '/tel/uit', { sleutel: OW2 });
+      toets('8o vervallen aanbod wordt niet meer uitgegeven', !r.j.id || r.j.soort !== 'zelf', r.j);
+      // zonder dagbericht van vandaag: niets, en later (wel klaar) alsnog
+      opruim(); fs.unlinkSync(OCH);
+      const hoofdNu = fs.readFileSync(HOOFD, 'utf8');
+      fs.writeFileSync(HOOFD, hoofdVoor); H.appStaat.briefing = null;
+      await auto(OW2);
+      toets('8o nog geen ingesproken briefing: geen aanbod, niets vastgelegd', ochItems().length === 0 && !(och() && och().dagen[ymd(Date.now())]), och());
+      fs.writeFileSync(HOOFD, hoofdNu); H.appStaat.briefing = null;
+      await auto(OW2);
+      toets('8o briefing alsnog klaar tijdens de rit: aanbod', ochItems().length === 1, ochItems().length);
+      // Tasker zonder actieve Onderweg-sleutel: Tasker krijgt het
+      opruim(); fs.unlinkSync(OCH);
+      const REG = path.join(DATA, 'tel-apparaten.json'), regVoor = fs.readFileSync(REG, 'utf8');
+      const reg = JSON.parse(regVoor); reg.apparaten.forEach((x) => { if (x.soort === 'onderweg') x.actief = false; }); fs.writeFileSync(REG, JSON.stringify(reg));
+      await auto(TK3);
+      const tk = ochItems();
+      toets('8o alleen Tasker gekoppeld: aanbod naar Tasker', tk.length === 1 && och().dagen[ymd(Date.now())].soort === 'tasker', { n: tk.length, o: och() });
+      fs.writeFileSync(REG, regVoor);
+      opruim(); try { fs.unlinkSync(OCH); } catch (e) {}
+      klok(12); vers();
+      toets('8o geen onverwachte fouten', !logs.some((l) => /tel-ochtend/.test(l)), logs.filter((l) => /tel-ochtend/.test(l)));
+    }
     fs.writeFileSync(HOOFD, hoofdVoor);
     // vraagzin
     const A1 = 'Klaar.\n\n**VRAAG AAN DAVID:** Zal ik de **afspraak** verzetten?\n\nVerder in de app:\n- details';

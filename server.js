@@ -19579,7 +19579,7 @@ function telVolgende(apparaat) {
   const eigen = open.find(function (x) { return x.soort !== 'zelf'; });
   if (eigen) return eigen;
   // uit zichzelf: meteen, dan één herhaling na TEL_ZELF_HERHAAL_MS; daarna alleen nog met een tik af te spelen (deel n)
-  return open.find(function (x) { return (x.aangeboden_n || 0) < 2 && (!x.aangeboden_n || nu - x.aangeboden_t >= TEL_ZELF_HERHAAL_MS); }) || null;
+  return open.find(function (x) { return (x.aangeboden_n || 0) < (x.ochtend ? 1 : 2) && (!x.aangeboden_n || nu - x.aangeboden_t >= TEL_ZELF_HERHAAL_MS); }) || null;   // wv4152: het ochtendaanbod zonder herhaling
 }
 // Wat hardop gaat: alles tot een regel "Verder in de app:" (of "Verder in Telegram:"), zonder de VRAAG AAN DAVID-regel
 // (daarvoor één zin aan het eind), met de regels van Voorlezen in de app. Deterministisch, geen model.
@@ -19596,6 +19596,7 @@ function telSpreektekst(antwoord, waar) {
   return s || 'Ik heb een antwoord voor je in ' + waar + '.';
 }
 function telDelen(x) {
+  if (x.ochtend) return ['(ochtendbericht)'];   // wv4152: één deel, de bewaarde mp3 van de briefing (geen stem)
   if (!telStaat.delen[x.id]) {
     let d = appVoorleesDelen(x.spreek || TEL_AFZEGGEN);
     if (d.length > TEL_DELEN_MAX) { d = d.slice(0, TEL_DELEN_MAX); d[TEL_DELEN_MAX - 1] += ' De rest staat in de app.'; }
@@ -19608,6 +19609,11 @@ function telDelen(x) {
 function telAudio(x, n) {
   const a = telStaat.audio[x.id] = telStaat.audio[x.id] || {};
   if (a[n]) return a[n];
+  if (x.ochtend && n >= 1) {   // wv4152
+    a[n] = telOchtendMp3(x);
+    a[n].catch(function () { if (telStaat.audio[x.id] && telStaat.audio[x.id][n]) delete telStaat.audio[x.id][n]; });
+    return a[n];
+  }
   const tekst = n === 0 ? x.aankondiging : telDelen(x)[n - 1];
   if (!tekst) return null;
   if (!appTeller('tel-delen', TEL_DELEN_PER_DAG, 86400000)) return Promise.reject(Object.assign(new Error('dagplafond'), { plafond: true }));
@@ -19940,6 +19946,7 @@ function telUitRoute(req, res, t) {
   telAntwoordPoll(t.id, { ok: true, bezig: telBezig(t.id), reden: 'vervangen' });   // één open lange vraag per apparaat (vóór het opruimen: Fable #3)
   telOpruim();
   telTelefoonMeldt(t, q);
+  if (q.has('plek') && telStaat.plek[t.id].auto) telOchtendAanbod(t).catch(function (e) { logError('tel-ochtend', e); });   // wv4152
   const x = telVolgende(t.id);
   if (x) { res._tel.stil = false; res._tel.reden = 'item ' + x.soort; return telStuur(res, 200, telUitgifte(x)); }
   if (!w || telStaat.gestopt) return telStuur(res, 200, { ok: true, bezig: telBezig(t.id) });
@@ -20139,9 +20146,120 @@ async function telDagbericht(req, res, t, audio) {
   try { buf = await appLeesEcht(d.pad); } catch (e) { logError('tel-dagbericht', e); return telWeiger(res, 503, 'het dagbericht is nu niet te lezen', 'dagbericht lezen'); }
   if (buf.length > TEL_DAGBERICHT_MAX || buf.length < 4) return telWeiger(res, 503, 'het dagbericht is nu niet te lezen', 'dagbericht grootte');
   res._tel.reden = 'dagbericht audio'; res._tel.s = null;
+  try { telOchtendLos(t, d.dag); } catch (e) { logError('tel-ochtend', e); }   // wv4152
   if (res.headersSent) return;
   res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': buf.length, 'Cache-Control': 'no-store' });
   res.end(buf);
+}
+// ── wv4152 (besluitenpagina nr 445 = 3C145, David Ja 25-11-2026 22:09): het ochtendbericht aangeboden zodra je gaat rijden (proef 2 weken) ──
+// Meldt de telefoon in de /tel-lus plek Auto (Onderweg: zolang de autostand aanstaat; Tasker: %plek) op een werkdag tussen 05:00 en
+// 10:00, en staat de ingesproken briefing van vandaag klaar, dan krijgt dat apparaat één item 'zelf': belletje + vaste zin, tik = de
+// bewaarde mp3 van de briefing (geen stemaanroep, geen tel-delen). Aanbieden, nooit vanzelf afspelen; één keer per dag (geen herhaling
+// na 4 min), daarna 30 min te tikken. Niet als Onderweg het dagbericht vandaag al ophaalde (Dagbericht-knop). Onderweg gaat voor:
+// Tasker krijgt het alleen als er geen Onderweg-sleutel actief is. Teller per dag in tel-ochtendaanbod.json (0600, 60 dagen):
+// aangeboden, getikt (deel 1 gevraagd), gespeeld (tot het eind of gestopt), los (Dagbericht-knop). Uit zonder uitrol: {"uit": true}.
+const TEL_OCHTEND = path.join(APP_DATA, 'tel-ochtendaanbod.json');
+const TEL_OCHTEND_AANKONDIGING = 'Je ochtendbericht staat klaar. Tik op de knop om te luisteren.';
+const TEL_OCHTEND_TTL_MS = 30 * 60 * 1000;
+const TEL_OCHTEND_VAN = 5, TEL_OCHTEND_TOT = 10;   // uur (Nederlandse tijd), tot = niet meer
+const TEL_OCHTEND_DAGEN = 60;
+const TEL_OCHTEND_ELKE_MS = 30 * 1000;   // per apparaat hooguit eens per 30 s afwegen (de lus vraagt ± elke minuut)
+function telOchtendKlok() {
+  const nu = Date.now();
+  const uur = Number(new Date(nu).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }));
+  const dag = new Date(nu).toLocaleDateString('en-GB', { timeZone: 'Europe/Amsterdam', weekday: 'short' });
+  return { ymd: appYmd(nu), uur: uur, werkdag: ['Sat', 'Sun'].indexOf(dag) < 0 };
+}
+function telOchtendLees() {
+  let j;
+  try { j = appLeesStreng(TEL_OCHTEND, { versie: 1, dagen: {} }); } catch (e) { logError('tel-ochtend', e); return null; }   // onleesbaar = niets aanbieden (fail-closed)
+  if (!j || typeof j !== 'object' || !j.dagen || typeof j.dagen !== 'object') return null;
+  return j;
+}
+function telOchtendSchrijf(j) {
+  const grens = appYmdPlus(appYmd(Date.now()), -TEL_OCHTEND_DAGEN);
+  Object.keys(j.dagen).forEach(function (d) { if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || d < grens) delete j.dagen[d]; });
+  appSchrijfJson(TEL_OCHTEND, j);
+}
+// één veld per dag één keer zetten (de eerste tijd telt)
+function telOchtendTel(ymd, veld, extra) {
+  try {
+    const j = telOchtendLees();
+    if (!j) return false;
+    const d = j.dagen[ymd] = j.dagen[ymd] && typeof j.dagen[ymd] === 'object' ? j.dagen[ymd] : {};
+    if (d[veld]) return false;
+    d[veld] = new Date().toISOString();
+    if (extra) Object.assign(d, extra);
+    telOchtendSchrijf(j);
+    telAudit({ route: 'ochtend', m: '-', status: 200, apparaat: null, reden: 'ochtendaanbod ' + veld });
+    return true;
+  } catch (e) { logError('tel-ochtend', e); return false; }
+}
+async function telOchtendAanbod(t) {
+  const nu = Date.now();
+  if (telUit() || telStaat.gestopt || telStaat.ochtendLoopt) return null;
+  const vorig = (telStaat.ochtendAfweging = telStaat.ochtendAfweging || {})[t.id] || 0;
+  if (nu - vorig < TEL_OCHTEND_ELKE_MS) return null;
+  telStaat.ochtendAfweging[t.id] = nu;
+  const k = telOchtendKlok();
+  if (!k.werkdag || !(k.uur >= TEL_OCHTEND_VAN && k.uur < TEL_OCHTEND_TOT)) return null;
+  const j = telOchtendLees();
+  if (!j || j.uit === true) return null;
+  const vd = j.dagen[k.ymd] || {};
+  if (vd.aangeboden || vd.los) return null;
+  if (!(Date.parse(t.verloopt) > nu)) return null;
+  if (telSoort(t) !== 'onderweg') {   // Onderweg gaat voor; Tasker alleen zonder actieve Onderweg-sleutel
+    let ow = true;
+    try { ow = telRegister().apparaten.some(function (x) { return x && x.actief && telSoort(x) === 'onderweg' && Date.parse(x.verloopt) > nu; }); } catch (e) { return null; }
+    if (ow) return null;
+  }
+  telStaat.ochtendLoopt = true;
+  try {
+    const d = await telDagberichtBestand();
+    if (!d || d.dag !== k.ymd) return null;   // nog geen ingesproken briefing van vandaag: de volgende melding weegt opnieuw
+    if (telUit() || telStaat.gestopt) return null;
+    const j2 = telOchtendLees();   // vers: tussen de await door kan de Dagbericht-knop of een ander apparaat geweest zijn
+    if (!j2 || j2.uit === true) return null;
+    const vd2 = j2.dagen[k.ymd] = j2.dagen[k.ymd] && typeof j2.dagen[k.ymd] === 'object' ? j2.dagen[k.ymd] : {};
+    if (vd2.aangeboden || vd2.los) return null;
+    const p = telStaat.plek[t.id];
+    if (!p || !p.auto || Date.now() - p.t > TEL_PLEK_MAX_MS) return null;
+    const t2 = Date.now();
+    vd2.aangeboden = new Date(t2).toISOString(); vd2.soort = telSoort(t);
+    telOchtendSchrijf(j2);   // eerst vastleggen, dan pas in de rij: na een herstart nooit een tweede aanbod
+    const x = { id: crypto.randomBytes(8).toString('hex'), apparaat: t.id, soort: 'zelf', ochtend: k.ymd, spreek: 'Je ochtendbericht van vandaag.', rest: false,
+      aankondiging: TEL_OCHTEND_AANKONDIGING, t_start: t2, t_klaar: t2, tot: t2 + TEL_OCHTEND_TTL_MS, k_gelogd: 'nvt' };
+    telRij().push(x);
+    telRijBewaar();
+    telAudit({ route: 'ochtend', m: '-', status: 200, apparaat: t.id, reden: 'ochtendaanbod aangeboden' });
+    telWek(t.id);
+    const a = telAudio(x, 0); if (a) a.catch(function () {});   // aankondiging alvast maken
+    return x;
+  } finally { telStaat.ochtendLoopt = false; }
+}
+// De Dagbericht-knop in Onderweg haalde de mp3: telt als gehoord; een open aanbod van vandaag vervalt (geen tweede stem)
+function telOchtendLos(t, ymd) {
+  if (!ymd) return;
+  telOchtendTel(ymd, 'los');
+  let om = false;
+  telRij().forEach(function (x) { if (x.ochtend && !x.gespeeld && !x.ochtend_tik && x.tot > Date.now()) { x.tot = Date.now(); om = true; } });   // Codex MOET 1: alleen een niet-getikt aanbod
+  if (om) { telRijBewaar(); telOpruim(); }
+}
+async function telOchtendMp3(x) {
+  const d = await telDagberichtBestand();
+  if (!d || d.dag !== x.ochtend) throw new Error('geen dagbericht van ' + x.ochtend);
+  const buf = await appLeesEcht(d.pad);
+  if (buf.length > TEL_DAGBERICHT_MAX || buf.length < 4) throw new Error('dagbericht grootte');
+  return buf;
+}
+// /health: vandaag en de laatste 14 dagen (alleen tijden en tellingen)
+function telOchtendStand() {
+  const j = telOchtendLees();
+  if (!j) return { leesbaar: false };
+  const vandaag = appYmd(Date.now()), grens = appYmdPlus(vandaag, -14);
+  const n = { aangeboden: 0, getikt: 0, gespeeld: 0, los: 0 };
+  Object.keys(j.dagen).forEach(function (d) { if (d > grens) Object.keys(n).forEach(function (v) { if (j.dagen[d] && j.dagen[d][v]) n[v]++; }); });
+  return { uit: j.uit === true, vandaag: j.dagen[vandaag] || null, dagen_14: n };
 }
 async function telVoorJou(req, res, t) {
   if (telSoort(t) !== 'onderweg') return telWeiger(res, 404, 'onbekend', 'voorjou: geen onderweg-sleutel');
@@ -21172,6 +21290,7 @@ async function telDeel(req, res, t, id, n) {
   if (!x || x.soort === 'bezig' || x.gespeeld || Date.now() > x.tot) return telWeiger(res, 404, 'geen deel', 'onbekend item');
   if (!Number.isInteger(n) || n < 0 || (n === 0 && !x.aankondiging) || n > telDelen(x).length) return telWeiger(res, 404, 'geen deel', 'deel ' + n + ' bestaat niet');
   if (!process.env.GEMINI_API_KEY_AUTO) return telWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'geen gemini-sleutel');
+  if (n >= 1 && x.ochtend) { if (!x.ochtend_tik) { x.ochtend_tik = Date.now(); telRijBewaar(); } telOchtendTel(x.ochtend, 'getikt'); }   // wv4152: David tikte op het aanbod (deel 0 = alleen de aankondiging; Codex MOET 1)
   if (n >= 1) x.lease_tot = Math.max(x.lease_tot || 0, Date.now() + TEL_LEASE_MS);   // wie afspeelt, houdt het item vast (deel 0 = aankondiging niet: wv275)
   if (!(x.deel_t >= x.uitgifte_t)) { x.deel_t = Date.now(); telRijBewaar(); } else x.deel_t = Date.now();   // wv622: de telefoon heeft dit item ontvangen (op schijf: ook na een herstart niet meer vrijgeven)
   let wav;
@@ -21190,7 +21309,7 @@ async function telDeel(req, res, t, id, n) {
   if (n >= 1 && n < telDelen(x).length) { const v = telAudio(x, n + 1); if (v) v.catch(function () {}); }
   res._tel.stil = true;
   if (res.headersSent) return;
-  res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, 'Cache-Control': 'no-store' });
+  res.writeHead(200, { 'Content-Type': x.ochtend && n >= 1 ? 'audio/mpeg' : 'audio/wav', 'Content-Length': wav.length, 'Cache-Control': 'no-store' });
   res.end(wav);
 }
 
@@ -21199,7 +21318,7 @@ function telGespeeld(req, res, t, id) {
   if (!x) return telWeiger(res, 404, 'onbekend', 'onbekend item');
   if (x.soort === 'bezig') return telWeiger(res, 409, 'nog niet klaar', 'gespeeld op een lopende beurt');   // Fable #4
   const al = !!x.gespeeld;
-  if (!al) { x.gespeeld = new Date().toISOString(); telKostenRegel(x, 'gespeeld'); telRijBewaar(); }
+  if (!al) { x.gespeeld = new Date().toISOString(); telKostenRegel(x, 'gespeeld'); telRijBewaar(); if (x.ochtend && x.ochtend_tik) telOchtendTel(x.ochtend, 'gespeeld'); }
   delete telStaat.audio[x.id];
   res._tel.reden = al ? 'gespeeld (al)' : 'gespeeld';
   res._tel.stil = false;
@@ -21282,7 +21401,8 @@ function telInfo() {
     tasker_versie: t && telSoort(t) === 'tasker' && telStaat.telefoon[t.id] ? telStaat.telefoon[t.id].versie : null,   // wv622: &v= van de lus (null = v6 of ouder)
     onderweg: ow ? Object.assign({ verloopt: ow.verloopt, luistert: telLuistert(ow.id), versie: telStaat.telefoon[ow.id] ? telStaat.telefoon[ow.id].versie : null, vingerja: !!ow.vinger_pub }, telRitNu()) : null,   // wv3700; wv3779: rijdt/sinds; wv3862
     beurten_lopend: rij.filter(function (x) { return x.soort === 'bezig'; }).length, items_klaar: rij.filter(function (x) { return x.soort !== 'bezig' && !x.gespeeld; }).length,
-    zelf: Object.assign({ aanwezig: (function () { try { const w = telAanwezig(); return w.ok ? 'ja' : w.reden; } catch (e) { return 'fout'; } })() }, telStaat.zelf) };
+    zelf: Object.assign({ aanwezig: (function () { try { const w = telAanwezig(); return w.ok ? 'ja' : w.reden; } catch (e) { return 'fout'; } })() }, telStaat.zelf),
+    ochtend: (function () { try { return telOchtendStand(); } catch (e) { return { fout: true }; } })() };   // wv4152
 }
 // Bij afsluiten (SIGTERM van uitrol.sh of de supervisor): elke open lange vraag een leeg antwoord, dan pas het standaardgedrag.
 function telAfsluiten() {
