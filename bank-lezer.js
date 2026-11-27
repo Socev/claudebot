@@ -1357,6 +1357,7 @@ const opdrachten = {
     let inv;
     try { inv = x.A.potAfschriftInvoer(x.a, maand); } catch (e) { throw new Weigering('POT-rekening: ' + e.message); }
     inv.laatstGezien = potOpgehaald(x.s, inv.rek);   // echte ophaaltijd van de transacties (Fable wv787 diff #1)
+    potBewijsZet(P, inv);   // wv4157 (2C93)
     const vorig = potMeta(potMaandPlus(maand, -1));
     const oud = potMeta(maand);
     inv.vorigEind = vorig ? vorig.eind_centen : null;
@@ -1380,7 +1381,7 @@ const opdrachten = {
     if (!zelfde(pp, r.sha256.pdf)) schrijf(pp, r.pdf);
     const t = r.telling;
     const meta = { maand: maand, gemaakt: inv.gemaakt, aantal: t.aantal, eind_centen: t.eind, begin: t.begin / 100, eind: t.eind / 100, bij: t.bij / 100, af: t.af / 100,
-      stuk_open: t.stuk_open, ingekort86: t.ingekort86, per_soort: t.per_soort, sha_mt940: r.sha256.mt940, sha_pdf: r.sha256.pdf,
+      stuk_open: t.stuk_open, open: t.open, uitleg: r.uitleg, ingekort86: t.ingekort86, per_soort: t.per_soort, sha_mt940: r.sha256.mt940, sha_pdf: r.sha256.pdf,
       bestanden: { mt940: r.bestandsnamen.mt940, pdf: r.bestandsnamen.pdf }, vervangen_op: veranderd ? inv.gemaakt : (oud && oud.vervangen_op) || null,
       vorige_sha_mt940: veranderd ? oud.sha_mt940 : (oud && oud.vorige_sha_mt940) || null };
     schrijf(path.join(dir, 'meta.json'), JSON.stringify(meta));
@@ -1404,7 +1405,7 @@ const opdrachten = {
     if (!r.ok) return { ok: false, maand: maand, reden: r.reden, geweigerd: true };
     const oud = potMeta(maand);
     return { ok: true, maand: maand, aantal: r.telling.aantal, stuk_open: r.telling.stuk_open, regels: r.regels, vergelijk: potVergelijk(P, x, maand, r),
-      gemaakt: !!oud, actueel: !!(oud && oud.sha_mt940 === r.sha256.mt940) };
+      gemaakt: !!oud, actueel: !!(oud && oud.sha_mt940 === r.sha256.mt940), uitleg: r.uitleg, open: r.telling.open, stand: r.stand };   // wv4157
   },
   // wv815: POT-posten voor Davids datahub (server.js potDatahubRonde na de bank-ronde); alleen de pod (BANK_LOKAAL), niet via /smal/bank.
   // Uitvoer naar de pod (geheugen), nooit naar een sessie of log: de pod schrijft ze met parameters in D1 `fin`.
@@ -1607,6 +1608,7 @@ function potRekenAlleen(P, x, maand) {
   let inv;
   try { inv = x.A.potAfschriftInvoer(x.a, maand); } catch (e) { return { ok: false, reden: 'POT-rekening: ' + e.message }; }
   inv.laatstGezien = potOpgehaald(x.s, inv.rek);
+  potBewijsZet(P, inv);   // wv4157 (2C93)
   const vorig = potMeta(potMaandPlus(maand, -1)), oud = potMeta(maand);
   inv.vorigEind = vorig ? vorig.eind_centen : null;
   inv.gemaakt = oud && oud.gemaakt ? oud.gemaakt : '2000-01-01T00:00:00.000Z';
@@ -1621,6 +1623,18 @@ function potVergelijk(P, x, maand, r) {
   inv.laatstGezien = potOpgehaald(x.s, inv.rek); inv.vorigEind = null; inv.gemaakt = '2000-01-01T00:00:00.000Z';
   const t = P.maakAfschrift(inv);
   try { return t.ok ? P.vergelijk({ maand: maand, telling: r.telling, regels: r.regels }, { maand: vm, telling: t.telling, regels: t.regels }) : null; } catch (e) { return null; }
+}
+// wv4157 (2C93): het bewijs dat de pod via stdin meegaf (geheim.bewijs: facturen, loon, praktijk, stand; alleen lezen verzameld) aan de
+// posten van de maand koppelen. Ontbreekt het of is het onbruikbaar, dan het afschrift zoals voorheen (bewijs is extra, nooit een weigering).
+function potBewijsZet(P, inv) {
+  const b = geheim && geheim.bewijs && typeof geheim.bewijs === 'object' ? geheim.bewijs : null;
+  if (!b || (b.maand != null && b.maand !== inv.maand)) return;
+  try {
+    inv.stukken = P.koppelBewijs(inv.posten, b, inv.rekening.iban);
+    const l = b.loon && Array.isArray(b.loon.regels) && b.loon.regels.length && typeof b.loon.label === 'string' ? b.loon : null;
+    if (l) inv.loon = { label: l.label, aantal: l.regels.length, som: l.regels.reduce(function (a, r) { return a + (Number.isInteger(r && r.centen) ? r.centen : 0); }, 0) };
+    if (b.stand) inv.stand = b.stand;
+  } catch (e) { delete inv.stukken; delete inv.loon; delete inv.stand; }
 }
 function potOpgehaald(s, rek) { const o = s && s.opgehaald && rek ? s.opgehaald[rek] : null; return o && typeof o.transacties === 'string' ? o.transacties : null; }
 function potOpruimen() {

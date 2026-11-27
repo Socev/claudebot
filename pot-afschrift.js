@@ -111,7 +111,7 @@ function swiftX(s, waarde) {
 const PRAKTIJK = /huisarts|praktijk|gezondheidscentrum|heelkom/i;
 function verrijk(p, v, eigen, stukken) {
   const bij = p.b > 0, cat = String(p.categorie || '');
-  let wat, stuk, soort;
+  let wat, stuk, soort, afwijkt = false, bewijs = null;
   if (p.tegen_iban && eigen.has(p.tegen_iban)) { wat = bij ? 'Van eigen rekening David' : 'Naar eigen rekening David'; stuk = 'niet nodig'; soort = 'eigen'; }
   else if (/^ABN AMRO Bank N\.V\./.test(v.type) && !p.tegen_iban) { wat = 'Bankkosten ABN AMRO'; stuk = 'niet nodig'; soort = 'bankkosten'; }
   else if (bij) { soort = 'ontvangsten'; wat = PRAKTIJK.test(p.naam) ? 'Bijdrage praktijk (voorschot POT)' : 'Ontvangst'; stuk = ''; }
@@ -122,9 +122,63 @@ function verrijk(p, v, eigen, stukken) {
   const s = stukken && stukken[p.nr];
   if (s && typeof s === 'object') {
     if (s.soort === 'ontbreekt') stuk = 'ontbreekt';
-    else if (s.soort === 'factuur' && typeof s.tekst === 'string') stuk = s.tekst.slice(0, 24);
+    else if (s.soort === 'factuur' && typeof s.tekst === 'string') {
+      stuk = s.tekst.slice(0, 40); bewijs = 'factuur';
+      // wv4157: een betaling die de bank als salaris indeelt maar in Facturen aan een factuur hangt, is geen loon (bv. het salarisbureau)
+      // soort blijft (de telling per soort en de vergelijking met de vorige maand, die zonder bewijs rekent, blijven gelijk)
+      if (soort === 'salarissen') wat = 'Betaling met factuur';
+    }
+    // wv4157 (2C93): bewijs uit de loonrun (salaris: rekening en bedrag gelijk) of OVIS POT (ontvangst toegewezen aan een praktijk)
+    else if (s.soort === 'loonrun' && soort === 'salarissen' && typeof s.tekst === 'string') { stuk = s.tekst.slice(0, 40); bewijs = 'loonrun'; }
+    else if (s.soort === 'loonrun_afwijkt' && soort === 'salarissen') { stuk = 'wijkt af van loonrun'; afwijkt = true; }
+    else if (s.soort === 'praktijk' && soort === 'ontvangsten' && typeof s.tekst === 'string') {
+      stuk = s.tekst.slice(0, 40); bewijs = 'praktijk';
+      wat = s.geld === 'afrekening' ? 'Afrekening praktijk (POT)' : s.geld === 'liquiditeit' ? 'Extra bijdrage praktijk (POT)' : 'Bijdrage praktijk (voorschot POT)';   // OVIS POT wint van een woord in de naam
+    }
   }
-  return { wat: wat, stuk: stuk, soort: soort };
+  return { wat: wat, stuk: stuk, soort: soort, afwijkt: afwijkt, bewijs: bewijs };
+}
+
+// ── wv4157 (2C93): bewijs per post uit bronnen die er al zijn ─────────────
+// Puur. bewijs = { facturen: {bankluis-sleutel: 'factuur <nr>'} | null, loon: {label, regels: [{iban, centen}]} | null,
+// praktijk: {op_sleutel: {d1-sleutel: {praktijk}}} | null }. Alleen exacte koppelingen: factuur op de bankluis-sleutel (Facturen kopieert
+// die sleutel), praktijk op de D1-sleutel die pot-datahub uit dezelfde bankluis-sleutel maakt (geen datum- of bedragvenster, nooit een woord
+// in de naam), salaris één-op-één op tegenrekening én bedrag in centen tegen de betaallijst van de loonrun. Geeft {nr: {soort, tekst}}.
+function d1Sleutel(iban, bankSleutel) {
+  return crypto.createHash('sha256').update('enablebanking|' + String(iban || '').replace(/\s+/g, '').toUpperCase() + '|' + String(bankSleutel)).digest('hex').slice(0, 16);
+}
+function ibanKort(s) { return String(s || '').replace(/\s+/g, '').toUpperCase(); }
+function koppelBewijs(posten, bewijs, iban) {
+  const b = bewijs && typeof bewijs === 'object' ? bewijs : {}, uit = {};
+  const fac = b.facturen && typeof b.facturen === 'object' && !Array.isArray(b.facturen) ? b.facturen : null;
+  const op = b.praktijk && b.praktijk.op_sleutel && typeof b.praktijk.op_sleutel === 'object' ? b.praktijk.op_sleutel : null;
+  const loon = b.loon && Array.isArray(b.loon.regels) && b.loon.regels.length && typeof b.loon.label === 'string' ? b.loon : null;   // leeg = geen loondata (Codex MOET 1)
+  const pool = new Map();
+  if (loon) loon.regels.forEach(function (r) {
+    const cent = Number(r && r.centen);
+    if (!Number.isInteger(cent) || cent <= 0) return;
+    const k = ibanKort(r.iban) + '|' + cent; pool.set(k, (pool.get(k) || 0) + 1);
+  });
+  // in boekingsvolgorde (datum, nr), zodat dezelfde invoer altijd dezelfde paren geeft
+  const l = (Array.isArray(posten) ? posten : []).filter(function (p) { return p && p.nr != null; }).slice()
+    .sort(function (x, y) { return x.datum < y.datum ? -1 : x.datum > y.datum ? 1 : Number(x.nr) - Number(y.nr); });
+  l.forEach(function (p) {
+    const s = p.sleutel != null ? String(p.sleutel) : '', cent = c(p.bedrag);
+    if (fac && s && Object.prototype.hasOwnProperty.call(fac, s) && typeof fac[s] === 'string' && fac[s]) { uit[p.nr] = { soort: 'factuur', tekst: fac[s] }; return; }
+    if (op && s && cent > 0) {
+      const x = op[d1Sleutel(iban, s)];
+      if (x && typeof x.praktijk === 'string' && x.praktijk) {
+        const geld = x.soort === 'afrekening' || x.soort === 'liquiditeit' ? x.soort : 'voorschot';
+        uit[p.nr] = { soort: 'praktijk', geld: geld, tekst: (geld === 'afrekening' ? 'afrekening ' : geld === 'liquiditeit' ? 'storting ' : 'voorschot ') + x.praktijk }; return;
+      }
+    }
+    if (loon && cent < 0 && String(p.categorie || '') === 'salarissen') {
+      const k = ibanKort(p.tegen_iban) + '|' + (-cent), n = pool.get(k) || 0;
+      if (n > 0 && p.tegen_iban) { pool.set(k, n - 1); uit[p.nr] = { soort: 'loonrun', tekst: 'loonrun ' + loon.label }; }
+      else uit[p.nr] = { soort: 'loonrun_afwijkt' };
+    }
+  });
+  return uit;
 }
 
 // ── MT940 ─────────────────────────────────────────────────────────────────
@@ -210,7 +264,7 @@ function getal(n) { return (Math.round(n * 100) / 100).toFixed(2).replace(/\.?0+
 
 function maakPdf(d) {
   const W = 841.89, H = 595.28, M = 36, RIJ = 11, PT = 7.5;
-  const kolom = [['Datum', 44, 'l'], ['Tegenpartij', 150, 'l'], ['Omschrijving', 226, 'l'], ['Wat is het', 122, 'l'], ['Stuk', 70, 'l'], ['Af', 52, 'r'], ['Bij', 52, 'r'], ['Saldo', 54, 'r']];
+  const kolom = [['Datum', 44, 'l'], ['Tegenpartij', 150, 'l'], ['Omschrijving', 186, 'l'], ['Wat is het', 122, 'l'], ['Bewijs', 110, 'l'], ['Af', 52, 'r'], ['Bij', 52, 'r'], ['Saldo', 54, 'r']];   // wv4157: Stuk → Bewijs (breder)
   const kopHoogte = 128, tabelBoven = H - M - kopHoogte, tabelOnder = M + 26;
   const perPagina1 = Math.floor((tabelBoven - tabelOnder) / RIJ) - 1, perPagina = Math.floor((H - M - 30 - tabelOnder) / RIJ) - 1;
   const rijen = d.rijen, paginas = [];
@@ -218,6 +272,7 @@ function maakPdf(d) {
   paginas.push(rijen.slice(0, perPagina1)); i = perPagina1;
   while (i < rijen.length) { paginas.push(rijen.slice(i, i + perPagina)); i += perPagina; }
   const sam = d.samenvatting;
+  const totaal = paginas.length + (d.stand ? 1 : 0);   // wv4157: tweede blad "Stand per praktijk"
   // samenvatting past naast de kop of als eigen blok op de laatste pagina
   const streams = paginas.map(function (rs, pi) {
     const o = [];
@@ -251,7 +306,7 @@ function maakPdf(d) {
       let xx = M;
       const cel = [r.datum, r.tegenpartij, r.omschrijving, r.wat, r.stuk, r.af, r.bij, r.saldo];
       kolom.forEach(function (k, ki) {
-        const f = ki === 4 && (r.stuk === '?' || r.stuk === 'ontbreekt') ? 'F2' : 'F1';
+        const f = ki === 4 && (r.stuk === '?' || r.stuk === 'ontbreekt' || r.afwijkt) ? 'F2' : 'F1';
         const s = pas(f, PT, cel[ki], k[1] - 5);
         txt(f, PT, k[2] === 'r' ? xx + k[1] - 3 : xx + 2, y - RIJ + 5, s, k[2] === 'r');
         xx += k[1];
@@ -263,14 +318,15 @@ function maakPdf(d) {
     o.push('0.6 G 0.4 w ' + getal(M) + ' ' + getal(M + 18) + ' m ' + getal(W - M) + ' ' + getal(M + 18) + ' l S 0 G');
     txt('F1', 6.5, M, M + 9, pas('F1', 6.5, d.voet[0], W - 2 * M - 70));
     txt('F1', 6.5, M, M + 1, pas('F1', 6.5, d.voet[1], W - 2 * M - 70));
-    txt('F1', 7, W - M, M + 9, 'pagina ' + (pi + 1) + ' van ' + paginas.length, true);
+    txt('F1', 7, W - M, M + 9, 'pagina ' + (pi + 1) + ' van ' + totaal, true);
     return Buffer.from(o.join('\n') + '\n', 'latin1');
   });
+  if (d.stand) streams.push(standBlad(d, W, H, M, totaal));
   // objecten: 1 catalogus, 2 pagina's, 3 F1, 4 F2, 5 info, dan per pagina (pagina, inhoud)
   const obj = [];
-  const kids = paginas.map(function (_, pi) { return (6 + pi * 2) + ' 0 R'; }).join(' ');
+  const kids = streams.map(function (_, pi) { return (6 + pi * 2) + ' 0 R'; }).join(' ');   // wv4157: ook het blad Stand per praktijk
   obj.push(Buffer.from('<< /Type /Catalog /Pages 2 0 R >>', 'latin1'));
-  obj.push(Buffer.from('<< /Type /Pages /Kids [' + kids + '] /Count ' + paginas.length + ' >>', 'latin1'));
+  obj.push(Buffer.from('<< /Type /Pages /Kids [' + kids + '] /Count ' + streams.length + ' >>', 'latin1'));
   obj.push(Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>', 'latin1'));
   obj.push(Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>', 'latin1'));
   obj.push(Buffer.from('<< /Title ' + hex(d.titel.replace(/[—–]/g, '-')) + ' /Producer (Socev) /CreationDate (D:' + d.pdfDatum + ') >>', 'latin1'));
@@ -289,6 +345,67 @@ function maakPdf(d) {
   const x = ['xref', '0 ' + (obj.length + 1), '0000000000 65535 f '].concat(xref.map(function (p) { return String(p).padStart(10, '0') + ' 00000 n '; }));
   delen.push(Buffer.from(x.join('\n') + '\ntrailer\n<< /Size ' + (obj.length + 1) + ' /Root 1 0 R /Info 5 0 R >>\nstartxref\n' + pos + '\n%%EOF\n', 'latin1'));
   return Buffer.concat(delen);
+}
+
+// wv4157 (2C93): blad "Stand per praktijk" (verwacht t/m einde maand, betaald, verschil; totaalregel). Eén pagina, hooguit 30 praktijken.
+function standBlad(d, W, H, M, totaal) {
+  const o = [], st = d.stand, RIJ = 13, PT = 8.5;
+  const txt = function (f, pt, x, y, s, rechts) { const w = rechts ? breedte(f, pt, s) : 0; o.push('BT /' + f + ' ' + getal(pt) + ' Tf ' + getal(x - w) + ' ' + getal(y) + ' Td ' + hex(s) + ' Tj ET'); };
+  let y = H - M;
+  txt('F2', 14, M, y - 12, st.titel);
+  (st.noot || []).slice(0, 3).forEach(function (n, i) { txt('F1', 8.5, M, y - 30 - i * 11, pas('F1', 8.5, n, W - 2 * M)); });
+  y = y - 30 - 3 * 11 - 10;
+  const kol = [['Praktijk', 330, 'l'], ['Verwacht', 120, 'r'], ['Betaald', 120, 'r'], ['Verschil (achter = +)', 140, 'r']];
+  o.push('0.85 g ' + getal(M) + ' ' + getal(y - RIJ + 3) + ' ' + getal(710) + ' ' + getal(RIJ) + ' re f 0 g');
+  let x = M;
+  kol.forEach(function (k) { txt('F2', PT, k[2] === 'r' ? x + k[1] - 4 : x + 3, y - RIJ + 6, k[0], k[2] === 'r'); x += k[1]; });
+  y -= RIJ;
+  const som = { v: 0, b: 0 };
+  const rij = function (cel, vet, grijs) {
+    if (grijs) o.push('0.95 g ' + getal(M) + ' ' + getal(y - RIJ + 3) + ' ' + getal(710) + ' ' + getal(RIJ) + ' re f 0 g');
+    let xx = M;
+    kol.forEach(function (k, ki) { const f = vet ? 'F2' : 'F1'; txt(f, PT, k[2] === 'r' ? xx + k[1] - 4 : xx + 3, y - RIJ + 6, pas(f, PT, cel[ki], k[1] - 8), k[2] === 'r'); xx += k[1]; });
+    y -= RIJ;
+  };
+  st.rijen.slice(0, 30).forEach(function (r, i) {
+    som.v += r.verwacht; som.b += r.betaald;
+    const vs = r.verwacht - r.betaald;
+    rij([r.praktijk, eur(r.verwacht), eur(r.betaald), vs === 0 ? '0,00' : (vs < 0 ? '-' : '') + eur(Math.abs(vs))], false, i % 2 === 1);
+  });
+  const vt = som.v - som.b;
+  o.push('0 G 0.6 w ' + getal(M) + ' ' + getal(y + 2) + ' m ' + getal(M + 710) + ' ' + getal(y + 2) + ' l S');
+  rij(['Totaal', eur(som.v), eur(som.b), vt === 0 ? '0,00' : (vt < 0 ? '-' : '') + eur(Math.abs(vt))], true, false);
+  o.push('0.6 G 0.4 w ' + getal(M) + ' ' + getal(M + 18) + ' m ' + getal(W - M) + ' ' + getal(M + 18) + ' l S 0 G');
+  txt('F1', 6.5, M, M + 9, pas('F1', 6.5, d.titel + ' — blad bij het afschrift; geen officieel bankafschrift.', W - 2 * M - 70));
+  txt('F1', 7, W - M, M + 9, 'pagina ' + totaal + ' van ' + totaal, true);
+  return Buffer.from(o.join('\n') + '\n', 'latin1');
+}
+// Stand uit de invoer (centen, gehele getallen) of null. inv.stand = { rijen: [{praktijk, verwacht, betaald}], noot: [tekst] }.
+function standNorm(x) {
+  if (!x || typeof x !== 'object' || !Array.isArray(x.rijen) || !x.rijen.length) return null;
+  const rijen = x.rijen.filter(function (r) { return r && typeof r.praktijk === 'string' && Number.isInteger(r.verwacht) && Number.isInteger(r.betaald); })
+    .map(function (r) { return { praktijk: r.praktijk.replace(/[\r\n]+/g, ' ').slice(0, 80), verwacht: r.verwacht, betaald: r.betaald,
+      termijnen: Number.isInteger(r.termijnen) && r.termijnen > 0 ? r.termijnen : 1 }; }).slice(0, 30);
+  if (!rijen.length) return null;
+  return { rijen: rijen, noot: (Array.isArray(x.noot) ? x.noot : []).filter(function (n) { return typeof n === 'string'; }).slice(0, 3).map(function (n) { return n.slice(0, 220); }) };
+}
+// wv4157: één regel "Klopt, op deze N na" (kort: kop van de PDF) en een langere voor het scherm. Alleen aantallen en sommen.
+function uitleg(t, stand) {
+  const kort = t.open === 0 ? 'Klopt: elke regel verklaard' : 'Klopt, op ' + (t.open === 1 ? 'één' : t.open) + ' na (vet bij Bewijs)';
+  const d = [t.open === 0 ? 'Klopt: elke regel heeft een bewijs of hoort bij de loonadministratie.' : (t.open === 1 ? 'Klopt, op deze ene na' : 'Klopt, op deze ' + t.open + ' na') +
+    (t.stuk_open && t.afwijkt ? ' (' + t.stuk_open + ' zonder stuk, ' + t.afwijkt + ' wijkt af van de loonrun).' : t.afwijkt ? ' (wijkt af van de loonrun).' : ' (daar hoort een bon of factuur bij).')];
+  const s = t.per_soort.salarissen ? t.per_soort.salarissen.aantal : 0;
+  if (t.loon) d.push('Salarissen: ' + t.loon.gelijk + ' van ' + t.loon.posten + ' gelijk aan de loonrun ' + t.loon.label + (t.loon.som_bank === t.loon.som_loonrun && t.loon.gelijk === t.loon.posten && t.loon.posten === t.loon.aantal_loonrun
+    ? ' (som gelijk).' : ' (bank € ' + eur(t.loon.som_bank) + ', loonrun € ' + eur(t.loon.som_loonrun) + ', ' + t.loon.aantal_loonrun + ' betalingen in de loonrun).'));
+  else if (s) d.push('Salarissen niet naast de loonrun gelegd: de loonrun van deze maand staat niet in de Nmbrs-kopie.');
+  if (t.ontvangsten) d.push('Ontvangsten: ' + t.bewijs.praktijk + ' van ' + t.ontvangsten + ' staan in OVIS POT bij een praktijk.');
+  if (t.bewijs.factuur) d.push(t.bewijs.factuur + (t.bewijs.factuur === 1 ? ' betaling gekoppeld aan een factuur.' : ' betalingen gekoppeld aan een factuur.'));
+  if (stand) {
+    // zelfde marge als de betaalmonitor van OVIS POT: € 1 per termijn (centen-afronding van de termijnen is geen achterstand)
+    const ach = stand.rijen.filter(function (r) { return r.verwacht - r.betaald > 100 * r.termijnen; }).length;
+    d.push('Stand per praktijk: ' + (ach === 0 ? 'iedereen bij, verschillen zijn afronding' : ach + (ach === 1 ? ' praktijk loopt' : ' praktijken lopen') + ' achter') + ' (blad 2).');
+  }
+  return { kort: kort, lang: d.join(' ') };
 }
 
 // ── hoofdfunctie ──────────────────────────────────────────────────────────
@@ -372,16 +489,30 @@ function maak(inv) {
   zelfcontrole(mt940, { iban: iban, begin: begin, eind: eindSaldo, rijen: rijen });
 
   // telling en PDF
-  const telling = { aantal: rijen.length, begin: begin, eind: eindSaldo, bij: 0, af: 0, stuk_open: 0, ingekort86: 0, per_soort: {} };
+  const telling = { aantal: rijen.length, begin: begin, eind: eindSaldo, bij: 0, af: 0, stuk_open: 0, ingekort86: 0, per_soort: {},
+    afwijkt: 0, open: 0, bewijs: { factuur: 0, loonrun: 0, praktijk: 0 }, loon: null, ontvangsten: 0 };   // wv4157 (2C93)
   const SOORT_NAAM = { salarissen: 'Salarissen', loonheffing: 'Loonheffing', pensioen: 'Pensioenpremie', overig: 'Overige betalingen',
     bankkosten: 'Bankkosten', eigen: 'Eigen rekening David', ontvangsten: 'Ontvangsten' };
   rijen.forEach(function (r) {
     if (r.p.b > 0) telling.bij += r.p.b; else telling.af -= r.p.b;
     if (r.vr.stuk === '?' || r.vr.stuk === 'ontbreekt') telling.stuk_open++;
+    if (r.vr.afwijkt) telling.afwijkt++;
+    if (r.vr.bewijs) telling.bewijs[r.vr.bewijs]++;
+    if (r.vr.soort === 'ontvangsten') telling.ontvangsten++;
     if (r.r86.ingekort) telling.ingekort86++;
     const s = telling.per_soort[r.vr.soort] || (telling.per_soort[r.vr.soort] = { aantal: 0, af: 0, bij: 0 });
     s.aantal++; if (r.p.b > 0) s.bij += r.p.b; else s.af -= r.p.b;
   });
+  telling.open = telling.stuk_open + telling.afwijkt;
+  // wv4157: salarissen naast de loonrun (som van de betaallijst; alleen als die er is)
+  const loon = inv.loon && typeof inv.loon === 'object' && typeof inv.loon.label === 'string' && Number.isInteger(inv.loon.som) ? inv.loon : null;
+  if (loon) {
+    const sal = rijen.filter(function (r) { return r.vr.soort === 'salarissen' && r.vr.bewijs !== 'factuur'; });   // met factuur = geen loon
+    telling.loon = { label: loon.label.slice(0, 40), aantal_loonrun: Number(loon.aantal) || 0, som_loonrun: loon.som, posten: sal.length,
+      gelijk: sal.filter(function (r) { return r.vr.bewijs === 'loonrun'; }).length, som_bank: sal.reduce(function (a, r) { return a - r.p.b; }, 0) };
+  }
+  const stand = standNorm(inv.stand);
+  const uit = uitleg(telling, stand);
   const shaMt = crypto.createHash('sha256').update(mt940, 'latin1').digest('hex');
   const g = String(inv.gemaakt);
   const pdf = maakPdf({
@@ -389,16 +520,17 @@ function maak(inv) {
     ondertitel: 'ABN AMRO-rekening ' + iban.replace(/(.{4})(?=.)/g, '$1 ') + ' · ' + dagNL(maand + '-01') + ' t/m ' + dagNL(eind),
     kop: [['Beginsaldo ' + dagNL(plusDagen(maand + '-01', -1)), '€ ' + eur(begin)], ['Eindsaldo ' + dagNL(eind), '€ ' + eur(eindSaldo)],
       ['Totaal bij', '€ ' + eur(telling.bij)], ['Totaal af', '€ ' + eur(telling.af)], ['Aantal posten', String(telling.aantal)],
-      ['Stuk nodig (?)', String(telling.stuk_open)]],
+      ['Stuk nodig (?)', String(telling.stuk_open)], ['Nagekeken', uit.kort]],
     samenvatting: ['salarissen', 'loonheffing', 'pensioen', 'overig', 'bankkosten', 'eigen', 'ontvangsten'].filter(function (k) { return telling.per_soort[k]; })
       .map(function (k) { return { wat: SOORT_NAAM[k], aantal: telling.per_soort[k].aantal, af: telling.per_soort[k].af, bij: telling.per_soort[k].bij }; }),
     rijen: rijen.map(function (r) {
       return { datum: dagNL(r.p.datum).replace(/-\d{4}$/, ''), tegenpartij: r.p.naam || (r.vr.soort === 'bankkosten' ? 'ABN AMRO Bank N.V.' : ''),
-        omschrijving: r.v.Omschrijving || (r.vr.soort === 'bankkosten' ? r.v.vrij.replace(/^ABN AMRO Bank N\.V\.\s*/, '') : ''), wat: r.vr.wat, stuk: r.vr.stuk,
+        omschrijving: r.v.Omschrijving || (r.vr.soort === 'bankkosten' ? r.v.vrij.replace(/^ABN AMRO Bank N\.V\.\s*/, '') : ''), wat: r.vr.wat, stuk: r.vr.stuk, afwijkt: r.vr.afwijkt,
         af: r.p.b < 0 ? eur(-r.p.b) : '', bij: r.p.b > 0 ? eur(r.p.b) : '', saldo: eur(r.p.s) };
     }),
-    voet: ['Gemaakt door Socev op ' + dagNL(g.slice(0, 10)) + ' uit de bankkoppeling (ABN AMRO via Enable Banking); geen officieel bankafschrift. Stuk: loonadministratie = komt uit de salarisadministratie; niet nodig = geen bon nodig;',
-      '? = hier hoort een bon of factuur bij, Socev ziet nog niet of die er is; ontbreekt = bekend dat het stuk ontbreekt. MT940 (zelfde posten) sha256 ' + shaMt.slice(0, 16) + '…'],
+    voet: ['Gemaakt door Socev op ' + dagNL(g.slice(0, 10)) + ' uit de bankkoppeling (ABN AMRO via Enable Banking); geen officieel bankafschrift. Bewijs: loonrun = rekening en bedrag gelijk aan de loonrun (Nmbrs); voorschot = in OVIS POT van die praktijk;',
+      'factuur = gekoppeld in Facturen; loonadministratie = uit de salarisadministratie; niet nodig = geen bon nodig; ? = hier hoort een bon of factuur bij; ontbreekt = stuk ontbreekt. MT940 sha256 ' + shaMt.slice(0, 16) + '…'],
+    stand: stand ? { titel: 'Stand per praktijk — POT POH-GGZ t/m ' + dagNL(eind), rijen: stand.rijen, noot: stand.noot } : null,
     pdfDatum: g.slice(0, 4) + g.slice(5, 7) + g.slice(8, 10) + g.slice(11, 13) + g.slice(14, 16) + g.slice(17, 19) + 'Z',
   });
   const shaPdf = crypto.createHash('sha256').update(pdf).digest('hex');
@@ -406,10 +538,12 @@ function maak(inv) {
   const regelsApp = rijen.map(function (r) {
     return { datum: r.p.datum, tegenpartij: r.p.naam || (r.vr.soort === 'bankkosten' ? 'ABN AMRO Bank N.V.' : ''),
       omschrijving: String(r.v.Omschrijving || (r.vr.soort === 'bankkosten' ? r.v.vrij.replace(/^ABN AMRO Bank N\.V\.\s*/, '') : '')).slice(0, 140),
-      wat: r.vr.wat, soort: r.vr.soort, stuk: r.vr.stuk, vraag: r.vr.stuk === '?' || r.vr.stuk === 'ontbreekt', bedrag: r.p.b / 100, saldo: r.p.s / 100 };
+      wat: r.vr.wat, soort: r.vr.soort, stuk: r.vr.stuk, vraag: r.vr.stuk === '?' || r.vr.stuk === 'ontbreekt', afwijkt: r.vr.afwijkt === true, bedrag: r.p.b / 100, saldo: r.p.s / 100 };
   });
   return {
-    ok: true, maand: maand, mt940: mt940, pdf: pdf, sha256: { mt940: shaMt, pdf: shaPdf }, telling: telling, regels: regelsApp,
+    ok: true, maand: maand, mt940: mt940, pdf: pdf, sha256: { mt940: shaMt, pdf: shaPdf }, telling: telling, regels: regelsApp, uitleg: uit.lang,
+    stand: stand ? { rijen: stand.rijen.map(function (x) { return { praktijk: x.praktijk, verwacht: x.verwacht / 100, betaald: x.betaald / 100, verschil: (x.verwacht - x.betaald) / 100,
+      afronding: Math.abs(x.verwacht - x.betaald) <= 100 * x.termijnen }; }), noot: stand.noot } : null,
     bestandsnamen: { mt940: 'POT-' + maand + '.sta', pdf: 'POT-afschrift ' + maand + '.pdf' },
   };
 }
@@ -501,4 +635,4 @@ function vergelijk(nu, toen) {
   return { vorige_maand: toen.maand, zelfde: zelfde, soorten: soorten, nieuw: nieuw.slice(0, 20), ontbreekt: weg.slice(0, 20), tekst: tekst };
 }
 
-module.exports = { maakAfschrift, mailConcept, vraagLijst, vergelijk, isCompleet, maandNaam, laatsteDag, velden, swiftX, breek, dagEind, dagVolgorde, maakPdf, Weigering, MAANDEN };
+module.exports = { maakAfschrift, mailConcept, vraagLijst, vergelijk, isCompleet, koppelBewijs, d1Sleutel, uitleg, maandNaam, laatsteDag, velden, swiftX, breek, dagEind, dagVolgorde, maakPdf, Weigering, MAANDEN };

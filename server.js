@@ -15892,9 +15892,102 @@ function potAfMaandNaam(m) { return POT_AF_MND[Number(m.slice(5, 7)) - 1] + ' ' 
 function potAfVorigeMaand(datum) { const d = new Date(Date.UTC(Number(datum.slice(0, 4)), Number(datum.slice(5, 7)) - 2, 1)); return d.toISOString().slice(0, 7); }
 function potAfWanneer(iso) { const p = new Date(iso).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }); return Number(p.slice(8, 10)) + '-' + Number(p.slice(5, 7)) + ' ' + p.slice(11, 16); }
 // Het kind: bank-lezer pot-afschrift (maakt of hergebruikt de bestanden; weigert zelf een maand die niet compleet is of niet sluit).
+// wv4157 (besluit 2C93, David Ja 25-11-2026): het afschrift legt zichzelf uit. Vóór elke kindaanroep verzamelt de pod, alleen lezend, het
+// bewijs uit drie bronnen die er al zijn en geeft het via stdin mee (bank-lezer potBewijsZet → pot-afschrift.js koppelBewijs):
+//   facturen: {bankluis-sleutel: 'factuur <nr>'} — alleen koppelingen van David of automatisch met zekerheid >= 0,95, niet ontkoppeld;
+//   loon: betaallijst (IBAN + netto in centen) van de POT-loonrun(s) van die maand uit de Nmbrs-kopie (alleen status klaar);
+//   praktijk: {D1-sleutel: {praktijk}} uit D1 pot (toewijzing aan een praktijk) en de stand per praktijk t/m einde maand (verwachting
+//   vs voorschotten, zelfde rijen als de betaalmonitor; alleen jaren vóór de overname, daarna volgen de nota's — nog niet gebouwd).
+// Een bron die faalt valt weg (het afschrift blijft te maken). Klein gehouden: bank-lezer leest hooguit 64 kB stdin.
+const POT_AF_BEWIJS_MS = 15000, POT_AF_KORT = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
+function potAfDagPlus(d, n) { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
+function potAfEind(m) { return new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0)).toISOString().slice(0, 10); }
+function potAfBewijsFacturen(maand) {
+  if (typeof facturenMagOpenen !== 'function' || typeof FACTUREN_DIR !== 'string' || !facturenMagOpenen()) return null;
+  const pad = path.join(FACTUREN_DIR, 'facturen.sqlite');
+  if (!fs.existsSync(pad)) return null;
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(pad, { readOnly: true });
+  try {
+    const l = db.prepare("SELECT t.bankluis_sleutel AS s, f.nummer AS n FROM koppeling k JOIN bank_transactie t ON t.id = k.transactie JOIN rekening r ON r.id = t.rekening " +
+      "JOIN factuur f ON f.id = k.factuur WHERE r.entiteit = 'pot' AND t.formaat = 'bankluis' AND t.bankluis_sleutel IS NOT NULL AND t.verwijderd_op IS NULL " +
+      "AND t.boekdatum >= ? AND t.boekdatum <= ? AND (k.bron = 'mens' OR (k.bron = 'auto' AND k.zekerheid >= 0.95)) AND f.dubbel_van IS NULL " +
+      "AND f.nummer IS NOT NULL AND trim(f.nummer) <> '' AND NOT EXISTS (SELECT 1 FROM ontkoppeling o WHERE o.transactie = k.transactie AND o.factuur = k.factuur AND o.wanneer >= k.wanneer) " +
+      'ORDER BY t.bankluis_sleutel, f.nummer LIMIT 200').all(potAfDagPlus(maand + '-01', -7), potAfDagPlus(potAfEind(maand), 7));
+    const per = {};
+    l.forEach(function (x) { const k = String(x.s).slice(0, 120); (per[k] = per[k] || []).push(String(x.n).replace(/\s+/g, ' ').trim().slice(0, 30)); });
+    const uit = {};
+    Object.keys(per).slice(0, 80).forEach(function (k) { const n = per[k]; uit[k] = n.length === 1 ? 'factuur ' + n[0] : 'facturen ' + n.slice(0, 3).join(', ') + (n.length > 3 ? ' +' + (n.length - 3) : ''); });
+    return uit;
+  } finally { try { db.close(); } catch (e) {} }
+}
+function potAfBewijsLoon(maand) {
+  const pad = path.join(NMBRS_DIR, 'nmbrs.sqlite');
+  if (!fs.existsSync(pad)) return null;
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(pad, { readOnly: true });
+  try {
+    const J = Number(maand.slice(0, 4)), M = Number(maand.slice(5, 7));
+    // review Codex (ontwerp) MOET 1: alleen als ÉLKE POT-run van die maand een klaargezette betaallijst met regels heeft; anders null
+    // (dan houden de salarissen "loonadministratie"), nooit een lege of halve lijst die alles op "wijkt af" zet
+    const runs = db.prepare("SELECT l.id, l.data, b.status FROM loonrun l JOIN bedrijf_entiteit e ON e.bedrijf = l.bedrijf LEFT JOIN betaallijst b ON b.run = l.id WHERE e.entiteit = 'POT'").all()
+      .filter(function (r) { let x = null; try { x = JSON.parse(r.data); } catch (e) { x = null; } return x && Number(x.year) === J && Number(x.periodEnd) === M; });
+    if (!runs.length || runs.some(function (r) { return r.status !== 'klaar'; })) return null;
+    const q = db.prepare('SELECT iban, centen FROM betaalregel WHERE run = ? AND volg > 0 ORDER BY volg');
+    const regels = [];
+    let leeg = false;
+    runs.forEach(function (r) { const l = q.all(r.id); if (!l.length) leeg = true; l.forEach(function (x) { if (regels.length < 200) regels.push({ iban: String(x.iban || '').replace(/\s+/g, '').toUpperCase().slice(0, 34), centen: Number(x.centen) }); }); });
+    if (leeg || !regels.length) return null;
+    return { label: POT_AF_KORT[M - 1] + ' ' + J, regels: regels };
+  } finally { try { db.close(); } catch (e) {} }
+}
+function potAfPraktijkKort(n) { return String(n || '').replace(/\s+/g, ' ').trim().replace(/^(huisartsen)?praktijk\s+/i, '').slice(0, 60); }
+async function potAfBewijsPraktijk(maand) {
+  const J = Number(maand.slice(0, 4)), eind = potAfEind(maand);
+  const r = await potDhD1([
+    { sql: "SELECT m.sleutel AS s, t.praktijk_id AS p, t.soort AS soort FROM bankmutatie m JOIN bank_toewijzing t ON t.bankmutatie_id = m.id WHERE m.entiteit = 'POT' AND m.bron_bestand = 'enablebanking' " +
+      "AND m.boekdatum >= ? AND m.boekdatum <= ? AND m.sleutel IS NOT NULL", params: [potAfDagPlus(maand + '-01', -7), potAfDagPlus(eind, 7)] },
+    { sql: 'SELECT id, naam FROM praktijk', params: [] },
+    { sql: "SELECT waarde FROM instelling WHERE sleutel = 'overname_vragen'", params: [] },
+    { sql: "SELECT praktijk_id AS p, round(sum(bedrag) * 100) AS c, count(*) AS n FROM verwachting WHERE entiteit = 'POT' AND jaar = ? AND vervaldag <= ? GROUP BY praktijk_id", params: [J, eind] },
+    { sql: "SELECT t.praktijk_id AS p, round(sum(t.bedrag) * 100) AS c FROM bank_toewijzing t JOIN bankmutatie m ON m.id = t.bankmutatie_id WHERE m.entiteit = 'POT' AND t.boekjaar = ? " +
+      "AND t.soort = 'voorschot' AND t.praktijk_id IS NOT NULL AND m.boekdatum <= ? GROUP BY t.praktijk_id", params: [J, eind] },
+  ], POT_AF_BEWIJS_MS);
+  const naam = new Map(r[1].results.map(function (x) { return [String(x.id), String(x.naam || x.id)]; }));
+  // per D1-sleutel: alleen als alle toewijzingen van die post bij één praktijk horen en geldsoort voorschot/afrekening/liquiditeit zijn
+  const per = new Map();
+  r[0].results.forEach(function (x) { const k = String(x.s); if (!per.has(k)) per.set(k, []); per.get(k).push(x); });
+  const op = {};
+  per.forEach(function (l, k) {
+    const p = l[0].p;
+    if (!p || !l.every(function (x) { return x.p === p && ['voorschot', 'afrekening', 'liquiditeit'].indexOf(x.soort) >= 0; })) return;
+    if (Object.keys(op).length < 200) op[k.slice(0, 32)] = { praktijk: potAfPraktijkKort(naam.get(String(p)) || p), soort: l.every(function (x) { return x.soort === l[0].soort; }) ? l[0].soort : 'voorschot' };
+  });
+  const overname = Number(String((r[2].results[0] || {}).waarde || '2027').slice(0, 4));
+  let stand = null;
+  if (J < overname && r[3].results.length) {
+    const nt = new Map(r[3].results.map(function (x) { return [String(x.p), Number(x.n) || 0]; }));
+    const v = new Map(r[3].results.map(function (x) { return [String(x.p), Math.round(Number(x.c))]; })), b = new Map(r[4].results.map(function (x) { return [String(x.p), Math.round(Number(x.c))]; }));
+    const ids = Array.from(new Set(Array.from(v.keys()).concat(Array.from(b.keys())))).sort(function (x, y) { return (naam.get(x) || x).localeCompare(naam.get(y) || y, 'nl'); });
+    const d = Number(eind.slice(8, 10)) + '-' + Number(eind.slice(5, 7)) + '-' + J;
+    stand = { rijen: ids.slice(0, 30).map(function (id) { return { praktijk: String(naam.get(id) || id).slice(0, 80), verwacht: v.get(id) || 0, betaald: b.get(id) || 0, termijnen: nt.get(id) || 0 }; }),
+      noot: ['Verwacht = de maandtermijnen ' + J + ' van elke praktijk zoals in OVIS POT (Davids stukken), met vervaldag t/m ' + d + '.',
+        'Betaald = ontvangsten op deze rekening die in OVIS POT als voorschot ' + J + ' van die praktijk staan, geboekt t/m ' + d + '.',
+        'Verschil = verwacht min betaald: positief = nog te ontvangen, negatief (-) = vooruit betaald; tot € 1 per termijn is afronding.'] };
+  }
+  return { praktijk: { op_sleutel: op }, stand: stand };
+}
+async function potAfBewijs(maand) {
+  const b = { maand: maand, facturen: null, loon: null, praktijk: null, stand: null };
+  try { b.facturen = potAfBewijsFacturen(maand); } catch (e) { logError('pot-bewijs facturen', e); }
+  try { b.loon = potAfBewijsLoon(maand); } catch (e) { logError('pot-bewijs loon', e); }
+  try { const p = await potAfBewijsPraktijk(maand); b.praktijk = p.praktijk; b.stand = p.stand; } catch (e) { logError('pot-bewijs praktijk', e); }
+  return b;
+}
 async function potAfMaakKind(maand) {
   let r;
-  try { r = await bankKind(['pot-afschrift', '--maand', maand], {}, POT_AF_MAX_MS); } catch (e) { return { ok: false, fout: 'bankkind faalde' }; }
+  const bewijs = await potAfBewijs(maand);
+  try { r = await bankKind(['pot-afschrift', '--maand', maand], { bewijs: bewijs }, POT_AF_MAX_MS); } catch (e) { return { ok: false, fout: 'bankkind faalde' }; }
   const j = (r && r.j) || {};
   if (j.ok === true) return j;
   if (j.geweigerd === true) return { ok: false, geweigerd: true, reden: String(j.reden || 'geweigerd').slice(0, 300) };
@@ -15976,6 +16069,7 @@ function potAfRegelsApp(l) {
     const o = {};
     POT_AF_REGEL_VELDEN.forEach(function (k) { o[k] = typeof r[k] === 'string' ? r[k].slice(0, 160) : ''; });
     o.vraag = r.vraag === true;
+    o.afwijkt = r.afwijkt === true;   // wv4157
     o.bedrag = typeof r.bedrag === 'number' && Number.isFinite(r.bedrag) ? Math.round(r.bedrag * 100) / 100 : null;
     o.saldo = typeof r.saldo === 'number' && Number.isFinite(r.saldo) ? Math.round(r.saldo * 100) / 100 : null;
     return o;
@@ -15986,13 +16080,19 @@ function potAfVergelijkApp(v) {
   const lijst = function (x) { return (Array.isArray(x) ? x : []).filter(function (n) { return typeof n === 'string'; }).slice(0, 20).map(function (n) { return n.slice(0, 80); }); };
   return { vorige_maand: POT_AF_MAAND_RE.test(String(v.vorige_maand)) ? v.vorige_maand : null, zelfde: v.zelfde === true, tekst: v.tekst.slice(0, 600), nieuw: lijst(v.nieuw), ontbreekt: lijst(v.ontbreekt) };
 }
+function potAfStandApp(st) {
+  if (!st || !Array.isArray(st.rijen)) return null;
+  const g = function (n) { return typeof n === 'number' && Number.isFinite(n) ? Math.round(n * 100) / 100 : null; };
+  return { rijen: st.rijen.slice(0, 30).map(function (x) { return { praktijk: String(x.praktijk || '').slice(0, 80), verwacht: g(x.verwacht), betaald: g(x.betaald), verschil: g(x.verschil), afronding: x.afronding === true }; }),
+    noot: (Array.isArray(st.noot) ? st.noot : []).filter(function (n) { return typeof n === 'string'; }).slice(0, 3).map(function (n) { return n.slice(0, 220); }) };
+}
 async function appPotRegels(req, res, a, rest) {
   const maand = String(rest || '');
   if (!POT_AF_MAAND_RE.test(maand)) return appWeiger(res, 404, 'onbekend', 'pot regels pad');
   res._app.reden = 'pot-regels ' + maand;
   if (!potAfAan()) return appWeiger(res, 503, 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten', 'pot uit');
   let r;
-  try { r = await bankKind(['pot-afschrift-regels', '--maand', maand], {}, POT_AF_MAX_MS); } catch (e) { r = null; }
+  try { r = await bankKind(['pot-afschrift-regels', '--maand', maand], { bewijs: await potAfBewijs(maand) }, POT_AF_MAX_MS); } catch (e) { r = null; }
   const j = r && r.j;
   if (!j || (j.ok !== true && !j.geweigerd)) {
     const oud = j && typeof j.fout === 'string' && /^gebruik:/.test(j.fout);
@@ -16000,7 +16100,8 @@ async function appPotRegels(req, res, a, rest) {
   }
   if (j.ok !== true) return appStuur(res, 200, { ok: true, maand: maand, regels: null, reden: String(j.reden || '').slice(0, 300) });
   appStuur(res, 200, { ok: true, maand: maand, aantal: j.aantal, stuk_open: j.stuk_open, regels: potAfRegelsApp(j.regels), vergelijk: potAfVergelijkApp(j.vergelijk),
-    gemaakt: j.gemaakt === true, actueel: j.actueel === true });
+    gemaakt: j.gemaakt === true, actueel: j.actueel === true,
+    uitleg: typeof j.uitleg === 'string' ? j.uitleg.slice(0, 800) : null, open: Number.isInteger(j.open) ? j.open : null, stand: potAfStandApp(j.stand) });   // wv4157 (2C93)
 }
 // wv835: de twee bestanden van het afschrift dat het kind net teruggaf ({soort, naam, mime, bytes}; wv959: ook voor de Facturen-wachtrij).
 // Zelfde toets als appPotBestand: meta.json van die maand, een veilige naam, en de sha256 van de inhoud gelijk aan meta én aan het kind.

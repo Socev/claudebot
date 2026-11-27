@@ -384,6 +384,35 @@ weiger('IBAN ongeldig → geweigerd', basis({ rekening: { iban: 'x' } }), /geldi
   u = await R.potAfschriftRonde({ datum: '2027-03-03', uur: 18 });
   toets('ronde: maand zonder posten → geen kaart', u.uitkomst === 'geen posten' && rpc.length === 3, u);
   toets('ronde: pod.json 600, geen bedrag of naam', (fs.statSync(path.join(BD, 'pot-afschriften', 'pod.json')).mode & 0o777) === 0o600 && geenGeheim(fs.readFileSync(path.join(BD, 'pot-afschriften', 'pod.json'), 'utf8')));
+  // ── wv4157 (2C93): bewijs per post (verzonnen gegevens) ──
+  {
+    const metSleutel = () => { const ib = basis(); ib.posten.forEach((p, i) => { p.sleutel = 'e:proef-' + i; }); return ib; };
+    const ib = metSleutel();
+    const pr = { op_sleutel: { [P.d1Sleutel(IBAN, 'e:proef-0')]: { praktijk: 'Testdorp', soort: 'voorschot' } } };
+    const loon = { label: 'proef', regels: [{ iban: ib.posten[4].tegen_iban, centen: 180000 }, { iban: ib.posten[5].tegen_iban, centen: 165050 }] };
+    const st = P.koppelBewijs(ib.posten, { facturen: { 'e:proef-1': 'factuur 2026-118' }, loon: loon, praktijk: pr }, IBAN);
+    ib.stukken = st; ib.loon = { label: 'proef', aantal: 2, som: 345050 };
+    ib.stand = { rijen: [{ praktijk: 'Praktijk Testdorp', verwacht: 250000, betaald: 250000, termijnen: 1 }], noot: ['proef'] };
+    const r1 = P.maakAfschrift(ib), r0 = P.maakAfschrift(basis());
+    const stuk = (r, i) => r.regels[i].stuk;
+    toets('bewijs: MT940 en totalen gelijk aan zonder bewijs', r1.ok && r1.mt940 === r0.mt940 && ['begin', 'eind', 'bij', 'af', 'aantal'].every((k) => r1.telling[k] === r0.telling[k]));
+    toets('bewijs: factuur exact op de bankluis-sleutel (? vervalt)', stuk(r1, 1) === 'factuur 2026-118' && r1.telling.stuk_open === r0.telling.stuk_open - 1, [stuk(r1, 1), r1.telling.stuk_open]);
+    toets('bewijs: ontvangst via D1-sleutel → voorschot <praktijk>', stuk(r1, 0) === 'voorschot Testdorp' && r1.regels[0].wat === 'Bijdrage praktijk (voorschot POT)', stuk(r1, 0));
+    toets('bewijs: salarissen gelijk aan de loonrun (rekening + bedrag), som gelijk', stuk(r1, 4) === 'loonrun proef' && stuk(r1, 5) === 'loonrun proef' && r1.telling.loon.gelijk === 2 && r1.telling.loon.som_bank === 345050, r1.telling.loon);
+    toets('bewijs: open 0 → "Klopt: elke regel …" en blad 2 in de PDF', r1.telling.open === 0 && /^Klopt: elke regel/.test(r1.uitleg) && (r1.pdf.toString('latin1').match(/\/Type \/Page /g) || []).length === 2 && /\/Count 2/.test(r1.pdf.toString('latin1')), r1.uitleg);
+    // kruisproeven
+    const ib2 = metSleutel();
+    const st2 = P.koppelBewijs(ib2.posten, { loon: { label: 'proef', regels: [{ iban: ib2.posten[4].tegen_iban, centen: 180001 }, { iban: ib2.posten[5].tegen_iban, centen: 165050 }] } }, IBAN);
+    ib2.stukken = st2; const r2 = P.maakAfschrift(ib2);
+    toets('kruis: één cent anders → "wijkt af van loonrun", telt open, niet in de mail-vraaglijst', stuk(r2, 4) === 'wijkt af van loonrun' && r2.telling.open === r2.telling.stuk_open + 1 && r2.regels[4].vraag === false && r2.regels[4].afwijkt === true, [stuk(r2, 4), r2.telling.open]);
+    const st3 = P.koppelBewijs(metSleutel().posten, { loon: { label: 'proef', regels: [] } }, IBAN);
+    toets('kruis: lege loonlijst = geen loondata (nooit alles "wijkt af")', Object.keys(st3).length === 0, st3);
+    const st4 = P.koppelBewijs(metSleutel().posten, { praktijk: { op_sleutel: { [P.d1Sleutel(IBAN, 'e:ander')]: { praktijk: 'Testdorp' } } } }, IBAN);
+    toets('kruis: praktijknaam in de banknaam zonder D1-sleutel → geen bewijs', Object.keys(st4).length === 0, st4);
+    const st5 = P.koppelBewijs(ib.posten, { loon: loon }, 'NL00ANDE0000000000');
+    toets('kruis: loonregel twee keer gebruiken kan niet (één-op-één)', P.koppelBewijs([ib.posten[4], Object.assign({}, ib.posten[4], { nr: 1e9 })], { loon: { label: 'x', regels: [loon.regels[0]] } }, IBAN)[1e9].soort === 'loonrun_afwijkt' && st5[ib.posten[4].nr].soort === 'loonrun');
+    toets('bewijs: zonder bewijs is het afschrift byte voor byte als voorheen op de MT940', P.maakAfschrift(basis()).mt940 === r0.mt940);
+  }
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

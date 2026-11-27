@@ -1727,14 +1727,14 @@ function potAfschriftPost(r) {
   let rl = j && Array.isArray(j.remittance_information) ? j.remittance_information.map(function (x) { return String(x == null ? '' : x).slice(0, 200); }).slice(0, 40) : [];
   if (!rl.length && r.omschrijving) rl = [String(r.omschrijving).slice(0, 500)];   // post zonder ruwe bankregels: de opgeslagen omschrijving (Fable wv787 diff #5)
   const code = j && j.bank_transaction_code && typeof j.bank_transaction_code.code === 'string' ? j.bank_transaction_code.code : null;
-  return { nr: r.nr, datum: r.datum, bedrag: r.bedrag, saldo_na: r.saldo_na, tegenpartij: r.tegenpartij, tegen_iban: r.tegen_iban, regels: rl, code: code,
+  return { nr: r.nr, sleutel: r.sleutel == null ? null : String(r.sleutel), datum: r.datum, bedrag: r.bedrag, saldo_na: r.saldo_na, tegenpartij: r.tegenpartij, tegen_iban: r.tegen_iban, regels: rl, code: code,
     categorie: r.categorie || potCategorie(r) };
 }
 function potAfschriftInvoer(a, maand) {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(maand || ''))) throw new Error('maand: JJJJ-MM');
   verrijkAlsVuil(a);
   const rk = potRekeningEen(a), db = a.db;
-  const kol = 'SELECT t.nr, t.datum, t.bedrag, t.saldo_na, t.tegenpartij, t.tegen_iban, t.omschrijving, t.ruwe_json, v.categorie FROM transacties t LEFT JOIN verrijking v ON v.nr = t.nr WHERE t.rek = ? AND ' + POT_BOEKT;
+  const kol = 'SELECT t.nr, t.sleutel, t.datum, t.bedrag, t.saldo_na, t.tegenpartij, t.tegen_iban, t.omschrijving, t.ruwe_json, v.categorie FROM transacties t LEFT JOIN verrijking v ON v.nr = t.nr WHERE t.rek = ? AND ' + POT_BOEKT;   // wv4157: sleutel = exacte koppeling (Facturen, D1 pot)
   const posten = db.prepare(kol + ' AND t.datum >= ? AND t.datum <= ? ORDER BY t.datum, t.nr DESC').all(rk.rek, maand + '-01', maandEinde(maand)).map(potAfschriftPost);
   const vd = (db.prepare('SELECT max(t.datum) d FROM transacties t WHERE t.rek = ? AND ' + POT_BOEKT + ' AND t.datum < ?').get(rk.rek, maand + '-01') || {}).d;
   const voorDag = vd ? db.prepare(kol + ' AND t.datum = ? ORDER BY t.nr DESC').all(rk.rek, vd).map(potAfschriftPost) : [];
