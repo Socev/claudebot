@@ -72,7 +72,7 @@ function pas(lijst, d) {
 // alleen aantallen). De weergave raster/lijst is per toestel en staat niet hier. Alleen App-id's uit APP_IDS (= de Apps in de
 // catalogus src/modules.ts, plek "apps"; de toets test/apps-volgorde.test.ts in socev-app houdt ze gelijk). Een App die de pod nog
 // niet kent, toont de app gewoon onderaan; ordenen en favoriet maken kan pas als hij hier staat.
-const APP_IDS = ['bandjes', 'financien', 'gezondheid', 'facturen', 'docplan', 'bestanden', 'pot',
+const APP_IDS = ['bandjes', 'financien', 'gezondheid', 'facturen', 'docplan', 'bestanden', 'pot', 'forum',
   'pot-afschriften', 'studio', 'broedstoof', 'memorylane', 'tripper', 'kalender', 'shopper', 'pakjes', 'osint', 'mediatheek', 'harvester',
   'flock', 'verbruik', 'tokencounter', 'sleutelbos', 'mail', 'cijfer-meester', 'ghawa', 'beleggen', 'imagine', 'personeelsscherm', 'pma', 'ovis-nza', 'vastgoed', 'energie', 'besluiten', 'gambia'];   // gambia: wv3950; besluiten: wv3588; energie: wv3586; sleutelbos: wv2481; ghawa: wv2877; beleggen: wv2982; imagine: wv2984; personeelsscherm: wv2991; pma: wv3037; ovis-nza: wv3087; vastgoed: wv3085
 // wv3069 (David 14-11-2026 18:53, "Projecten kan weg"): Apps die weg zijn. Staat zo'n id nog in een bewaarde volgorde, favorieten of

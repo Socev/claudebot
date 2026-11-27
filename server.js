@@ -17255,6 +17255,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
         if (route === 'POST /app/werkers/schakel') return typeof appWerkerSchakel === 'function' ? appWerkerSchakel(req, res, a, s, d) : appWeiger(res, 404, 'onbekend', 'schakel');   // wv1733 (OVIS M4b): schakelaar per werker
+        if (route === 'GET /app/forum/teller') return typeof appForumTellerRoute === 'function' ? appForumTellerRoute(req, res) : appWeiger(res, 404, 'onbekend', 'forum teller');   // wv4201 (3C169): getal op de tegel Forum
         if (route === 'GET /app/harvester' || route === 'GET /app/harvester/teller' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
         if (route === 'GET /app/ideeen' || /^GET \/app\/ideeen\/(plaatje\/[1-9][0-9]{0,11}\/[0-2]|proefplaatje\/k\d{2,3}\/[0-2]|kaart\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||
           route === 'POST /app/ideeen/naar-ideeenbus' || /^POST \/app\/ideeen\/kaart\/[ka]\d{2,3}\/(deel|niet|plaats)$/.test(route))   // wv942: AIX lezen, Deel/Niet per kaart of antwoord; wv3072: Plaats (verse vingerafdruk)
@@ -27978,6 +27979,27 @@ async function raadForum(methode, pad, body) {
   if (r.status >= 400) return Object.assign({ ok: false, status: r.status }, j);
   return j;
 }
+// ── wv4201 forum-teller (besluitenpagina nr 469 = 3C169, David Ja 25-11-2026): tegel Forum in Apps met het aantal berichten sinds Davids laatste bezoek.
+// Het forum houdt per mens het laatste bezoek bij (tabel aanwezig, elke aanroep vanaf de forumpagina, telefoon en pc samen) en telt met
+// GET /api/eigenaar-bezoek (alleen moderatorsleutels, alleen een tijd en een aantal; eigen berichten tellen niet). De pod leest alleen.
+// Nog nooit bezocht = nieuw null → 0 op de tegel. 15 s tussenopslag (tegelijk openen = één aanroep); fout = 503, de app toont dan niets.
+const FORUM_TELLER_MS = 15000;
+const forumTellerStand = { op: 0, uit: null, bezig: null };
+async function appForumTellerRoute(req, res) {
+  res._app.stil = true;
+  if (!appTeller('forum_teller', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens forum teller');
+  try {
+    if (!forumTellerStand.uit || Date.now() - forumTellerStand.op > FORUM_TELLER_MS) {
+      if (!forumTellerStand.bezig) forumTellerStand.bezig = raadForum('GET', 'eigenaar-bezoek').finally(function () { forumTellerStand.bezig = null; });
+      const j = await forumTellerStand.bezig;
+      if (!j || j.ok !== true) throw new Error('forum ' + String((j && (j.status || j.fout)) || 'geen antwoord').slice(0, 80));
+      forumTellerStand.uit = { nieuw: Number.isInteger(j.nieuw) && j.nieuw > 0 ? j.nieuw : 0, bekend: typeof j.laatst === 'string' };
+      forumTellerStand.op = Date.now();
+    }
+    appStuur(res, 200, Object.assign({ ok: true }, forumTellerStand.uit));
+  } catch (e) { logError('forum-teller', e); appWeiger(res, 503, 'het forum is nu niet te lezen', 'forum teller'); }
+}
+// ── einde wv4201 forum-teller ──
 const raad = (function () {
   const p = path.join(__dirname, 'raad.js');
   if (!fs.existsSync(p) || process.env.RAAD_UIT === '1') return null;
