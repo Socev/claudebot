@@ -31721,6 +31721,7 @@ function personeelsschermInfo() {
 //   POST /app/shopper/<id>/opnieuw    wv2561: start een achtergrondagent "socev: Shopper opnieuw" (skill ovis-shopper) op dezelfde pagina; 6/uur,
 //                                     één ronde tegelijk per zoektocht; stand in klokken/shopper-opnieuw.json (job + tijd, geen wens)
 //   POST /app/shopper/<id>/antwoord   wv4171 (2C96 h): {antwoord} op wacht_op_jou: eis erbij, wacht_op_jou weg, dan Opnieuw zoeken (6/uur)
+//   POST /app/shopper/<id>/bestelling wv4183 (2C70): {pakje, antwoord: ja|nee} op "was dit hem?" (bestelling uit Pakjes bij een optie-winkel)
 //   POST /app/shopper/<id>/bedrag     wv4171 (2C96 g): {factuur} bij gekocht zonder bedrag: het bedrag van die passende factuur uit Facturen
 //   POST /app/shopper/vergelijk       wv2934: {wens, aantal?, eisen[]?, refurbished?} = Snel vergelijken (pod-zoekhulp + winkel-lezen.py, ± 20 s,
 //                                     plafond 20/dag in de module en 10/uur); GET …/vergelijk/<id> = de stand (opties zodra gelezen, 24 u bewaard);
@@ -31859,6 +31860,10 @@ const shopper = (function () {
     nieuwPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nieuw.json') : null,
     nalezenPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-nalezen.json') : null,
     agentStart: agentStart, agentStand: agentStand, grondwet: grondwet,
+    // wv4183 (2C70 stap 1): "Was dit hem?" — de bestellingen uit OVIS Pakjes (alleen lezen; pakjes staat verderop in dit bestand en bestaat
+    // pas bij een vraag) en Davids antwoorden in de klokken-map (0600)
+    bestellingen: function (sinds) { return typeof pakjes !== 'undefined' && pakjes && typeof pakjes.bestellingen === 'function' ? pakjes.bestellingen(sinds) : []; },
+    bestellingPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-bestelling.json') : null,
     opnieuwPad: typeof KLOKKEN_DIR === 'string' ? path.join(KLOKKEN_DIR, 'shopper-opnieuw.json') : null }); } catch (e) { logError('shopper', e); return null; }
 })();
 function shopperInfo() {
@@ -31940,6 +31945,11 @@ async function appShopper(req, res, a, route, d) {
       if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
       if (!appTeller('shopper_opnieuw', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 6)', 'grens shopper opnieuw');
       u = typeof shopper.antwoord === 'function' ? await shopper.antwoord(m[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
+    }
+    else if ((m = /^POST \/app\/shopper\/([^/]*)\/bestelling$/.exec(route))) {   // wv4183 (2C70): antwoord op "was dit hem?" (Ja = gekocht, Nee = niet meer vragen)
+      soort = 'bestelling';
+      if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
+      u = typeof shopper.bestelling === 'function' ? shopper.bestelling(m[1], d) : { status: 404, body: { ok: false, fout: 'onbekend' } };
     }
     else if ((m = /^POST \/app\/shopper\/([^/]*)\/bedrag$/.exec(route))) {   // wv4171 (2C96 g): bedrag uit de factuur (Facturen alleen lezen)
       soort = 'bedrag';

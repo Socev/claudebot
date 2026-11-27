@@ -1100,8 +1100,19 @@ function maak(o) {
         laatste_ronde: r ? { op: r.eind || r.start, mails: r.mails, herkend: r.herkend, gevolgd: r.gevolgd, volg_fout: r.volg_fout, fout: !!r.fout } : null };
     } catch (e) { return { aan: true, fout: true }; }
   }
+  // wv4183 (2C70 stap 1): de bestellingen voor Shopper ("was dit hem?"): per rij met een winkel alleen id, winkel, de NL-dag van de eerste mail en
+  // het tijdstip ervan (review ZOU 1: Shopper vergelijkt met het begin van de zoektocht) en het afzenderdomein van een winkelrij (sleutel winkel:<domein>:…). Alleen lezen; verborgen rijen tellen niet; hooguit 45 dagen terug en 300 rijen.
+  function bestellingen(sinds) {
+    const grens = Math.max(Date.parse(sinds) || 0, klok() - 45 * DAG);
+    return open().prepare('SELECT id, sleutel, winkel, eerste FROM zending WHERE winkel IS NOT NULL AND verborgen IS NULL AND eerste >= ? ORDER BY eerste DESC LIMIT 300')
+      .all(new Date(grens).toISOString()).map((z) => {
+        const m = /^winkel:([a-z0-9.-]{3,100}):/.exec(String(z.sleutel || ''));
+        const t = Date.parse(z.eerste);
+        return isFinite(t) ? { id: String(z.id), winkel: schoon(z.winkel, 80), dag: nlDag(t), eerste: new Date(t).toISOString(), domein: m ? m[1] : null } : null;
+      }).filter((x) => x && x.winkel);
+  }
   function sluit() { if (db) { try { db.close(); } catch (e) { /* niets */ } db = null; } }
-  return { herken, isKandidaat, ronde, lijst, verberg, geleverd, info, sluit, verwerkMail, teVolgen, volg, conceptBron, conceptGezet, _laatst: () => laatst };
+  return { herken, isKandidaat, ronde, lijst, verberg, geleverd, info, sluit, verwerkMail, teVolgen, volg, conceptBron, conceptGezet, bestellingen, _laatst: () => laatst };
 }
 
 /*

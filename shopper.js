@@ -51,6 +51,9 @@
  *    krijgt prijshistorie {zin, t, url} of {stand: 'leest'}; geen zin = null. Eén lezing tegelijk over alle zoektochten heen.
  *  - Aanwijzen (wv2946, stap A): aanwijs() telt per maand hoe vaak David bij een actie op "Zoek met Shopper" tikte (o.aanwijsPad, alleen
  *    {"JJJJ-MM": n}, geen tekst); info() geeft het aantal van deze maand. Beslisregel stap B: ≥ 3 in een maand.
+ *  - "Was dit hem?" (wv4183, 2C70 stap 1): een bestelling die OVIS Pakjes zag (o.bestellingen, alleen lezen) bij een winkel uit de opties van een
+ *    OPEN zoektocht, ná het begin ervan, geeft bij die zoektocht één vraag (lijst: bestelling {winkel, dag}; zoektocht: ook pakje, optie en de
+ *    ene passende factuur uit Facturen). Ja = gekocht via bestelling() (Davids tik; bedrag alleen uit die factuur); Nee/Ja in o.bestellingPad.
  * PRIVACY. Deze module logt niets; info() geeft alleen aantallen en het tijdstip van de laatste lijst (geen wens, pad of bedrag). Er gaat niets naar buiten of naar een taalmodel.
  */
 const fs = require('fs');
@@ -219,10 +222,10 @@ const FAC_WINKEL_SQL = "SELECT naam, count(*) AS aantal, max(d) AS laatst FROM (
   + "UNION ALL SELECT coalesce(a.leverancier_naam, ''), coalesce(a.factuurdatum, substr(a.aangemaakt_op, 1, 10)) FROM factuur_archief a "
   + "WHERE coalesce(a.status, '') NOT IN ('geen_factuur', 'genegeerd') AND a.entiteit <> 'prive'"
   + ") WHERE trim(naam) <> '' GROUP BY naam";   // review ZOU 1: geen LIMIT (een afgekapte telling zou als ok gelden); begrensd door het aantal leveranciers
-function facturenBij(db, z) {
+function facturenBij(db, z, venster) {
   const g = z.gekocht;
   if (!g || !g.datum) return [];
-  const van = dagPlus(g.datum, -14), tot = dagPlus(g.datum, 30);
+  const van = dagPlus(g.datum, venster ? venster[0] : -14), tot = dagPlus(g.datum, venster ? venster[1] : 30);   // wv4183: eigen venster bij "was dit hem?"
   if (!van || !tot) return [];
   const opt = g.optie ? z._opties.find((x) => x.id === g.optie) : null;
   const sleutels = [];
@@ -248,7 +251,48 @@ function facturenBij(db, z) {
     uit.push({ id: String(f.id), leverancier: tekstVeld(f.lnaam || f.leverancier_naam, 80), factuurdatum: d, bedrag_eur: incl == null ? null : incl / 100, zekerheid: zeker, _afstand: dagAfstand(d, g.datum) });
   }
   uit.sort((a, b) => ZEKER[a.zekerheid] - ZEKER[b.zekerheid] || a._afstand - b._afstand || (a.id < b.id ? -1 : 1));
-  return uit.slice(0, 3).map((x) => { delete x._afstand; return x; });
+  return uit.slice(0, venster ? 20 : 3).map((x) => { delete x._afstand; return x; });
+}
+
+// ── wv4183 (2C70 stap 1, David 25-11 Ja op "Wil je dat Shopper zelf … bijhoudt wat je kocht en bij een open zoektocht vraagt 'was dit hem?'"):
+// een bestelling uit OVIS Pakjes bij een winkel uit de opties van een OPEN zoektocht wordt één vraag bij die zoektocht. Geen automatisme zet
+// gekocht (review 2-11 MOET 5 blijft): pas Davids Ja in zijn app doet dat. Ontwerp + review: Systeemoverzicht § OVIS Shopper "Was dit hem?".
+const BESTEL_BEWAAR = 180 * 86400000, MAX_BESTEL_STAAT = 500, BESTEL_TERUG = 45 * 86400000, BESTEL_MARGE = 3600000, PAKJE_RE = /^[0-9a-f]{12}$/;
+const BESTEL_OPMERKING = 'uit je bestelmail';
+// Het begin van de zoektocht. Bestandsnaam "Shopper - JJJJ-MM-DD - …" is de dag waarop hij begon; gezocht schuift mee bij Opnieuw zoeken.
+// Is de bestandsdag eerder dan de dag van gezocht: die dag vanaf middernacht (ruim: 2 uur ervoor, zomertijd). Anders gezocht min een uur
+// (review ZOU 1: een bestelling van dezelfde ochtend, vóór de zoektocht, telt niet). Niets bekend = geen vraag.
+function beginVan(rel, z) {
+  const m = /(?:^|\/)Shopper - (\d{4}-\d{2}-\d{2}) - [^/]*$/.exec(String(rel || ''));
+  const bd = m && geldigeDag(m[1]) ? m[1] : null, gz = String(z.gezocht || ''), gd = gz.slice(0, 10), gt = Date.parse(gz);
+  if (bd && (!geldigeDag(gd) || bd < gd || !isFinite(gt))) return Date.parse(bd + 'T00:00:00Z') - 2 * 3600000;
+  return isFinite(gt) ? gt - BESTEL_MARGE : null;
+}
+// De kern van een afzenderdomein (mail.bol.com → bol), zoals hostKern bij een url
+function domeinKern(d) { const x = String(d || '').toLowerCase().split('.').filter(Boolean); return x.length >= 2 ? sleutelVan(x[x.length - 2]) : null; }
+// De vraag bij één open zoektocht: de nieuwste bestelling (Pakjes: {id, winkel, dag, eerste, domein}) ná het begin, bij een winkel uit de opties
+// (zelfde sleutels als facturenBij: winkel en verkoper als hele woorden, kern van de koop-link; of het afzenderdomein), die David nog niet
+// beantwoordde. antwoorden = [{w, p, tot, a}] van deze zoektocht: dezelfde bestelling, of bij Nee ook een andere rij van dezelfde winkel tot
+// 3 dagen later (vervoerder- en winkelrij van één bestelling), vraagt niet opnieuw.
+function bestellingVoor(z, rel, lijst, antwoorden) {
+  if (!z || z.status !== 'open' || !Array.isArray(lijst) || !lijst.length) return null;
+  const begin = beginVan(rel, z);
+  if (begin == null) return null;
+  const opts = (z._opties || []).map((o) => ({ o, k: [sleutelVan(o.winkel), sleutelVan(o.verkoper), o.url ? hostKern(o.url) : null].filter(Boolean) })).filter((x) => x.k.length);
+  if (!opts.length) return null;
+  const ant = Array.isArray(antwoorden) ? antwoorden.filter((a) => a && typeof a === 'object') : [];
+  let beste = null;
+  for (const b of lijst) {
+    if (!b || !PAKJE_RE.test(String(b.id)) || !geldigeDag(String(b.dag)) || !(Date.parse(b.eerste) >= begin)) continue;
+    const bw = ' ' + woorden(b.winkel).join(' ') + ' ', bd = domeinKern(b.domein);
+    const past = opts.filter((x) => x.k.some((k) => bw.indexOf(' ' + k + ' ') >= 0 || k === bd));
+    if (!past.length) continue;
+    const winkel = mapTekst(past[0].o.winkel, 80) || mapTekst(b.winkel, 80) || null;
+    const w = sleutelVan(winkel) || past[0].k[0];
+    if (ant.some((a) => a.p === b.id || (a.a === 'nee' && a.w === w && geldigeDag(String(a.tot)) && b.dag <= dagPlus(a.tot, 3)))) continue;
+    if (!beste || b.eerste > beste.eerste) beste = { pakje: b.id, winkel, w, dag: b.dag, eerste: b.eerste, optie: past.length === 1 ? past[0].o.id : null };
+  }
+  return beste;
 }
 
 function ontleed(t, rel, ent, fav) {
@@ -675,13 +719,14 @@ function maak(o) {
   }
   function lijst() {
     const uit = [];
-    let onleesbaar = 0;
+    let onleesbaar = 0, bl = null, ba = null;   // wv4183: bestellingen en antwoorden één keer per lijst
     const fav = favorieten();
     for (const p of paden()) {
       const t = lees(p.rel);
       if (t == null) { onleesbaar++; continue; }
       const z = ontleed(t, p.rel, p.ent, fav);
       if (z) {
+        if (z.status === 'open') { if (!bl) { bl = bestellingenNu(); ba = bestelAntwoorden(); } const b = bestellingVoor(z, p.rel, bl, ba[z.id]); z.bestelling = b ? { winkel: b.winkel, dag: b.dag } : null; }   // wv4183
         // wv2850: in de lijst alleen de uitkomst van de advies-controle en de goedkoopste die past (bedrag), geen redenen
         const c = adviesControle(z, R.fmLijst(t, 'eisen'));
         z.controle = c.uitkomst; z.goedkoopst_passend_eur = c.goedkoopst_eur;
@@ -707,6 +752,12 @@ function maak(o) {
     if (!z) return { fout: { status: 404, body: { ok: false, fout: 'onbekende zoektocht' } } };
     return { p, t, z };
   }
+  // wv4183: de vraag bij één open zoektocht met de factuur erbij (null = geen vraag)
+  function bestellingDetail(z, rel) {
+    if (z.status !== 'open') return null;
+    const b = bestellingVoor(z, rel, bestellingenNu(), bestelAntwoorden()[z.id]);
+    return b ? { pakje: b.pakje, winkel: b.winkel, dag: b.dag, optie: b.optie, factuur: factuurBijBestelling(z, b) } : null;
+  }
   function zoektocht(id) {
     const v = vind(id);
     if (v.fout) return v.fout;
@@ -720,7 +771,7 @@ function maak(o) {
       facturen: z.status === 'gekocht' ? metFacturen((db) => facturenBij(db, z)) : undefined,
       todoist_url: z.todoist_id ? 'https://app.todoist.com/app/task/' + z.todoist_id : null, nu: nalezingBij(z),
       eerdere: sectie(t, 'Eerdere opties', 12000), aangepast: tekstVeld(fmWaarde(t, 'aangepast'), 60) || null, zoekt: zoektBij(z),
-      advies_controle: adviesControle(z, R.fmLijst(t, 'eisen').map((x) => tekstVeld(x, 200)).filter(Boolean)), prijshistorie: prijshistorieBij(z) }) } };
+      advies_controle: adviesControle(z, R.fmLijst(t, 'eisen').map((x) => tekstVeld(x, 200)).filter(Boolean)), prijshistorie: prijshistorieBij(z), bestelling: bestellingDetail(z, p.rel) }) } };
   }
   // POST …/nalezen (wv2454): de opties van een open zoektocht opnieuw lezen. Async; o.lezer(url) → Promise<uitkomst | null>.
   async function nalezen(id) {
@@ -1097,6 +1148,64 @@ function maak(o) {
     if (ok) return { status: 200, body: { ok: true, gekocht: Object.assign({}, nieuw, { via: 'app' }) } };
     return { status: 409, body: { ok: false, fout: reden === 'anders' ? 'de aankoop veranderde intussen; laad de zoektocht opnieuw' : 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
   }
+  // ── wv4183 (2C70 stap 1): "Was dit hem?" ──
+  // De bestellingen uit Pakjes (o.bestellingen(sinds), alleen lezen; geen Pakjes = geen vraag) en de antwoorden van David (o.bestellingPad,
+  // { <zoektocht-id>: [{w, p, tot, a, t}] }, 180 dagen bewaard, hooguit 500 rijen)
+  function bestellingenNu() {
+    if (typeof o.bestellingen !== 'function') return [];
+    try { const l = o.bestellingen(new Date(nu().getTime() - BESTEL_TERUG).toISOString()); return Array.isArray(l) ? l : []; } catch (e) { return []; }
+  }
+  function bestelAntwoorden() { return jsonStaat(o.bestellingPad); }
+  function bestelBewaar(zid, rij) {
+    const st = bestelAntwoorden(), grens = nu().getTime() - BESTEL_BEWAAR, alle = [];
+    st[zid] = (Array.isArray(st[zid]) ? st[zid] : []).concat([rij]);
+    for (const k of Object.keys(st)) if (ID_RE.test(k) && Array.isArray(st[k])) for (const r of st[k]) if (r && Date.parse(r.t) > grens) alle.push([k, r]);
+    alle.sort((a, b) => (a[1].t < b[1].t ? 1 : -1));
+    const uit = {};
+    for (const [k, r] of alle.slice(0, MAX_BESTEL_STAAT)) (uit[k] = uit[k] || []).push(r);
+    jsonBewaar(o.bestellingPad, uit);
+  }
+  // De factuur bij de bestelling: Facturen alleen lezen, zelfde entiteit en leverancier als facturenBij, factuurdatum 1 dag vóór tot 7 dagen
+  // na de bestelling, met bedrag; precies één = die, anders geen (geen gok)
+  function factuurBijBestelling(z, b) {
+    const l = metFacturen((db) => facturenBij(db, Object.assign({}, z, { gekocht: { optie: b.optie, winkel: b.winkel, bedrag_eur: null, datum: b.dag } }), [-1, 7]));
+    const mb = Array.isArray(l) ? l.filter((f) => f.bedrag_eur != null) : [];
+    return mb.length === 1 ? { id: mb[0].id, leverancier: mb[0].leverancier, factuurdatum: mb[0].factuurdatum, bedrag_eur: mb[0].bedrag_eur } : null;
+  }
+  // POST …/bestelling {pakje, antwoord: 'ja'|'nee'}: Davids antwoord op "was dit hem?". De pod rekent de vraag opnieuw uit; alleen als het
+  // pakje nog precies de vraag is. Ja = gekocht (winkel van de pagina, datum = dag van de bestelling, bedrag alleen uit die ene factuur,
+  // opmerking "uit je bestelmail"), getoetst onder het slot. Nee = deze bestelling (en rijen van dezelfde winkel tot 3 dagen later) vraagt
+  // bij deze zoektocht niet meer. Beide komen in de antwoorden, zodat ook "Toch niet gekocht" de vraag niet terugbrengt.
+  function bestelling(id, d) {
+    if (!d || typeof d !== 'object' || Array.isArray(d) || Object.keys(d).some((k) => k !== 'pakje' && k !== 'antwoord')
+      || typeof d.pakje !== 'string' || !PAKJE_RE.test(d.pakje) || (d.antwoord !== 'ja' && d.antwoord !== 'nee')) return { status: 400, body: { ok: false, fout: 'alleen pakje en antwoord (ja of nee)' } };
+    if (!o.bestellingPad || typeof o.bestellingen !== 'function') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    const v = vind(id);
+    if (v.fout) return v.fout;
+    if (v.z.status !== 'open') return { status: 409, body: { ok: false, fout: 'deze zoektocht staat niet meer open' } };
+    const lijst = bestellingenNu(), ant = bestelAntwoorden()[id];
+    const b = bestellingVoor(v.z, v.p.rel, lijst, ant);
+    if (!b || b.pakje !== d.pakje) return { status: 409, body: { ok: false, fout: 'deze vraag geldt niet meer; laad de zoektocht opnieuw' } };
+    const rij = { w: b.w, p: b.pakje, tot: b.dag, a: d.antwoord, t: nu().toISOString() };
+    if (d.antwoord === 'nee') {
+      try { bestelBewaar(id, rij); } catch (e) { return { status: 503, body: { ok: false, fout: 'niet bewaard; probeer het zo opnieuw' } }; }
+      return { status: 200, body: { ok: true, antwoord: 'nee' } };
+    }
+    const f = factuurBijBestelling(v.z, b);
+    const nieuw = { optie: b.optie, winkel: b.winkel, bedrag_eur: f ? bedrag(String(f.bedrag_eur)) : null, datum: b.dag, opmerking: BESTEL_OPMERKING };
+    let reden = null;
+    const ok = o.vv.wijzig(path.join(o.vault, v.p.rel), function (t) {
+      const fm = /^---\n([\s\S]*?)\n---/.exec(t || '');
+      const z = fm ? ontleed(t, v.p.rel, v.p.ent) : null;
+      if (!z || z.status !== 'open') { reden = 'anders'; return null; }
+      const b2 = bestellingVoor(z, v.p.rel, lijst, ant);   // onder het slot: dezelfde vraag op de herlezen pagina (opties kunnen veranderd zijn)
+      if (!b2 || b2.pakje !== b.pakje || b2.winkel !== b.winkel || b2.optie !== b.optie) { reden = 'anders'; return null; }
+      return '---\n' + zetStatusRegels(fm[1], 'gekocht', gekochtRegel(nieuw)) + '\n---' + t.slice(fm[0].length);
+    });
+    if (!ok) return { status: 409, body: { ok: false, fout: reden === 'anders' ? 'deze zoektocht veranderde intussen; laad hem opnieuw' : 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
+    try { bestelBewaar(id, rij); } catch (e) { /* de pagina is de bron; zonder antwoord kan "Toch niet gekocht" de vraag terugbrengen */ }
+    return { status: 200, body: { ok: true, status: 'gekocht', gekocht: Object.assign({}, nieuw, { via: 'app' }) } };
+  }
   // ── wv2935 fase 3: tab Winkels en de score bij de echte verkoper ──
   const winkelsMod = W ? W.maak({ scorePad: o.scorePad || null, scoreLezer: o.scoreLezer || null, nu, sleutels: { sleutelVan, hostKern, woorden } }) : null;
   function winkelsEnScores() { const t = lees(FAVORIETEN); return { pagina: t, winkels: t == null ? [] : W.winkelsVan(t), scores: winkelsMod.scores() }; }
@@ -1134,7 +1243,7 @@ function maak(o) {
     const a = o.aanwijsPad ? jsonStaat(o.aanwijsPad)[maandNl()] : null;   // wv2946: aantal tikken op Zoek met Shopper deze maand (geen tekst)
     return Object.assign({ aan: true }, laatst || { op: null, zoektochten: null, open: null, onleesbaar: null, favorieten: null }, { aanwijzen_maand: Number.isInteger(a) ? a : 0 });
   }
-  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, antwoord, bedrag: bedragUitFactuur, info, vergelijk, winkels: winkelsMod ? winkels : null, aanwijs };
+  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, antwoord, bedrag: bedragUitFactuur, bestelling, info, vergelijk, winkels: winkelsMod ? winkels : null, aanwijs };
 }
 
-module.exports = { maak, kandidatenBlok, ontleed, adviesControle, eenheidStuks, poortVrij, nieuwOpdracht, POORT_FOUT, nuVan, btwVeld, zetEisenRegels, opnieuwOpdracht, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
+module.exports = { maak, bestellingVoor, beginVan, kandidatenBlok, ontleed, adviesControle, eenheidStuks, poortVrij, nieuwOpdracht, POORT_FOUT, nuVan, btwVeld, zetEisenRegels, opnieuwOpdracht, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };

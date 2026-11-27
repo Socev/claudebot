@@ -1278,6 +1278,97 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
       && /\\\/bedrag\$\/[\s\S]{0,200}shopper_status[\s\S]{0,200}shopper\.bedrag\(m\[1\], d\)/.test(bl16));
   }
 
+  // ── 17. wv4183 (2C70 stap 1): "Was dit hem?" — bestelling uit Pakjes bij een optie-winkel van een open zoektocht ──
+  {
+    const V17 = path.join(W, 'vault17');
+    for (const mp of S.MAPPEN) fs.mkdirSync(path.join(V17, mp[2]), { recursive: true });
+    const TG = '10_Zakelijk/Tolgaarde/Shopper', PRV = '20_Prive/Shopper';
+    const PB = path.join(V17, TG, 'Shopper - 2026-11-20 - Proefkopjes.md'), PP = path.join(V17, PRV, 'Shopper - 2026-11-02 - Proefplisse.md');
+    const bronB = pagina(['type: shopper-zoektocht', 'wens: "Proefkopjes"', 'status: open', 'gezocht: 2026-11-20T15:30+01:00', 'opties:',
+      opt('o1', { w: 'Proefmedisch', p: 10.95, v: 6.5, t: 50.3, u: 'https://www.proefmedisch.nl/p/1' }), opt('o2', { w: 'Proefmedisch', p: 10.95, v: 6.5, t: 50.3, u: 'https://www.proefmedisch.nl/p/2' }),
+      opt('o3', { w: 'Andere Proefzaak', p: 18, v: 0, t: 72, u: 'https://www.andereproefzaak.nl/p/3' }), 'advies: o1'], '# Proefkopjes\n\nlijf blijft\n');
+    fs.writeFileSync(PB, bronB);
+    fs.writeFileSync(PP, pagina(['type: shopper-zoektocht', 'wens: "Proefplisse"', 'status: open', 'gezocht: 2026-11-06T09:48+01:00', 'opties:',
+      opt('o1', { w: 'bol', p: 44.99, v: 0, t: 44.99, u: 'https://www.bol.com/nl/nl/p/x/1/' }), 'advies: o1']));
+    fs.writeFileSync(path.join(V17, TG, 'Shopper - 2026-11-10 - Al gekocht.md'), pagina(['type: shopper-zoektocht', 'wens: "Al gekocht"', 'status: gekocht', 'gezocht: 2026-11-10T09:00+01:00', 'opties:',
+      opt('o1', { w: 'Proefmedisch', p: 1, v: 0, t: 1, u: 'https://www.proefmedisch.nl/p/9' })]));
+    // de bestellingen uit Pakjes: een echte pakjes.js op een eigen map (verzonnen rijen)
+    const P = require('./pakjes.js'), PD = path.join(W, 'pakjes17'), pk = P.maak({ dir: PD, nu: () => Date.parse('2026-11-27T12:00:00Z') });
+    pk.bestellingen('2026-01-01T00:00:00Z');
+    const { DatabaseSync } = require('node:sqlite'), pdb = new DatabaseSync(path.join(PD, 'pakjes.sqlite'));
+    const zr = (id, sleutel, winkel, eerste, verborgen) => pdb.prepare("INSERT INTO zending (id, sleutel, vervoerder, winkel, eerste, bijgewerkt, verborgen) VALUES (?, ?, 'winkel', ?, ?, ?, ?)").run(id, sleutel, winkel, eerste, eerste, verborgen || null);
+    zr('aaaaaaaaaaa1', 'winkel:proefmedisch.nl:111', 'Proefmedisch', '2026-11-20T08:00:00.000Z');     // vóór de zoektocht (zelfde dag, 's ochtends)
+    zr('aaaaaaaaaaa2', 'winkel:proefmedisch.nl:222', 'Proefmedisch', '2026-11-21T10:00:00.000Z');     // de bestelling
+    zr('aaaaaaaaaaa3', 'winkel:heelanders.nl:333', 'Heel Andere Winkel', '2026-11-22T10:00:00.000Z');   // andere winkel
+    zr('aaaaaaaaaaa4', 'winkel:bol.com:444', 'bol', '2026-11-24T09:00:00.000Z');                      // bestelmail bol
+    zr('aaaaaaaaaaa5', 'dhl:CODE5', 'bol', '2026-11-24T14:00:00.000Z');                               // vervoerderrij van dezelfde bestelling
+    zr('aaaaaaaaaaa6', 'winkel:proefbol.nl:666', 'Proefbol', '2026-11-25T09:00:00.000Z');              // Proefbol ≠ bol
+    zr('aaaaaaaaaaa7', 'winkel:proefmedisch.nl:777', 'Proefmedisch', '2026-11-26T09:00:00.000Z', '2026-11-26T10:00:00.000Z');   // verborgen
+    zr('aaaaaaaaaaa8', 'winkel:proefmedisch.nl:888', 'Proefmedisch', '2026-09-01T09:00:00.000Z');     // ouder dan 45 dagen
+    pdb.prepare("INSERT INTO zending (id, sleutel, vervoerder, winkel, eerste, bijgewerkt) VALUES ('aaaaaaaaaaa9', 'dpd:X', 'dpd', NULL, '2026-11-25T09:00:00.000Z', '2026-11-25T09:00:00.000Z')").run();
+    let pl = pk.bestellingen('2026-01-01T00:00:00Z');
+    toets('17a pakjes.bestellingen: id, winkel, dag, eerste, domein uit een winkelrij; geen verborgen, geen zonder winkel, niet ouder dan 45 dagen', pl.length === 6
+      && pl.find((x) => x.id === 'aaaaaaaaaaa2').domein === 'proefmedisch.nl' && pl.find((x) => x.id === 'aaaaaaaaaaa5').domein === null && pl.find((x) => x.id === 'aaaaaaaaaaa2').dag === '2026-11-21'
+      && !pl.some((x) => ['aaaaaaaaaaa7', 'aaaaaaaaaaa8', 'aaaaaaaaaaa9'].includes(x.id)), pl);
+    // Facturen: één passende factuur van Proefmedisch op 21-11 (tolgaarde) en een oudere buiten het venster
+    const F = require('./facturen-db.js'), FD = path.join(W, 'facturen17'), fdb = F.open(FD), db = fdb.db, fnu = '2026-11-21T10:00:00.000Z';
+    for (const e of ['groenhouten', 'tolgaarde', 'prive']) db.prepare('INSERT INTO entiteit (sleutel, naam) VALUES (?, ?)').run(e, 'Proef ' + e);
+    db.prepare('INSERT INTO leverancier (id, naam, genormaliseerd, aangemaakt_op) VALUES (?, ?, ?, ?)').run('b000000000000001', 'Proefmedisch.nl - Proef en Zonen B.V.', 'proefmedisch', fnu);
+    let fnr = 0;
+    const fac = (datum, c) => { fnr++; const h = String(fnr).padStart(15, '0'); db.prepare('INSERT INTO document (id, sha256, soort, aangemaakt_op) VALUES (?, ?, ?, ?)').run('d' + h, String(fnr).padStart(64, '1'), 'pdf', fnu);
+      db.prepare('INSERT INTO factuur (id, document, soort, leverancier, leverancier_naam, factuurdatum, incl, incl_eur, valuta, entiteit, status, aangemaakt_op, bijgewerkt_op) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run('f' + h, 'd' + h, 'factuur', 'b000000000000001', null, datum, c, c, 'EUR', 'tolgaarde', 'te_beoordelen', fnu, fnu); return 'f' + h; };
+    const fJuist = fac('2026-11-21', 4930); fac('2026-11-09', 2190);
+    F.sluit ? F.sluit(fdb) : db.close();
+    let klok17 = new Date('2026-11-27T12:00:00Z');
+    const ST17 = path.join(W, 'bestelling17.json');
+    const m17 = S.maak({ vault: V17, vv: VV, nu: () => klok17, bestellingen: (s) => pk.bestellingen(s), bestellingPad: ST17, facturenPad: () => path.join(FD, 'facturen.sqlite') });
+    const L17 = () => m17.lijst().body.zoektochten, zw = (w) => L17().find((x) => x.wens === w);
+    const kB = zw('Proefkopjes'), kP = zw('Proefplisse');
+    toets('17b lijst: bij een open zoektocht de nieuwste bestelling bij een optie-winkel na het begin (winkel van de pagina, dag); bij gekocht geen vraag',
+      JSON.stringify(kB.bestelling) === JSON.stringify({ winkel: 'Proefmedisch', dag: '2026-11-21' }) && JSON.stringify(kP.bestelling) === JSON.stringify({ winkel: 'bol', dag: '2026-11-24' })
+      && !zw('Al gekocht').bestelling, [kB.bestelling, kP.bestelling, zw('Al gekocht').bestelling]);
+    const dB = m17.zoektocht(kB.id).body.zoektocht.bestelling;
+    toets('17c zoektocht: pakje, geen optie (twee opties bij die winkel), de ene factuur in het venster met bedrag', dB && dB.pakje === 'aaaaaaaaaaa2' && dB.optie === null && dB.factuur && dB.factuur.id === fJuist && dB.factuur.bedrag_eur === 49.3, dB);
+    const zB = S.ontleed(bronB, TG + '/Shopper - 2026-11-20 - Proefkopjes.md', ['tolgaarde', 'Tolgaarde'], []);
+    const bv = (lijst, rel) => S.bestellingVoor(zB, rel || TG + '/Shopper - 2026-11-20 - Proefkopjes.md', lijst, []);
+    toets('17d bestelling dezelfde dag maar vóór de zoektocht = geen vraag (review ZOU 1)', bv([pl.find((x) => x.id === 'aaaaaaaaaaa1')]) === null);
+    toets('17e bestelling bij een andere winkel = geen vraag; Proefbol is niet bol', bv([pl.find((x) => x.id === 'aaaaaaaaaaa3')]) === null
+      && S.bestellingVoor(S.ontleed(fs.readFileSync(PP, 'utf8'), PRV + '/Shopper - 2026-11-02 - Proefplisse.md', ['prive', 'Privé'], []), PRV + '/Shopper - 2026-11-02 - Proefplisse.md', [pl.find((x) => x.id === 'aaaaaaaaaaa6')], []) === null);
+    toets('17f afzenderdomein telt ook (mail.proefmedisch.nl bij een andere weergavenaam); één optie = die optie', (() => {
+      const z1 = S.ontleed(bronB.replace(/\n  - \{id: o2[^\n]*/, ''), TG + '/Shopper - 2026-11-20 - Proefkopjes.md', ['tolgaarde', 'Tolgaarde'], []);
+      const b = S.bestellingVoor(z1, TG + '/Shopper - 2026-11-20 - Proefkopjes.md', [{ id: 'bbbbbbbbbbb1', winkel: 'Webshop Klantenservice', dag: '2026-11-22', eerste: '2026-11-22T09:00:00.000Z', domein: 'mail.proefmedisch.nl' }], []);
+      return b && b.optie === 'o1' && b.winkel === 'Proefmedisch'; })());
+    toets('17g begin: bestandsdag eerder dan gezocht (Opnieuw zoeken) = vanaf de bestandsdag', S.beginVan(PRV + '/Shopper - 2026-11-02 - Proefplisse.md', { gezocht: '2026-11-06T09:48+01:00' }) < Date.parse('2026-11-02T00:00:00+01:00')
+      && S.beginVan(TG + '/Shopper - 2026-11-20 - Proefkopjes.md', { gezocht: '2026-11-20T15:30+01:00' }) === Date.parse('2026-11-20T13:30:00Z'));
+    let r17 = m17.bestelling(kB.id, { pakje: 'aaaaaaaaaaa1', antwoord: 'ja' });
+    toets('17h ander pakje dan de vraag = 409; ongeldig/extra veld/ander antwoord = 400; onbekende zoektocht = 404', r17.status === 409
+      && m17.bestelling(kB.id, { pakje: 'xyz', antwoord: 'ja' }).status === 400 && m17.bestelling(kB.id, { pakje: 'aaaaaaaaaaa2', antwoord: 'ja', bedrag_eur: 1 }).status === 400
+      && m17.bestelling(kB.id, { pakje: 'aaaaaaaaaaa2', antwoord: 'misschien' }).status === 400 && m17.bestelling('000000000000', { pakje: 'aaaaaaaaaaa2', antwoord: 'ja' }).status === 404, r17);
+    r17 = m17.bestelling(kB.id, { pakje: 'aaaaaaaaaaa2', antwoord: 'ja' });
+    const naB = fs.readFileSync(PB, 'utf8');
+    toets('17i Ja: gekocht met winkel van de pagina, bedrag uit de factuur, datum van de bestelling, opmerking; rest byte-gelijk', r17.status === 200
+      && /\nstatus: gekocht\ngekocht: \{optie: null, winkel: "Proefmedisch", bedrag_eur: 49\.3, datum: "2026-11-21", opmerking: "uit je bestelmail", via: app\}\n/.test(naB)
+      && naB.replace(/status: gekocht\ngekocht: [^\n]*\n/, 'status: open\n') === bronB, [r17, naB.slice(0, 300)]);
+    toets('17j na Ja: tweede Ja = 409 (staat niet meer open); geen vraag meer in de lijst', m17.bestelling(kB.id, { pakje: 'aaaaaaaaaaa2', antwoord: 'ja' }).status === 409 && !zw('Proefkopjes').bestelling);
+    const terug = m17.status(kB.id, { status: 'open' });
+    toets('17k Toch niet gekocht: weer open, maar dezelfde bestelling vraagt niet opnieuw', terug.status === 200 && zw('Proefkopjes').status === 'open' && zw('Proefkopjes').bestelling === null, [terug, zw('Proefkopjes')]);
+    r17 = m17.bestelling(kP.id, { pakje: 'aaaaaaaaaaa5', antwoord: 'nee' });
+    toets('17l Nee: 200, pagina ongewijzigd; ook de andere rij van dezelfde bestelling (bestelmail) vraagt niet meer', r17.status === 200 && /status: open/.test(fs.readFileSync(PP, 'utf8'))
+      && zw('Proefplisse').bestelling === null && m17.bestelling(kP.id, { pakje: 'aaaaaaaaaaa5', antwoord: 'nee' }).status === 409, [r17, zw('Proefplisse').bestelling]);
+    zr('aaaaaaaaaab1', 'winkel:bol.com:555', 'bol', '2026-11-28T09:00:00.000Z');   // meer dan 3 dagen na de Nee-bestelling
+    toets('17m een nieuwe bestelling bij die winkel ruim 3 dagen later = wel weer één vraag', JSON.stringify(zw('Proefplisse').bestelling) === JSON.stringify({ winkel: 'bol', dag: '2026-11-28' }), zw('Proefplisse').bestelling);
+    const st17 = JSON.parse(fs.readFileSync(ST17, 'utf8'));
+    toets('17n staatbestand 0600, alleen sleutel/pakje/dag/antwoord/tijd (geen wens of bedrag)', (fs.statSync(ST17).mode & 0o777) === 0o600 && Object.keys(st17).length === 2
+      && Object.values(st17).flat().every((x) => JSON.stringify(Object.keys(x).sort()) === JSON.stringify(['a', 'p', 't', 'tot', 'w'])), st17);
+    const m17z = S.maak({ vault: V17, vv: VV, nu: () => klok17 });
+    toets('17o zonder Pakjes-koppeling: geen vraag, route 404', m17z.lijst().body.zoektochten.every((x) => !x.bestelling) && m17z.bestelling(kP.id, { pakje: 'aaaaaaaaaab1', antwoord: 'nee' }).status === 404);
+    const src17 = fs.readFileSync('server.js', 'utf8'), bl17 = src17.slice(src17.indexOf('const shopper = (function () {'), src17.indexOf('// ── einde OVIS Shopper ──'));
+    toets('17p server.js: route bestelling (statusteller), bestellingen uit pakjes en bestellingPad in de klokken-map', /\\\/bestelling\$\/[\s\S]{0,200}shopper_status[\s\S]{0,200}shopper\.bestelling\(m\[1\], d\)/.test(bl17)
+      && /bestellingen: function \(sinds\) \{ return typeof pakjes !== 'undefined' && pakjes && typeof pakjes\.bestellingen === 'function'/.test(bl17) && /'shopper-bestelling\.json'/.test(bl17));
+    pdb.close(); pk.sluit();
+  }
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
