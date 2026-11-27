@@ -81,6 +81,13 @@ if (S) {
   const l9 = S.herlees(l8, Buffer.from(JSON.stringify({ type: 'system', subtype: 'init' }) + '\n' + SE({ type: 'message_start', message: {} }) + '\n' + SE({ type: 'message_start', message: {} }) + '\n' + blokStart(0, 'tool_use') + '\n'), {});
   const nf = l9.fasen();
   toets('A13 herlees: oude tijden winnen, aantallen van de hele buffer, merk herlezen', nf.init === oudF.init && nf.model === oudF.model && nf.stappen === 2 && nf.tools === 1 && typeof nf.werk === 'number' && nf.herlezen === true, [oudF, nf]);
+  // Codex ZOU 1: na herverbinden een nieuw laatste tekstblok → antwoord niet van de oude lezer
+  const la = S.maakLezer({}); la.voeg(blokStart(0, 'text') + '\n'); const oa = la.fasen();
+  for (const t5 = Date.now(); Date.now() - t5 < 5;) {}   // nieuwe tijd moet aantoonbaar later zijn
+  const lb = S.herlees(la, Buffer.from(blokStart(0, 'text') + '\n' + blokStart(1, 'tool_use') + '\n' + blokStart(0, 'text') + '\n'), {});
+  const lc = S.herlees(la, Buffer.from(blokStart(0, 'text') + '\n' + blokStart(1, 'tool_use') + '\n'), {});
+  toets('A15 herlees: nieuw tekstblok → nieuwe antwoordtijd; zelfde blok → oude', lb.fasen().blokken === 2 && lb.fasen().antwoord > oa.antwoord && lb.fasen().tekst === oa.tekst
+    && lc.fasen().antwoord === oa.antwoord, [oa, lb.fasen(), lc.fasen()]);
   const l10 = S.maakLezer({}); l10.voeg('{"type":"assistant","message":{"content":[{"type":"text","text":"\\"subtype\\":\\"init\\""}]}}\n');
   toets('A14 tekst met "subtype":"init" in een assistant-regel telt niet als init', l10.fasen().init == null, l10.fasen());
   // knip

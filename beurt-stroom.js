@@ -50,7 +50,7 @@ function maakLezer(o) {
       const t = ev.content_block && ev.content_block.type;
       if (t === 'thinking' || t === 'redacted_thinking') eerst('denk');
       else if (t === 'tool_use' || t === 'server_tool_use') { eerst('werk'); f.tools++; }
-      else if (t === 'text') { eerst('tekst'); f.antwoord = Date.now(); }
+      else if (t === 'text') { eerst('tekst'); f.antwoord = Date.now(); f.blokken = (f.blokken || 0) + 1; }
       if (t === 'text') { blokTekst = true; zetDeel(typeof ev.content_block.text === 'string' ? ev.content_block.text : ''); }
       else blokTekst = false;   // tool_use / thinking: het vorige tekstblok blijft staan tot er een nieuw begint
       return;
@@ -80,7 +80,16 @@ function maakLezer(o) {
     deel: function () { return deel; },
     fasen: function () { return Object.assign({}, f); },
     // herlees: tijden van de vorige lezer winnen (deze lezer las alles opnieuw in één keer), aantallen komen van de volledige buffer
-    neemFasen: function (oud) { if (!oud) return; Object.keys(oud).forEach(function (k) { if (k !== 'stappen' && k !== 'tools' && oud[k] != null) f[k] = oud[k]; }); f.herlezen = true; },
+    // Codex ZOU 1: antwoord alleen van de oude lezer als er sindsdien geen nieuw tekstblok begon (anders wijst het naar een eerder blok)
+    neemFasen: function (oud) {
+      if (!oud) return;
+      Object.keys(oud).forEach(function (k) {
+        if (k === 'stappen' || k === 'tools' || k === 'blokken' || oud[k] == null) return;
+        if (k === 'antwoord' && (f.blokken || 0) > (oud.blokken || 0)) return;
+        f[k] = oud[k];
+      });
+      f.herlezen = true;
+    },
   };
 }
 // Hele buffer opnieuw (loper slot-volg): nieuwe lezer, en de oude result-regel blijft als de nieuwe er geen vond (afgekapte buffer).
