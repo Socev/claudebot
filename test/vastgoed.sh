@@ -20,8 +20,8 @@ if echo "$W" | grep -nE "\bfetch\s*\(|process\.|import\(|console\.|\beval\(|new 
 g=0
 grep -q "const vastgoedApp = (function () {" server.js || { echo "ROOD  server.js: vastgoedApp ontbreekt"; g=1; }
 P=$(grep -oE "POST \\\\/app\\\\/vastgoed\\\\/\([a-z|-]+\)" server.js)
-[ "$P" = 'POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar|gezien|kelder-pdf)' ] || { echo "ROOD  server.js: POST-routes van Vastgoed zijn niet precies de negen ($P)"; g=1; }   # wv4182: + gezien, kelder-pdf
-grep -qF "['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar', 'woz-bezwaar', 'gezien', 'kelder-pdf'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });" server.js || { echo "ROOD  server.js: Vastgoed-routes verlengen de sessie niet"; g=1; }
+[ "$P" = 'POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar|gezien|kelder-pdf|project-concept)' ] || { echo "ROOD  server.js: POST-routes van Vastgoed zijn niet precies de tien ($P)"; g=1; }   # wv4182: + gezien, kelder-pdf; wv4231: + project-concept
+grep -qF "['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar', 'woz-bezwaar', 'gezien', 'kelder-pdf', 'project-concept'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });" server.js || { echo "ROOD  server.js: Vastgoed-routes verlengen de sessie niet"; g=1; }
 grep -qF "p === '/app/vastgoed/woz-lees') ? APP_OSINT_BESTAND_MAX_BODY" server.js || { echo "ROOD  server.js: woz-lees heeft niet de bestandsgrens (10 MB)"; g=1; }
 grep -qE "^\s+vastgoed: typeof vastgoedInfo === 'function'" server.js || { echo "ROOD  server.js: /health.vastgoed ontbreekt"; g=1; }
 grep -qE "^RELEASE_OPTIONEEL=\".* vastgoed\.js" uitrol.sh || { echo "ROOD  uitrol.sh: vastgoed.js niet in RELEASE_OPTIONEEL"; g=1; }
@@ -56,6 +56,8 @@ VASTGOED_JS="$VJS" node --test test/vastgoed-kelder.test.js >/dev/null 2>&1 && e
 VASTGOED_JS="$VJS" node --test test/vastgoed-buurt.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-buurt.test.js (L38: buurtwachter, nooit twee keer dezelfde)" || { echo "ROOD  test/vastgoed-buurt.test.js"; f=1; }
 VASTGOED_JS="$VJS" node --test test/vastgoed-binnenkort.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-binnenkort.test.js (L40: Loopt nu, Binnenkort, Nieuw; register)" || { echo "ROOD  test/vastgoed-binnenkort.test.js"; f=1; }
 VASTGOED_JS="$VJS" node --test test/vastgoed-kostte.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-kostte.test.js (L42: offerte naast betaald, wat het huis kostte)" || { echo "ROOD  test/vastgoed-kostte.test.js"; f=1; }
+# wv4231 (L43): projectkaart per lopend project (wachtpunten, geld, vergunning, stukken, mailconcept)
+VASTGOED_JS="$VJS" node --test test/vastgoed-project.test.js >/dev/null 2>&1 && echo "GROEN test/vastgoed-project.test.js (L43: projectkaart)" || { echo "ROOD  test/vastgoed-project.test.js"; f=1; }
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 python3 -I test/vastgoed-laag.py "$OPY" "$T" | tail -1; python3 -I test/vastgoed-laag.py "$OPY" "$T" >/dev/null 2>&1 || { echo "ROOD  test/vastgoed-laag.py"; f=1; }
 

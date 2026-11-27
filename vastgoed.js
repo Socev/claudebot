@@ -1333,10 +1333,156 @@ function binnenkortNodig(tekst, regels) {
   });
 }
 
+// ── wv4231 (besluitenpagina nr 943 = L43, Fable-review "Een 9 - vastgoed" G1): een projectkaart per lopend project ──
+// Puur. Per huispagina met status lopend (looptUit) één kaart die zichzelf bijhoudt uit wat er al is: stand (laatste besluit), wachtpunten
+// (tabel "## Wachtpunten" op de pagina + open rijen van de Correspondentie-Wachter op een maildomein dat op de pagina staat; nooit geraden uit
+// vrije tekst), geld (de verbouwing uit kostte: schatting / offerte / meerwerk naast betaald, en het effect als je het leent), vergunning (eigen
+// bekendmakingen van de buurtwachter op straat + huisnummer, met de termijnen) en stukken (vault, naam bevat het projectwoord).
+//   ## Wachtpunten
+//   | Wat | Wie | Sinds | Mail | Klaar |
+//   | eerste schatting van de kosten | Jan | 7-11-2026 | jan@voorbeeld.nl | |
+const PK_MAX_WACHT = 5, PK_MAX_STUK = 8, PK_CW_MS = 15 * 60 * 1000;
+const PK_ALGEMEEN = /^(gmail|googlemail|hotmail|outlook|live|icloud|me|yahoo|ziggo|kpnmail|kpnplanet|planet|xs4all|home|hetnet|chello|upcmail|telfort|tele2|casema|quicknet|zeelandnet|online|caiway|onsbrabantnet|example)\.(com|nl|ne[t]|org)$/i;   // ne[t]: de CI-poort zoekt het losse woord n-e-t
+const PK_EIGEN = /(^|\.)(huisartsentolgaarde|hapleusden|huisartsengroenhouten|sociaalleusden|socev)\.(nl|dev)$/i;
+const PK_MAIL = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
+const pkDagen = (van, tot) => (isoVeilig(van) && isoVeilig(tot) ? Math.round((Date.parse(tot + 'T12:00:00Z') - Date.parse(van + 'T12:00:00Z')) / 86400000) : null);
+const pkPlus = (dag, n) => (isoVeilig(dag) ? new Date(Date.parse(dag + 'T12:00:00Z') + n * 86400000).toISOString().slice(0, 10) : null);
+function leesWachtpunten(md) {
+  const t = tabelOnder(String(md || ''), /^Wachtpunten\b/i);
+  if (!t) return [];
+  const kol = (re) => t.koppen.findIndex((x) => re.test(x));
+  const iW = kol(/^wat\b/), iV = kol(/^wie\b/), iS = kol(/^sinds\b/), iM = kol(/^mail/), iK = kol(/^klaar\b/);
+  if (iW < 0 || iS < 0) return [];
+  const uit = [];
+  for (const r of t.rijen) {
+    const c = r.map(kaal);
+    const wat = (c[iW] || '').slice(0, 160), sinds = datumUit(c[iS] || '');
+    if (!wat || !sinds) continue;
+    if (iK >= 0 && datumUit(c[iK] || '')) continue;   // klaar
+    const mail = iM >= 0 ? String(c[iM] || '').trim().toLowerCase() : '';
+    uit.push({ wat, wie: iV >= 0 ? (c[iV] || '').slice(0, 80) || null : null, sinds, mail: PK_MAIL.test(mail) ? mail : null, bron: 'pagina' });
+  }
+  return uit;
+}
+function pkDomeinen(md) {   // maildomeinen die letterlijk op de projectpagina staan (zonder algemene providers en Davids eigen domeinen)
+  const d = new Set();
+  for (const m of String(md || '').matchAll(/[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})/g)) {
+    const x = m[1].toLowerCase();
+    if (!PK_ALGEMEEN.test(x) && !PK_EIGEN.test(x)) d.add(x);
+  }
+  return d;
+}
+function pkCwPunten(cw, domeinen) {
+  const uit = [];
+  for (const r of cw || []) {
+    if (!r || !['wacht', 'gemeld'].includes(String(r.status))) continue;
+    const mails = [...String(r.tegenpartij || '').matchAll(/[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})/g)];
+    const raak = mails.find((m) => domeinen.has(m[1].toLowerCase()));
+    if (!raak) continue;
+    const sinds = isoVeilig(String(r.verzonden_op || '').slice(0, 10)) ? String(r.verzonden_op).slice(0, 10) : null;
+    if (!sinds) continue;
+    const wie = String(r.tegenpartij || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 80) || null;
+    uit.push({ wat: String(r.onderwerp || '').replace(/\s+/g, ' ').trim().slice(0, 160) || 'antwoord op je mail', wie, sinds,
+      mail: PK_MAIL.test(raak[0]) ? raak[0].toLowerCase() : null, bron: r.type === 'belofte_david' ? 'belofte' : 'mailwachter' });
+  }
+  return uit;
+}
+function pkAdres(adres) {   // "Straat 16, 1234 AB Plaats" → { straat, nr, toev }
+  const m = /^\s*(.+?)\s+(\d{1,5})\s*(?:-?\s*([A-Za-z]{1,2}|\d{1,3}))?\s*(?:,|$)/.exec(String(adres || ''));
+  return m ? { straat: gesprekNorm(m[1]).replace(/\s+/g, ' '), nr: m[2], toev: m[3] ? m[3].toLowerCase() : null } : null;
+}
+function pkEigenBekendmaking(titel, a) {
+  if (!a) return false;
+  const t = gesprekNorm(titel).replace(/\s+/g, ' ');
+  const s = a.straat.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(?:^|[^a-z0-9])${s} ${a.nr}(?:\\s*-?\\s*([a-z]{1,2}|\\d{1,3}))?(?![a-z0-9])`, 'g');
+  for (const m of t.matchAll(re)) if ((m[1] || null) === a.toev) return true;
+  return false;
+}
+function pkVergunning(bekendmakingen, adres, vandaag) {
+  const a = pkAdres(adres);
+  const eigen = (bekendmakingen || []).filter((b) => b && b.titel && pkEigenBekendmaking(b.titel, a))
+    .sort((x, y) => String(y.datum || '').localeCompare(String(x.datum || ''))).slice(0, 5);
+  return eigen.map((b) => {
+    const t = String(b.titel);
+    const datum = isoVeilig(b.datum || '') ? b.datum : null;
+    const r = { titel: t.slice(0, 300), datum, url: typeof b.url === 'string' && BM_URL.test(b.url) ? b.url : null, soort: 'bekendmaking', termijnen: [] };
+    if (/verleend|besluit|geweigerd|buiten behandeling/i.test(t)) {
+      r.soort = /geweigerd/i.test(t) ? 'geweigerd' : /buiten behandeling/i.test(t) ? 'buiten behandeling' : 'besluit';
+      const tot = pkPlus(datum, 42);
+      if (tot) r.termijnen.push({ datum: tot, tekst: 'Indicatie: bezwaar kan ongeveer tot deze dag (zes weken na de bekendmaking). De echte termijn staat in het besluit zelf', voorbij: tot < vandaag, indicatie: true });
+    } else if (/aanvraag|aangevraagd|ontvangen|ingediend/i.test(t)) {
+      r.soort = 'aanvraag';
+      const b8 = pkPlus(datum, 56), b14 = pkPlus(datum, 98);
+      if (b8) r.termijnen.push({ datum: b8, tekst: 'Indicatie: een besluit rond deze dag als het de gewone procedure is (acht weken vanaf de ontvangst, die meestal iets vóór de bekendmaking ligt). Controleer de procedure en de termijn in de ontvangstbevestiging', voorbij: b8 < vandaag, indicatie: true });
+      if (b14) r.termijnen.push({ datum: b14, tekst: 'Indicatie: rond deze dag als de gemeente de termijn één keer met zes weken verlengt', voorbij: b14 < vandaag, indicatie: true });
+    }
+    return r;
+  });
+}
+function pkGeld(v, kern) {
+  if (!v) return { bedragen: [], schatting: null, offerte: null, meerwerk: null, betaald: null, nog: null, effect: null };
+  const per = { schatting: [], offerte: [], meerwerk: [] };
+  for (const o of v.offertes || []) {
+    const kop = String(o.kop || '');
+    const soort = /meerwerk/i.test(kop) ? 'meerwerk' : /schatting|raming|begroting|inschatting/i.test(kop) ? 'schatting' : 'offerte';
+    per[soort].push({ waarde: o.waarde, kop: kop || null });
+  }
+  const som = (l) => (l.length ? rond2(l.reduce((s, x) => s + x.waarde, 0)) : null);
+  const schatting = per.schatting.length ? per.schatting[per.schatting.length - 1].waarde : null;   // de laatste schatting telt (geen optelling van versies)
+  const offerte = som(per.offerte), meerwerk = som(per.meerwerk), betaald = v.betaald ?? null;
+  const verwacht = offerte !== null ? rond2(offerte + (meerwerk || 0)) : schatting !== null ? rond2(schatting + (meerwerk || 0)) : null;
+  const nog = verwacht !== null ? Math.max(0, rond2(verwacht - (betaald || 0))) : null;
+  const k = kern || {};
+  const effect = nog !== null ? { nog, op: offerte !== null ? 'offerte' : 'schatting',
+    restschuld_na: Number.isFinite(k.restschuld) ? Math.round(k.restschuld + nog) : null, overwaarde_na: Number.isFinite(k.overwaarde) ? Math.round(k.overwaarde - nog) : null } : null;
+  return { bedragen: ['schatting', 'offerte', 'meerwerk'].flatMap((s) => per[s].map((x) => Object.assign({ soort: s }, x))), schatting, offerte, meerwerk, betaald,
+    betalingen: (v.betalingen || []).length, buiten: (v.buiten || []).length > 0, verwacht, nog, effect };
+}
+// Alleen bouwprojecten krijgen een kaart (gemeten 27-11: ook een kachelklacht en de NAS staan op lopend): tag of titel moet over bouwen gaan.
+const PK_BOUW = /^(verbouwing|verbouw|kelder|aanbouw|uitbouw|renovatie|bouw|zwembad|tuin|terras|dakkapel|badkamer|keuken|zolder)$/i;
+function pkBouwproject(md) {
+  const tags = (frontVeld(md, 'tags') || '').replace(/^\[|\]$/g, '').split(',').map((x) => x.trim().replace(/^["']|["']$/g, ''));
+  return tags.some((x) => PK_BOUW.test(x)) || /\b(verbouw\w*|kelder|aanbouw|uitbouw|renovatie)\b/i.test(titel(String(md || '')) || '');
+}
+function pkWoord(naam) { const w = gesprekNorm(naam).split(/[^a-z0-9]+/).find((x) => x.length >= 4); return w || null; }
+// x: { vandaag, paginas: [{ pad, md }], kostte (won.kostte), kern (won.geld_kern), cw (rijen | null), bekendmakingen, buurt_op, adres, stukken }
+function projectKaarten(x) {
+  const vandaag = x.vandaag, uit = [];
+  for (const p of x.paginas || []) {
+    const l = looptUit(p.md, p.pad);
+    if (!l || !pkBouwproject(p.md)) continue;
+    const woord = pkWoord(l.naam);
+    const besluit = (() => { const a = String(p.md || '').split(/\n\s*\n/).filter((z) => /^\*\*(Besluit|Open|Volgende stap|Wacht)\b/.test(z.trim())); return a.length ? isoUitNl(a[a.length - 1].split('\n')[0]) : null; })();
+    const wp = leesWachtpunten(p.md).concat(x.cw ? pkCwPunten(x.cw, pkDomeinen(p.md)) : []);
+    const gezien = new Set();
+    const wachtpunten = wp.filter((w) => { const k = gesprekNorm(w.wat) + '|' + w.sinds; if (gezien.has(k)) return false; gezien.add(k); return true; })
+      .map((w) => Object.assign(w, { dagen: pkDagen(w.sinds, vandaag), sleutel: fnv([p.pad, w.wat, w.wie || '', w.sinds].join('|')) }))
+      .sort((a, b) => (b.dagen ?? -1) - (a.dagen ?? -1)).slice(0, PK_MAX_WACHT);
+    const v = ((x.kostte && x.kostte.verbouwingen) || []).find((z) => z.pagina === p.pad) || null;
+    const stukken = woord ? (x.stukken || []).filter((s) => gesprekNorm(s.naam).includes(woord))
+      .sort((a, b) => String(b.datum || '').localeCompare(String(a.datum || '')) || String(a.naam).localeCompare(String(b.naam))).slice(0, PK_MAX_STUK)
+      .map((s) => ({ naam: String(s.naam).replace(/\.\w{2,4}$/, '').slice(0, 160), pad: s.pad, datum: s.datum || null, soort: s.soort || null })) : [];
+    uit.push({ naam: l.naam, pagina: l.pagina, kelder: l.kelder, sinds: l.sinds, stand: l.stand, stand_op: besluit || l.sinds,
+      wachtpunten, wachter: x.cw ? { ok: true } : { ok: false, reden: x.cw_reden || 'de mailwachter is nu niet te lezen' },
+      geld: pkGeld(v, x.kern), vergunning: { eigen: pkVergunning(x.bekendmakingen, x.adres, vandaag), buurt_op: x.buurt_op || null }, stukken });
+  }
+  uit.sort((a, b) => (b.kelder - a.kelder) || String(b.sinds || '').localeCompare(String(a.sinds || '')));
+  return uit;
+}
+// Vaste tekst voor het mailconcept (geen taalmodel); David verstuurt zelf.
+function projectConceptTekst(p, w) {
+  const voornaam = String(w.wie || '').replace(/\(.*$/, '').trim().split(/\s+/)[0] || '';
+  const wat = String(w.wat).replace(/[.\s]+$/, '');
+  return { aan: w.mail, onderwerp: `${p.naam}: ${wat}`.slice(0, 150),
+    bericht: `${voornaam && /^[A-Z]/.test(voornaam) && !/@/.test(voornaam) ? 'Hoi ' + voornaam : 'Hallo'},\n\nHoe staat het met ${wat.charAt(0).toLowerCase() + wat.slice(1)}? Ik hoor graag wanneer ik het kan verwachten.\n\nGroet,\nDavid` };
+}
+
 function maak(o) {
   const map = o.map, vault = o.vault;
   const dbPad = path.join(map, 'vastgoed.sqlite');
   const bronnen = typeof o.bronnen === 'function' ? o.bronnen : null;
+  const wachter = typeof o.wachter === 'function' ? o.wachter : null;   // wv4231: open rijen van de Correspondentie-Wachter → { rijen, volledig }
   const nu = typeof o.nu === 'function' ? o.nu : () => new Date();
   const bankPad = o.bank || null, tibberPad = o.tibber || null;   // fase 2: alleen lezen (bank-archief transacties.sqlite, tibber.sqlite)
   function mappen() { if (!fs.existsSync(map)) fs.mkdirSync(map, { recursive: true, mode: 0o700 }); try { fs.chmodSync(map, 0o700); } catch (e) { /* niet van ons */ } }
@@ -1859,6 +2005,61 @@ function maak(o) {
   function kelderPdfGezet(hash) { metDb((db) => { metaZet(db, 'kelder_pdf_op', nu().toISOString()); if (hash) metaZet(db, 'kelder_pdf_hash', hash); }, true); }
   function gezien() { metDb((db) => { metaZet(db, 'gezien_op', nu().toISOString()); }, true); return { ok: true }; }
 
+  // ── wv4231 (L43): projectkaart per lopend project. De open mailwachter-rijen 15 min in het geheugen (n8n niet bij elke opening). ──
+  let cwCache = null;
+  async function cwRijen() {
+    if (!wachter) return { rijen: null, reden: 'de mailwachter is op deze pod niet gekoppeld' };
+    if (cwCache && nu().getTime() - cwCache.t < PK_CW_MS) return cwCache.w;
+    let w;
+    try { const r = await wachter(); w = r && Array.isArray(r.rijen) ? { rijen: r.rijen, volledig: r.volledig !== false } : { rijen: null, reden: 'de mailwachter gaf geen lijst' }; }
+    catch (e) { w = { rijen: null, reden: 'de mailwachter is nu niet te lezen' }; }
+    if (w.rijen) cwCache = { t: nu().getTime(), w };
+    return w;
+  }
+  function huisPaginas() {
+    const huis = path.join(vault, HUIS);
+    let namen = []; try { namen = fs.readdirSync(huis).filter((n) => n.endsWith('.md') && !n.startsWith('.')).sort().slice(0, 200); } catch (e) { return []; }
+    const uit = [];
+    for (const n of namen) { try { uit.push({ pad: `${HUIS}/${n}`, md: fs.readFileSync(path.join(huis, n), 'utf8') }); } catch (e) { /* weg */ } }
+    return uit;
+  }
+  async function projectenVan(u) {
+    const won = (u.objecten || []).find((x) => x.soort === 'woning' && !x.weg_op);
+    if (!won) return [];
+    const paginas = huisPaginas().filter((p) => /^(lopend|loopt)$/i.test(frontVeld(p.md, 'status') || ''));
+    if (!paginas.length) return [];
+    const bm = metDb((db) => {
+      if (!db || !db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bekendmaking'").get()) return { rijen: [], op: null };
+      return { rijen: db.prepare('SELECT id, datum, titel, url FROM bekendmaking WHERE object = ? ORDER BY datum DESC LIMIT 500').all(won.sleutel), op: buurtStand(db).straal_op || null };
+    }, false);
+    const cw = await cwRijen();
+    const k = projectKaarten({ vandaag: nlVandaag(nu()), paginas, kostte: won.kostte, kern: won.geld_kern, cw: cw.rijen, cw_reden: cw.reden,
+      bekendmakingen: bm.rijen, buurt_op: bm.op, adres: won.adres, stukken: won.stukken });
+    const gezet = metDb((db) => { if (!db) return {}; try { return JSON.parse(metaLees(db, 'project_concept') || '{}') || {}; } catch (e) { return {}; } }, false);
+    for (const p of k) {
+      if (cw.rijen && !cw.volledig) p.wachter = { ok: true, onvolledig: true };
+      for (const w of p.wachtpunten) w.concept_op = gezet[w.sleutel] || null;
+    }
+    return k;
+  }
+  // POST /app/vastgoed/project-concept {sleutel, opnieuw?}: zoekt het wachtpunt opnieuw op (nooit tekst of adres uit de app) → { aan, onderwerp, bericht }
+  async function projectConcept(b) {
+    const sleutel = String((b && b.sleutel) || '');
+    if (!/^[0-9a-f]{8,32}$/.test(sleutel)) throw new Fout(400, 'sleutel ontbreekt');
+    const u = overzicht();
+    const k = await projectenVan(u);
+    for (const p of k) {
+      const w = p.wachtpunten.find((x) => x.sleutel === sleutel);
+      if (!w) continue;
+      if (!w.mail) throw new Fout(422, 'bij dit wachtpunt staat geen mailadres; zet het in de tabel Wachtpunten op de projectpagina');
+      if (w.concept_op && !(b && b.opnieuw === true)) throw new Fout(409, 'het concept staat al in Gmail (bij Concepten)');
+      return projectConceptTekst(p, w);
+    }
+    throw new Fout(404, 'dit wachtpunt staat er niet meer');
+  }
+  function projectConceptGezet(sleutel) {
+    metDb((db) => { let g = {}; try { g = JSON.parse(metaLees(db, 'project_concept') || '{}') || {}; } catch (e) { g = {}; } g[String(sleutel)] = nuIso(); metaZet(db, 'project_concept', JSON.stringify(g)); }, true);
+  }
   async function app(v) {
     const pad = String(v.pad || ''), post = v.methode === 'POST', body = v.body && typeof v.body === 'object' ? v.body : {};
     const idUit = () => { const id = Number(body.id); if (!Number.isInteger(id) || id < 1) throw new Fout(400, 'id ontbreekt'); return id; };
@@ -1872,6 +2073,7 @@ function maak(o) {
           if (!actief.length || nu().getTime() - oud > GELD_DAG_MS) { try { leesDossier(); u = overzicht(); } catch (e) { /* de vorige stand blijft */ } }
         }
         try { u.nu_binnenkort = nuBinnenkortVan(u); } catch (e) { u.nu_binnenkort = null; }   // wv4228: een fout hier laat de rest van het scherm staan
+        try { u.projecten = await projectenVan(u); } catch (e) { u.projecten = null; }   // wv4231 (L43): projectkaart per lopend project
         return { status: 200, body: u, reden: 'vastgoed overzicht' };
       }
       if (post && pad === '/app/vastgoed/dossier') { const t = leesDossier(); return { status: 200, body: { ok: true, gelezen: t }, reden: 'vastgoed dossier gelezen' }; }
@@ -1928,9 +2130,10 @@ function maak(o) {
     if (u.status !== 200) return { status: u.status, body: { ok: false, fout: (u.body && u.body.fout) || 'Vastgoed is nu niet te lezen' } };
     return gesprekUit(u.body, x);
   }
-  return { app, info, leesDossier, ververs, overzicht, kelder, ronde, rondeDag, meldingOpen, meldingVerstuurd, kelderPdfGezet, gezien, wozHerken, wozControle, wozVastleggen, wozVergelijk, wozBezwaar, wozConceptGezet, gesprek, nieuwAantal };
+  return { app, info, leesDossier, ververs, overzicht, kelder, projectConcept, projectConceptGezet, ronde, rondeDag, meldingOpen, meldingVerstuurd, kelderPdfGezet, gezien, wozHerken, wozControle, wozVastleggen, wozVergelijk, wozBezwaar, wozConceptGezet, gesprek, nieuwAantal };
 }
 
 module.exports = { maak, geldKern, leesWoning, leesBox, leesDossierMap, dossierstand, indicatie, soortStuk, euroUit, datumUit, bagSoort, SCHEMA_VERSIE,
   leesHypotheek, hypotheekReeksen, laatsteStand, leesKelder, kelderDossier, kelderMd, kenmerken, kenmerkenMetOud, vergelijk, wijzigingBericht, buurtNieuw, leesKosten, leesBetaald, leesBouwkosten, tegenSleutel, kostteUit, vveUitBank, vveKern, stroomMaanden, wozUitTekst, maandUit, Fout, bezwaarTot, wozVergelijkObject, wozDeadlineRegels, wozSeintjeRegel, deadlineErbij, wozBezwaarTekst, gesprekUit, gesprekLink,
-  looptUit, toekomstUit, alvUit, wozBinnenkort, nuEnBinnenkort, binnenkortRegels, binnenkortNodig, binnenkortErbij };
+  looptUit, toekomstUit, alvUit, wozBinnenkort, nuEnBinnenkort, binnenkortRegels, binnenkortNodig, binnenkortErbij,
+  leesWachtpunten, projectKaarten, projectConceptTekst, pkVergunning, pkEigenBekendmaking, pkGeld };

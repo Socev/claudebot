@@ -6550,7 +6550,7 @@ APP_GLIJD_ROUTES.add('POST /app/zoek-snel/uitzoeken');   // wv3821: de tik op "Z
 ['plan', 'soort', 'positie', 'transactie', 'bestand', 'dagboek', 'volglijst', 'signaal', 'bedrijf', 'week/keuze', 'past'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/beleggen/' + r); });   // wv3755: past   // wv2993: bedrijf, week/keuze   // wv2982: OVIS Beleggen = David die werkt   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 ['open', 'koppel', 'intrek', 'leeg', 'info', 'aanvraag', 'medisch', 'mededeling', 'vanzelf'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/personeelsscherm/' + r); });
 ['controleer', 'inlees', 'intrek', 'code', 'koppel', 'rol', 'rooster', 'persoon'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/pma/' + r); });   // wv3037: OVIS PMA = David die werkt (wv3047: koppel, rol, rooster, persoon)   // wv2991: Personeelsscherm = David die werkt (wv3020: info, aanvraag)
-['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar', 'woz-bezwaar', 'gezien', 'kelder-pdf'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt; wv3102: + WOZ-beschikking
+['dossier', 'ververs', 'beelden', 'aanroepen', 'woz-lees', 'woz-bewaar', 'woz-bezwaar', 'gezien', 'kelder-pdf', 'project-concept'].forEach(function (r) { APP_GLIJD_ROUTES.add('POST /app/vastgoed/' + r); });   // wv3085: OVIS Vastgoed = David die werkt; wv3102: + WOZ-beschikking
 APP_GLIJD_ROUTES.add('POST /app/nza/stuk');
 APP_GLIJD_ROUTES.add('POST /app/nza/zittingsmap');   // wv4224: een zittingsmap maken = David die werkt
 APP_GLIJD_ROUTES.add('POST /app/nza/draad');   // wv3156: een vraagdraad lezen in de tab Vragen   // wv3099: een stuk lezen in het NZa-scherm = David die werkt
@@ -18678,7 +18678,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/imagine' || route.indexOf('GET /app/imagine/') === 0 || route.indexOf('POST /app/imagine/') === 0) return typeof appImagine === 'function' ? appImagine(req, res, a, s, route, d) : appWeiger(res, 404, 'onbekend', 'imagine');   // wv2984: OVIS Imagine fase 1
         if (route === 'GET /app/personeelsscherm' || /^POST \/app\/personeelsscherm\/(open|koppel|intrek|leeg|info|aanvraag|medisch|mededeling|vanzelf)$/.test(route)) return typeof appPersoneelsscherm === 'function' ? appPersoneelsscherm(req, res, a, route, d, s) : appWeiger(res, 404, 'onbekend', 'personeelsscherm');   // wv2991: OVIS Personeelsscherm fase 0
         if (route === 'GET /app/pma' || route === 'GET /app/pma/personeel' || /^POST \/app\/pma\/(controleer|inlees|intrek|code|koppel|rol|rooster|persoon)$/.test(route)) return typeof appPma === 'function' ? appPma(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'pma');   // wv3037: OVIS PMA fase 1; wv3047: fase 2 (personeel)
-        if (route === 'GET /app/vastgoed' || route === 'GET /app/vastgoed/kelder' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar|gezien|kelder-pdf)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking; wv4229: + concept-bezwaar
+        if (route === 'GET /app/vastgoed' || route === 'GET /app/vastgoed/kelder' || /^POST \/app\/vastgoed\/(dossier|ververs|beelden|aanroepen|woz-lees|woz-bewaar|woz-bezwaar|gezien|kelder-pdf|project-concept)$/.test(route)) return typeof appVastgoed === 'function' ? appVastgoed(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'vastgoed');   // wv3085: OVIS Vastgoed fase 1; wv3102: + WOZ-beschikking; wv4229: + concept-bezwaar
         if (route === 'GET /app/nza' || route === 'POST /app/nza/stuk' || route === 'GET /app/nza/punten' || route === 'GET /app/nza/scorekaart' || route === 'POST /app/nza/zittingsmap') return typeof appNza === 'function' ? appNza(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza');   // wv3099: OVIS NZa scherm (alleen lezen); wv3676: tab Punten
         if (route === 'GET /app/nza/vragen' || route === 'POST /app/nza/draad' || route === 'POST /app/nza/dubbelcheck') return typeof appNzaVragen === 'function' ? appNzaVragen(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'nza-vragen');   // wv3156: tab Vragen; wv3157: Dubbelcheck
         if (route === 'GET /app/beleggen/strateeg' || route === 'GET /app/beleggen/strateeg/backtest' || route === 'POST /app/beleggen/strateeg/stand' || route === 'POST /app/beleggen/strateeg/idee') return typeof appStrateeg === 'function' ? appStrateeg(req, res, a, route, d) : appWeiger(res, 404, 'onbekend', 'strateeg');   // wv3993: Strateeg (fictief)
@@ -32062,6 +32062,12 @@ const vastgoedApp = (function () {
         if (typeof osintRun !== 'function' || !fs.existsSync(OSINT_SCRIPT)) return { ok: false };
         invoer.sleutels = await osintSleutels();   // EP-online uit de kluis, via stdin (nooit in env, log of uitkomst)
         return osintRun(['vastgoed'], invoer);
+      },
+      // wv4231 (L43): open rijen van de Correspondentie-Wachter (alleen lezen; status wacht of gemeld) voor de wachtpunten op de projectkaart
+      wachter: async function () {
+        if (typeof appN8nRijen !== 'function' || typeof WK_TABEL === 'undefined') return { rijen: null };
+        const rijen = await appN8nRijen(WK_TABEL.correspondentie.n8n, { type: 'or', filters: [{ columnName: 'status', condition: 'eq', value: 'wacht' }, { columnName: 'status', condition: 'eq', value: 'gemeld' }] }, 400);
+        return { rijen: rijen, volledig: rijen.length < 400 };
       } });
   } catch (e) { logError('vastgoed', new Error('laden faalde')); return null; }
 })();
@@ -32168,9 +32174,34 @@ async function appVastgoedWozBezwaar(res, d) {
   res._app.reden = 'vastgoed bezwaar concept';
   return appStuur(res, 200, { ok: true, concept: true });
 }
+// wv4231 (besluitenpagina nr 943 = L43): een wachtpunt op de projectkaart als Gmail-CONCEPT (vaste tekst uit vastgoed.js projectConceptTekst; nooit
+// versturen). De app stuurt alleen de sleutel; wachtpunt en adres zoekt de module opnieuw op. Eén tegelijk per sleutel; tweede keer 409 tenzij opnieuw.
+const VASTGOED_PROJECT_BEZIG = new Set();
+async function appVastgoedProjectConcept(res, d) {
+  if (!appTeller('vastgoed-project-concept', 6, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed-project-concept');
+  if (!SERVER_ECHT) return appWeiger(res, 409, 'proefserver: geen concept in Gmail', 'vastgoed project-concept proef');
+  let c;
+  try { c = await vastgoedApp.projectConcept(d || {}); } catch (e) { return appWeiger(res, e && e.status || 400, e && e.status ? e.message : 'ongeldig', 'vastgoed project-concept ' + (e && e.status || 400)); }
+  const slot = String(d.sleutel);
+  if (VASTGOED_PROJECT_BEZIG.has(slot)) return appWeiger(res, 409, 'het concept wordt al gemaakt', 'vastgoed project-concept bezig');
+  VASTGOED_PROJECT_BEZIG.add(slot);
+  let r;
+  try { r = await bandjesMailConcept(c); } finally { VASTGOED_PROJECT_BEZIG.delete(slot); }
+  if (!r.ok) {
+    res._app.reden = 'vastgoed project-concept mislukt';
+    return appStuur(res, r.zeker ? 502 : 504, { ok: false, onzeker: !r.zeker, fout: r.zeker ? 'Het concept kon niet in Gmail: ' + r.reden + '.' : 'Geen bevestiging van het mailluik. Kijk in Gmail bij Concepten of het er toch staat voor je het opnieuw probeert.' });
+  }
+  vastgoedApp.projectConceptGezet(slot);
+  res._app.reden = 'vastgoed project-concept';
+  return appStuur(res, 200, { ok: true, concept: true });
+}
 async function appVastgoed(req, res, a, route, d) {
   if (!vastgoedApp) return appWeiger(res, 404, 'Vastgoed zit niet in deze versie van de pod', 'vastgoed ontbreekt');
   if (!appTeller('vastgoed', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens vastgoed');
+  if (route === 'POST /app/vastgoed/project-concept') {
+    try { return await appVastgoedProjectConcept(res, d); }
+    catch (e) { logError('vastgoed-project-concept', new Error('route faalde')); return appWeiger(res, 503, 'het concept lukte nu niet; probeer het zo opnieuw', 'vastgoed project-concept fout'); }
+  }
   if (route === 'POST /app/vastgoed/woz-bezwaar') {
     try { return await appVastgoedWozBezwaar(res, d); }
     catch (e) { logError('vastgoed-woz-bezwaar', new Error('route faalde')); return appWeiger(res, 503, 'het concept lukte nu niet; probeer het zo opnieuw', 'vastgoed bezwaar fout'); }
