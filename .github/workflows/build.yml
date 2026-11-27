@@ -585,6 +585,11 @@ jobs:
       - name: "tripper (wv2136, reizen in de app)"
         if: ${{ !cancelled() }}
         run: bash test/tripper.sh
+      # Boekingen bij de reis (wv4334): reis-boekingen.js met verzonnen mails en nep-luik op een wegwerpvault (kandidaat, datumrol, koppelen,
+      # naam als platte tekst, eigen blok, venster/25-grens/herkansing, droog schrijft niets, uitgesteld = venster blijft staan).
+      - name: "reis-boekingen (wv4334, bevestiging bij de reis)"
+        if: ${{ !cancelled() }}
+        run: bash test/reis-boekingen.sh
       # OVIS Calendar in de app (wv2333): kalender-app.js (venster, vorm, tijden in Amsterdam, 1000-rijengrens) en het server.js-blok.
       - name: "kalender-app (wv2333, OVIS Calendar in de app)"
         if: ${{ !cancelled() }}

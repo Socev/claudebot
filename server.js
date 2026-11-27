@@ -28569,6 +28569,8 @@ const nachtketen = (function () {
       // wv4178 (C52): werkbomen + gemergde takken opruimen (opruim.py; regels in het script); kindproces met harde grens 540 s;
       // een fout meldt de keten (meldtZelf false), nieuwe overgeslagen mappen meldt de stap zelf in één box-rij.
       { naam: 'werkbomen-opruim', start_na: [4, 25], limiet_min: 11, pogingen: 2, meldtZelf: false, doe: function (ctx) { return werkbomenOpruimRonde(ctx); } },
+      // wv4334: boekingsbevestiging → eigen blok van de komende reispagina (reis-boekingen.js); in-proces, schakelaar aan.json; meldt via de keten
+      { naam: 'tripper-boekingen', start_na: [4, 30], limiet_min: 10, pogingen: 2, inProces: true, meldtZelf: false, doe: function () { return tripperBoekingenStap(); } },
       // wv3304: Takeout-wachter (klaar-mail + Drive → controlelijst voor de NAS, stand.json lezen, Drive-ruimte); kindproces met eigen harde
       // grens (300 s); vóór de NAS-run van 05:30. Een fout meldt alleen de keten (box-rij), meldingen per export zet het script zelf.
       { naam: 'takeout-wachter', start_na: [4, 40], limiet_min: 6, pogingen: 2, meldtZelf: false, doe: function (ctx) { return takeoutWachterRonde(ctx); } },
@@ -30742,6 +30744,28 @@ const tripper = (function () {
   } catch (e) { logError('tripper', e); return null; }
 })();
 function tripperInfo() { if (!tripper) return { aan: false }; try { return tripper.info(); } catch (e) { return { aan: true, fout: true }; } }
+// ── wv4334 (besluitenpagina nr 197 = 2C97, David Ja 25-11-2026 22:27): een boekingsbevestiging in Davids Gmail komt vanzelf als verwijzing bij
+// de komende reis. Logica, waarom en grenzen in reis-boekingen.js (ontwerp + Codex-review mk-scripts/wv4334). Nachtketenstap tripper-boekingen
+// 04:30: lees-luik (mail_zoeken/mail_lezen, alleen lezen), schrijft alleen het eigen blok "## Boekingen (Socev)" van een komende reispagina.
+// Schakelaar scripts-staat/tripper-boekingen/aan.json: weg = niets, {"schrijven": false} = droge run, {"schrijven": true} = schrijven.
+// Geen melding, geen kaart (Tripper toont het blok); de keten meldt pas na drie nachten op rij met een fout.
+const TRIPPER_BOEKINGEN_DIR = '/opt/data/scripts-staat/tripper-boekingen';
+const tripperBoekingen = (function () {
+  const p = path.join(__dirname, 'reis-boekingen.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ vault: VAULT, vv: VV(), staatDir: TRIPPER_BOEKINGEN_DIR, luik: function (body) { return appAgendaApi(body, { timeoutMs: 60000 }); } }); }
+  catch (e) { logError('tripper-boekingen', e); return null; }
+})();
+async function tripperBoekingenStap() {
+  if (!tripperBoekingen) return { ok: true, al_gedaan: true, detail: { niet_aanwezig: true } };
+  if (!tripperBoekingen.aan()) return { ok: true, al_gedaan: true, detail: { uit: true } };
+  let r;
+  try { r = await tripperBoekingen.ronde({}); } catch (e) { return { ok: false, reden: String((e && e.message) || e).slice(0, 120) }; }
+  const gezet = Object.values(r.per_reis || {}).reduce((n, x) => n + (Number(x.nieuw) || 0), 0);
+  const d = { droog: r.droog, reizen: r.reizen, luikvragen: r.luikvragen, kandidaten: r.kandidaten, gezet: gezet, al: r.al, geen: r.geen, twijfel: r.twijfel, uitgesteld: r.uitgesteld, fouten: (r.fouten || []).length };
+  if ((r.fout_nachten || 0) >= 3) return { ok: false, reden: 'drie nachten op rij een fout: ' + String((r.fouten || [])[0] || '').slice(0, 80), detail: d };
+  return { ok: true, detail: d };
+}
 // ── wv4131 (besluitenpagina nr 190 = 2C90, David Ja 25-11-2026): het Weekboek van MemoryLane. Logica en waarom in memorylane-weekboek.js;
 // hier de io. Zondag nachtketenstap ml-weekboek (vóór apps-editie); GET/POST /app/memorylane/weekboek(/antwoord); koppel() elke 5 min.
 // Afleveringen in HERINNERINGEN_DIR/weekboek (700/600). Geen stemaanroep bij het maken; log alleen weeknummer en aantallen.
