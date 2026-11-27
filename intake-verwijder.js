@@ -345,7 +345,7 @@ function maak(o) {
       'Code van het stuk: ' + vinger.slice(0, 12));
     return { titel: ('Stuk van ' + nlDag(s.ontvangen || s.aangemaakt) + ' uit ' + bron + ' — verwijderen?').slice(0, 90), soort: 'besluit', waar: 'overal',
       waarom: 'Je wilt dit stuk kwijt omdat er patiëntgegevens of een geheim in staan. Verwijderen kan niet ongedaan worden; daarom vraag ik je Ja met vingerafdruk.',
-      stappen, deadline: new Date(nu() + 7 * 86400000).toISOString().slice(0, 10), databank_rijen: databank };
+      stappen, databank_rijen: databank };   // wv4193 (3C52): geen standaarddatum meer (er loopt buiten Socev niets af)
   }
 
   async function plan(stukId, opt) {

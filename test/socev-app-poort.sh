@@ -7263,10 +7263,10 @@ async function bewijs(o) {
         herkomst: { wv: [] }, status: 'open', later_tot: null, bewijs: 'BEWIJS-' + sl, gesloten_door: null, meting: 'METING-' + sl, laatst_gemeten: new Date().toISOString(), volgorde: 100, gesloten_op: null }, x || {});
       sbStaat.vj = [
         pnt(1, 'nas-backup', { deadline: plus(V, 9), waar: 'praktijk', duur_min: 15, stappen: ['Open de stappenlijst', 'Typ: n8n export:credentials --all --output=/tmp/c.json (zonder --decrypted)', 'Draai `ls -la /mnt` op de NAS', 'Zeg gedaan'],
-          herkomst: { wv: [62], todoist: ['6hhXcR5c57pp4PXM'], register: ['2026-10-07 13:30'] } }),
-        pnt(2, 'vandaag-punt', { deadline: V, waar: 'pixel', duur_min: 90 }),
-        pnt(3, 'morgen-punt', { deadline: plus(V, 1), waar: 'pc', duur_min: 5 }),
-        pnt(4, 'over-tijd', { deadline: plus(V, -2) }),
+          herkomst: { wv: [62], todoist: ['6hhXcR5c57pp4PXM'], register: ['2026-10-07 13:30'], deadline_reden: 'Termijn van de verzekeraar loopt af' } }),   // wv4193: een datum telt alleen met reden
+        pnt(2, 'vandaag-punt', { deadline: V, waar: 'pixel', duur_min: 90, herkomst: { wv: [], deadline_reden: 'Termijn van de verzekeraar loopt af' } }),
+        pnt(3, 'morgen-punt', { deadline: plus(V, 1), waar: 'pc', duur_min: 5, herkomst: { wv: [], deadline_reden: 'Termijn van de verzekeraar loopt af' } }),
+        pnt(4, 'over-tijd', { deadline: plus(V, -2), herkomst: { wv: [], deadline_reden: 'Termijn van de verzekeraar loopt af' } }),
         pnt(5, 'besluit-x', { soort: 'besluit', herkomst: { wv: [325], register: ['2026-10-09 19:55'] } }),
         pnt(6, 'besluit-pat', { soort: 'besluit', herkomst: { register: ['2026-10-09 19:40#wv318'] } }),
         pnt(7, 'later-toekomst', { status: 'later', later_tot: plus(V, 3) }),
@@ -7297,7 +7297,7 @@ async function bewijs(o) {
       toets('27 wv926 Fable #1: GET /app/voor-jou (zonder proef) zonder moet_iets en gezien, zoals main', r.status === 200 && !('moet_iets' in r.j) && !('gezien' in r.j) && !('moet_fout' in r.j), Object.keys(r.j).join());
       const rK = await vraag('GET', '/app/voor-jou/kanaal', undefined, { pot: P.jar });
       const ids = (r.j.punten || []).map((x) => x.id);
-      toets('27 lijst: open + later-vandaag, zonder later-toekomst en gesloten; volgorde van de tabel; privé wel op de telefoon', r.status === 200 && ids.join() === '1,2,3,4,5,6,8,9' && r.j.zichtbaar === 5 && r.j.meer === 3, JSON.stringify(ids) + ' ' + r.j.meer);
+      toets('27 lijst: open + later-vandaag, zonder later-toekomst en gesloten; wv4193: echte datum vroegst eerst, dan wat werk vrijmaakt (5: rij 325 wacht), dan de tabel; privé wel op de telefoon', r.status === 200 && ids.join() === '4,2,3,1,5,6,8,9' && r.j.zichtbaar === 5 && r.j.meer === 3, JSON.stringify(ids) + ' ' + r.j.meer);
       toets('27 later-toekomst niet in de lijst (ook het tweede)', !ids.includes(11));
       toets('27 wv594: /app/voor-jou/kanaal: moet_iets is een lijst en gezien een object met alleen sleutels die Voor jou toont (k:<id>, k:<id>:over, v:/a:/d:); kaarten gelijk', rK.status === 200 && Array.isArray(rK.j.moet_iets) && rK.j.moet_fout === null && rK.j.gezien && typeof rK.j.gezien === 'object' && Object.keys(rK.j.gezien).every((k) => /^(k:\d+(:over)?|[vad]:[a-f0-9:]+)$/.test(k)) && JSON.stringify(rK.j.punten) === JSON.stringify(r.j.punten), JSON.stringify([rK.status, rK.j.moet_iets, rK.j.moet_fout, rK.j.gezien]));
       {   // wv1004 Fable #2: klussen-RPC kapot -> Moet iets gewoon (zonder die ontdubbeling), kaarten ongewijzigd, één logregel
@@ -7312,8 +7312,9 @@ async function bewijs(o) {
       toets('27 wv3100: afgehandeld = vandaag door David gesloten (id, titel, status, t), niet de ronde, niet gisteren, niet wat in de lijst staat; zonder bewijs of sleutel', Array.isArray(r.j.afgehandeld) && r.j.afgehandeld.length === 1 && r.j.afgehandeld[0].id === 3112 && r.j.afgehandeld[0].titel === 'Afgehandeld3100' && r.j.afgehandeld[0].status === 'vervallen' && !!r.j.afgehandeld[0].t && r.j.afgehandeld[0].beantwoord === null && !/BEWIJS-|sleutel/.test(JSON.stringify(r.j.afgehandeld)), JSON.stringify(r.j.afgehandeld));
       toets('27 later-toekomst apart met datum', (r.j.later || []).length === 2 && r.j.later[0].id === 7 && r.j.later[0].later_tot === plus(V, 3), JSON.stringify(r.j.later));
       const L = Object.fromEntries((r.j.punten || []).map((x) => [x.id, x]));
-      toets('27 regel 2: wanneer · waar · duur', L[1].regel2 === 'uiterlijk ' + dm(plus(V, 9)) + ' · op de praktijk · ± 15 min' && L[2].regel2 === 'vandaag · op je telefoon · ± 1,5 u' && L[3].regel2 === 'uiterlijk morgen · op de pc · ± 5 min'
-        && L[4].regel2 === 'over tijd (' + dm(plus(V, -2)) + ')' && L[5].regel2 === 'besluit', JSON.stringify([L[1].regel2, L[2].regel2, L[3].regel2, L[4].regel2, L[5].regel2]));
+      const RD = ' · Termijn van de verzekeraar loopt af';   // wv4193 (3C52): de reden staat bij de datum
+      toets('27 regel 2: wanneer · reden · waar · duur', L[1].regel2 === 'uiterlijk ' + dm(plus(V, 9)) + RD + ' · op de praktijk · ± 15 min' && L[2].regel2 === 'vandaag' + RD + ' · op je telefoon · ± 1,5 u' && L[3].regel2 === 'uiterlijk morgen' + RD + ' · op de pc · ± 5 min'
+        && L[4].regel2 === 'over tijd (' + dm(plus(V, -2)) + ')' + RD && L[5].regel2 === 'besluit' && L[1].deadline_reden === 'Termijn van de verzekeraar loopt af' && L[5].deadline_reden === null, JSON.stringify([L[1].regel2, L[2].regel2, L[3].regel2, L[4].regel2, L[5].regel2]));
       toets('27 dichtbij (deadline ≤ 48 u): vandaag, morgen en over tijd', [2, 3, 4].every((i) => L[i].dichtbij) && !L[1].dichtbij && !L[5].dichtbij);
       toets('27 lijst zonder bewijs, herkomst, meting, sleutel of waarom', !/BEWIJS-|METING-|herkomst|sleutel|Waarom /.test(JSON.stringify(r.j)), JSON.stringify(r.j).slice(0, 300));
       toets('27 GET (200) is stil: geen auditregel', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAu, fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').slice(nAu - 1).join(' | '));
