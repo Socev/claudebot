@@ -520,11 +520,19 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   CODE_APPS: require('./code-apps.js'), CODE_IDS: require('./code-apps.js').APPS.map((x) => x.id), OVIS_CODE_DIR: path.join(W, 'ovis-code'),
   CODE_WERK: require('./ovis-code.js').maak({ basis: path.join(W, 'ovis-code'), geheugenToets: require('./mk-tekst.js').geheugenToets }),
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
+  // wv4320: ook deze staan in server.js buiten het app-blok; zonder naam gaf het blok een ReferenceError (Ja op een kaart -> 500 sinds wv4196 vj-ja-zelf,
+  // knopdruk logde 'conceptLeer is not defined', § 11 'bandjes is not defined'). schrijfLog schrijft in productie naar api.log: hier ook (apiLogNep).
+  schrijfLog: (r) => apiLogNep.push(String(r)), nu: () => new Date().toISOString().replace('T', ' ').slice(0, 19),
+  velden: (o) => Object.keys(o).filter((k) => o[k] !== undefined && o[k] !== null && o[k] !== '').map((k) => k + '=' + String(o[k]).replace(/\s+/g, '_')).join(' '),
+  conceptLeer: null, bandjes: null,
+  storingsdienst: null, NMBRS_DIR: path.join(W, 'nmbrs'),   // wv4320: idem (app-meldingen wv4120, pot-bewijs loon); geen nmbrs.sqlite = geen loonbewijs
+  managers: null,   // wv4320: sinds wv4128 roept berichtRoute managers.noteerGemist aan (const buiten het app-blok); zonder naam gaf elke /bericht naar machinekamer 500
   maxAgents: () => 6,   // wv3607: sinds 19-11 (max-agents.json) staat maxAgents() buiten het app-blok; zonder nep gaf /app/agents 500
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100, ROL_KANT: 'olares',   // wv3873: passief-poort
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
+const CTX_LOG0 = { schrijfLog: ctx.schrijfLog, nu: ctx.nu, velden: ctx.velden };   // wv4320: secties die ze tijdelijk vervangen, zetten deze terug (niet delete)
 vm.runInContext(blok + '\n;globalThis.__h = { berichtVraagOpKaart, handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appVastJaDicht, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appDradenUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm, appVjDoel, appVjModuleKaart, appVjBron, appVjVoorwaardeMeet, appVjVoorwaardeRonde, appVjControleIo, appAnders, appAntwoordSeintjeKomt, VJU };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
@@ -996,7 +1004,9 @@ async function bewijs(o) {
     const geheimen = [POORT, code1, code2, X.jar.koppel].filter(Boolean).concat(telegram.map(codeUit).filter(Boolean));
     toets('6 auditlog: regels met route/status/reden', audit.split('\n').filter(Boolean).length > 40 && /"reden":"access: aud"/.test(audit) && /"reden":"andere browser"/.test(audit) && /gekoppeld/.test(audit));
     toets('6 auditlog bevat geen codes, geheimen of cookies', geheimen.every((g) => audit.indexOf(g) < 0) && !/[a-f0-9]{64}/.test(audit));
-    toets('6 geen onverwachte fouten in logError', logs.filter((l) => !/app-telegram|app-register: Expected property|app: Unexpected token .x., "xx"/.test(l)).length === 0, logs.join(' | '));
+    // wv4320: de vm heeft bewust geen __dirname (zie server.js 'de app-toets draait in een vm zonder __dirname'); modules die het blok
+    // ongeguard laadt (deadline-lijstje, koppel-klus, ...) loggen dat hier. In productie bestaat __dirname; een ontbrekend bestand geeft MODULE_NOT_FOUND.
+    toets('6 geen onverwachte fouten in logError', logs.filter((l) => !/app-telegram|app-register: Expected property|app: Unexpected token .x., "xx"|: __dirname is not defined$/.test(l)).length === 0, logs.join(' | '));
     const info = H.appInfo();
     toets('6 appInfo voor /health', info.ingericht === true && info.passkey_bibliotheek === 'brug' && info.apparaten === 0, JSON.stringify(info));
 
@@ -1632,7 +1642,9 @@ async function bewijs(o) {
     toets('9 beurt_id overleeft een herstart (beurten.json) -> geen tweede beurt', r.j.al === true && r.j.job_id === j1, JSON.stringify(r.j));
     const auditAlles = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
     toets('9 auditlog: beurt/knop/goedkeur-regels zonder berichtinhoud', /"reden":"beurt hoofd [a-f0-9]{16}"/.test(auditAlles) && /"reden":"knop ja/.test(auditAlles) && /goedgekeurd [A-F0-9]{6}/.test(auditAlles) && auditAlles.indexOf('morgen') < 0 && auditAlles.indexOf('accountant') < 0);
-    toets('9 geen onverwachte fouten in logError', logs.filter((l) => !/app-telegram|app-register: Expected property|app: Unexpected token .x., "xx"|^app-log:/.test(l)).length === 0, logs.join(' | '));
+    // wv4320: de vm heeft bewust geen __dirname (zie server.js 'de app-toets draait in een vm zonder __dirname'); modules die het blok
+    // ongeguard laadt (deadline-lijstje, koppel-klus, ...) loggen dat hier. In productie bestaat __dirname; een ontbrekend bestand geeft MODULE_NOT_FOUND.
+    toets('9 geen onverwachte fouten in logError', logs.filter((l) => !/app-telegram|app-register: Expected property|app: Unexpected token .x., "xx"|^app-log:|: __dirname is not defined$/.test(l)).length === 0, logs.join(' | '));
     for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('opgeruimd');
 
     // ── 9c. bestanden in een beurt (wv99, fase 5b; bouwplan § 4.7) ──
@@ -2707,7 +2719,9 @@ async function bewijs(o) {
       toets('11 processJob bewaart alleen 40687/telegram-debug/cijfer-meester (wv200) en ovis-nza (wv3087), nooit lezen', /if \(gereedschap !== 'lezen' && APP_KANAAL_VAN_CHAT\[chatId\]\) appBewaar\(/.test(volSrc) && /APP_KANAAL_VAN_CHAT = \{ '40687': 'hoofd', 'telegram-debug': 'machinekamer', 'cijfer-meester': 'cijfer-meester', 'ovis-nza': 'ovis-nza' \}/.test(volSrc) && !/'cijfermeester': 'cijfermeester'/.test(volSrc));
       // wv364: één gedeelde ingang appBewaarAgent (finally, wees, tussenstand na herstart, gesneuvelde agents)
       toets('11 processAgent: rapport alleen bij route machinekamer of david', /rapport: \(route === 'machinekamer' \|\| route === 'david'\) \? rapport : null/.test(volSrc) &&
-        /appBewaarAgent\(jobId, entry, outdir, appRapport, /.test(volSrc) && (volSrc.match(/appBewaar\(/g) || []).length === 4);
+        /appBewaarAgent\(jobId, entry, outdir, appRapport, /.test(volSrc) && (volSrc.match(/appBewaar\(/g) || []).length === 5
+        // wv4320: de vijfde aanroep is sinds wv4182 het kelderdossier van Vastgoed (pdf die de pod zelf maakt, vast kanaal hoofd, geen agentroute)
+        && /const m = appBewaar\(id, dir, \{ soort: 'beurt', kanaal: 'hoofd', app: true, label: 'Kelderdossier \(Vastgoed\)'/.test(volSrc));
       // wv716: de vierde ingang is de opvangronde na een herstart (appVerlorenAfronden), met dezelfde kanaalpoort als processJob (C8)
       toets('11 wv716: appVerlorenAfronden bewaart alleen via APP_KANAAL_VAN_CHAT, als beurt met na_herstart', /const k = APP_KANAAL_VAN_CHAT\[x\.chat_id\];\s*if \(k\) \{\s*const m = appBewaar\(id, path\.join\(IO, id, 'out'\), \{ soort: 'beurt', kanaal: k, app: true, na_herstart: true/.test(volSrc));
       toets('11 appRoute: zonder prefix = socev', H.appRoute('vakantie') === 'socev' && H.appRoute(' Machinekamer: x') === 'machinekamer' && H.appRoute('david:x') === 'david');
@@ -4568,10 +4582,12 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
       rolStub.primair = true;
       toets('20 pod passief -> 409, niets aangeroepen', r.status === 409 && vkStaat.aanroepen.length === nS, JSON.stringify(r.j));
-      H.appStaat.tellers.actie = Array.from({ length: 60 }, () => Date.now());
+      // wv4320: de grens is sinds wv3710 200 per uur (weekstapel), niet meer 60: lees hem uit de bron
+      const ACTIE_MAX = Number(/const APP_ACTIES_PER_UUR = (\d+);/.exec(src)[1]);
+      H.appStaat.tellers.actie = Array.from({ length: ACTIE_MAX }, () => Date.now());
       r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
       H.appStaat.tellers.actie = [];
-      toets('20 hooguit 60 per uur -> 429', r.status === 429 && vkStaat.aanroepen.length === nS, r.status);
+      toets('20 hooguit ' + ACTIE_MAX + ' per uur -> 429', ACTIE_MAX >= 60 && r.status === 429 && vkStaat.aanroepen.length === nS, r.status);
       vkStaat.antwoord = null; H.appStaat.vandaag = null; delete H.appStaat.voorwerkKnopUrl;
     }
 
@@ -4988,7 +5004,7 @@ async function bewijs(o) {
           toets('18B wv4184 logregel sleutel-bestel met naam, aantal kaarten en vrije klus, zonder waarde', logW.some((x) => /sleutel-bestel .*"naam":"proef_besteld".*"kaarten":1.*"vrij":"wv94184"/.test(x)) && !logW.join().includes(WN), logW.join(' | '));
           spNep.kluis = spNep.kluis.filter((x) => !/^proef_(besteld|twee|later)$/.test(x.naam));
           H.appStaat.tellers.sleutels = [];
-          delete ctx.schrijfLog; delete ctx.nu; delete ctx.velden;
+          Object.assign(ctx, CTX_LOG0);
         }
       }
       // ── 18W. wv1786: weggooien (POST /app/sleutels/weg): alleen proef_-rijen en vorige-kopieën, verse vingerafdruk, de kluis beslist
@@ -5259,9 +5275,11 @@ async function bewijs(o) {
       r = await upl('/app/spraak', w2, null, { pot: P.jar });
       toets('20 zonder Workers-AI-sleutel -> 503 staat niet aan', r.status === 503 && /niet aan/.test(r.j.fout), JSON.stringify(r.j));
       ctx.process.env.CLOUDFLARE_AI_TOKEN_AUTO = cfSleutel;
-      H.appStaat.tellers.spraak = Array(60).fill(Date.now());
+      // wv4320: sinds wv4188 150 opnames per uur (lang inspreken = één stuk per minuut), niet meer 60: lees de grens uit de bron
+      const SPRAAK_MAX = Number(/const APP_SPRAAK_PER_UUR = (\d+);/.exec(src)[1]);
+      H.appStaat.tellers.spraak = Array(SPRAAK_MAX).fill(Date.now());
       r = await upl('/app/spraak', w2, null, { pot: P.jar });
-      toets('20 grens spraak (60/u) -> 429', r.status === 429, r.status);
+      toets('20 grens spraak (' + SPRAAK_MAX + '/u) -> 429', SPRAAK_MAX >= 60 && r.status === 429, r.status);
       H.appStaat.tellers.spraak = [];
       // voorlezen
       const ANTW = '**Kort:** Socev heeft je agenda bekeken.\n\n- 09:00 werkoverleg op [Tolgaarde](https://x.nl/a)\n- 15:30 de accountant 📞\n\n| Praktijk | Omzet |\n|---|---|\n| Tolgaarde | € 1.088.000 |\n\n```socev-weergave\n{"soort":"staaf"}\n```\n\n'
@@ -5921,7 +5939,7 @@ async function bewijs(o) {
       toets('22c na het eerste antwoord start de derde', isGestart(ids[2]));
       afmaken[ids[1]]('klaar spoed'); afmaken[ids[2]]('klaar crisis');
       await slaap(80);
-      delete ctx.schrijfLog; delete ctx.nu; delete ctx.velden; delete ctx.ovisBoxRij; ['RUNTIMES_LIJST', 'chatSessions', 'sessieSleutel', 'saveSessions', 'sessieResetOp'].forEach((k) => { delete ctx[k]; });
+      Object.assign(ctx, CTX_LOG0); delete ctx.ovisBoxRij; ['RUNTIMES_LIJST', 'chatSessions', 'sessieSleutel', 'saveSessions', 'sessieResetOp'].forEach((k) => { delete ctx[k]; });
     }
 
     // ── 22d. OVIS Code fase 2 (wv3243): draden — Nieuwe draad, beurt in een draad (eigen sessie + draadkop), overkoepelende regel in het
@@ -5988,7 +6006,7 @@ async function bewijs(o) {
       const vk = path.join(VMAP, 'OVIS Texere.md');
       const vt = fs.existsSync(vk) ? fs.readFileSync(vk, 'utf8') : '';
       toets('22d leeskopie in de vault (01_Ontwikkeling/OVIS Code/OVIS Texere.md): draden met stand en rapport, STAND', /# OVIS Texere — OVIS Code \(leeskopie\)/.test(vt) && /\| Server — De server van Texere bijhouden \| Klaar \| Server 3\.4 draait/.test(vt) && /## STAND/.test(vt), vt.slice(0, 500));
-      delete ctx.schrijfLog; delete ctx.nu; delete ctx.velden; delete ctx.ovisBoxRij; delete ctx.VV; ['RUNTIMES_LIJST', 'chatSessions', 'sessieSleutel', 'saveSessions', 'sessieResetOp'].forEach((k) => { delete ctx[k]; });
+      Object.assign(ctx, CTX_LOG0); delete ctx.ovisBoxRij; delete ctx.VV; ['RUNTIMES_LIJST', 'chatSessions', 'sessieSleutel', 'saveSessions', 'sessieResetOp'].forEach((k) => { delete ctx[k]; });
     }
 
     // ── 22. Cijfer-Meester (wv200, bouwplan § 4.9c): kanaal cijfer-meester -> eigen sessie, kop, geen knoppen/bijlagen/chat_log ──
@@ -6637,8 +6655,12 @@ async function bewijs(o) {
       };
       zetD(ams12 - 20 * 3600000, Date.now(), ams12);
       r = await bq('/bericht', B({ klasse: 'stil', tekst: 'stil bericht', bron: 'proef' }));
-      toets('23 Pixel keek 12 u niet en een seintje van 12:00 bleef onbeantwoord -> app_actief false, ook al pollt een ander apparaat', r.status === 200 && r.j.app_actief === false, JSON.stringify(r.j));
+      // wv4320: sinds wv4041 telt elk actief apparaat (ook de pc's), niet alleen de Pixel: pollt een ander apparaat, dan actief
+      toets('23 wv4041: Pixel keek 12 u niet en een seintje van 12:00 bleef onbeantwoord, maar een ander apparaat pollt -> app_actief true', r.status === 200 && r.j.app_actief === (ander ? true : false), JSON.stringify(r.j));
       const idStil = r.j.id;
+      zetD(ams12 - 20 * 3600000, ams12 - 20 * 3600000, ams12);
+      r = await bq('/bericht/stand', { secret: GEH, id: idStil });
+      toets('23 geen enkel apparaat keek 12 u en een seintje van 12:00 bleef onbeantwoord -> app_actief false', r.j.app_actief === false, JSON.stringify(r.j));
       zetD(ams03 - 20 * 3600000, 0, ams03);
       r = await bq('/bericht/stand', { secret: GEH, id: idStil });
       toets('23 alleen een onbeantwoord seintje van 03:00 (stille nacht) -> nog actief', r.j.app_actief === true, JSON.stringify(r.j));
@@ -7441,7 +7463,9 @@ async function bewijs(o) {
       const ids = (r.j.punten || []).map((x) => x.id);
       toets('27 lijst: open + later-vandaag, zonder later-toekomst en gesloten; wv4193: echte datum vroegst eerst, dan wat werk vrijmaakt (5: rij 325 wacht), dan de tabel; privé wel op de telefoon', r.status === 200 && ids.join() === '4,2,3,1,5,6,8,9' && r.j.zichtbaar === 5 && r.j.meer === 3, JSON.stringify(ids) + ' ' + r.j.meer);
       toets('27 later-toekomst niet in de lijst (ook het tweede)', !ids.includes(11));
-      toets('27 wv594: /app/voor-jou/kanaal: moet_iets is een lijst en gezien een object met alleen sleutels die Voor jou toont (k:<id>, k:<id>:over, v:/a:/d:); kaarten gelijk', rK.status === 200 && Array.isArray(rK.j.moet_iets) && rK.j.moet_fout === null && rK.j.gezien && typeof rK.j.gezien === 'object' && Object.keys(rK.j.gezien).every((k) => /^(k:\d+(:over)?|[vad]:[a-f0-9:]+)$/.test(k)) && JSON.stringify(rK.j.punten) === JSON.stringify(r.j.punten), JSON.stringify([rK.status, rK.j.moet_iets, rK.j.moet_fout, rK.j.gezien]));
+      // wv4320: sinds wv4232 geeft alleen /kanaal per open besluitkaart snel { knop, ja } (antwoorden zonder openklappen); de kaarten zelf blijven gelijk
+      const zonderSnel = (l) => (l || []).map((x) => { const y = Object.assign({}, x); delete y.snel; return y; });
+      toets('27 wv594: /app/voor-jou/kanaal: moet_iets is een lijst en gezien een object met alleen sleutels die Voor jou toont (k:<id>, k:<id>:over, v:/a:/d:); kaarten gelijk', rK.status === 200 && Array.isArray(rK.j.moet_iets) && rK.j.moet_fout === null && rK.j.gezien && typeof rK.j.gezien === 'object' && Object.keys(rK.j.gezien).every((k) => /^(k:\d+(:over)?|[vad]:[a-f0-9:]+)$/.test(k)) && JSON.stringify(zonderSnel(rK.j.punten)) === JSON.stringify(r.j.punten) && !(r.j.punten || []).some((x) => 'snel' in x), JSON.stringify([rK.status, rK.j.moet_iets, rK.j.moet_fout, rK.j.gezien]));
       {   // wv1004 Fable #2: klussen-RPC kapot -> Moet iets gewoon (zonder die ontdubbeling), kaarten ongewijzigd, één logregel
         const nL = logs.length;
         sbStaat.vjJobsKapot = true; H.appStaat.vjVraagJobsCache = null;
@@ -8450,8 +8474,9 @@ async function bewijs(o) {
       g = gestart[gestart.length - 1];
       toets('27c actieregel en bron met markering -> (lijstje) [APP] / (lijstje) [KNOP]', r.status === 200 && /actielijstje: "Actie \(lijstje\) \[APP\] nep"/.test(g.prompt) && /bron "x\(lijstje\) \[KNOP\]"/.test(g.prompt), g && g.prompt.slice(0, 400));
       await klaarC();
-      const rOnb = await AN({ soort: 'lijstje', datum: VC, positie: 9, toelichting: 'x' }), rPos = await AN({ soort: 'lijstje', datum: VC, positie: 11, toelichting: 'x' });
-      toets('27c actielijstje onbekende positie 404, positie > 10 400', rOnb.status === 404 && rPos.status === 400, rOnb.status + ' ' + rPos.status);
+      const rOnb = await AN({ soort: 'lijstje', datum: VC, positie: 9, toelichting: 'x' }), rPos = await AN({ soort: 'lijstje', datum: VC, positie: 100, toelichting: 'x' });
+      // wv4320: sinds wv3710 (weekstapel, posities 11…90) is de grens 99, niet meer 10
+      toets('27c actielijstje onbekende positie 404, positie > 99 400', rOnb.status === 404 && rPos.status === 400, rOnb.status + ' ' + rPos.status);
       n8nStaat.portie = portieVoor;
       // agendavoorstel: kanaal van het bericht, de ✅ blijft staan, nooit een bevestiging
       const AJC = 'abab0000abab0001';
