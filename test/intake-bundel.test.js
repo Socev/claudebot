@@ -327,3 +327,82 @@ test('review MOET 3: een groep groter dan 25 wordt verdeeld in uitvoerbare bunde
   assert.ok(ids.every((id) => staat(E, id).keuze === 'geen:'));
   E.r.sluit();
 });
+
+// ── wv4205 (besluitenpagina nr 497 / 3C197): ook zonder zeker herkende afzender een bundel, op hetzelfde afzenderadres en hetzelfde voorstel ──
+const ONB_AUTH = 'Authentication-Results: mx.google.com; dkim=pass header.d=onbekend-bedrijf.example; dmarc=pass\r\n';
+const onbMail = (E, onderwerp, x) => levMail(E, onderwerp, Object.assign({ van: 'nieuws@onbekend-bedrijf.example', van_naam: 'Onbekend Bedrijf', auth: ONB_AUTH }, x || {}));
+async function metVoorstelTG(E, maak) {   // één eerdere keuze van David voor dit adres = het voorstel (Intake kent de afzender verder niet)
+  const eerst = maak('Eerste');
+  await E.r.ronde();
+  assert.equal((await E.r.appKeuze({ stuk_id: eerst, keuze: 'bestemming', lens: 'kennis', entiteit: 'TG', versie: versie(E, eerst) }, 'app:x')).status, 200);
+  E.klok.t += 3600000;
+}
+
+test('wv4205: drie stukken van een onbekend adres met hetzelfde voorstel = één bundel; Klopt voor alle zet ze in één tik', async () => {
+  const E = bundelOmgeving();
+  await metVoorstelTG(E, (o) => onbMail(E, o));
+  const ids = [1, 2, 3].map((i) => onbMail(E, 'Nieuwsbrief ' + i));
+  await E.r.ronde();
+  const st = (await E.r.appOverzicht(80)).stukken.filter((s) => ids.includes(s.stuk_id));
+  assert.equal(st.length, 3);
+  assert.ok(st.every((s) => s.live.staat === 'twijfel'));
+  assert.ok(st.every((s) => s.afzender_kracht !== 'hoog'), 'de afzender is niet zeker herkend: ' + JSON.stringify(st.map((s) => s.afzender_kracht)));
+  assert.match(st[0].bundel, /^b[0-9a-f]{16}$/);
+  assert.ok(st.every((s) => s.bundel === st[0].bundel));
+  assert.deepEqual(st[0].voorstel, { lens: 'kennis', entiteit: 'TG' });
+  const r = await E.r.appBundel({ bundel: st[0].bundel, stukken: lijstVan(E, ids), lens: 'kennis', entiteit: 'TG' }, 'app:x');
+  assert.equal(r.status, 200, JSON.stringify(r.j)); assert.equal(r.j.n, 3);
+  assert.ok(ids.every((id) => staat(E, id).staat === 'klaar'));
+  E.r.sluit();
+});
+
+test('wv4205: geen adresbundel zonder voorstel, bij een afgewezen handtekening, bij geld, bij twee verschillende adressen of als één stuk een ander voorstel krijgt', async () => {
+  // zonder voorstel (Intake weet niets): geen bundel
+  let E = bundelOmgeving();
+  let ids = [1, 2, 3].map((i) => onbMail(E, 'Zonder voorstel ' + i));
+  await E.r.ronde();
+  let st = (await E.r.appOverzicht(80)).stukken.filter((s) => ids.includes(s.stuk_id));
+  assert.equal(st.length, 3); assert.ok(st.every((s) => !s.voorstel || !s.voorstel.entiteit || !s.bundel)); assert.ok(st.every((s) => !s.bundel), JSON.stringify(st.map((s) => s.voorstel)));
+  E.r.sluit();
+  // DKIM afgewezen voor dit domein: geen bundel
+  E = bundelOmgeving();
+  const FOUT = 'Authentication-Results: mx.google.com; dkim=fail header.d=onbekend-bedrijf.example; dmarc=fail\r\n';
+  await metVoorstelTG(E, (o) => onbMail(E, o, { auth: FOUT }));
+  ids = [1, 2, 3].map((i) => onbMail(E, 'Vals ' + i, { auth: FOUT }));
+  await E.r.ronde();
+  st = (await E.r.appOverzicht(80)).stukken.filter((s) => ids.includes(s.stuk_id));
+  assert.equal(st.length, 3); assert.ok(st.every((s) => !s.bundel));
+  E.r.sluit();
+  // geld in de tekst: geen bundel
+  E = bundelOmgeving();
+  await metVoorstelTG(E, (o) => onbMail(E, o));
+  ids = [1, 2, 3].map((i) => onbMail(E, 'Betaal ' + i, { tekst: 'Beste David, graag betaling van EUR 80,00 op NL91ABNA0417164300 (verzonnen). Groet.' }));
+  await E.r.ronde();
+  st = (await E.r.appOverzicht(80)).stukken.filter((s) => ids.includes(s.stuk_id));
+  assert.ok(st.every((s) => !s.bundel));
+  E.r.sluit();
+  // twee adressen van hetzelfde domein (2 + 1): geen bundel; elk adres telt apart
+  E = bundelOmgeving();
+  await metVoorstelTG(E, (o) => onbMail(E, o));
+  const a = [1, 2].map((i) => onbMail(E, 'Adres een ' + i));
+  const b = onbMail(E, 'Adres twee', { van: 'ander@onbekend-bedrijf.example' });
+  await E.r.ronde();
+  st = (await E.r.appOverzicht(80)).stukken.filter((s) => a.concat([b]).includes(s.stuk_id));
+  assert.ok(st.every((s) => !s.bundel));
+  E.r.sluit();
+});
+
+test('wv4205: een adresbundel valt uit elkaar als een stuk intussen privé blijkt; de bundelroute weigert dan (409) en kiest niets', async () => {
+  const E = bundelOmgeving();
+  await metVoorstelTG(E, (o) => onbMail(E, o));
+  const ids = [1, 2, 3].map((i) => onbMail(E, 'Bericht ' + i));
+  await E.r.ronde();
+  const sl = (await E.r.appOverzicht(80)).stukken.find((s) => s.stuk_id === ids[0]).bundel;
+  assert.ok(sl);
+  const rij = E.db.prepare('SELECT r.rowid, r.samenvatting FROM router_stuk r JOIN live_stuk l ON l.stuk_id = r.stuk_id AND l.versie = r.versie WHERE r.stuk_id = ?').get(ids[1]);
+  const sam = JSON.parse(rij.samenvatting); sam.label_route = ['PRIVE'];
+  E.db.prepare('UPDATE router_stuk SET samenvatting = ? WHERE rowid = ?').run(JSON.stringify(sam), rij.rowid);
+  const r = await E.r.appBundel({ bundel: sl, stukken: lijstVan(E, ids), lens: 'kennis', entiteit: 'TG' }, 'app:x');
+  assert.equal(r.status, 409); assert.ok(ids.every((id) => staat(E, id).staat === 'twijfel'));
+  E.r.sluit();
+});

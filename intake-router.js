@@ -2932,7 +2932,8 @@ function maak(o) {
     // wv3683: zegt het model "niet bewaren", dan is dat het voorstel op de kaart (Klopt = Davids tik); nooit vanzelf. Niet bij geld (facturen/keten)
     if (vnb.niet_bewaren && lenzenLive().indexOf('geen') >= 0 && (!uit.voorstel || uit.voorstel.lens === 'kennis')) { uit.voorstel = { lens: 'geen', entiteit: null }; uit.reden = 'Intake denkt: niet bewaren'; }
     else if (vnb.vermoeden && uit.voorstel && uit.voorstel.entiteit === vnb.vermoeden) uit.reden = 'Intake denkt ' + (namen.get(vnb.vermoeden) || vnb.vermoeden) + ', maar weet het niet zeker';
-    uit._b = bundelSleutel(row, sam, uit);
+    const bs = bundelSleutel(row, sam, uit, meta);
+    uit._b = bs ? bs.sleutel : null; uit._bAdres = !!(bs && bs.adres);
     // wv4100 (besluitenpagina nr 393 / 3C93, David Ja 25-11 21:50): altijd drie plekken om uit te kiezen. Pas NA voorstel en bundelsleutel: een
     // aangevulde plek is geen signaal (geen voorstel, en een aangevuld Privé mag een bundel niet tegenhouden). Eerst de plekken die David in dit
     // postvak het vaakst koos, dan over alle postvakken (review ZOU 1), het postvak van een praktijk zelf en als laatste een vaste rij.
@@ -2957,14 +2958,28 @@ function maak(o) {
   const BUNDEL_MIN = 3, BUNDEL_MAX = 25;
   const BUNDEL_AFZ_RE = /^(org:[a-z0-9-]{1,60}|[A-Z][A-Z0-9_-]{0,15})$/;   // een organisatie of een eigen entiteit, geen persoon
   const BUNDEL_GELD_VELDEN = ['bedrag', 'iban', 'factuurnummer'];
-  function bundelSleutel(row, sam, uit) {
+  // wv4205 (besluitenpagina nr 497 / 3C197, David Ja 25-11 21:55): ook zonder zeker herkende afzender een bundel, op hetzelfde afzenderadres en
+  // hetzelfde voorstel (lens + plek). Gemeten 27-11: de registerroute gaf sinds 8-11 nul bundels. Alle uitsluitingen hieronder (geld, privé,
+  // medisch, Jev, altijd vragen, mislukt) gelden voor beide routes; de adresroute eist een voorstel, een mailbron en geen DKIM-afwijzing.
+  // Geeft { sleutel, adres } of null; adres = true is de adresroute (geen registertoets in stukVoorApp, het adres van een stuk verandert niet).
+  const BUNDEL_ADRES_RE = /^[a-z0-9._%+'-]{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,24}$/;
+  function bundelAdres(sam, meta) {
+    if (!/^(gmail|outlook):/.test(String(sam.bron || '')) || sam.aangeleverd_door) return null;
+    if (sam.dkim === 'geen_pass') return null;   // een mail waarvan de handtekening niet klopt, hoort niet in één tik bij anderen van 'dat' adres
+    const a = adresVan((meta && meta.van) || '');
+    return a && BUNDEL_ADRES_RE.test(a) ? a : null;
+  }
+  function bundelSleutel(row, sam, uit, meta) {
     if (row.status !== 'beoordeeld' || !sam.live) return null;
     if (sam.mogelijk_medisch || sam.na_keuze || sam.prive_schaduw || uit.mogelijk_medisch || uit.buiten_brain) return null;
-    if (!sam.afzender || !BUNDEL_AFZ_RE.test(String(sam.afzender)) || sam.afzender === 'PRIVE' || sam.afzender_kracht !== 'hoog' || sam.aangeleverd_door) return null;
     const km = Array.isArray(sam.afzender_kenmerken) ? sam.afzender_kenmerken : [];
     // review ronde 2 MOET 3: alleen het mailadres met uitgelijnde DKIM; dat toetst stukVoorApp opnieuw tegen het register van nu (afzenderNogSterk).
     // Een KvK-nummer telt hier niet: het staat niet in de samenvatting, dus de pod kan het niet opnieuw toetsen.
-    if (km.indexOf('mailadres+dkim') < 0 || sam.dkim !== 'uitgelijnd') return null;
+    const register = !!sam.afzender && BUNDEL_AFZ_RE.test(String(sam.afzender)) && sam.afzender !== 'PRIVE' && sam.afzender_kracht === 'hoog' && !sam.aangeleverd_door
+      && km.indexOf('mailadres+dkim') >= 0 && sam.dkim === 'uitgelijnd';
+    const adres = register ? null : bundelAdres(sam, meta);
+    if (!register && !adres) return null;
+    if (sam.afzender === 'PRIVE') return null;
     if (sam.jev && sam.jev !== 'onder') return null;
     if (sam.geld !== false || sam.soort === 'bewijsstuk' || sam.soort === 'keten') return null;   // ook een stuk van vóór wv2710 (geen geld-veld): niet bundelen
     if ((sam.velden || []).some(function (v) { return BUNDEL_GELD_VELDEN.indexOf(v) >= 0; })) return null;
@@ -2975,7 +2990,9 @@ function maak(o) {
     if ((uit.kandidaten || []).some(function (k) { return k.id === 'PRIVE'; })) return null;
     const v = uit.voorstel;
     if (v && (v.entiteit === 'PRIVE' || ['kennis', 'geen'].indexOf(v.lens) < 0)) return null;
-    return 'b' + crypto.createHash('sha256').update(['wv2710', sam.bron || '', sam.afzender, v ? v.lens + ':' + (v.entiteit || '') : '-'].join('|')).digest('hex').slice(0, 16);
+    if (adres && (!v || (v.lens === 'kennis' && !v.entiteit))) return null;   // adresroute: alleen met een echt voorstel ("zelfde voorstel")
+    if (register) return { sleutel: 'b' + crypto.createHash('sha256').update(['wv2710', sam.bron || '', sam.afzender, v ? v.lens + ':' + (v.entiteit || '') : '-'].join('|')).digest('hex').slice(0, 16), adres: false };
+    return { sleutel: 'b' + crypto.createHash('sha256').update(['wv4205', sam.bron || '', adres, v.lens + ':' + (v.entiteit || '')].join('|')).digest('hex').slice(0, 16), adres: true };
   }
   // het afzenderkenmerk van de bundel moet NU nog in het register staan: de afzender actief en het mailadres als actief kenmerk van die afzender
   function afzenderNogSterk(r, sam, meta) {
@@ -3019,7 +3036,8 @@ function maak(o) {
         const zin = vz ? (safeJson(vz.bewijs) || {}).zin : null;
         if (typeof zin === 'string' && zin.trim()) basis.zin = eenRegel(zin, 200);
       }
-      if (basis._b && !afzenderNogSterk(r, sam, mt)) basis._b = null;   // wv2710 review ronde 2 MOET 3 (zonder register: geen bundels)
+      if (basis._b && !basis._bAdres && !afzenderNogSterk(r, sam, mt)) basis._b = null;   // wv2710 review ronde 2 MOET 3 (zonder register: geen bundels)
+      delete basis._bAdres;
     }
     if (!ctx || !ctx.bundels) delete basis._b;   // wv2710: de bundelsleutel alleen in het overzicht (bundelsZet) en bij appBundel
     if (row.status !== 'beoordeeld') return Object.assign(basis, { marker: sam.marker || null, soorten: Array.isArray(sam.soorten) ? sam.soorten : [] });

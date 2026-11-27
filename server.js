@@ -12205,7 +12205,13 @@ async function appNieuwRoute(req, res, a) {
   }
   const gd = appGezienDavid();   // wv804 (ontwerp § 2): door David gezien, voor fase 4 (nu informatief)
   appStuur(res, 200, { ok: true, nu: new Date(nu).toISOString(), tabs: tabs, laatst: laatst, gezien: gezien, seintje: appSeintjeTab(a.id), fouten: fouten, telegram: telegram,
-    telegram_bezig: appTelegramBezig(), david: gd ? { tabs: gd.tabs, punten_n: Object.keys(gd.punten).length } : null, zacht: zacht });
+    telegram_bezig: appTelegramBezig(), david: gd ? { tabs: gd.tabs, punten_n: Object.keys(gd.punten).length } : null, zacht: zacht, intake_wacht: appIntakeWacht() });
+}
+// wv4205 (besluitenpagina nr 498 / 3C198, David Ja 25-11 21:55): wacht er in Intake iets op David (twijfel of vastgehouden)? Alleen ja/nee
+// voor een stil puntje op de Intake-knop, geen getal en geen inhoud. Router uit of niet te lezen = null (de app toont dan niets).
+function appIntakeWacht() {
+  try { const r = intakeRouterHaal(); if (!r || typeof r.wachtOpDavid !== 'function') return null; const w = r.wachtOpDavid(); return w.twijfel.length + w.vastgehouden.length > 0; }
+  catch (e) { return null; }
 }
 // wv292 (Fable wv277 spiegel #6): loopt er een Telegram-beurt (bron telegram, zoals appTelegramSpiegel) in hoofd of machinekamer?
 // Alleen of en sinds wanneer, nooit inhoud: wat David in Telegram typte, komt pas na afloop via de spiegel in het app-log.
