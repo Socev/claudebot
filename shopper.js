@@ -21,7 +21,12 @@
  *  - Favoriet (wv2267, David 2-11: "Kunnen we gericht iets bouwen dat ook op favoriete websites zoekt? … Ik wil altijd prijs en levervoorraad
  *    weten"): de vault-pagina FAVORIETEN (type: shopper-favorieten, lijst winkels: {domein, aan}) wordt bij elke vraag gelezen (vault-veilig,
  *    zelfde grens). Een optie krijgt favoriet: true als haar (al goedgekeurde https-)koop-link op een domein staat dat aan staat (zelfde host
- *    of een subdomein). Geen pagina of geen geldige regels = niets favoriet. De pagina zelf wordt nooit geschreven.
+ *    of een subdomein). Geen pagina of geen geldige regels = niets favoriet. De pagina wordt alleen geschreven door Davids tik in de app
+ *    (wv4280, 2C96 e): winkelAan (alleen het veld aan van die ene winkelregel) en winkelErbij (één regel erbij), beide via o.vv.wijzig onder
+ *    het slot opnieuw gelezen, de rest byte-gelijk, en daarna nagelezen (alleen die ene winkel anders; anders niets geschreven).
+ *  - Ergens anders gekocht met link (wv4280, 2C96 f): de gekocht-regel krijgt link (alleen https, koopUrl) en de pagina een sectie
+ *    "## Waarom niet gevonden" met één regel uit de winkellijst (shopper-winkels.js waaromNiet: niet in de lijst / staat uit / site weigert
+ *    Shopper / zoekgebied te smal). Het detail geeft elders_winkel (vers uit de lijst), zodat de app "Zet <winkel> in mijn winkels" aanbiedt.
  *  - S5 Facturen-koppeling (wv2276, ontwerp § 3.4b): bij een zoektocht op gekocht zoekt facturenBij() in de Facturen-app naar facturen die bij
  *    de aankoop passen (entiteit gelijk, datum 14 d vóór t/m 30 d na gekocht.datum, winkel als heel woord in de leveranciersnaam, bedrag in
  *    centen ± max(€ 1, 1 %) = hoog, hooguit € 15 hoger = middel, bedrag onbekend = laag). Een berekende verwijzing: er wordt NIETS
@@ -176,10 +181,10 @@ function gekochtVan(t) {
   const datum = tekstVeld(g.datum, 10);
   return { optie: /^o\d{1,3}$/.test(String(g.optie || '')) ? String(g.optie) : null, winkel: tekstVeld(g.winkel, 80) || null, bedrag_eur: bedrag(g.bedrag_eur),
     datum: DATUM_RE.test(datum) ? datum : null, opmerking: tekstVeld(g.opmerking || g.toelichting, 120) || null,
-    via: ['app', 'socev'].indexOf(String(g.via || '')) >= 0 ? String(g.via) : null };
+    via: ['app', 'socev'].indexOf(String(g.via || '')) >= 0 ? String(g.via) : null, ...(koopUrl(g.link) ? { link: koopUrl(g.link) } : {}) };
 }
 // ── wv2275: de knop Gekocht (bouwplan "OVIS Shopper - knop Gekocht (ontwerp 2-11-2026)" § 3.2) ──
-const GEKOCHT_VELDEN = ['optie', 'winkel', 'bedrag_eur', 'datum', 'opmerking'];
+const GEKOCHT_VELDEN = ['optie', 'winkel', 'bedrag_eur', 'datum', 'opmerking', 'link'];   // link: wv4280, alleen bij ergens anders gekocht
 // Vrije tekst voor de flow-map in de frontmatter: geen regeleinden of besturingstekens (ook U+2028/2029/0085), geen " of \ (dat breekt de
 // map niet, maar ook het lezen niet); te lang = null (de vraag wordt geweigerd, niet afgekapt)
 function mapTekst(x, max) {
@@ -192,7 +197,51 @@ function geldigeDag(s) { if (!DATUM_RE.test(s)) return false; const x = new Date
 function gekochtRegel(g) {
   const q = (x) => (x == null || x === '' ? 'null' : '"' + x + '"');
   return 'gekocht: {optie: ' + (g.optie || 'null') + ', winkel: ' + q(g.winkel) + ', bedrag_eur: ' + (g.bedrag_eur == null ? 'null' : String(g.bedrag_eur))
-    + ', datum: ' + q(g.datum) + ', opmerking: ' + q(g.opmerking) + ', via: app}';
+    + ', datum: ' + q(g.datum) + ', opmerking: ' + q(g.opmerking) + (g.link ? ', link: ' + q(g.link) : '') + ', via: app}';
+}
+// wv4280 (2C96 f): de sectie "## Waarom niet gevonden" in het lijf van de pagina (na de frontmatter). Bestaat hij al (een eerdere keer
+// gekocht), dan alleen die sectie vervangen; anders vóór "## Gerelateerd", of onderaan. De rest van het lijf blijft byte-gelijk.
+const WAAROM_KOP = '## Waarom niet gevonden';
+const WAAROM_ZIN = {
+  niet_in_lijst: (w) => w.domein + ' staat niet in je winkellijst; Shopper zoekt bij Snel vergelijken alleen in je winkels.',
+  uit: (w) => (w.naam || w.domein) + ' staat in je winkellijst, maar uit.',
+  niet_te_lezen: (w) => 'de site van ' + (w.naam || w.domein) + ' weigert Shopper (zo staat het in je winkellijst); prijs en voorraad zijn er niet te lezen.',
+  zoekgebied_te_smal: (w) => (w.naam || w.domein) + ' staat aan en is te lezen, maar kwam niet in de opties: het zoekgebied (categorie of zoekwoorden) was te smal.',
+};
+function waaromRegel(w, winkel, dag) {
+  const f = w && WAAROM_ZIN[w.soort];
+  return f ? '- ' + dag.split('-').reverse().map(Number).join('-') + ', gekocht bij ' + (mapTekst(winkel, 80) || w.domein) + ': ' + f(w) + ' (vastgelegd door de app)' : null;
+}
+// review wv4280 MOET 1: koppen alleen buiten codeblokken (``` of ~~~); binnen een codeblok telt een ##-regel niet
+function kopRegels(regels) {
+  const uit = [];
+  let hek = null;   // { t: teken, n: lengte } van het open codeblok (CommonMark: sluiten met hetzelfde teken, minstens zo lang, alleen witruimte erna)
+  regels.forEach((r, i) => {
+    if (hek) { const f = /^[ ]{0,3}(`{3,}|~{3,})[ \t]*$/.exec(r); if (f && f[1][0] === hek.t && f[1].length >= hek.n) hek = null; return; }
+    const f = /^[ ]{0,3}(`{3,}|~{3,})/.exec(r);
+    if (f) { hek = { t: f[1][0], n: f[1].length }; return; }
+    if (/^[ ]{0,3}#{1,2}[ \t]/.test(r)) uit.push(i);
+  });
+  return uit;
+}
+// review wv4280 ronde 3: bij vervangen gaan alleen de eigen regels van de app weg (de kop, lege regels en regels die eindigen op
+// "(vastgelegd door de app)"); de eerste andere regel en alles daarna blijft staan. Zo kan er nooit tekst van iemand anders verdwijnen,
+// ook niet bij een kop die de kopherkenning mist.
+const EIGEN_REGEL = /^- .*\(vastgelegd door de app\)[ \t]*$/;
+function zetWaaromSectie(lijf, regel) {
+  const blok = WAAROM_KOP + '\n' + regel + '\n';
+  const regels = lijf.split('\n'), koppen = kopRegels(regels);
+  const k = koppen.find((i) => /^## Waarom niet gevonden[ \t]*$/.test(regels[i]));
+  const tot = (i) => regels.slice(0, i).join('\n') + (i > 0 ? '\n' : '');
+  if (k !== undefined) {
+    let e = k + 1;
+    while (e < regels.length && (EIGEN_REGEL.test(regels[e]) || (!regels[e].trim() && e < regels.length - 1))) e++;
+    const rest = regels.slice(e).join('\n');
+    return tot(k) + blok + (rest ? '\n' + rest : '');
+  }
+  const g = koppen.find((i) => /^[ ]{0,3}## Gerelateerd\b/.test(regels[i]));
+  if (g !== undefined) return tot(g) + blok + '\n' + regels.slice(g).join('\n');
+  return lijf + (lijf === '' || /\n\n$/.test(lijf) ? '' : /\n$/.test(lijf) ? '\n' : '\n\n') + blok;
 }
 // Frontmatterregels: de status zetten, alle gekocht-regels (ook een blokvorm met ingesprongen regels eronder) eruit, eventueel één nieuwe
 // gekocht-regel direct onder de status. De rest van de frontmatter blijft regel voor regel gelijk.
@@ -758,6 +807,13 @@ function maak(o) {
     const b = bestellingVoor(z, rel, bestellingenNu(), bestelAntwoorden()[z.id]);
     return b ? { pakje: b.pakje, winkel: b.winkel, dag: b.dag, optie: b.optie, factuur: factuurBijBestelling(z, b) } : null;
   }
+  // wv4280 (2C96 f): bij "ergens anders gekocht" met link: hoe die winkel NU in de lijst staat (vers, zodat "Zet in mijn winkels" verdwijnt
+  // zodra hij erin staat); naam = de winkel die David opgaf
+  function eldersWinkel(z) {
+    const g = z.gekocht;
+    if (!W || z.status !== 'gekocht' || !g || g.optie || !g.link) return null;
+    try { const ft = lees(FAVORIETEN); const w = W.waaromNiet(g.link, ft == null ? [] : W.winkelsVan(ft)); return w ? Object.assign({}, w, { winkel: g.winkel }) : null; } catch (e) { return null; }
+  }
   function zoektocht(id) {
     const v = vind(id);
     if (v.fout) return v.fout;
@@ -768,6 +824,7 @@ function maak(o) {
       eisen: R.fmLijst(t, 'eisen').map((x) => tekstVeld(x, 200)).filter(Boolean).slice(0, 20),
       aannames: R.fmLijst(t, 'aannames').map((x) => tekstVeld(x, 300)).filter(Boolean).slice(0, 20),
       inleiding: inleiding(t), waarom: sectie(t, 'Waarom dit advies'), niet_te_lezen: sectie(t, 'Niet te lezen'),
+      waarom_niet: sectie(t, 'Waarom niet gevonden'), elders_winkel: eldersWinkel(z),
       facturen: z.status === 'gekocht' ? metFacturen((db) => facturenBij(db, z)) : undefined,
       todoist_url: z.todoist_id ? 'https://app.todoist.com/app/task/' + z.todoist_id : null, nu: nalezingBij(z),
       eerdere: sectie(t, 'Eerdere opties', 12000), aangepast: tekstVeld(fmWaarde(t, 'aangepast'), 60) || null, zoekt: zoektBij(z),
@@ -1030,6 +1087,13 @@ function maak(o) {
     const heeftOptie = d.optie != null && d.optie !== '', heeftWinkel = d.winkel != null && d.winkel !== '';
     if (heeftOptie === heeftWinkel) return nee('kies een optie of vul een winkel in (één van beide)');
     if (heeftOptie && (typeof d.optie !== 'string' || !/^o\d{1,3}$/.test(d.optie))) return nee('ongeldige optie');
+    // wv4280 (2C96 f): een link alleen bij ergens anders gekocht; alleen https (koopUrl-regels)
+    let link = null;
+    if (d.link != null && d.link !== '') {
+      if (heeftOptie) return nee('een link alleen bij ergens anders gekocht');
+      link = typeof d.link === 'string' ? koopUrl(d.link) : null;
+      if (!link) return nee('link: alleen een https-adres van de winkelpagina');
+    }
     let winkelElders = null;
     if (heeftWinkel) { winkelElders = typeof d.winkel === 'string' ? mapTekst(d.winkel, 80) : null; if (!winkelElders) return nee('winkel: tekst van hooguit 80 tekens'); }
     let bedragEur = null;
@@ -1058,7 +1122,7 @@ function maak(o) {
     if (teVroeg(v.z)) return nee('de datum ligt ruim vóór de zoektocht');
     let nieuw = null, reden = null, bestaand = null;
     const maakNieuw = (z) => {
-      if (!heeftOptie) return { optie: null, winkel: winkelElders, bedrag_eur: bedragEur, datum, opmerking };
+      if (!heeftOptie) return Object.assign({ optie: null, winkel: winkelElders, bedrag_eur: bedragEur, datum, opmerking }, link ? { link } : {});
       const opt = z._opties.find((x) => x.id === d.optie);
       if (!opt) return null;
       return { optie: opt.id, winkel: mapTekst(opt.winkel, 80) || null, bedrag_eur: bedragEur, datum, opmerking };
@@ -1069,6 +1133,8 @@ function maak(o) {
       return zelfdeGekocht(g, n) ? { status: 200, body: { ok: true, status: 'gekocht', al: true, gekocht: g } }
         : { status: 409, body: { ok: false, fout: 'deze zoektocht staat al op gekocht met andere gegevens; tik eerst Toch niet gekocht' } };
     }
+    // wv4280 (2C96 f): met een link ook waarom Shopper deze winkel niet vond (alleen uit de winkellijst); dezelfde schrijfactie
+    const waarom = link && W ? (() => { try { const ft = lees(FAVORIETEN); return W.waaromNiet(link, ft == null ? [] : W.winkelsVan(ft)); } catch (e) { return null; } })() : null;
     const ok = o.vv.wijzig(path.join(o.vault, v.p.rel), function (t) {
       const fm = /^---\n([\s\S]*?)\n---/.exec(t || '');
       const z = fm ? ontleed(t, v.p.rel, v.p.ent) : null;
@@ -1077,9 +1143,11 @@ function maak(o) {
       if (teVroeg(z)) { reden = 'datum'; return null; }
       nieuw = maakNieuw(z);
       if (!nieuw) { reden = 'optie'; return null; }
-      return '---\n' + zetStatusRegels(fm[1], 'gekocht', gekochtRegel(nieuw)) + '\n---' + t.slice(fm[0].length);
+      const regel = waarom ? waaromRegel(waarom, nieuw.winkel, nieuw.datum) : null;
+      const lijf = t.slice(fm[0].length);
+      return '---\n' + zetStatusRegels(fm[1], 'gekocht', gekochtRegel(nieuw)) + '\n---' + (regel ? (lijf.startsWith('\n') ? '' : '\n') + zetWaaromSectie(lijf, regel) : lijf);   // review ronde 4: nooit "---## …"
     });
-    if (ok) return { status: 200, body: { ok: true, status: 'gekocht', gekocht: Object.assign({}, nieuw, { via: 'app' }) } };
+    if (ok) return { status: 200, body: Object.assign({ ok: true, status: 'gekocht', gekocht: Object.assign({}, nieuw, { via: 'app' }) }, waarom ? { waarom_niet: waarom } : {}) };
     if (reden === 'gekocht' && bestaand && nieuw === null && zelfdeGekocht(bestaand, maakNieuw(v.z))) return { status: 200, body: { ok: true, status: 'gekocht', al: true, gekocht: bestaand } };
     return { status: 409, body: { ok: false, fout: 'de pagina veranderde of is weg; laad Shopper opnieuw' } };
   }
@@ -1231,6 +1299,44 @@ function maak(o) {
     const fac = metFacturen((db) => db.prepare(FAC_WINKEL_SQL).all().map((r) => ({ naam: String(r.naam || ''), aantal: Number(r.aantal), laatst: r.laatst || null })));
     return winkelsMod.overzicht(lees(FAVORIETEN), gekocht, fac);
   }
+  // ── wv4280 (2C96 e): aan/uit en Zet in mijn winkels (Davids tik in de app; alleen de pagina FAVORIETEN, onder het slot) ──
+  const WINKEL_FOUT = { onbekend: [400, 'onbekende winkel'], blokvorm: [409, 'deze winkel staat niet op één regel; pas hem aan in Brain'],
+    dubbel: [409, 'deze winkel staat dubbel in de lijst; pas hem aan in Brain'], controle: [409, 'de winkellijst is niet veilig aan te passen; pas hem aan in Brain'],
+    pagina: [409, 'de winkellijst is nu niet te lezen'], bestaat: [409, 'deze winkel staat al in je lijst'], vol: [409, 'de lijst is vol (60 winkels)'],
+    ongeldig: [400, 'vul een naam, een webadres (zoals winkel.nl) en 1 tot 3 categorieën in'] };
+  const winkelFout = (f) => { const x = WINKEL_FOUT[f] || [409, 'de winkellijst veranderde; probeer het opnieuw']; return { status: x[0], body: { ok: false, fout: x[1] } }; };
+  function favSchrijf(fn) {
+    let r = null;
+    const ok = o.vv.wijzig(path.join(o.vault, FAVORIETEN), function (t) { r = fn(t == null ? '' : String(t)); return r && r.tekst ? r.tekst : null; });
+    return { ok, r };
+  }
+  // POST /app/shopper/winkels/aan {domein, aan}: alleen het veld aan van die ene winkel; al zo = 200 al (niets geschreven)
+  function winkelAan(d) {
+    if (!W) return { status: 404, body: { ok: false, fout: 'Winkels zit niet in deze versie van de pod' } };
+    if (!d || typeof d !== 'object' || Array.isArray(d) || Object.keys(d).some((k) => k !== 'domein' && k !== 'aan') || typeof d.domein !== 'string' || typeof d.aan !== 'boolean') return { status: 400, body: { ok: false, fout: 'alleen domein en aan (true of false)' } };
+    const t = lees(FAVORIETEN);
+    if (t == null) return winkelFout('pagina');
+    const dom = W.domeinVan(d.domein);
+    if (!dom || !W.winkelsVan(t).some((w) => w.domein === dom)) return winkelFout('onbekend');
+    const { ok, r } = favSchrijf((x) => W.zetAan(x, dom, d.aan));
+    if (ok) return { status: 200, body: { ok: true, domein: dom, aan: d.aan } };
+    if (r && r.al) return { status: 200, body: { ok: true, domein: dom, aan: d.aan, al: true } };
+    return winkelFout(r && r.fout);
+  }
+  // POST /app/shopper/winkels/erbij {domein, naam, categorie: [..]}: één regel erbij (aan: true, toegevoegd: vandaag); bestaat hij al = 409
+  function winkelErbij(d) {
+    if (!W) return { status: 404, body: { ok: false, fout: 'Winkels zit niet in deze versie van de pod' } };
+    if (!d || typeof d !== 'object' || Array.isArray(d) || Object.keys(d).some((k) => ['domein', 'naam', 'categorie'].indexOf(k) < 0)
+      || typeof d.domein !== 'string' || typeof d.naam !== 'string' || !Array.isArray(d.categorie) || d.categorie.some((c) => typeof c !== 'string')) return winkelFout('ongeldig');
+    const w = { domein: d.domein, naam: d.naam, categorie: d.categorie, dag: nlDag(nu()) };
+    const t = lees(FAVORIETEN);
+    if (t == null) return winkelFout('pagina');
+    const pr = W.zetErbij(t, w);
+    if (pr.fout) return winkelFout(pr.fout);
+    const { ok, r } = favSchrijf((x) => W.zetErbij(x, w));
+    if (ok) return { status: 200, body: { ok: true, winkel: { domein: r.winkel.domein, naam: r.winkel.naam, aan: true, categorie: r.winkel.categorie } } };
+    return winkelFout(r && r.fout);
+  }
   // Snel vergelijken: de stand met de score per optie (de module zelf kent geen scores)
   const vergelijk = o.vergelijk ? Object.assign({}, o.vergelijk, { stand: function (id) {
     const u = o.vergelijk.stand(id);
@@ -1243,7 +1349,8 @@ function maak(o) {
     const a = o.aanwijsPad ? jsonStaat(o.aanwijsPad)[maandNl()] : null;   // wv2946: aantal tikken op Zoek met Shopper deze maand (geen tekst)
     return Object.assign({ aan: true }, laatst || { op: null, zoektochten: null, open: null, onleesbaar: null, favorieten: null }, { aanwijzen_maand: Number.isInteger(a) ? a : 0 });
   }
-  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, antwoord, bedrag: bedragUitFactuur, bestelling, info, vergelijk, winkels: winkelsMod ? winkels : null, aanwijs };
+  return { paden, lijst, zoektocht, status, gekocht, nalezen, taak, eisen, opnieuw, nieuw, antwoord, bedrag: bedragUitFactuur, bestelling, info, vergelijk, winkels: winkelsMod ? winkels : null, aanwijs,
+    winkelAan: winkelsMod ? winkelAan : null, winkelErbij: winkelsMod ? winkelErbij : null };
 }
 
-module.exports = { maak, bestellingVoor, beginVan, kandidatenBlok, ontleed, adviesControle, eenheidStuks, poortVrij, nieuwOpdracht, POORT_FOUT, nuVan, btwVeld, zetEisenRegels, opnieuwOpdracht, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };
+module.exports = { maak, zetWaaromSectie, waaromRegel, bestellingVoor, beginVan, kandidatenBlok, ontleed, adviesControle, eenheidStuks, poortVrij, nieuwOpdracht, POORT_FOUT, nuVan, btwVeld, zetEisenRegels, opnieuwOpdracht, todoistId, idVan, koopUrl, optiesVan, favorietenVan, isFavoriet, facturenBij, gekochtVan, gekochtRegel, mapTekst, sleutelVan, hostKern, MAPPEN, ID_RE, FAVORIETEN };

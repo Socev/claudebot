@@ -2,7 +2,7 @@
 # Toetst OVIS Shopper S3 (wv2264, 2-11-2026; favorieten wv2267 § 6): shopper.js (alleen type: shopper-zoektocht direct in de vaste Shopper-mappen, entiteit uit de map,
 # geen symlink volgen, id = hash van het pad en nooit een pad uit de vraag, koop-link alleen https, totaal/advies uit de opties) en het
 # server.js-blok (routes, audit zonder wens, Niet meer nodig = de enige schrijfactie, gekocht niet via de App, /health alleen aantallen + tijdstip,
-# uitrol-lijst; § 12 Snel vergelijken wv2934 met nep-zoekhulp en nep-winkels; § 13 Winkels, categorieën, verzendtabel en winkelscore wv2935; § 14 prijshistorie (Kieskeurig) en aanwijsteller wv2946; § 15 Winkels: facturen per winkel uit Facturen wv2947; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase; § 8 de knop Gekocht en Toch niet gekocht, wv2275). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
+# uitrol-lijst; § 12 Snel vergelijken wv2934 met nep-zoekhulp en nep-winkels; § 13 Winkels, categorieën, verzendtabel en winkelscore wv2935; § 14 prijshistorie (Kieskeurig) en aanwijsteller wv2946; § 15 Winkels: facturen per winkel uit Facturen wv2947; § 7 S5 Facturen-koppeling wv2276 met een verzonnen facturendatabase; § 8 de knop Gekocht en Toch niet gekocht, wv2275; § 18 winkel aan/uit, Zet in mijn winkels en ergens anders gekocht met link, wv4280). Alleen verzonnen pagina's; raakt de echte vault niet. Gebruik: bash test/shopper.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
 if grep -nE "console\.|eval\(" shopper.js; then echo "ROOD  shopper.js logt naar de console of gebruikt eval"; exit 1; fi
@@ -1367,6 +1367,137 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     toets('17p server.js: route bestelling (statusteller), bestellingen uit pakjes en bestellingPad in de klokken-map', /\\\/bestelling\$\/[\s\S]{0,200}shopper_status[\s\S]{0,200}shopper\.bestelling\(m\[1\], d\)/.test(bl17)
       && /bestellingen: function \(sinds\) \{ return typeof pakjes !== 'undefined' && pakjes && typeof pakjes\.bestellingen === 'function'/.test(bl17) && /'shopper-bestelling\.json'/.test(bl17));
     pdb.close(); pk.sluit();
+  }
+
+  // ── 18. wv4280 (2C96 e/f): winkel aan/uit en Zet in mijn winkels; ergens anders gekocht met link en "Waarom niet gevonden" (verzonnen winkels) ──
+  {
+    const WM = require('./shopper-winkels.js');
+    const V18 = path.join(W, 'v18'), VS = path.join(V18, '20_Prive/Shopper'), FP = path.join(V18, '00_Systeem/Shopper - favoriete winkels.md');
+    fs.mkdirSync(VS, { recursive: true }); fs.mkdirSync(path.join(V18, '00_Systeem'), { recursive: true });
+    const FAV18 = ['---', 'type: shopper-favorieten', 'updated: 2026-11-11', '# uitleg', 'winkels:',
+      '  - {domein: proefblauw.nl, naam: "Proefblauw", aan: true, soort: "elektronica, huis", categorie: "elektronica huis", lezen: script, verzend_eur: 0}',
+      '  - {domein: weigerwinkel.nl, naam: "Weigerwinkel", aan: true, categorie: kantoor, lezen: niet}',
+      '  # commentaar tussendoor, aan: false',
+      '  - {domein: uitwinkel.be, naam: "Uitwinkel # België", aan: false, categorie: huis, lezen: script}',
+      '  - {domein: zonderaan.nl, naam: "Zonder aan", categorie: bouw}',
+      '  - domein: blokwinkel.nl', '    naam: Blokwinkel', '    aan: true',
+      '  - {domein: dubbel.nl, aan: true}', '  - {domein: dubbel.nl, aan: false}',
+      'volgend_veld: x', '---', '', '# Winkels', '', 'Tekst met aan: true die niet mag veranderen.', ''].join('\n');
+    fs.writeFileSync(FP, FAV18);
+    const leesF = () => fs.readFileSync(FP, 'utf8');
+    const verschil = (a, b) => { const x = a.split('\n'), y = b.split('\n'); if (x.length !== y.length) return null; return x.map((r, i) => (r === y[i] ? null : i)).filter((i) => i !== null); };
+    const klok18 = new Date('2026-11-27T10:00:00Z');
+    const m18 = S.maak({ vault: V18, vv: VV, nu: () => klok18 });
+    let r = m18.winkelAan({ domein: 'proefblauw.nl', aan: false });
+    let vs = verschil(FAV18, leesF());
+    toets('18a aan → uit: 200, alleen de regel van die winkel verandert (alleen aan: false), de rest byte-gelijk', r.status === 200 && r.body.aan === false && vs && vs.length === 1
+      && leesF().split('\n')[vs[0]] === FAV18.split('\n')[vs[0]].replace('aan: true', 'aan: false'), [r, vs]);
+    const na18a = leesF();
+    r = m18.winkelAan({ domein: 'https://www.proefblauw.nl/', aan: false });
+    toets('18b nog eens uit (ook als https://www.-adres) = 200 al, niets geschreven', r.status === 200 && r.body.al === true && leesF() === na18a, r);
+    r = m18.winkelAan({ domein: 'proefblauw.nl', aan: true });
+    toets('18c weer aan: pagina weer byte-gelijk aan het begin', r.status === 200 && leesF() === FAV18, r);
+    r = m18.winkelAan({ domein: 'uitwinkel.be', aan: true });
+    vs = verschil(FAV18, leesF());
+    toets('18d winkel met # in de naam (na een commentaarregel) aan: alleen die regel', r.status === 200 && vs && vs.length === 1 && /uitwinkel\.be.*aan: true/.test(leesF().split('\n')[vs[0]])
+      && WM.winkelsVan(leesF()).find((w) => w.domein === 'uitwinkel.be').aan === true, [r, vs]);
+    fs.writeFileSync(FP, FAV18);
+    r = m18.winkelAan({ domein: 'zonderaan.nl', aan: true });
+    vs = verschil(FAV18, leesF());
+    toets('18e winkel zonder veld aan: aan: true komt direct na het domein, alleen die regel', r.status === 200 && vs && vs.length === 1
+      && leesF().split('\n')[vs[0]] === '  - {domein: zonderaan.nl, aan: true, naam: "Zonder aan", categorie: bouw}', [r, leesF().split('\n')[vs && vs[0]]]);
+    fs.writeFileSync(FP, FAV18);
+    const st18 = [m18.winkelAan({ domein: 'nergens.nl', aan: true }), m18.winkelAan({ domein: '../x', aan: true }), m18.winkelAan({ domein: 'proefblauw.nl', aan: 'true' }),
+      m18.winkelAan({ domein: 'proefblauw.nl', aan: true, x: 1 }), m18.winkelAan(null), m18.winkelAan({ aan: false })].map((x) => x.status);
+    toets('18f onbekend domein / ongeldig domein / aan geen boolean / extra veld / leeg = 400, niets geschreven', st18.every((x) => x === 400) && leesF() === FAV18, st18);
+    const st18b = [m18.winkelAan({ domein: 'blokwinkel.nl', aan: false }), m18.winkelAan({ domein: 'dubbel.nl', aan: false })];
+    toets('18g winkel in blokvorm of dubbel in de lijst = 409 (pas aan in Brain), niets geschreven', st18b.every((x) => x.status === 409) && leesF() === FAV18, st18b);
+    // erbij
+    r = m18.winkelErbij({ domein: 'https://www.verzonnenvak.nl/shop', naam: 'Verzonnen "Vak" winkel', categorie: ['medisch', 'kantoor'] });
+    const regels18 = leesF().split('\n'), oud18 = FAV18.split('\n');
+    const nieuweRegel = '  - {domein: verzonnenvak.nl, naam: "Verzonnen \'Vak\' winkel", aan: true, categorie: "medisch kantoor", toegevoegd: "2026-11-27"}';
+    toets('18h Zet in mijn winkels: één regel erbij direct na de laatste winkelregel (vóór het volgende veld), rest byte-gelijk; " wordt \'',
+      r.status === 200 && r.body.winkel.domein === 'verzonnenvak.nl' && regels18.length === oud18.length + 1 && regels18[oud18.indexOf('volgend_veld: x')] === nieuweRegel
+      && regels18.filter((x) => x !== nieuweRegel).join('\n') === FAV18, [r, regels18.slice(10, 16)]);
+    const wv18 = m18.winkels().body.winkels.find((w) => w.domein === 'verzonnenvak.nl');
+    toets('18i daarna in de tab Winkels: aan, categorieën medisch + kantoor', wv18 && wv18.aan === true && JSON.stringify(wv18.categorie) === '["medisch","kantoor"]', wv18);
+    const na18h = leesF();
+    const st18c = [m18.winkelErbij({ domein: 'verzonnenvak.nl', naam: 'X', categorie: ['huis'] }), m18.winkelErbij({ domein: 'blokwinkel.nl', naam: 'X', categorie: ['huis'] })].map((x) => x.status);
+    const st18d = [m18.winkelErbij({ domein: '10.0.0.1', naam: 'X', categorie: ['huis'] }), m18.winkelErbij({ domein: 'x.nl', naam: '', categorie: ['huis'] }),
+      m18.winkelErbij({ domein: 'x.nl', naam: 'X', categorie: ['alles'] }), m18.winkelErbij({ domein: 'x.nl', naam: 'X', categorie: [] }),
+      m18.winkelErbij({ domein: 'x.nl', naam: 'X'.repeat(81), categorie: ['huis'] }), m18.winkelErbij({ domein: 'x.nl', naam: 'X', categorie: ['huis'], aan: false }),
+      m18.winkelErbij({ domein: 'x.nl', naam: 'X', categorie: 'huis' })].map((x) => x.status);
+    toets('18j bestaat al (ook in blokvorm) = 409; ip-adres, lege of te lange naam, "alles", geen of losse categorie, extra veld = 400; niets geschreven',
+      st18c.every((x) => x === 409) && st18d.every((x) => x === 400) && leesF() === na18h, [st18c, st18d]);
+    let vol = FAV18.replace('volgend_veld: x', Array.from({ length: 60 }, (_, i) => '  - {domein: vol' + i + '.nl, aan: false}').join('\n') + '\nvolgend_veld: x');
+    fs.writeFileSync(FP, vol);
+    toets('18k lijst vol (60) = 409, niets geschreven', m18.winkelErbij({ domein: 'x.nl', naam: 'X', categorie: ['huis'] }).status === 409 && leesF() === vol);
+    fs.writeFileSync(FP, FAV18);
+    // f: ergens anders gekocht met link
+    const zt = ['---', 'type: shopper-zoektocht', 'wens: "Proefprinter"', 'status: open', 'gezocht: 2026-11-20T09:00+01:00', 'aantal: 1', 'opties:',
+      '  - {id: o1, winkel: "Proefblauw", product: "Printer", koop_aantal: 1, prijs_eur: 99, verzending_eur: 0, totaal_eur: 99, url: "https://www.proefblauw.nl/p/1"}',
+      'advies: o1', '---', '# Shopper — proefprinter', '', 'Advies o1.', '', '## Waarom dit advies', 'Goedkoopst.', '', '## Gerelateerd', '- x', ''].join('\n');
+    const ZP = path.join(VS, 'Shopper - 2026-11-20 - Proefprinter.md');
+    fs.writeFileSync(ZP, zt);
+    const zid18 = S.idVan('20_Prive/Shopper/Shopper - 2026-11-20 - Proefprinter.md'), leesZ = () => fs.readFileSync(ZP, 'utf8');
+    const st18e = [m18.gekocht(zid18, { winkel: 'Nepzaak', link: 'http://www.nepzaak.nl/p/2' }), m18.gekocht(zid18, { optie: 'o1', link: 'https://www.proefblauw.nl/p/1' }),
+      m18.gekocht(zid18, { winkel: 'Nepzaak', link: 'javascript:alert(1)' }), m18.gekocht(zid18, { winkel: 'Nepzaak', link: 'https://a:b@nepzaak.nl/p' }),
+      m18.gekocht(zid18, { winkel: 'Nepzaak', link: 42 })].map((x) => x.status);
+    toets('18l link: http, bij een optie, javascript:, met inloggegevens of geen tekst = 400, niets geschreven', st18e.every((x) => x === 400) && leesZ() === zt, st18e);
+    r = m18.gekocht(zid18, { winkel: 'Nepzaak Leusden', link: 'https://www.nepzaak.nl/p/2?k=1,2#x', datum: '2026-11-26' });
+    const t18 = leesZ(), g18 = S.gekochtVan(t18);
+    const sect = '## Waarom niet gevonden\n- 26-11-2026, gekocht bij Nepzaak Leusden: nepzaak.nl staat niet in je winkellijst; Shopper zoekt bij Snel vergelijken alleen in je winkels. (vastgelegd door de app)\n\n';
+    toets('18m elders met link: 200, gekocht-regel met link (terug te lezen), sectie Waarom niet gevonden vóór Gerelateerd, rest byte-gelijk',
+      r.status === 200 && r.body.waarom_niet.soort === 'niet_in_lijst' && g18.link === 'https://www.nepzaak.nl/p/2?k=1,2#x' && g18.optie === null
+      && t18.slice(t18.indexOf('\n---\n')) === zt.slice(zt.indexOf('\n---\n')).replace('## Gerelateerd', sect + '## Gerelateerd'), [r, t18.slice(t18.indexOf('\n---\n'))]);
+    let d18 = m18.zoektocht(zid18).body.zoektocht;
+    toets('18n detail: waarom_niet (de zin) en elders_winkel {soort niet_in_lijst, domein nepzaak.nl, winkel Nepzaak Leusden}', /staat niet in je winkellijst/.test(d18.waarom_niet)
+      && d18.elders_winkel && d18.elders_winkel.soort === 'niet_in_lijst' && d18.elders_winkel.domein === 'nepzaak.nl' && d18.elders_winkel.winkel === 'Nepzaak Leusden', d18.elders_winkel);
+    toets('18o daarna Zet in mijn winkels: elders_winkel wordt zoekgebied_te_smal (vers uit de lijst)', m18.winkelErbij({ domein: 'nepzaak.nl', naam: 'Nepzaak', categorie: ['bouw'] }).status === 200
+      && m18.zoektocht(zid18).body.zoektocht.elders_winkel.soort === 'zoekgebied_te_smal');
+    toets('18p dezelfde tik nog eens = 200 al; met een andere link = 409', m18.gekocht(zid18, { winkel: 'Nepzaak Leusden', link: 'https://www.nepzaak.nl/p/2?k=1,2#x', datum: '2026-11-26' }).body.al === true
+      && m18.gekocht(zid18, { winkel: 'Nepzaak Leusden', link: 'https://www.nepzaak.nl/p/3', datum: '2026-11-26' }).status === 409);
+    // Toch niet gekocht en opnieuw elders (nu bij een winkel die uit staat): één sectie, vervangen
+    toets('18q Toch niet gekocht: link weg uit de frontmatter (sectie blijft als geschiedenis)', m18.status(zid18, { status: 'open' }).status === 200 && !/link:/.test(leesZ().split('\n---\n')[0]) && /## Waarom niet gevonden/.test(leesZ()));
+    r = m18.gekocht(zid18, { winkel: 'Uitwinkel', link: 'https://uitwinkel.be/p', datum: '2026-11-27' });
+    const t18b = leesZ();
+    toets('18r opnieuw elders bij een winkel die uit staat: sectie vervangen (één keer), zin "staat in je winkellijst, maar uit."', r.status === 200 && r.body.waarom_niet.soort === 'uit'
+      && t18b.split('## Waarom niet gevonden').length === 2 && /Uitwinkel # België staat in je winkellijst, maar uit\./.test(t18b) && t18b.indexOf('## Waarom niet gevonden') < t18b.indexOf('## Gerelateerd'), t18b.slice(t18b.indexOf('\n---\n')));
+    toets('18s waaromNiet: lezen niet = niet_te_lezen; aan + leesbaar = zoekgebied_te_smal; subdomein telt; geen https = null',
+      WM.waaromNiet('https://shop.weigerwinkel.nl/x', WM.winkelsVan(FAV18)).soort === 'niet_te_lezen' && WM.waaromNiet('https://www.proefblauw.nl/x', WM.winkelsVan(FAV18)).soort === 'zoekgebied_te_smal'
+      && WM.waaromNiet('geen', WM.winkelsVan(FAV18)) === null);
+    toets('18t zetWaaromSectie: zonder Gerelateerd onderaan met lege regel ervoor; bestaande sectie aan het eind vervangen',
+      S.zetWaaromSectie('# T\n\nTekst\n', '- r') === '# T\n\nTekst\n\n## Waarom niet gevonden\n- r\n' && S.zetWaaromSectie('# T\n\n## Waarom niet gevonden\n- oud (vastgelegd door de app)\n', '- nieuw') === '# T\n\n## Waarom niet gevonden\n- nieuw\n');
+    const cb = '# T\n\n```\n## Waarom niet gevonden\nvoorbeeld\n```\n\nNotitie na het codeblok.\n\n## Gerelateerd\n- x\n';
+    toets('18t2 (review MOET 1) een kop binnen een codeblok telt niet: codeblok en notitie blijven, sectie vóór Gerelateerd; tweede keer vervangt alleen de echte sectie',
+      S.zetWaaromSectie(cb, '- r') === cb.replace('## Gerelateerd', '## Waarom niet gevonden\n- r\n\n## Gerelateerd')
+      && S.zetWaaromSectie(S.zetWaaromSectie(cb, '- r (vastgelegd door de app)'), '- s') === cb.replace('## Gerelateerd', '## Waarom niet gevonden\n- s\n\n## Gerelateerd')
+      && S.zetWaaromSectie('# T\n\n## Waarom niet gevonden\n- oud (vastgelegd door de app)\n~~~\n## Gerelateerd\n~~~\nna\n\n## Echt\nz\n', '- n') === '# T\n\n## Waarom niet gevonden\n- n\n\n~~~\n## Gerelateerd\n~~~\nna\n\n## Echt\nz\n',
+      S.zetWaaromSectie(cb, '- r'));
+    const cb4 = '# T\n\n````\n```\n## Waarom niet gevonden\nvoorbeeld\n````\n~~~ tekst\n## Gerelateerd\n~~~~\nNotitie.\n\n## Gerelateerd\n- x\n';
+    toets('18t3 (review ronde 2 MOET 1) codeblok van 4 backticks sluit niet op 3; ~~~ met info sluit niet op ~~~ tekst: alleen de echte Gerelateerd telt',
+      S.zetWaaromSectie(cb4, '- r') === cb4.replace('Notitie.\n\n## Gerelateerd', 'Notitie.\n\n## Waarom niet gevonden\n- r\n\n## Gerelateerd'), S.zetWaaromSectie(cb4, '- r'));
+    const ing = '# T\n\n## Waarom niet gevonden\n- 1-11-2026, gekocht bij X: y (vastgelegd door de app)\nEigen notitie van David.\n  ## Gerelateerd\n- x\n';
+    toets('18t4 (review ronde 3) vervangen haalt alleen de eigen app-regels weg: notitie van David en een ingesprongen kop blijven byte-gelijk; ingesprongen Gerelateerd telt als kop',
+      S.zetWaaromSectie(ing, '- n') === '# T\n\n## Waarom niet gevonden\n- n\n\nEigen notitie van David.\n  ## Gerelateerd\n- x\n'
+      && S.zetWaaromSectie('# T\n\nTekst\n   ## Gerelateerd\n- x\n', '- r') === '# T\n\nTekst\n## Waarom niet gevonden\n- r\n\n   ## Gerelateerd\n- x\n', S.zetWaaromSectie(ing, '- n'));
+    const kaalZt = ['---', 'type: shopper-zoektocht', 'wens: "Kaal"', 'status: open', 'gezocht: 2026-11-20T09:00+01:00', '---'].join('\n');
+    const KP = path.join(VS, 'Shopper - 2026-11-20 - Kaal.md'); fs.writeFileSync(KP, kaalZt);
+    const kid = S.idVan('20_Prive/Shopper/Shopper - 2026-11-20 - Kaal.md');
+    r = m18.gekocht(kid, { winkel: 'Nepzaak', link: 'https://nepzaak.nl/p', datum: '2026-11-26' });
+    const kt = fs.readFileSync(KP, 'utf8');
+    toets('18t5 (review ronde 4) pagina met alleen frontmatter zonder slotregel: "---" blijft op een eigen regel, pagina leesbaar als gekocht met de sectie',
+      r.status === 200 && /\n---\n## Waarom niet gevonden\n- 26-11-2026/.test(kt) && m18.zoektocht(kid).body.zoektocht.status === 'gekocht' && /kwam niet in de opties/.test(m18.zoektocht(kid).body.zoektocht.waarom_niet), kt);
+    fs.unlinkSync(KP);
+    // gekocht zonder link: geen sectie, regel zoals altijd (geen link-veld)
+    fs.writeFileSync(ZP, zt);
+    r = m18.gekocht(zid18, { winkel: 'Ergens', datum: '2026-11-26' });
+    toets('18u elders zonder link: geen sectie, geen link-veld, geen waarom_niet', r.status === 200 && !/Waarom niet gevonden|link:/.test(leesZ()) && r.body.waarom_niet === undefined
+      && m18.zoektocht(zid18).body.zoektocht.elders_winkel === null);
+    const src18 = fs.readFileSync('server.js', 'utf8'), bl18 = src18.slice(src18.indexOf('async function appShopper'), src18.indexOf('// ── einde OVIS Shopper ──'));
+    toets('18v server.js: POST winkels/aan en winkels/erbij vóór de id-routes, met de statusteller', /'POST \/app\/shopper\/winkels\/aan' \|\| route === 'POST \/app\/shopper\/winkels\/erbij'[\s\S]{0,300}shopper_status[\s\S]{0,200}shopper\.winkelAan : shopper\.winkelErbij/.test(bl18)
+      && bl18.indexOf("'POST /app/shopper/winkels/aan'") < bl18.indexOf('\\/status$'));
+    toets('18w shopper.js zegt niet meer dat de winkelpagina nooit geschreven wordt', !/De pagina zelf wordt nooit geschreven/.test(fs.readFileSync('shopper.js', 'utf8')));
   }
 
   fs.rmSync(W, { recursive: true, force: true });

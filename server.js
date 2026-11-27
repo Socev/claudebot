@@ -32748,6 +32748,9 @@ function personeelsschermInfo() {
 //                                     één ronde tegelijk per zoektocht; stand in klokken/shopper-opnieuw.json (job + tijd, geen wens)
 //   POST /app/shopper/<id>/antwoord   wv4171 (2C96 h): {antwoord} op wacht_op_jou: eis erbij, wacht_op_jou weg, dan Opnieuw zoeken (6/uur)
 //   POST /app/shopper/<id>/bestelling wv4183 (2C70): {pakje, antwoord: ja|nee} op "was dit hem?" (bestelling uit Pakjes bij een optie-winkel)
+//   POST /app/shopper/winkels/aan     wv4280 (2C96 e): {domein, aan} = schakelaar in Winkels; alleen het veld aan van die winkelregel (statusteller)
+//   POST /app/shopper/winkels/erbij   wv4280 (2C96 e): {domein, naam, categorie[]} = Zet in mijn winkels; één regel erbij (statusteller)
+//   (POST …/gekocht kent sinds wv4280 ook link bij ergens anders gekocht: dan ook de sectie "## Waarom niet gevonden" op de zoektocht)
 //   POST /app/shopper/<id>/bedrag     wv4171 (2C96 g): {factuur} bij gekocht zonder bedrag: het bedrag van die passende factuur uit Facturen
 //   POST /app/shopper/vergelijk       wv2934: {wens, aantal?, eisen[]?, refurbished?} = Snel vergelijken (pod-zoekhulp + winkel-lezen.py, ± 20 s,
 //                                     plafond 20/dag in de module en 10/uur); GET …/vergelijk/<id> = de stand (opties zodra gelezen, 24 u bewaard);
@@ -32933,6 +32936,12 @@ async function appShopper(req, res, a, route, d) {
       soort = 'aanwijs';
       if (!appTeller('shopper_aanwijs', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens shopper aanwijs');
       u = typeof shopper.aanwijs === 'function' ? shopper.aanwijs() : { status: 404, body: { ok: false, fout: 'onbekend' } };
+    }
+    else if (route === 'POST /app/shopper/winkels/aan' || route === 'POST /app/shopper/winkels/erbij') {   // wv4280 (2C96 e): winkel aan/uit of erbij (alleen de winkelpagina, één regel)
+      soort = route.slice(route.lastIndexOf('/') + 1) === 'aan' ? 'winkel-aan' : 'winkel-erbij';
+      if (!appTeller('shopper_status', 30, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 30)', 'grens shopper status');
+      const fn = soort === 'winkel-aan' ? shopper.winkelAan : shopper.winkelErbij;
+      u = typeof fn === 'function' ? fn(d) : { status: 404, body: { ok: false, fout: 'Winkels zit niet in deze versie van de pod' } };
     }
     else if (route === 'GET /app/shopper/winkels') { soort = 'winkels'; u = shopper.winkels ? shopper.winkels() : { status: 404, body: { ok: false, fout: 'Winkels zit niet in deze versie van de pod' } }; }   // wv2935: tab Winkels (de 600/uur van shopper geldt)
     else if ((m = /^GET \/app\/shopper\/([^/]*)$/.exec(route))) { soort = 'zoektocht'; u = shopper.zoektocht(m[1]); }   // shopper.js toetst de id zelf (12 hex, anders 400)

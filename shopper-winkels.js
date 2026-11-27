@@ -192,6 +192,104 @@ function domeinenVoor(winkels, categorie, metBrowser) {
     && (!categorie || w.categorie.indexOf(categorie) >= 0 || w.categorie.indexOf('alles') >= 0)).map((w) => w.domein);
 }
 
+// ── wv4280 (nr 196 = 2C96 e): aan/uit en "Zet in mijn winkels" vanuit de app ──
+// Alleen de regel van die ene winkel verandert (of er komt één regel bij); de rest van de pagina blijft byte-gelijk. Alleen winkels op één
+// regel ({…}, de vorm van de pagina); een winkel in blokvorm of dubbel in de lijst = weigeren (dan in Brain aanpassen). Na de wijziging wordt
+// de pagina opnieuw gelezen: alleen die ene winkel mag anders zijn, anders gaat er niets op de pagina (fail-closed).
+const MAX_ERBIJ = 60;   // shopper.js leest hooguit 60 winkels die aan staan (MAX_FAVORIETEN)
+const ERBIJ_CATS = CATEGORIEEN.map((c) => c.id);
+const FLOW_RE = /^([ \t]*-[ \t]+)\{(.*)\}([ \t]*(?:#.*)?)$/;
+// De regels van het blok winkels: in de frontmatter, vanaf "winkels:" tot het volgende veld op de kantlijn of het einde van de frontmatter
+function winkelBlok(t) {
+  const fm = /^---\n([\s\S]*?)\n---/.exec(t || '');
+  if (!fm || !/^type:[ \t]*shopper-favorieten[ \t]*$/m.test(fm[1])) return null;
+  const regels = fm[1].split('\n');
+  const k = regels.findIndex((r) => /^winkels:[ \t]*(?:#.*)?$/.test(r));
+  if (k < 0) return null;
+  let eind = k + 1;
+  while (eind < regels.length && (/^[ \t]/.test(regels[eind]) || !regels[eind].trim() || /^#/.test(regels[eind]))) eind++;
+  let laatste = k;   // de laatste ingesprongen regel van het blok (geen commentaar op de kantlijn erna)
+  for (let i = k + 1; i < eind; i++) if (/^[ \t]+\S/.test(regels[i])) laatste = i;
+  return { regels, k, eind, laatste, kop: 4, rest: t.slice(fm[0].length) };   // kop = lengte van "---\n"
+}
+function blokTekst(b, regels) { return '---\n' + regels.join('\n') + '\n---' + b.rest; }
+// De regelnummers (in b.regels) van de items voor dit domein; blok = er staat ook een item in blokvorm voor dit domein (of een onleesbaar item)
+function itemsVoor(b, domein) {
+  const flow = [];
+  let blok = false;
+  for (let i = b.k + 1; i < b.eind; i++) {
+    const r = b.regels[i];
+    if (!/^[ \t]*-/.test(r)) { if (new RegExp('^[ \\t]+domein:[ \\t]*["\']?(?:https?://)?(?:www\\.)?' + domein.replace(/[.]/g, '\\.') + '["\']?[ \\t]*(?:#.*)?$', 'i').test(r)) blok = true; continue; }
+    const m = FLOW_RE.exec(r);
+    const v = m ? R.flowMap('{' + m[2] + '}') : null;
+    if (!v) { if (/domein:/.test(r) && domeinVan(String(r).replace(/^[ \t]*-[ \t]*(?:domein:)?/, '').trim()) === domein) blok = true; continue; }
+    if (domeinVan(v.domein) === domein) flow.push(i);
+  }
+  return { flow, blok };
+}
+const zonderWinkel = (l, d) => JSON.stringify(l.filter((w) => w.domein !== d));
+// → { tekst } of { fout: 'pagina' | 'onbekend' | 'blokvorm' | 'dubbel' | 'controle', al?: true }
+function zetAan(t, domein, aan) {
+  const d = domeinVan(domein);
+  const b = d ? winkelBlok(t) : null;
+  if (!b) return { fout: d ? 'pagina' : 'onbekend' };
+  const voor = winkelsVan(t), w = voor.find((x) => x.domein === d);
+  if (!w) return { fout: 'onbekend' };
+  if (w.aan === aan) return { al: true };
+  const it = itemsVoor(b, d);
+  if (it.blok || !it.flow.length) return { fout: 'blokvorm' };
+  if (it.flow.length > 1) return { fout: 'dubbel' };
+  const i = it.flow[0], m = FLOW_RE.exec(b.regels[i]);
+  const delen = m[2].match(/(^|,)[ \t]*aan[ \t]*:/g) || [];
+  if (delen.length > 1) return { fout: 'dubbel' };
+  let binnen;
+  if (delen.length === 1) {
+    binnen = m[2].replace(/(^|,)([ \t]*)aan[ \t]*:[ \t]*("?)(true|false)?\3(?=[ \t]*(,|$))/, (x, a, sp) => a + sp + 'aan: ' + (aan ? 'true' : 'false'));
+    if (binnen === m[2]) return { fout: 'controle' };
+  } else binnen = m[2].replace(/^([ \t]*domein[ \t]*:[ \t]*(?:"[^"]*"|'[^']*'|[^,]*))/, '$1, aan: ' + (aan ? 'true' : 'false'));
+  const regels = b.regels.slice();
+  regels[i] = m[1] + '{' + binnen + '}' + m[3];
+  const tekst = blokTekst(b, regels), na = winkelsVan(tekst), wn = na.find((x) => x.domein === d);
+  // controle op de herlezen tekst: alleen het veld aan van deze ene winkel is anders
+  if (!wn || wn.aan !== aan || na.length !== voor.length || zonderWinkel(na, d) !== zonderWinkel(voor, d)
+    || JSON.stringify(Object.assign({}, wn, { aan: w.aan })) !== JSON.stringify(w)) return { fout: 'controle' };
+  return { tekst, winkel: wn };
+}
+// Tekst voor in de flow-map: geen besturingstekens, geen " of \ (zelfde regel als de gekocht-regel in shopper.js); te lang = null
+function regelTekst(x, max) {
+  const v = String(x == null ? '' : x).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/"/g, "'").replace(/\\/g, '/').replace(/\s+/g, ' ').trim();
+  return v && v.length <= max ? v : null;
+}
+// w = { domein, naam, categorie: [ids], dag: 'JJJJ-MM-DD' } → { tekst, winkel } of { fout: 'pagina' | 'ongeldig' | 'bestaat' | 'vol' | 'controle', winkel? }
+function zetErbij(t, w) {
+  const d = domeinVan(w && w.domein), naam = regelTekst(w && w.naam, 80);
+  const cat = Array.isArray(w && w.categorie) ? Array.from(new Set(w.categorie)) : null;
+  if (!d || !/\.[a-z]{2,}$/.test(d) || !naam || !cat || !cat.length || cat.length > 3 || cat.some((c) => ERBIJ_CATS.indexOf(c) < 0) || !DATUM_RE.test(String(w.dag || ''))) return { fout: 'ongeldig' };
+  const b = winkelBlok(t);
+  if (!b) return { fout: 'pagina' };
+  const voor = winkelsVan(t), al = voor.find((x) => x.domein === d);
+  if (al) return { fout: 'bestaat', winkel: al };
+  if (itemsVoor(b, d).blok) return { fout: 'bestaat' };
+  if (voor.length >= MAX_ERBIJ) return { fout: 'vol' };
+  const regels = b.regels.slice();
+  regels.splice(b.laatste + 1, 0, '  - {domein: ' + d + ', naam: "' + naam + '", aan: true, categorie: "' + cat.join(' ') + '", toegevoegd: "' + w.dag + '"}');
+  const tekst = blokTekst(b, regels), na = winkelsVan(tekst), wn = na.find((x) => x.domein === d);
+  if (!wn || na.length !== voor.length + 1 || zonderWinkel(na, d) !== JSON.stringify(voor) || !wn.aan || wn.naam !== naam
+    || JSON.stringify(wn.categorie) !== JSON.stringify(cat)) return { fout: 'controle' };
+  return { tekst, winkel: wn };
+}
+// wv4280 (2C96 f): waarom de winkel van een aankoop "ergens anders" niet uit het advies kwam, alleen uit de winkellijst (geen gok over de site):
+// niet in de lijst / staat uit / de site weigert Shopper (lezen: niet, gemeten bij het vullen van de lijst) / anders: zoekgebied te smal.
+function waaromNiet(link, winkels) {
+  const h = hostVan(link);
+  if (!h) return null;
+  const w = winkelBij(link, winkels);
+  if (!w) return { soort: 'niet_in_lijst', domein: h, naam: null };
+  if (!w.aan) return { soort: 'uit', domein: w.domein, naam: w.naam };
+  if (w.lezen === 'niet') return { soort: 'niet_te_lezen', domein: w.domein, naam: w.naam };
+  return { soort: 'zoekgebied_te_smal', domein: w.domein, naam: w.naam };
+}
+
 function maak(o) {
   const nu = o.nu || (() => new Date());
   let poging = 0, bezig = false;
@@ -256,4 +354,4 @@ function maak(o) {
   return { overzicht, scores, ververs, info: () => ({ bezig, poging: poging ? new Date(poging).toISOString() : null }) };
 }
 
-module.exports = { maak, winkelsVan, winkelBij, verzendUitTabel, scoreBij, scoreVan, aankopen, facturenPerWinkel, domeinenVoor, CATEGORIEEN, CAT_IDS, MIN_ERVARINGEN };
+module.exports = { maak, zetAan, zetErbij, waaromNiet, domeinVan, winkelsVan, winkelBij, verzendUitTabel, scoreBij, scoreVan, aankopen, facturenPerWinkel, domeinenVoor, CATEGORIEEN, CAT_IDS, MIN_ERVARINGEN };
