@@ -14174,7 +14174,7 @@ async function appVoorJouKeuze(req, res, a, d) {
     if (!t || t.apparaat !== a.id) return appWeiger(res, 409, 'terugdraaien kan hier niet (meer); zet het punt zelf goed of zeg het Socev', 'voor-jou terug onbekend');
     if (t.tot <= nu) return appWeiger(res, 409, 'terugdraaien kan alleen tot een minuut na je keuze', 'voor-jou terug te laat');
     // wv4194: Vanavond terug = weer meteen zichtbaar (open; een zichtbare later-kaart was dat in feite al)
-    if (t.naar === 'vanavond') { fn = 'mk_voor_jou_toon'; body = { p_sleutel: p.sleutel, p_van: 'open', p_toon: null, p_door: 'david', p_bewijs: bewijs }; }
+    if (t.naar === 'vanavond') { fn = 'mk_voor_jou_toon'; body = { p_sleutel: p.sleutel, p_van: 'open', p_toon: null, p_door: 'david', p_bewijs: bewijs, p_was: t.toon || null }; }   // review MOET 1: alleen de eigen Vanavond
     else body = { p_sleutel: p.sleutel, p_van: t.naar, p_naar: t.van, p_door: 'david', p_bewijs: bewijs, p_later_tot: t.van === 'later' ? t.later_tot : null };
   } else if (keuze === 'vanavond') {
     fn = 'mk_voor_jou_toon';
@@ -14219,7 +14219,8 @@ async function appVoorJouKeuze(req, res, a, d) {
     return appStuur(res, 409, { ok: false, fout: 'dit punt is intussen veranderd; ververs de lijst', nu: r && typeof r.nu === 'string' ? r.nu : null });
   }
   if (keuze === 'terug') { delete appStaat.vjTerug[id]; clearTimeout(appStaat.vjDoorzet[id]); delete appStaat.vjDoorzet[id]; clearTimeout(appStaat.vjVrijgeef[id]); delete appStaat.vjVrijgeef[id]; }
-  else appStaat.vjTerug[id] = { van: van, naar: keuze === 'wacht' ? 'later' : keuze, later_tot: van === 'later' ? (p.later_tot || null) : null, tot: nu + APP_VJ_TERUG_MS, apparaat: a.id };
+  else appStaat.vjTerug[id] = { van: van, naar: keuze === 'wacht' ? 'later' : keuze, later_tot: van === 'later' ? (p.later_tot || null) : null, tot: nu + APP_VJ_TERUG_MS, apparaat: a.id,
+    toon: keuze === 'vanavond' && r.punt && r.punt.toon_vanaf ? r.punt.toon_vanaf : undefined };
   if (keuze === 'vervallen') appVjDoorzetLater(id, p.sleutel);   // wv506: de klus erachter na de ↩️-minuut ook dicht
   if (keuze !== 'terug' && keuze !== 'vanavond' && typeof hkNaKeuze === 'function') hkNaKeuze(p.sleutel);   // wv3905: herinneringskaart → de tik na de ↩️-minuut in het register
   const metKlus = p.soort !== 'besluit' && !!(p.herkomst && Array.isArray(p.herkomst.wv) && p.herkomst.wv.length);   // review wv1853 #5

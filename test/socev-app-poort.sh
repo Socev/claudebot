@@ -370,7 +370,7 @@ async function nepFetch(url, opt) {
     if (fn === 'mk_voor_jou_toon') {   // wv4194: Niet nu › Vanavond, zoals de echte (status open, later_tot weg, toon_vanaf; spoed = niet wachten)
       const x = (sbStaat.vj || []).find((y) => y.sleutel === b.p_sleutel);
       if (!['open', 'later'].includes(b.p_van) || b.p_door !== 'david') return antw(400, { message: 'ongeldig' });
-      if (!x || x.status !== b.p_van) return antw(200, { ok: false, fout: 'conflict', nu: x ? x.status : null });
+      if (!x || x.status !== b.p_van || (b.p_was && x.toon_vanaf !== b.p_was)) return antw(200, { ok: false, fout: 'conflict', nu: x ? x.status : null });
       Object.assign(x, { status: 'open', later_tot: null, toon_vanaf: x.spoed ? null : b.p_toon, bewijs: b.p_bewijs != null ? b.p_bewijs : x.bewijs });
       return antw(200, { ok: true, punt: Object.assign({}, x) });
     }
@@ -8367,7 +8367,7 @@ async function bewijs(o) {
         toets('27h Vanavond: binnen de ↩️-minuut met toon_vanaf (app telt hem niet), en hij telt als wachtend', p1 && p1.toon_vanaf && p1.terug_ms > 0 && l.j.wacht && l.j.wacht.n >= 1, JSON.stringify([p1, l.j.wacht]));
         r = await K({ id: 41941, keuze: 'terug' });
         const t2 = nT()[nT0 + 1] || {};
-        toets('27h Vanavond ↩️ -> weer open zonder toon_vanaf', r.status === 200 && t2.b && t2.b.p_toon === null && sbStaat.vj.find((x) => x.id === 41941).toon_vanaf === null, JSON.stringify([r.status, r.j, t2.b]));
+        toets('27h Vanavond ↩️ -> weer open zonder toon_vanaf, alleen op de eigen tijd (p_was)', r.status === 200 && t2.b && t2.b.p_toon === null && t2.b.p_was === t1.b.p_toon && sbStaat.vj.find((x) => x.id === 41941).toon_vanaf === null, JSON.stringify([r.status, r.j, t2.b]));
         r = await K({ id: 41943, van: 'open', keuze: 'vanavond' });
         toets('27h Vanavond op een spoedkaart: de databank laat hem niet wachten -> eerlijk "blijft in je lijst"', r.status === 200 && r.j.blijft === true && /blijft in je lijst/.test(r.j.melding), JSON.stringify(r.j));
       } else {
