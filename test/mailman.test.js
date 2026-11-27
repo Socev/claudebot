@@ -3807,3 +3807,20 @@ test('wv4133: Facturen in Intake → voorstel "meteen naar Facturen"; Nee = niet
   const ja = mm.intakeVraagAntwoord({ sleutel: v[0].sleutel, antwoord: 'ja' }, 'app:proef');
   assert.equal(ja.status, 200); assert.equal(mm._db.prepare('SELECT stroom FROM regel WHERE id = ?').get(ja.j.regel_id).stroom, 'factuur');
 });
+
+test('wv4133 review ZOU 1: een oudere open vraag blijft zichtbaar achter meer dan tien recentere beantwoorde', () => {
+  const { mm } = nieuweKamer();
+  const pv = 'gmail:david';
+  const oud = [mail({ van: 'Oud <oud@winkel.invalid>' }), mail({ van: 'Oud <oud@winkel.invalid>' })];
+  draai(mm, pv, oud, { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 2.5 }); } });
+  for (const m of oud) mm.intakeKeuze({ postvak: pv, gmail_id: m.id, lens: 'geen', tijd: '2026-10-01T10:00:00Z' });
+  for (let i = 0; i < 12; i++) {
+    const ms = [mail({ van: 'W <w' + i + '@winkel.invalid>' }), mail({ van: 'W <w' + i + '@winkel.invalid>' })];
+    draai(mm, pv, ms, { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 2.5 }); } });
+    for (const m of ms) mm.intakeKeuze({ postvak: pv, gmail_id: m.id, lens: 'geen' });
+    const v = mm.intakeVragen(10).find(function (x) { return x.adres === 'w' + i + '@winkel.invalid'; });
+    assert.equal(mm.intakeVraagAntwoord({ sleutel: v.sleutel, antwoord: 'nee' }).status, 200);
+  }
+  const v = mm.intakeVragen(3);
+  assert.equal(v.length, 1); assert.equal(v[0].adres, 'oud@winkel.invalid');
+});

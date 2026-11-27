@@ -2964,9 +2964,12 @@ function maak(o) {
       return raak && (stroom ? r.stap === 'in' && r.stroom === stroom : r.stap === 'weg');
     });
   }
-  function intakeVoorstellen(pv, max) {
-    return db.prepare("SELECT adres, naar, count(*) n, max(tijd) laatst FROM correctie WHERE postvak = ? AND bron = 'intake' AND adres IS NOT NULL AND adres != '' GROUP BY adres, naar HAVING count(*) >= ? ORDER BY laatst DESC LIMIT ?").all(pv, INTAKE_VRAAG_MIN, max)
-      .filter(function (x) { return !intakeRegelBestaat(pv, x.adres, x.naar); })
+  // review wv4133 ZOU 1: de limiet pas ná het wegfilteren (bestaande regel; met alleenOpen ook beantwoorde vragen), anders valt een oudere open vraag weg
+  function intakeVoorstellen(pv, max, alleenOpen) {
+    const antw = db.prepare('SELECT antwoord FROM intake_vraag WHERE postvak = ? AND adres = ? AND naar = ?');
+    return db.prepare("SELECT adres, naar, count(*) n, max(tijd) laatst FROM correctie WHERE postvak = ? AND bron = 'intake' AND adres IS NOT NULL AND adres != '' GROUP BY adres, naar HAVING count(*) >= ? ORDER BY laatst DESC").all(pv, INTAKE_VRAAG_MIN)
+      .filter(function (x) { return !intakeRegelBestaat(pv, x.adres, x.naar) && !(alleenOpen && antw.get(pv, x.adres, x.naar)); })
+      .slice(0, max)
       .map(function (x) {
         const fac = x.naar === 'FACTUUR';
         const dom = x.adres.indexOf('@') > 0 ? x.adres.slice(x.adres.indexOf('@') + 1) : x.adres;
@@ -2980,7 +2983,7 @@ function maak(o) {
   // Voor Intake: de open vragen (nog geen antwoord) over alle postvakken, nieuwste eerst, hooguit max
   function intakeVragen(max) {
     const uit = [];
-    for (const p of postvakken()) for (const v of intakeVoorstellen(p.id, 50)) if (!v.antwoord) uit.push(Object.assign({ postvak: p.id, postvak_naam: p.naam }, v));
+    for (const p of postvakken()) for (const v of intakeVoorstellen(p.id, 10, true)) uit.push(Object.assign({ postvak: p.id, postvak_naam: p.naam }, v));
     uit.sort(function (a, b) { return String(b.laatst).localeCompare(String(a.laatst)); });
     return uit.slice(0, Math.max(1, Math.min(10, Number(max) || 3))).map(function (v) {
       return { sleutel: v.postvak + '|' + v.adres + '|' + v.naar, postvak: v.postvak, postvak_naam: v.postvak_naam, adres: v.adres, naar: v.naar, aantal: v.aantal, laatst: v.laatst };
