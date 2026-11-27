@@ -13873,6 +13873,31 @@ async function wachterKaartenTik() {
   } finally { wkBezig = false; }
 }
 if (wachterKaarten && typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) { setInterval(function () { wachterKaartenTik(); }, 60000).unref(); }
+// ── wv4130 (besluitenpagina nr 457 = 3C157, David Ja 25-11-2026 22:05): "Loopt nog" — alles wat de nachtwachters volgen, alleen lezen ──
+// Verdeling en regels in loopt-nog.js (puur; test/loopt-nog.test.js). Hier alleen het lezen: dezelfde vier tabellen als WK_TABEL (n8n actie,
+// correspondentie, agenda; secondbrain.personeel_state). Hooguit eens per 3 minuten vers; mislukt één tabel, dan zegt het antwoord welke.
+const LOOPT_NOG = (function () { try { return require(path.join(__dirname, 'loopt-nog.js')); } catch (e) { logError('loopt-nog', e); return null; } })();
+const LOOPT_NOG_MAX = 500;
+let looptNogLaatst = null;
+async function looptNogLees() {
+  const tab = {}, afgekapt = [];
+  await Promise.all(['actie', 'correspondentie', 'agenda', 'personeel'].map(function (w) {
+    const T = WK_TABEL[w];
+    const p = T.pg ? wkSql('select row_to_json(t) as r from ' + T.pg + ' t limit ' + (LOOPT_NOG_MAX + 1)).then(function (r) { return r.map(function (x) { return x.r; }); })
+      : appN8nRijen(T.n8n, null, LOOPT_NOG_MAX);   // leest hooguit 5 × 100: 500 of meer = mogelijk niet alles
+    return p.then(function (r) { if (r.length >= LOOPT_NOG_MAX) afgekapt.push(w); tab[w] = r.slice(0, LOOPT_NOG_MAX); }, function (e) { logError('loopt-nog', e); tab[w] = null; });
+  }));
+  const u = LOOPT_NOG.verdeel(tab, appYmd(Date.now()));
+  u.op = new Date().toISOString(); u.afgekapt = afgekapt;
+  return u;
+}
+async function appLooptNog(req, res) {
+  if (!LOOPT_NOG) return appWeiger(res, 404, 'Loopt nog zit niet in deze versie van de pod', 'loopt-nog ontbreekt');
+  try {
+    if (!looptNogLaatst || Date.now() - looptNogLaatst.t > 3 * 60000) looptNogLaatst = { t: Date.now(), u: await looptNogLees() };
+    return appStuur(res, 200, Object.assign({ ok: true }, looptNogLaatst.u));
+  } catch (e) { logError('loopt-nog', e); return appWeiger(res, 503, 'Loopt nog is nu niet te lezen', 'loopt-nog fout'); }
+}
 // POST /app/voor-jou/wachter {id, keuze}. Onder het invoerslot, sessie glijdt, alleen de primaire kant, zelfde uurteller als Voor jou.
 async function appVoorJouWachter(req, res, a, d) {
   const id = d.id, keuze = String(d.keuze || '');
@@ -17098,6 +17123,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/voor-jou/keuze') return appVoorJouKeuze(req, res, a, d);
         if (route === 'POST /app/voor-jou/woord') return appVoorJouWoord(req, res, a, d);   // wv3250
         if (route === 'POST /app/voor-jou/wachter') return appVoorJouWachter(req, res, a, d);   // wv4124
+        if (route === 'GET /app/loopt-nog') return appLooptNog(req, res);   // wv4130 (3C157)
         if (route === 'POST /app/voor-jou/knop') return appVoorJouKnop(req, res, reg, a, s, d);   // wv404
         if (route === 'POST /app/te-lezen') return appTeLezenZet(req, res, a, d);   // wv2245
         if (route === 'POST /app/anders') return appAnders(req, res, reg, a, s, d);   // wv1821
