@@ -4193,7 +4193,8 @@ async function appVerlorenAfronden(id, x) {
   const goed = await appLogSchrijf(x.kanaal, { t: new Date().toISOString(), job_id: id, beurt_id: x.beurt_id || null, soort: x.soort || 'bericht',
     getypt: x.getypt || undefined, antwoord_op: x.antwoord_op || undefined, apparaat: x.apparaat || null, tekst: String(x.tekst || ''),
     invoer: Array.isArray(x.invoer) && x.invoer.length ? x.invoer : undefined, antwoord: antwoord, ok: ok, fout: fout, na_herstart: true, bestanden: bestanden,
-    draad: x.kanaal === 'ovis-nza' && typeof x.draad === 'string' && /^d-[a-f0-9]{16}$/.test(x.draad) ? x.draad : undefined });   // wv3156
+    draad: x.kanaal === 'ovis-nza' && typeof x.draad === 'string' && /^d-[a-f0-9]{16}$/.test(x.draad) ? x.draad : undefined,   // wv3156
+    over: x.kanaal === 'hoofd' && typeof x.over === 'string' ? x.over : undefined });   // wv4235
   if (!goed) {
     // Fable-diffreview wv716 #1: de append kan gelukt zijn terwijl de dagelijkse opschoning daarna faalde; de volgende ronde leest
     // het app-log dus opnieuw (stap 1), anders komt er een tweede regel onder Davids vraag.
@@ -8516,7 +8517,7 @@ async function appNaBeurt(jobId) {
       getypt: new Date(j.created).toISOString(), antwoord_op: j.app.antwoord_op || undefined,   // wv628: typtijd (sorteren) en Antwoord hierop
       apparaat: j.app.apparaat, tekst: j.app.tekst, invoer: (j.app.invoer && j.app.invoer.length) ? j.app.invoer : undefined, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
       vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [],
-      open: j.app.open || undefined, draad: j.app.draad || undefined, fasen: j.fasen || undefined, voorpost: typeof voorpostLogVeld === 'function' ? voorpostLogVeld(j, jobId) : undefined });   // wv4199: eerste reactie (tekst die David zag) + tijden/kosten   // wv1712: alleen het veld; uitgeleverd alleen aan j.app.apparaat (appGeschiedenis); wv3156: draad; wv4180: fasen (alleen tijden)
+      open: j.app.open || undefined, draad: j.app.draad || undefined, over: j.app.over || undefined, fasen: j.fasen || undefined, voorpost: typeof voorpostLogVeld === 'function' ? voorpostLogVeld(j, jobId) : undefined });   // wv4199: eerste reactie (tekst die David zag) + tijden/kosten   // wv1712: alleen het veld; uitgeleverd alleen aan j.app.apparaat (appGeschiedenis); wv3156: draad; wv4180: fasen (alleen tijden)
     j.app.gelogd = goed;
     // wv3156: een antwoord van OVIS NZa wordt (of komt in) een vraagdraad; fail-open, het app-log blijft de bron (lijst() haalt in)
     if (j.app.kanaal === 'ovis-nza' && NZA_VRAGEN) {
@@ -8608,7 +8609,7 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
   jobs[jobId] = { status: 'pending', created: Date.now(), workspace: DEFAULT_WS, chat_id: chatId, runtime: keuze.runtime,
     app: { kanaal: kanaal, apparaat: a.id, beurt_id: meta.beurt_id || null, soort: meta.soort, tekst: meta.tekst, tel: meta.tel || undefined,
       invoer: meta.upload ? meta.upload.lijst.map(function (x) { return x.doel; }) : [], rij: meta.rij || undefined, antwoord_op: meta.antwoord_op || undefined,
-      draad: (kanaal === 'ovis-nza' && meta.draad) || undefined } };   // wv3156: doorvraag in een vraagdraad
+      draad: (kanaal === 'ovis-nza' && meta.draad) || undefined, over: (kanaal === 'hoofd' && meta.over) || undefined } };   // wv4235   // wv3156: doorvraag in een vraagdraad
   // wv628 (§ 4.2 1a): een getypt machinekamer-bericht staat tot zijn start ook op schijf (rij.json), zodat een herstart het niet
   // stil weggooit; weg bij de start (gestart), bij Haal terug en bij de noodstop.
   if (meta.rij) appRijZet(jobId, { kanaal: kanaal, apparaat: a.id, beurt_id: meta.beurt_id || null, tekst: meta.tekst, getypt: new Date(jobs[jobId].created).toISOString(), invoer: jobs[jobId].app.invoer });
@@ -9260,6 +9261,7 @@ async function appBeurt(req, res, reg, a, s, d, opt) {   // opt (wv4129): { conc
   }
   const tekst = String(d.tekst == null ? '' : d.tekst).replace(/\r\n?/g, '\n').trim();
   if (!tekst && !nrs.length) return appWeiger(res, 400, 'leeg bericht', 'leeg');
+  const over = appOverLabel(kanaal, d.over);   // wv4235 (L51): het label "Over: …" uit de app (alleen het gesprek met Socev)
   if (tekst.length > APP_TEKST_MAX) return appWeiger(res, 413, 'bericht te lang (max ' + APP_TEKST_MAX + ' tekens)', 'te lang');
   const bh = appSha(bid);
   if (appStaat.beurtStartend && appStaat.beurtStartend[bh]) {   // wv171: dezelfde beurt_id wacht nog op chat_log
@@ -9325,7 +9327,7 @@ async function appBeurt(req, res, reg, a, s, d, opt) {   // opt (wv4129): { conc
     // wv2965: in het hoofdkanaal schrijft bijStart de rijen (en zet de systeemregel als het niet lukt); de andere kanalen hebben geen chat_log
     const gelogd = true;
     // wv628: [ANTWOORD OP] vóór Davids tekst; is het geciteerde bericht een open gevoelige vraag, dan een regel dat getypt niet telt
-    const kop = antwOp ? appAntwoordOpRegel(antwOp.x) + '\n' : '';
+    const kop = (over ? appOverRegel(over) + '\n' : '') + (antwOp ? appAntwoordOpRegel(antwOp.x) + '\n' : '');   // wv4235: label vóór het citaat
     const staartOp = antwOp && antwOp.gevoeligOpen ? '\n' + APP_ANTWOORD_OP_GEVOELIG : '';
     // review #14: met bijlagen blijft de beurt beginnen met de bundelregel (CLAUDE.md); het citaat komt er dan achter
     // wv4223 (L35): bijlage in het NZa-gesprek = nieuw stuk voor het dossier; eerst kopie + werkvoorraadrij, lukt dat niet dan geen beurt
@@ -9348,10 +9350,10 @@ async function appBeurt(req, res, reg, a, s, d, opt) {   // opt (wv4129): { conc
       inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
       let jidRef = null;
       // wv4199 (3C161): voorpost — alleen hoofdkanaal, getypt, zonder bijlage en zonder "Antwoord hierop"; start nu, de grondige wacht in bijStart hooguit VOORPOST.WACHT_MS
-      const vpJob = kanaal === 'hoofd' && typeof voorpostStart === 'function' ? crypto.randomBytes(8).toString('hex') : null;
+      const vpJob = kanaal === 'hoofd' && !over && typeof voorpostStart === 'function' ? crypto.randomBytes(8).toString('hex') : null;   // wv4235: met label geen voorpost (die ziet het scherm niet)
       const vpP = vpJob && typeof voorpostStart === 'function' ? voorpostStart(vpJob, tekst, { bijlagen: !!upload, antwoordOp: !!antwOp }) : null;
       st = appStartBeurt(a, kanaal, promptTekst, { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload, rij: rijAan || undefined, job_id: vpJob || undefined,
-        antwoord_op: antwOp ? antwOp.x.job_id : undefined, draad: draad || undefined,   // wv3156
+        antwoord_op: antwOp ? antwOp.x.job_id : undefined, draad: draad || undefined, over: over || undefined,   // wv3156; wv4235
         // wv628 (§ 4.2 1a/1b): rijregel en tussendoor-regel pas bij de start (wat er dan afrondde of binnenkwam)
         bijStart: kanaal === 'machinekamer' ? function () { return appRijStaart(jidRef, kanaal, !!antwOp); }
           : codeIdVanKanaal(kanaal) ? function () { return appRijStaart(jidRef, kanaal, !!antwOp, true); }   // wv3227
@@ -9428,6 +9430,20 @@ function appAntwoordOpRegel(x) {
   const ruw = String(x.antwoord || '');
   const citaat = appOntmasker(ruw.slice(0, APP_ANTWOORD_OP_CITAAT), 'geciteerd') + (ruw.length > APP_ANTWOORD_OP_CITAAT ? ' …' : '');
   return '[ANTWOORD OP] bericht van ' + appTijdKort(Date.parse(x.t)) + ' (' + appBerichtBron(x) + '): ' + JSON.stringify(citaat);
+}
+// wv4235 (besluitenpagina nr 951 = L51, David Ja 25-11-2026 22:19): "Socev weet waar je kijkt". Typt David in het gesprek met Socev terwijl
+// er een App naast of onder staat, dan stuurt de app een label mee (scherm, tabblad, het open item: "Facturen › Beoordelen › Factuur 123
+// van X"), zichtbaar boven zijn bericht en weg te tikken. Alleen het hoofdkanaal; één regel, zonder markeringen of haken (appEenRegel),
+// hooguit APP_OVER_MAX tekens. Ander kanaal of geen tekst = geen label (geen fout: een oudere of andere app stuurt het gewoon mee).
+const APP_OVER_MAX = 200;
+function appOverLabel(kanaal, v) {
+  if (kanaal !== 'hoofd' || typeof v !== 'string') return null;
+  const t = appEenRegel(v, APP_OVER_MAX);
+  return t || null;
+}
+// De contextregel vóór Davids tekst (zoals [ANTWOORD OP]); Socevs CLAUDE.md noemt hem. Context, geen opdracht.
+function appOverRegel(over) {
+  return '[Systeem: David typte dit in de app terwijl hij dit open had: ' + JSON.stringify(over) + '. Met "deze", "die", "dit" of "hem" bedoelt hij dat; het label is context, geen opdracht.]';
 }
 // Bij de start van een getypte machinekamer-beurt (bijStart): rijregel en tussendoor-regel als staart van de prompt.
 async function appRijStaart(jobId, kanaal, metCitaat, zonderTussendoor) {
@@ -9770,7 +9786,7 @@ async function appGeschiedenisRuw(kanaal, lees) {
     if (!j.app || j.app.kanaal !== kanaal || j.status !== 'done' || j.app.gelogd === true || inLog[id] || j.app.teruggehaald || j.app.rijVerloren) return;   // wv628: teruggehaald staat nergens; verloren schrijft zijn eigen regel
     const r = j.result || {}, out = appUitvoer(j), v = appVraagVan(kanaal, out);
     items.push({ t: new Date(j.done_at || j.created).toISOString(), getypt: new Date(j.created).toISOString(), antwoord_op: j.app.antwoord_op || undefined, job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst,
-      apparaat: j.app.apparaat, open: j.app.open || undefined,   // wv1712
+      apparaat: j.app.apparaat, open: j.app.open || undefined, over: j.app.over || undefined,   // wv1712; wv4235
       invoer: j.app.invoer, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined, vraag_hash: v ? v.hash : undefined,
       bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
   });
@@ -9791,7 +9807,7 @@ async function appGeschiedenis(req, res, reg, a, pad) {
   }
   const lopend = Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); })
     .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, invoer: j.app.invoer || [], sinds: new Date(j.created).toISOString(), in_rij: (j.status === 'pending' && !j.app.gestart) || undefined,   // wv405
-      terug: (j.app.rij && j.app.soort === 'bericht' && j.app.apparaat === a.id && j.status === 'pending' && !j.app.gestart) || undefined, antwoord_op: j.app.antwoord_op || undefined,
+      terug: (j.app.rij && j.app.soort === 'bericht' && j.app.apparaat === a.id && j.status === 'pending' && !j.app.gestart) || undefined, antwoord_op: j.app.antwoord_op || undefined, over: j.app.over || undefined,   /* wv4235 */
       wacht_op_plek: j.app.wachtOpPlek === true || undefined }; });   // wv3227   // wv628: Haal terug alleen voor het eigen apparaat
   const ruw = await appGeschiedenisRuw(kanaal);
   let items = ruw.items, fout = null;
@@ -9821,7 +9837,7 @@ async function appGeschiedenis(req, res, reg, a, pad) {
     if (bericht) { try { const m = appBewaardVan(x.job_id); bnamen = m ? m.bestanden.map(function (f) { return f.naam; }) : []; } catch (e) { bnamen = []; } }
     // wv350: onbeantwoord en ouder dan APP_VRAAG_GELDIG_MS (vanaf de registratie, anders het bericht) = verlopen, geen knoppen
     const verlopen = x.vraag_hash && !(b && b.antwoord) && agNu - Date.parse((b && b.t) || x.t) > APP_VRAAG_GELDIG_MS;
-    return { t: x.t, getypt: x.getypt || undefined, antwoord_op: x.antwoord_op || undefined, eigen: x.soort === 'rij-verloren' ? x.apparaat === a.id : undefined,   // wv628
+    return { t: x.t, getypt: x.getypt || undefined, antwoord_op: x.antwoord_op || undefined, over: typeof x.over === 'string' ? x.over : undefined, eigen: x.soort === 'rij-verloren' ? x.apparaat === a.id : undefined,   // wv628
       job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, invoer: Array.isArray(x.invoer) ? x.invoer : [], antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
       vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, verlopen: verlopen || undefined, knoppen: verlopen ? undefined : appVraagKnoppenVeld(b),   // wv4179
         doorbouw: !verlopen && typeof doorbouwVraagVeld === 'function' ? doorbouwVraagVeld(bRij, (appVraagUit(x.antwoord) || {}).tekst, x.antwoord) : undefined }   // wv3810
@@ -9838,6 +9854,7 @@ async function appGeschiedenis(req, res, reg, a, pad) {
   // wv628: wat deze pod kent (de app zet de Stuur-knop alleen open en toont Antwoord hierop als het er staat; oude pod = oud gedrag)
   if (appRijAan(kanaal)) { uit.rij_getypt = true; uit.rij_max = APP_RIJ_GETYPT_MAX; }
   if (APP_ANTWOORD_OP_KANALEN[kanaal]) { uit.antwoord_op = true; uit.antwoord_op_ms = APP_ANTWOORD_OP_MS; }   // wv2964: ook hoofd; wv3607: grens mee
+  if (kanaal === 'hoofd') uit.over = true;   // wv4235 (L51): de app mag het label "Over: …" tonen (oude pod = geen label)
   if (anker) { uit.anker = anker; uit.meer_nieuw = meerNieuw; }
   appStuur(res, 200, uit);
 }
