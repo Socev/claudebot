@@ -11740,15 +11740,23 @@ const APP_MELD_WAAROM_MS = 10 * 60 * 1000;
 function appMeldWaaromKaart() { return (appStaat.meldWaarom = appStaat.meldWaarom || {}); }
 function appMeldWaaromOp(ref, nu) {
   const w = appMeldWaaromKaart()[ref];
-  return w && nu - w.t < APP_MELD_WAAROM_MS ? new Date(w.t).toISOString() : null;
+  return w && w.ok && nu - w.t < APP_MELD_WAAROM_MS ? new Date(w.t).toISOString() : null;   // review MOET 2: alleen als de beurt is aangenomen
 }
 // beurt_id voor deze tik: binnen het venster dat van de eerste tik, anders een nieuw (en het venster begint opnieuw)
 function appMeldWaaromBeurtId(ref, nu) {
   const k = appMeldWaaromKaart();
   Object.keys(k).forEach(function (r) { if (!(nu - k[r].t < APP_MELD_WAAROM_MS)) delete k[r]; });
   if (k[ref]) return { bid: k[ref].bid, al: true };
-  k[ref] = { t: nu, bid: 'waarom-' + appSha(ref + '|' + nu).slice(0, 24) };
+  k[ref] = { t: nu, bid: 'waarom-' + appSha(ref + '|' + nu + '|' + Math.random()).slice(0, 24), ok: false };
   return { bid: k[ref].bid, al: false };
+}
+// Codex-review wv4129 MOET 2: pas na een aangenomen beurt (200, ook "al") telt de kaart als gevraagd; geweigerd (uurgrens, rij vol, andere
+// kant) = het venster weer vrij, zodat de knop blijft en een volgende tik een nieuw beurt_id krijgt.
+function appMeldWaaromNa(ref, bid, status) {
+  const k = appMeldWaaromKaart(), w = k[ref];
+  if (!w || w.bid !== bid) return;
+  if (status === 200) w.ok = true;
+  else if (!w.ok) delete k[ref];
 }
 function appMeldAbs(iso) {
   const t = Date.parse(iso || '');
@@ -11796,7 +11804,8 @@ async function appMeldingenWaarom(req, res, reg, a, s, d) {
   const vv = x.voorval ? (m.voorvallen || []).find(function (v) { return v.id === x.voorval; }) || null : null;
   const b = appMeldWaaromBeurtId(ref, Date.now());   // na de laatste await: twee tikken tegelijk krijgen hetzelfde beurt_id
   res._app.reden = 'waarom ' + ref + (b.al ? ' (al gevraagd)' : '');
-  return appBeurt(req, res, reg, a, s, { kanaal: 'machinekamer', beurt_id: b.bid, tekst: appMeldWaaromTekst(x, (m.herkomst || {})[appMeldRef(x)] || null, vv) }, { conceptHouden: true });
+  await appBeurt(req, res, reg, a, s, { kanaal: 'machinekamer', beurt_id: b.bid, tekst: appMeldWaaromTekst(x, (m.herkomst || {})[appMeldRef(x)] || null, vv) }, { conceptHouden: true });
+  appMeldWaaromNa(ref, b.bid, res._app && res._app.status);
 }
 // wv4129 (besluitenpagina nr 414 = 3C114): per bewaakte stroom de laatste aanvoer (stilte_state.laatste_executie) en de haperingen
 // van de afgelopen 14 dagen uit stiltelog (stil → hersteld, per pijplijn_id op tijd gekoppeld; dubbele "stil" na elkaar = één).

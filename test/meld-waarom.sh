@@ -23,7 +23,7 @@ const box = { appStaat: {}, logError: function () {}, appSha: function (s) { ret
   appWfNaam: function (n) { return String(n || '').replace(/^AI\s*-\s*/, ''); }, appMeldRef: function (x) { return String(x.kaart || x.id); },
   appMeldMetSeintjes: function (l) { return l; },
   appWeiger: function (res, st, f) { res.st = st; res.f = f; },
-  appBeurt: function (req, res, reg, a, s, d, opt) { beurten.push({ d: d, opt: opt }); res.st = 200; },
+  appBeurt: function (req, res, reg, a, s, d, opt) { beurten.push({ d: d, opt: opt }); res.st = box.BEURT_ST || 200; res._app.status = res.st; return Promise.resolve(); },
   appMeldingen: function () { return Promise.resolve(box.M); }, console: console };
 vm.createContext(box);
 vm.runInContext(blok + '\nthis.f = { appMeldStromen, appMeldWaaromBeurtId, appMeldWaaromTekst, appMeldingenWaarom, appMeldWaaromOp };', box);
@@ -60,6 +60,7 @@ toets('2a binnen 10 min: zelfde beurt_id, al gevraagd', a1.bid === a2.bid && !a1
 toets('2b na 10 min: nieuw beurt_id', a3.bid !== a1.bid && !a3.al);
 toets('2c andere kaart: ander beurt_id', F.appMeldWaaromBeurtId('kxyz999', t0 + 11 * 60000).bid !== a3.bid);
 toets('2d beurt_id past in /app/beurt (8-64, a-z0-9-)', /^[a-z0-9-]{8,64}$/.test(a1.bid));
+box.appStaat.meldWaarom.kabc123.ok = true;
 toets('2e waarom-tijd in de lijst binnen het venster', F.appMeldWaaromOp('kabc123', t0 + 12 * 60000) !== null && F.appMeldWaaromOp('kabc123', t0 + 22 * 60000) === null);
 // 3 bericht
 const kaart = { id: 'f101', kaart: 'k1a2b3c4d5e6f', soort: 'storing', titel: 'Agenda-Wachter liep vast', uitleg: 'Een andere dienst antwoordde niet op tijd.',
@@ -83,6 +84,15 @@ toets('3d stilgevallen stroom: geen storingsdienst-regel, wel soort', /aanvoer s
   await Promise.all([F.appMeldingenWaarom({}, r1, null, { id: 'a' }, null, { ref: 'k1a2b3c4d5e6f' }), F.appMeldingenWaarom({}, r2, null, { id: 'b' }, null, { ref: 'k1a2b3c4d5e6f' })]);
   toets('4b twee tikken (twee apparaten): beide naar machinekamer met hetzelfde beurt_id', beurten.length === 2 && beurten[0].d.kanaal === 'machinekamer' && beurten[0].d.beurt_id === beurten[1].d.beurt_id && /al gevraagd/.test(r2._app.reden));
   toets('4c bericht met kaartgegevens en herkomst; concept blijft', /workflow AbCdEf123456/.test(beurten[0].d.tekst) && beurten[0].opt && beurten[0].opt.conceptHouden === true);
+  toets('4e aangenomen beurt: kaart staat als gevraagd in de lijst', box.f.appMeldWaaromOp('k1a2b3c4d5e6f', Date.now()) !== null);
+  // review MOET 2: geweigerde beurt (uurgrens) → niet als gevraagd, volgende tik nieuw beurt_id
+  box.BEURT_ST = 429;
+  box.M.items.push(Object.assign({}, kaart, { id: 'f202', kaart: 'k999888777666' }));
+  const r4 = { _app: {} }; await F.appMeldingenWaarom({}, r4, null, { id: 'a' }, null, { ref: 'k999888777666' });
+  toets('4f geweigerd (429): niet als gevraagd, venster vrij', box.f.appMeldWaaromOp('k999888777666', Date.now()) === null && !box.appStaat.meldWaarom.k999888777666);
+  box.BEURT_ST = 200;
+  const r5 = { _app: {} }; await F.appMeldingenWaarom({}, r5, null, { id: 'a' }, null, { ref: 'k999888777666' });
+  toets('4g daarna nieuwe tik: nieuw beurt_id en wel gevraagd', beurten[beurten.length - 1].d.beurt_id !== beurten[beurten.length - 2].d.beurt_id && box.f.appMeldWaaromOp('k999888777666', Date.now()) !== null);
   const r3 = { _app: {} };
   await F.appMeldingenWaarom({}, r3, null, { id: 'a' }, null, { ref: 'K!' });
   toets('4d ongeldige ref: 400', r3.st === 400);
