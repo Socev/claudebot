@@ -25735,7 +25735,7 @@ function mailmanIntakeAfzender(postvak, adres) {
 const MAILMAN_CONTACT_MS = 60 * 60 * 1000;
 const mailmanContact = { set: null, op: 0, bezig: false, fout: null };
 function mailmanContactVers() {
-  if (mailmanContact.bezig || Date.now() - mailmanContact.op < (mailmanContact.set ? MAILMAN_CONTACT_MS : 5 * 60 * 1000)) return;
+  if (mailmanContact.bezig || Date.now() - mailmanContact.op < (mailmanContact.set && !mailmanContact.fout ? MAILMAN_CONTACT_MS : 5 * 60 * 1000)) return;
   mailmanContact.bezig = true; mailmanContact.op = Date.now();
   Promise.resolve().then(async function () {
     const r = await sbBeheerQuery("select distinct lower(trim(e)) as e from secondbrain.contacten c, unnest(c.emails_plat) e where e like '%@%'", { ua: 'socev-mailman-poort/1', ms: 30000 });
@@ -25749,7 +25749,8 @@ function mailmanContactVers() {
   }).catch(function (e) { mailmanContact.fout = String((e && e.message) || e).slice(0, 120); logError('mailman-poort-contacten', e); })
     .finally(function () { mailmanContact.bezig = false; });
 }
-function mailmanContactAdressen() { mailmanContactVers(); return mailmanContact.set; }
+// review Codex MOET 1: na een mislukte verversing null (= verband, oude gedrag) tot een volgende lukt (elke 5 min een poging)
+function mailmanContactAdressen() { mailmanContactVers(); return mailmanContact.fout ? null : mailmanContact.set; }
 // wv2033 (MailMan B8): welke van deze Gmail-id's staan in Intake (stuk.bron_id = Gmail-id)? = het bewijs dat een route verwerkt is.
 // Alleen lezen; zonder intake.sqlite een lege Set (dan blijft een route open).
 function mailmanIntakeBerichten(postvak, ids) {
