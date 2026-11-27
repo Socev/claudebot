@@ -3,7 +3,7 @@
 // bijvullen"; Ja 22:31): de vaste momenten van Voor jou. Puur (geen bestand, geen netwerk): server.js en te-lezen.js rekenen hiermee.
 // De databank houdt dezelfde momenten aan (machinekamer.voor_jou_moment_na, mk_voor_jou_moment); wijzig ze samen.
 //   - een nieuwe kaart krijgt toon_vanaf = het eerste moment ≥ 10 min later (databank-trigger), machinekamer-zaken alleen 17:15;
-//   - 5 minuten vóór elk moment kiest de momentstap (mk_voor_jou_moment) hooguit 5 nieuwe punten, hooguit 8 in beeld;
+//   - 5 minuten vóór elk moment kiest de momentstap (mk_voor_jou_moment) hooguit 5 nieuwe punten, hooguit 8 in beeld (Socev zelf: hooguit 5, wv4366);
 //   - een vraag uit het machinekamer-gesprek en een klusrapport in Te lezen tellen pas na het eerstvolgende moment.
 
 const MOMENTEN = [[7, 15], [12, 30], [17, 15]];
@@ -56,11 +56,19 @@ function momentTekst(ms, nu) {
   if (dag - vandaag === 86400000) return 'morgen ' + klok;
   return ['zo', 'ma', 'di', 'wo', 'do', 'vr', 'za'][new Date(dag).getUTCDay()] + ' ' + klok;
 }
-// Een kaart uit een machinekamer-klus (herkomst.wv) zonder dag-module: hoort in de bundel "Machinekamer" (één punt)
-function isMk(herkomst) {
+// wv4366 (wv4326 stap 2, David 27-11-2026 "een lijst die leeg kan raken"): is deze kaart Socev-werk (werk AAN Socev) of Davids eigen werk?
+// Socev-werk = alle drie: (1) herkomst heeft wv, register, manager of grondwet (een machinekamer-klus, de voor-jou-ronde/het register,
+// een managerronde of een grondwetkaart); (2) herkomst.module staat niet in DAG_MODULES; (3) herkomst.werk is niet true (de kaartmaker
+// zet "werk": true als de kaart over Davids werk of leven gaat en niet over hoe Socev werkt). Alles anders is Davids werk.
+// De databank houdt dezelfde regel aan (machinekamer.voor_jou_is_mk); wijzig ze samen.
+const SOCEV_BRONNEN = ['wv', 'register', 'manager', 'grondwet'];
+function isSocev(herkomst) {
   const h = herkomst && typeof herkomst === 'object' && !Array.isArray(herkomst) ? herkomst : null;
-  return !!h && Object.prototype.hasOwnProperty.call(h, 'wv') && DAG_MODULES.indexOf(String(h.module || '')) < 0;
+  if (!h || h.werk === true) return false;
+  return SOCEV_BRONNEN.some(function (k) { return Object.prototype.hasOwnProperty.call(h, k); }) && DAG_MODULES.indexOf(String(h.module || '')) < 0;
 }
+// Oude naam (wv3967: de bundel "Machinekamer"); zelfde regel
+const isMk = isSocev;
 
 module.exports = { MOMENTEN: MOMENTEN, DAG_MODULES: DAG_MODULES, STAP_VOOR_MS: STAP_VOOR_MS, laatsteMoment: laatsteMoment, volgendMoment: volgendMoment,
-  stapMoment: stapMoment, momentTekst: momentTekst, isMk: isMk, nlMs: nlMs };
+  stapMoment: stapMoment, momentTekst: momentTekst, isMk: isMk, isSocev: isSocev, SOCEV_BRONNEN: SOCEV_BRONNEN, nlMs: nlMs };

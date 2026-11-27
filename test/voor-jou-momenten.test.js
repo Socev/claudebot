@@ -43,10 +43,52 @@ test('momenttekst en machinekamer-herkomst', function () {
   assert.strictEqual(M.isMk({ wv: [1], module: 'facturen' }), false);   // dag-module
   assert.strictEqual(M.isMk({ wv: [1], module: 'beleggen' }), true);
   assert.strictEqual(M.isMk({ module: 'intake' }), false);
-  assert.strictEqual(M.isMk({ register: ['x'] }), false);
+  assert.strictEqual(M.isMk({ register: ['x'] }), true);   // wv4366: register telt sinds de splitsing ook als Socev-werk
   assert.strictEqual(M.isMk(null), false);
   assert.deepStrictEqual(M.DAG_MODULES.slice().sort(), ['agenda', 'bandjes', 'bank', 'facturen', 'financien', 'intake', 'kalender', 'mail', 'nogbetalen']);
 });
+
+// wv4366 (wv4326 stap 2): de herkomstvormen zoals ze op 27-11-2026 in machinekamer.voor_jou staan (select distinct sleutels, module),
+// met wat de regel ervan maakt: true = Socev zelf, false = Davids werk
+test('isSocev op de herkomstvormen uit de databank', function () {
+  const V = [
+    [['auto', 'beurt', 'wv'], '', true], [['auto', 'wv'], '', true], [['auto', 'register', 'wv'], '', true],
+    [['doel', 'handmatig', 'module'], 'facturen', false], [['doel', 'handmatig', 'module'], 'intake', false], [['register'], '', true],
+    [['auto', 'beurt', 'manager', 'wv'], '', true], [['handmatig', 'register'], '', true], [['auto', 'beurt', 'doel', 'wv'], '', true],
+    [['register', 'wv'], '', true], [['doel', 'handmatig', 'module', 'ovis'], 'intake', false], [['auto', 'beurt', 'grondwet', 'wv'], '', true],
+    [['proef'], '', false], [['handmatig', 'stuk'], '', false], [['doorbouw', 'wv'], '', true], [['auto', 'beurt', 'module', 'wv'], 'memorylane', true],
+    [['todoist', 'wv'], '', true], [['manager', 'register'], '', true], [['doel', 'handmatig', 'manager', 'module', 'ovis'], 'intake', false],
+    [['auto', 'beurt', 'module', 'wv'], 'financien', false], [['wv'], '', true], [['doel', 'handmatig', 'jaar', 'module', 'soort'], 'pot', false],
+    [['handmatig'], '', false], [['aanvraag', 'doel', 'handmatig', 'module'], 'ideeen', false], [['handmatig', 'knoop', 'manager', 'praktijken', 'soort'], '', true],
+    [['handmatig', 'module'], 'sb2-voorstel', false], [['auto', 'beurt', 'doel', 'module', 'wv'], 'facturen', false],
+    [['auto', 'beurt', 'doel', 'grondwet', 'module', 'wv'], 'ghawa', true], [['auto', 'beurt', 'deadline_reden', 'doel', 'wv'], '', true],
+    [['handmatig', 'herinnering', 'module'], 'kalender', false], [['doel', 'handmatig', 'module'], 'bandjes', false],
+    [['handmatig', 'inhaal', 'postvak', 'run', 'thread_id', 'wachtronde'], '', false], [['register', 'todoist', 'wv'], '', true],
+    [['briefing', 'module'], 'briefing', false], [['todoist'], '', false], [['module'], 'takeout-nas', false],
+    [['eindjes', 'handmatig', 'links', 'module'], 'open-eindjes', false], [['auto', 'ja_vrij', 'wv', 'zonder_stappen'], '', true],
+  ];
+  V.forEach(function (v) {
+    const h = {};
+    v[0].forEach(function (k) { h[k] = k === 'wv' ? [1] : k === 'register' ? ['2026-11-27 05:56#x'] : true; });
+    if (v[1]) h.module = v[1];
+    assert.strictEqual(M.isSocev(h), v[2], JSON.stringify(h));
+    // herkomst.werk true = altijd Davids werk
+    assert.strictEqual(M.isSocev(Object.assign({}, h, { werk: true })), false, 'werk ' + JSON.stringify(h));
+  });
+  assert.strictEqual(M.isSocev({ wv: [1], werk: 'true' }), true);   // alleen de waarde true telt
+  assert.strictEqual(M.isSocev({ wv: [1], werk: false }), true);
+  assert.strictEqual(M.isSocev([]), false);
+  assert.strictEqual(M.isSocev('wv'), false);
+  assert.strictEqual(M.isMk, M.isSocev);
+  assert.deepStrictEqual(M.SOCEV_BRONNEN, ['wv', 'register', 'manager', 'grondwet']);
+});
+
+test('databank en pod: dezelfde Socev-regel (wv4366)', function () {
+  const sql = fs.readFileSync('/opt/data/mk-scripts/wv4366/nieuw.sql', 'utf8');
+  M.SOCEV_BRONNEN.forEach(function (b) { assert.ok(sql.includes("'" + b + "'"), b); });
+  assert.match(sql, /\(h->'werk'\) = 'true'::jsonb/);
+  assert.match(sql, /n_mk \+ mk_erbij < 5/);
+}, { skip: !fs.existsSync('/opt/data/mk-scripts/wv4366/nieuw.sql') });
 
 test('databank en pod gebruiken dezelfde momenten en dag-modules', function () {
   const sql = fs.readFileSync('/opt/data/mk-scripts/wv3967/nieuw.sql', 'utf8');
@@ -81,8 +123,12 @@ test('zichtbaarheidsfilter: toon_vanaf in de toekomst = wacht, null of verleden 
 });
 
 test('server.js: route geeft wacht en bundel, momentstap via mk_voor_jou_moment, vj-moment in de release', function () {
-  assert.match(src, /wacht: wacht \}/);
+  assert.match(src, /wacht: wacht(, splitsing: split)? \}/);
   assert.match(src, /bundel: vjMoment && vjMoment\.isMk\(p\.herkomst\) \? 'machinekamer' : undefined/);
+  // wv4366: Socev-werk apart met de schakelaar; tellingen zonder Socev-werk
+  assert.match(src, /socev: split && appVjIsSocev\(p\) \? true : undefined/);
+  assert.match(src, /wacht: wacht, splitsing: split \}/);
+  assert.match(src, /appVjZichtbaar\(p, vandaag\) && !\(split && appVjIsSocev\(p\)\)/);
   assert.match(src, /appSbRpc\('mk_voor_jou_moment', \{ p_moment: new Date\(m\)\.toISOString\(\) \}\)/);
   assert.match(src, /mkKlussen: false, momentSinds: vjMoment \? vjMoment\.laatsteMoment\(nu\) : null/);
   const u = fs.readFileSync(path.join(wortel, 'uitrol.sh'), 'utf8');
@@ -108,4 +154,40 @@ test('Te lezen: geen machinekamer-klusrapport meer, hoofdklus pas na het moment,
   // bewaard blijft, ook uit de machinekamer
   const bew = T.uit(Object.assign({}, o, { mkKlussen: false, momentSinds: sinds, staat: { sinds: iso(NU - 86400000), bewaard: { [mk.job_id]: { kanaal: 'machinekamer', op: iso(NU - 60000) } } } }));
   assert.ok(bew.punten.some((p) => p.job_id === mk.job_id && p.soort === 'bewaard'));
+});
+
+// wv4366: schakelaar en telling los geknipt (appVjSplitsing, appVjIsSocev, appVjTelling, appVjSplitsingRoute)
+test('splitsing: standaard aan, uit via het bestand; telling zonder Socev-werk; route schrijft alleen true/false', async function () {
+  const os = require('os');
+  const map = fs.mkdtempSync(path.join(os.tmpdir(), 'wv4366-'));
+  const pad = path.join(map, 'vj-splitsing.json');
+  const PUNTEN = [
+    { id: 1, status: 'open', herkomst: { wv: [1], auto: 'wv' } },
+    { id: 2, status: 'open', herkomst: { module: 'facturen', handmatig: true } },
+    { id: 3, status: 'open', herkomst: { wv: [2], werk: true }, deadline: '2026-11-23' },
+    { id: 4, status: 'open', herkomst: { register: ['x'] } },
+    { id: 5, status: 'gedaan', herkomst: {} },
+  ];
+  const lees = function (f, s) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return s; } };
+  const uit = [];
+  const F = new Function('path', 'APP_DATA', 'vjMoment', 'appLeesJson', 'appSchrijfJson', 'appVjPunten', 'appYmd', 'appVjDichtbij', 'appWeiger', 'appStuur', 'logError', 'appStaat',
+    "const APP_VJ_SPLITSING_PAD = path.join(APP_DATA, 'vj-splitsing.json');\n" + knip('appVjSplitsing') + '\n' + knip('appVjIsSocev') + '\n' + knip('appVjSplitsingRoute') + '\n' + knip('appVjZichtbaar') + '\nasync ' + knip('appVjTelling') +
+    '\nreturn { s: appVjSplitsing, t: appVjTelling, r: appVjSplitsingRoute };')(
+    path, map, M, lees, function (f, d) { fs.writeFileSync(f, JSON.stringify(d)); }, async function () { return PUNTEN; }, function () { return '2026-11-23'; },
+    function (p) { return !!p.deadline; }, function (res, c, t) { uit.push([c, t]); }, function (res, c, j) { uit.push([c, j]); }, function () {}, {});
+  assert.strictEqual(F.s(), true);   // geen bestand = aan
+  assert.deepStrictEqual(await F.t({}), { open: 2, dichtbij: 1 });   // 2 (facturen) en 3 (werk: true)
+  F.r({ method: 'POST' }, { _app: {} }, { aan: 'nee' });
+  assert.deepStrictEqual(uit.pop(), [400, 'aan moet true of false zijn']);
+  F.r({ method: 'POST' }, { _app: {} }, { aan: false });
+  assert.deepStrictEqual(uit.pop(), [200, { ok: true, aan: false }]);
+  assert.strictEqual(F.s(), false);
+  assert.deepStrictEqual(await F.t({}), { open: 4, dichtbij: 1 });   // uit = alles telt, zoals vóór wv4366
+  fs.writeFileSync(pad, '{kapot');
+  assert.strictEqual(F.s(), true);   // onleesbaar = aan
+  const res = { _app: {} };
+  F.r({ method: 'GET' }, res, undefined);
+  assert.deepStrictEqual(uit.pop(), [200, { ok: true, aan: true }]);
+  assert.strictEqual(res._app.stil, true);
+  fs.rmSync(map, { recursive: true, force: true });
 });

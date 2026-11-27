@@ -13626,10 +13626,30 @@ function appVjKort(p, vandaag) {
     toon_vanaf: p.status === 'open' && Date.parse(p.toon_vanaf || '') > Date.now() ? p.toon_vanaf : undefined,
     uitgang: typeof appVjUitgang === 'function' ? appVjUitgang(p.id) || undefined : undefined };
 }
+// wv4366 (wv4326 stap 2, David 27-11-2026 "een lijst die leeg kan raken"): Voor jou in twee delen. Aan (standaard) = Davids werk in de
+// lijst en in elk getal; Socev-werk (vj-moment.js isSocev) staat in de app onder één ingeklapte regel "Socev zelf (n)" en telt nergens mee.
+// Uit (⚙ › Weergave) = de lijst zoals vóór wv4366. Bestand vj-splitsing.json {aan: false}; ontbreekt of onleesbaar = aan.
+const APP_VJ_SPLITSING_PAD = path.join(APP_DATA, 'vj-splitsing.json');
+function appVjSplitsing() { const j = appLeesJson(APP_VJ_SPLITSING_PAD, null); return !(j && j.aan === false); }
+function appVjIsSocev(p) {
+  if (!vjMoment || !p) return false;
+  return typeof vjMoment.isSocev === 'function' ? vjMoment.isSocev(p.herkomst) : vjMoment.isMk(p.herkomst);
+}
+// GET/POST /app/voor-jou/splitsing {aan: true|false}
+function appVjSplitsingRoute(req, res, d) {
+  if (req.method === 'POST') {
+    if (!d || typeof d.aan !== 'boolean') return appWeiger(res, 400, 'aan moet true of false zijn', 'vj splitsing veld');
+    try { appSchrijfJson(APP_VJ_SPLITSING_PAD, { aan: d.aan, op: new Date().toISOString() }); } catch (e) { logError('vj-splitsing', e); return appWeiger(res, 500, 'opslaan lukte niet', 'vj-splitsing.json schrijven'); }
+    appStaat.vjCache = null;
+    res._app.reden = 'voor jou splitsing ' + (d.aan ? 'aan' : 'uit');
+  } else res._app.stil = true;
+  appStuur(res, 200, { ok: true, aan: appVjSplitsing() });
+}
 // Telling voor /app/nieuw en Agents: zichtbare punten (en hoeveel met een deadline binnen 48 u) voor dit apparaat
+// wv4366: met de splitsing aan alleen Davids werk
 async function appVjTelling(a) {
-  const vandaag = appYmd(Date.now());
-  const z = (await appVjPunten()).filter(function (p) { return appVjZichtbaar(p, vandaag); });
+  const vandaag = appYmd(Date.now()), split = appVjSplitsing();
+  const z = (await appVjPunten()).filter(function (p) { return appVjZichtbaar(p, vandaag) && !(split && appVjIsSocev(p)); });
   return { open: z.length, dichtbij: z.filter(function (p) { return appVjDichtbij(p, vandaag); }).length };
 }
 // ↩️ alleen op het apparaat dat koos (Fable wv335 #4): een ander apparaat ziet het punt gewoon als gesloten
@@ -13780,7 +13800,8 @@ async function appVoorJouRoute(req, res, a, kanaal) {
     try { snel = await appVjSnel(zichtbaar, af.map); } catch (e) { logError('vj-snel', e); snel = {}; }
     try { afl = await appVjAfloopAlle(eigen, nu, af.map); } catch (e) { logError('vj-afloop', e); }
   }
-  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), appVjDoel(p, a), { bundel: vjMoment && vjMoment.isMk(p.herkomst) ? 'machinekamer' : undefined, terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map), auto: p.soort === 'besluit' && typeof telVoorstelKort === 'function' ? telVoorstelKort(p.id) : undefined,   // wv1706: module + doel; wv3771: klaargezet in de auto (alleen weergave)
+  const split = appVjSplitsing();   // wv4366: Socev-werk apart (socev: true), telt niet mee
+  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), appVjDoel(p, a), { bundel: vjMoment && vjMoment.isMk(p.herkomst) ? 'machinekamer' : undefined, socev: split && appVjIsSocev(p) ? true : undefined, terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map), auto: p.soort === 'besluit' && typeof telVoorstelKort === 'function' ? telVoorstelKort(p.id) : undefined,   // wv1706: module + doel; wv3771: klaargezet in de auto (alleen weergave)
     snel: snel[p.id], afloop: appVjAfloopVorm(afl.per[p.id]) }); });   // wv4232
   // wv3100 (David 14-11 23:28, "inbox zero"): wat David vandaag zelf afhandelde (Gedaan, Niet meer nodig, Ja / Nee / Anders op de kaart) en
   // niet meer in de lijst staat, voor de ingeklapte regel "Afgehandeld vandaag" onderaan Voor jou. De app haalt beantwoorde en net gekozen
@@ -13810,7 +13831,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   const wachtend = eigen.filter(function (p) { return appVjWacht(p, nu); });
   const wacht = { n: wachtend.length, moment: null, tekst: null };
   const basisAntwoord = { ok: true, punten: lijst, later: later, afgehandeld: afgehandeld, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5),
-    bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null, wacht: wacht };
+    bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null, wacht: wacht, splitsing: split };
   const wachtMoment = function () {
     const eerst = wachtend.reduce(function (m, p) { const t = Date.parse(p.toon_vanaf); return t < m ? t : m; }, Infinity);
     const m = wacht.n ? (Number.isFinite(eerst) && wachtend.length === wacht.n ? eerst : vjMoment ? vjMoment.volgendMoment(nu) : eerst) : null;
@@ -18681,6 +18702,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/actie') return appActieRoute(req, res, a, d);
         if (route === 'GET /app/voor-jou') return appVoorJouRoute(req, res, a);   // wv335
         if (route === 'GET /app/voor-jou/kanaal') return appVoorJouRoute(req, res, a, true);   // wv926 (Fable #1) / wv946: de app vraagt alleen nog deze; /app/voor-jou blijft voor een oude app in de cache
+        if (route === 'GET /app/voor-jou/splitsing' || route === 'POST /app/voor-jou/splitsing') return appVjSplitsingRoute(req, res, d);   // wv4366
         if (route.indexOf('GET /app/voor-jou/') === 0) return appVoorJouDetail(req, res, a, route.slice('GET /app/voor-jou/'.length));
         if (route === 'POST /app/voor-jou/keuze') return appVoorJouKeuze(req, res, a, d);
         if (route === 'POST /app/voor-jou/woord') return appVoorJouWoord(req, res, a, d);   // wv3250
