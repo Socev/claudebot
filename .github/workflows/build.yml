@@ -647,6 +647,10 @@ jobs:
       - name: "pod-klok (wv4126, C71 stap a)"
         if: ${{ !cancelled() }}
         run: node --test test/pod-klok.test.js
+      # wv4243: verzendercontrole (C17 deel 4) — alleen de gepubliceerde versie van AI - Facturen-verzender telt, concept = gepubliceerd, hash over alle knopen en verbindingen.
+      - name: "verzender-gepubliceerd (wv4243, C17 deel 4)"
+        if: ${{ !cancelled() }}
+        run: node --test test/verzender-gepubliceerd.test.js
       # wv4155: PMA › Naast elkaar (2C46) — Tolgaarde naast Groenhouten per 1000 patiënten uit de VIP-aantallen; ECG sluit op de handtelling.
       - name: "praktijken-naast (wv4155, 2C46)"
         if: ${{ !cancelled() }}

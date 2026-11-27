@@ -376,6 +376,6 @@ test('server.js: direct alleen met het eigen verzendgeheim + bron facturen; dire
   assert.match(s, /if \(v\.modus === 'versturen'\) \{ try \{ geheim = await potVzVerzendGeheim\(\); \} catch \(e\) \{ geheim = null; \} \}/);
   assert.match(s, /if \(v\.modus === 'versturen'\) fd\.append\('bron', 'facturen'\);/);
   assert.match(s, /return \(await potVzVerzenderOk\('facturen'\)\) === true;/);
-  assert.match(s, /if \(bron === 'facturen'\) return false;/);
+  assert.match(s, /function potVzToetsenMag\(ts\) \{ return ts === POT_VZ_TOETSEN_SHA; \}/);   // wv4243: geen overgangshashes meer, elke bron eist de gepubliceerde versie
   assert.match(s, /'POST \/app\/facturen\/leverancier\/verzendwijze'/);
 });

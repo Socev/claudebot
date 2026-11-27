@@ -128,7 +128,7 @@ const een = [{ naam: 'SLOEL - 2026033 - Huisartsenpraktijk Korte Geer.pdf', byte
   toets('pot ongewijzigd als boekstuk uit staat', r.json.toets.fout === null && r.json.toets.pad === 'pot', r.json.toets);
   r = await draai(pot({ aan: 'a.schaap@actasynergia.nl' }), een);
   toets('pot kan niet naar Andrés adres (lijsten per bron)', r.json.toets.status === 403, r.json.toets);
-  toets('server.js: vorige Toetsen-hash alleen voor pot, die van wv2316 voor pot en boekstuk, sepa eist de nieuwe', /POT_VZ_TOETSEN_SHA_VORIG = '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7716d25994bfd241b02'/.test(fs.readFileSync('server.js', 'utf8')) && /const POT_VZ_TOETSEN_BOEKSTUK = '8fec24893c22a23d54e56d8749b6c186d63897634e9e10608f97ee6336ddbcbb'/.test(fs.readFileSync('server.js', 'utf8')) && /if \(bron === 'sepa'\) return false;/.test(fs.readFileSync('server.js', 'utf8')));
+  toets('server.js: geen overgangshashes meer (wv4243), alleen POT_VZ_TOETSEN_SHA', !/POT_VZ_TOETSEN_(SHA_VORIG|BOEKSTUK|SEPA|DIRECT|NOGBETALEN)\b/.test(fs.readFileSync('server.js', 'utf8')) && /function potVzToetsenMag\(ts\) \{ return ts === POT_VZ_TOETSEN_SHA; \}/.test(fs.readFileSync('server.js', 'utf8')));
   // ── wv2465: bron sepa (één adres: nogbetalen@, precies één xml + één pdf, MsgId in het bestand, 07–23 elke dag, 6 per 24 uur) ──
   const REF = 'SOCEV-20261105-0a1b2c3d';
   const SXML = Buffer.from('<?xml version="1.0" encoding="UTF-8"?>\n<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.09">\n  <CstmrCdtTrfInitn>\n    <GrpHdr>\n      <MsgId>' + REF + '</MsgId>\n    </GrpHdr>\n  </CstmrCdtTrfInitn>\n</Document>\n');
@@ -372,7 +372,6 @@ const een = [{ naam: 'SLOEL - 2026033 - Huisartsenpraktijk Korte Geer.pdf', byte
   toets('proef herinnering met bijlage → 400', r.json.toets.status === 400 && r.json.toets.code === 'bijlagen', r.json.toets);
   const telNh = fs.readFileSync('tools/n8n/facturen-verzender-tel-verstuurd.js', 'utf8');
   toets('Tel verstuurd telt de herinnering niet in het pot-plafond', /'nogbetalen_herinnering'\]\.includes\(t\.bron\)\) sd\.pot\.push/.test(telNh));
-  toets('server.js: bron nogbetalen_herinnering eist de nieuwe Toetsen-code; de vorige (0c412219…) blijft voor de rest', /if \(bron === 'nogbetalen_herinnering'\) return false;[^\n]*\n  if \(ts === POT_VZ_TOETSEN_NOGBETALEN\) return true;/.test(fs.readFileSync('server.js', 'utf8')) && /const POT_VZ_TOETSEN_NOGBETALEN = '0c4122194217e0bfaa93e312d98f3bb55798d16eef9a0984e0a2b804b2752c98'/.test(fs.readFileSync('server.js', 'utf8')));
   const sj = fs.readFileSync('server.js', 'utf8');
   const m = /const POT_VZ_TOETSEN_SHA = process\.env\.POT_VZ_TOETSEN_SHA_TOETS \|\| '([0-9a-f]{64})'/.exec(sj);
   toets('POT_VZ_TOETSEN_SHA in server.js = sha256 van dit bestand', m && m[1] === crypto.createHash('sha256').update(code).digest('hex'), m && m[1]);

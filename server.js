@@ -37175,7 +37175,7 @@ function potVzInfo() {
   const u = potVz.uitkomst, a = potVz.auto;
   return { aan: potVzAan(), module: !!POT_VZ_MOD, adresbron: potVzAdresbron(), laatste_tik: potVz.laatste, fouten_op_rij: potVz.fouten_op_rij, laatste_fout: potVz.laatste_fout,
     laatste: u ? { geclaimd: u.geclaimd, concept: u.concept, wacht_op_adres: u.wacht_op_adres, fout: u.fout, onzeker: u.onzeker, verzonden: u.verzonden, fouten: u.fouten } : null,
-    auto: { aan: potVzAutoAan(), proef: potVzProef(), geheim: a.geheim, dag: a.dag, vandaag_verstuurd: a.verstuurd, vandaag_onzeker: a.onzeker, vandaag_concept: a.terug, toetsen_sha: POT_VZ_TOETSEN_SHA.slice(0, 12) } };
+    auto: { aan: potVzAutoAan(), proef: potVzProef(), geheim: a.geheim, dag: a.dag, vandaag_verstuurd: a.verstuurd, vandaag_onzeker: a.onzeker, vandaag_concept: a.terug, toetsen_sha: POT_VZ_TOETSEN_SHA.slice(0, 12), wf_sha: POT_VZ_WF_SHA.slice(0, 12) } };
 }
 // ── wv921: automatisch versturen — eigen verzendgeheim, verzender, Toetsen-hash, podbericht ──────────────────────────────────────────
 // Het eigen verzendgeheim (kluis n8n_verzender_versturen_secret, wv921) staat NIET in de podomgeving en dus nooit in SOCEV_ENV_MAG of
@@ -37186,33 +37186,9 @@ const POT_VZ_GEHEIM_NAAM = 'n8n_verzender_versturen_secret';
 // sha256 van de jsCode van de Code-knoop Toetsen in AI - Facturen-verzender, zoals gepubliceerd door wv921. Wijkt de workflow af, dan
 // verstuurt de pod niets en wordt alles concept (Fable #10). Bewuste wijziging aan de verzender = deze waarde mee wijzigen (nieuw image).
 const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '2e60f6b4c0f6baacc547ff86e4e9c95db9376dc84420dadd5fa81bc0d2c2c30b';
-// wv3455: de Toetsen-code van wv3369/wv3370 (zonder bron nogbetalen_herinnering) blijft gelden voor alle andere bronnen zolang image en workflow niet
-// op dezelfde minuut wisselen; bron nogbetalen_herinnering eist de nieuwe. Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
-const POT_VZ_TOETSEN_NOGBETALEN = '0c4122194217e0bfaa93e312d98f3bb55798d16eef9a0984e0a2b804b2752c98';
-// wv3369: de Toetsen-code van wv2480 (zonder bron nogbetalen) blijft gelden voor pot, boekstuk, sepa en facturen zolang image en workflow niet op
-// dezelfde minuut wisselen; bron nogbetalen eist de nieuwe. Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
-const POT_VZ_TOETSEN_DIRECT = '509d97e44222f962dd6c286fa211ae82b60b06092222a29b6c909797a7984cf7';
-// wv2480: de Toetsen-code van wv2465 (bron sepa, zonder direct uit Facturen) blijft gelden voor pot, boekstuk en sepa zolang image en workflow
-// niet op dezelfde minuut wisselen; bron facturen (direct) eist de nieuwe. Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
-const POT_VZ_TOETSEN_SEPA = '6edfee1f08f03f851ba596c9c59f644694951e0894c0c3d43766f7d205746cb6';
-// wv2316: de versie van vóór bron boekstuk telt voor pot nog mee, zodat image en gepubliceerde workflow niet op dezelfde minuut hoeven te
-// wisselen; het boekstuk eist de nieuwe (potVzVerzenderOk(true)). Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
-const POT_VZ_TOETSEN_SHA_VORIG = '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7716d25994bfd241b02';
-// wv2465: welke gepubliceerde Toetsen-code welke bron mag bedienen. Bron sepa eist de nieuwe; boekstuk en pot werken ook nog met de vorige
-// (8fec2489…, wv2316) zolang image en workflow niet op dezelfde minuut wisselen. Weghalen zodra de nieuwe gepubliceerd en nagemeten is.
-const POT_VZ_TOETSEN_BOEKSTUK = '8fec24893c22a23d54e56d8749b6c186d63897634e9e10608f97ee6336ddbcbb';
-function potVzToetsenMag(ts, bron) {
-  if (ts === POT_VZ_TOETSEN_SHA) return true;
-  if (bron === 'nogbetalen_herinnering') return false;   // wv3455: alleen met de nieuwe Toetsen-code
-  if (ts === POT_VZ_TOETSEN_NOGBETALEN) return true;
-  if (bron === 'nogbetalen') return false;   // wv3369: alleen met de nieuwe Toetsen-code
-  if (ts === POT_VZ_TOETSEN_DIRECT) return true;
-  if (bron === 'facturen') return false;   // wv2480: direct uit Facturen alleen met de nieuwe Toetsen-code
-  if (ts === POT_VZ_TOETSEN_SEPA) return true;
-  if (bron === 'sepa') return false;
-  if (ts === POT_VZ_TOETSEN_BOEKSTUK) return true;
-  return bron === 'pot' && ts === POT_VZ_TOETSEN_SHA_VORIG;
-}
+// wv4243 (C17 deel 4): de overgangshashes van wv2316/2465/2480/3369/3455 zijn weg; de gepubliceerde Toetsen-code is sinds 20-11 die van
+// POT_VZ_TOETSEN_SHA (gemeten 27-11). Elke bron eist nu dezelfde, gepubliceerde versie van de hele verzender (POT_VZ_WF_SHA hieronder).
+function potVzToetsenMag(ts) { return ts === POT_VZ_TOETSEN_SHA; }
 let potVzGeheimCache = null;   // { w, tot }
 async function potVzVerzendGeheim() {
   if (potVzGeheimCache && Date.now() < potVzGeheimCache.tot) return potVzGeheimCache.w;
@@ -37228,19 +37204,46 @@ async function potVzVerzendGeheim() {
 // Code-knopen niet toe). sha256 van tools/n8n/facturen-verzender-merk.js; de IF-waarde is de (niet-geheime) sha256 van het verzendgeheim.
 const POT_VZ_MERK_SHA = process.env.POT_VZ_MERK_SHA_TOETS || '92594dfa5edd9ea7b656dd1b4a8c1f831b86c22e0de42d7fa53c0f303b6117bb';
 const POT_VZ_GEHEIM_SHA = '675ccb2c6d979175f015301fb6b6614ccc2952f5f2f7a855a0262fd7b84019c9';
-async function potVzVerzenderOk(alleenNieuw) {
-  const bron = typeof alleenNieuw === 'string' ? alleenNieuw : alleenNieuw ? 'boekstuk' : 'pot';   // wv2465: true = boekstuk (oud gebruik)
+// wv4243 (C17 deel 4, review verzenden § 7): sha256 van de hele gepubliceerde versie van AI - Facturen-verzender (alle knopen en
+// verbindingen, zie potVzWfHash), berekend uit de live gepubliceerde versie c4fb9551 op 27-11-2026. Bewuste wijziging aan de verzender in n8n =
+// deze waarde in dezelfde uitrol mee wijzigen; tot dan gaat alles als concept (box-rij 'toetsen').
+const POT_VZ_WF_SHA = process.env.POT_VZ_WF_SHA_TOETS || '3dbd8cc5126784a86c7908522813288a1cf010339167fb1c15c42599aa3711dd';
+// Vaste vorm van een versie: knopen op naam gesorteerd, zonder position/id/webhookId (zet n8n zelf), credentials alleen {type: id},
+// zonder notitieknopen; verbindingen volledig; sleutels recursief gesorteerd.
+function potVzWfHash(nodes, connections) {
+  const vast = function (x) {
+    if (Array.isArray(x)) return x.map(vast);
+    if (x && typeof x === 'object') { const o = {}; Object.keys(x).sort().forEach(function (k) { o[k] = vast(x[k]); }); return o; }
+    return x;
+  };
+  const kn = nodes.filter(function (n) { return n && n.type !== 'n8n-nodes-base.stickyNote'; }).map(function (n) {
+    const k = Object.assign({}, n);
+    delete k.position; delete k.id; delete k.webhookId;
+    if (k.credentials && typeof k.credentials === 'object') {
+      const c = {};
+      Object.keys(k.credentials).forEach(function (t) { c[t] = k.credentials[t] && typeof k.credentials[t] === 'object' ? k.credentials[t].id || null : k.credentials[t]; });
+      k.credentials = c;
+    }
+    return k;
+  }).sort(function (x, y) { return String(x.name) < String(y.name) ? -1 : String(x.name) > String(y.name) ? 1 : 0; });
+  return crypto.createHash('sha256').update(JSON.stringify(vast({ nodes: kn, connections: connections }))).digest('hex');
+}
+// bron blijft in de aanroep (pot, boekstuk/true, sepa, facturen, nogbetalen, nogbetalen_herinnering) maar telt niet meer: één gepubliceerde versie voor allen.
+// Concept ≠ gepubliceerd, of geen gepubliceerde versie te zien → false ('verzender niet in orde', alles concept). Niet te lezen → throw.
+async function potVzVerzenderOk() {
   const w = await appN8n('/workflows/' + encodeURIComponent(FACTUREN_VERZENDER_WF));
   if (!w || !Array.isArray(w.nodes)) throw new Error('verzender niet te lezen');
   if (w.active !== true) return false;
-  const knoop = function (naam, type) { const k = w.nodes.filter(function (x) { return x && x.name === naam && x.type === type; }); return k.length === 1 ? k[0] : null; };
+  if (typeof w.activeVersionId !== 'string' || !w.activeVersionId || w.versionId !== w.activeVersionId) return false;
+  const av = w.activeVersion;
+  if (!av || typeof av !== 'object' || av.versionId !== w.activeVersionId || !Array.isArray(av.nodes) || !av.connections || typeof av.connections !== 'object') return false;
+  const knoop = function (naam, type) { const k = av.nodes.filter(function (x) { return x && x.name === naam && x.type === type; }); return k.length === 1 ? k[0] : null; };
   const sha = function (s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); };
   const t = knoop('Toetsen', 'n8n-nodes-base.code'), m = knoop('Merk verzendgeheim', 'n8n-nodes-base.code'), i = knoop('Verzendgeheim?', 'n8n-nodes-base.if');
   if (!t || !m || !i || typeof t.parameters.jsCode !== 'string' || typeof m.parameters.jsCode !== 'string') return false;
   const c = (((i.parameters || {}).conditions || {}).conditions) || [];
   const ifOk = c.length === 1 && c[0].rightValue === POT_VZ_GEHEIM_SHA && c[0].operator && c[0].operator.operation === 'equals' && ((i.parameters.conditions || {}).combinator === 'and');
-  const ts = sha(t.parameters.jsCode);
-  return ifOk && potVzToetsenMag(ts, bron) && sha(m.parameters.jsCode) === POT_VZ_MERK_SHA;
+  return ifOk && potVzToetsenMag(sha(t.parameters.jsCode)) && sha(m.parameters.jsCode) === POT_VZ_MERK_SHA && potVzWfHash(av.nodes, av.connections) === POT_VZ_WF_SHA;
 }
 // { bron, modus, ref, aan, cc, onderwerp, bericht, van, bijlage: { naam, bytes } } → { status, j }. Vóór de aanroep mislukt = zekerNietVerstuurd.
 async function potVzVerstuur(v) {

@@ -2735,21 +2735,9 @@ test('wv2465: server.js — na een batch plannen, verzender per bron (sepa eist 
   assert.match(src, /pad === '\/app\/facturen\/sepa-batch' && r\.status === 200 && r\.j && r\.j\.doorsturen && typeof sdPlan === 'function'\) sdPlan\(1500\)/);
   assert.match(src, /sepaDoor: typeof sdModus === 'function' \? sdModus\(\) : null/);
   assert.match(src, /potVzVerstuur\(\{ bron: 'sepa', modus: 'versturen', ref: v\.ref, aan: facturenRoutes\.sepaDoor\.AAN,/);
-  const i = src.indexOf('function potVzToetsenMag('), mag = new Function('POT_VZ_TOETSEN_SHA', 'POT_VZ_TOETSEN_BOEKSTUK', 'POT_VZ_TOETSEN_SHA_VORIG', 'POT_VZ_TOETSEN_SEPA', 'POT_VZ_TOETSEN_DIRECT', 'POT_VZ_TOETSEN_NOGBETALEN',
-    src.slice(i, src.indexOf('\n}\n', i) + 3) + 'return potVzToetsenMag;')('nieuw', 'boekstuk', 'vorig', 'sepa6edf', 'direct509', 'nb0c41');
-  assert.deepEqual(['sepa', 'boekstuk', 'pot', 'facturen', 'nogbetalen', 'nogbetalen_herinnering'].map((b) => mag('nieuw', b)), [true, true, true, true, true, true]);
-  // wv3455: de Toetsen van wv3369 (nogbetalen) dient alles behalve de herinnering; de herinnering alleen met de nieuwste
-  assert.deepEqual(['sepa', 'boekstuk', 'pot', 'facturen', 'nogbetalen', 'nogbetalen_herinnering'].map((b) => mag('nb0c41', b)), [true, true, true, true, true, false]);
-  assert.deepEqual(['direct509', 'sepa6edf', 'boekstuk', 'vorig', 'anders'].map((t) => mag(t, 'nogbetalen_herinnering')), [false, false, false, false, false]);
-  // wv3369: de Toetsen van wv2480 (direct) dient alles behalve nogbetalen; nogbetalen alleen met de nieuwste
-  assert.deepEqual(['sepa', 'boekstuk', 'pot', 'facturen', 'nogbetalen'].map((b) => mag('direct509', b)), [true, true, true, true, false]);
-  assert.deepEqual(['sepa6edf', 'boekstuk', 'vorig', 'anders'].map((t) => mag(t, 'nogbetalen')), [false, false, false, false]);
-  // wv2480: de Toetsen van wv2465 (sepa) dient pot, boekstuk en sepa nog, maar nooit direct uit Facturen
-  assert.deepEqual(['sepa', 'boekstuk', 'pot', 'facturen'].map((b) => mag('sepa6edf', b)), [true, true, true, false]);
-  assert.deepEqual(['boekstuk', 'vorig', 'anders'].map((t) => mag(t, 'facturen')), [false, false, false]);
-  assert.deepEqual(['sepa', 'boekstuk', 'pot'].map((b) => mag('boekstuk', b)), [false, true, true]);
-  assert.deepEqual(['sepa', 'boekstuk', 'pot'].map((b) => mag('vorig', b)), [false, false, true]);
-  assert.deepEqual(['sepa', 'pot'].map((b) => mag('anders', b)), [false, false]);
+  // wv4243: geen overgangshashes meer; elke bron eist dezelfde (gepubliceerde) Toetsen-code
+  const i = src.indexOf('function potVzToetsenMag('), mag = new Function('POT_VZ_TOETSEN_SHA', src.slice(i, src.indexOf('\n', i)) + '\nreturn potVzToetsenMag;')('nieuw');
+  assert.deepEqual(['nieuw', 'nb0c41', 'direct509', 'sepa6edf', 'boekstuk', 'vorig', 'anders'].map((t) => mag(t)), [true, false, false, false, false, false, false]);
   const j = src.indexOf('function sdVenster('), venster = new Function(src.slice(j, src.indexOf('\n', j)) + '\nreturn sdVenster;')();
   assert.deepEqual(['2026-11-05T05:59:00Z', '2026-11-05T06:00:00Z', '2026-11-05T21:59:00Z', '2026-11-05T22:00:00Z', '2026-07-05T05:00:00Z'].map((x) => venster(Date.parse(x))), [false, true, true, false, true]);
 });

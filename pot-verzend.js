@@ -452,6 +452,9 @@ async function autoRonde(io, nuD1, o, uit, zet) {
   }
 
   // 5. versturen: alleen met auto, op een werkdag, 09:00–12:00 Amsterdam, rijen auto_vrij van vandaag
+  // wv4243 (27-11-2026): sinds wv4140 maakt niets meer rijen auto_gevraagd (pod-schrijfroutes 404, pot.socev.dev leest alleen; D1: 0 auto-rijen
+  // en 0 vrijgaven ooit). Wie die ingang heropent, bouwt eerst C17 deel 3: nota, vrijgave, rij en adres per nota vers lezen vlak vóór de
+  // reservering, en vóór de eerste verzending van een vrijgave de kaart pot-vrijgave-<id> toetsen (gedaan, zelfde vraag-id).
   // geen nieuwe verzending na 11:55: de verzender weigert vanaf 12:00 (natoets Fable #3); wat overblijft wordt om 12:00 concept
   if (ietsAuto && werkdag(vandaag) && A.uur >= AUTO.vanUur && A.uur < AUTO.totUur && !(A.uur === AUTO.totUur - 1 && A.min >= 55)) {
     const kand = (await io.d1([{ sql: `select ${KOL} from nota_verzending where status='auto_vrij' and plan_datum=? order by id limit ${AUTO.perDag}`, params: [vandaag] }]))[0].results.filter(magAuto);
