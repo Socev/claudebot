@@ -182,3 +182,15 @@ test('review MOET 3: geen IBAN in het kenmerk, ook gespreid of in kleine letters
   for (const b of k.verbouwingen[0].betalingen) { assert.doesNotMatch(b.kenmerk || '', /0123|test/i, b.kenmerk); assert.match(b.kenmerk || '', /factuur 7/); }
 });
 
+test('Socev leest het ook (tab waarde): dezelfde cijfers, kort, zonder losse betalingen', () => {
+  const x = proef();
+  try {
+    const ov = x.m.overzicht();
+    const r = V.gesprekUit(ov, { opdracht: 'tab', tab: 'waarde', object: 'woning' }, 'https://app.proef');
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.kostte.samen, x.k.samen);
+    assert.strictEqual(r.body.kostte.niet_gekoppeld.aantal, 3);
+    assert.ok(r.body.kostte.per_verbouwing.every((v) => typeof v.betalingen === 'number'));
+  } finally { x.weg(); }
+});
+

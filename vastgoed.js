@@ -909,6 +909,12 @@ function gesprekUit(ov, b, basis) {
       u.reeksen = Object.fromEntries(Object.entries(per).map(([k, l]) => [k, { punten: l.length, laatste: l.slice(-3) }]));
       u.leningdelen = (o.leningdelen || []).map((d) => ({ naam: d.naam, restschuld: d.restschuld, restschuld_op: d.restschuld_op || null, rente: d.rente_bank ?? d.rente, rentevast_tot: d.rentevast_tot || null, einde: d.einde || null }));
       if (o.soort === 'woning') { u.geld = o.geld_kern || null; u.indicatie = o.indicatie || null; }
+      if (o.soort === 'woning' && o.kostte) {   // wv4230 (L42): wat het huis kostte, kort (Socev antwoordt met dezelfde cijfers als het scherm)
+        const k = o.kostte;
+        u.kostte = { samen: k.samen, bouw: k.bouw_som, verbouwingen: k.verbouwingen_som, indicatie: k.indicatie, verschil: k.verschil, link: gesprekLink(basis, o.sleutel, 'waarde'),
+          per_verbouwing: k.verbouwingen.map((v) => ({ titel: v.titel, offerte: v.offerte, betaald: v.betaald, telt: v.telt, telt_als: v.telt_als, betalingen: v.betalingen.length })),
+          niet_gekoppeld: { aantal: k.niet_gekoppeld.length, som: Math.round(k.niet_gekoppeld.reduce((s2, x) => s2 + x.bedrag, 0) * 100) / 100 } };
+      }
       if (o.soort === 'garagebox') u.vve = o.vve || null;
     }
     u.regels = regels.slice(0, GESPREK_MAX_TAB);
