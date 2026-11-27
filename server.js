@@ -17775,8 +17775,9 @@ function appWavSeconden(b) {
   return n / 32000;
 }
 // wv2536: hint = extra woorden voor de uitschrijver (MemoryLane: de namen van Davids familie uit de vault), achter "Socev"
-async function appWhisper(wav, hint) {
-  const prompt = 'Socev' + (hint ? ', ' + String(hint).replace(/[\u0000-\u001f]+/g, ' ').slice(0, 400) : '');
+// wv4176 (3C150): de namenlijst van het gesprek is langer (spraak-namen.js MAX_TEKENS 560); MemoryLane en de rest blijven op hun eigen lengte.
+async function appWhisper(wav, hint, max) {
+  const prompt = 'Socev' + (hint ? ', ' + String(hint).replace(/[\u0000-\u001f]+/g, ' ').slice(0, max || 400) : '');
   const r = await fetch(APP_STT_URL, { method: 'POST', signal: AbortSignal.timeout(50000),
     headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_AI_TOKEN_AUTO, 'Content-Type': 'application/json' },
     body: JSON.stringify({ audio: wav.toString('base64'), language: 'nl', vad_filter: true, initial_prompt: prompt }) });
@@ -17830,6 +17831,48 @@ function appRamble(req, res, a, route, d) {
   });
 }
 
+// wv4176 (besluitenpagina nr 450 = 3C150, David Ja 25-11-2026): de namenlijst voor het uitschrijven in het gesprek (spraak-namen.js: eigen
+// entiteiten, Apps, gezin, partners, leveranciers, Woordenlijst; nooit personen uit register of facturen). Ontbreekt de module (terugrol) of
+// faalt hij, dan gaat het uitschrijven gewoon door met alleen "Socev". Nooit namen in het log: alleen het aantal.
+// Pas bij de eerste opname geladen (undefined = nog niet geprobeerd).
+let SPRAAK_NAMEN_MOD;
+function spraakNamenMod() {
+  if (SPRAAK_NAMEN_MOD !== undefined) return SPRAAK_NAMEN_MOD;
+  if (typeof __dirname !== 'string') return null;   // los geladen knipsel (poorttoets): later opnieuw
+  try { const p = path.join(__dirname, 'spraak-namen.js'); SPRAAK_NAMEN_MOD = fs.existsSync(p) ? require(p) : null; } catch (e) { logError('spraak-namen', e); SPRAAK_NAMEN_MOD = null; }
+  return SPRAAK_NAMEN_MOD;
+}
+let spraakNamen = null;
+function spraakNamenMaak() {
+  const M = spraakNamenMod();
+  if (spraakNamen || !M) return spraakNamen;
+  try {
+    spraakNamen = M.maak({
+      register: function () { return appSbRpc('ovis_register_lees', { p_log_sinds: null }); },
+      gezin: function (max) { return typeof herinneringenVerhaal !== 'undefined' && herinneringenVerhaal && herinneringenVerhaal.namen ? herinneringenVerhaal.namen.hint(max) : ''; },
+      facturen: function () {
+        if (typeof facturenMagOpenen !== 'function' || typeof FACTUREN_DIR !== 'string' || !facturenMagOpenen()) return null;
+        const pad = path.join(FACTUREN_DIR, 'facturen.sqlite');
+        if (!fs.existsSync(pad)) return null;
+        const { DatabaseSync } = require('node:sqlite');
+        const db = new DatabaseSync(pad, { readOnly: true });
+        try {
+          db.exec('PRAGMA busy_timeout = 2000;');
+          return db.prepare("select l.knoop_id as knoop_id, l.naam as naam, count(*) as n from factuur f join leverancier l on l.id = f.leverancier where f.factuurdatum >= date('now', '-365 day') group by l.id").all();
+        } finally { try { db.close(); } catch (e) { /* al dicht */ } }
+      },
+      lees: function (rel) { return VV().lees(path.join(VAULT, rel), 'utf8'); } });
+  } catch (e) { logError('spraak-namen', e); spraakNamen = null; }
+  return spraakNamen;
+}
+// → { tekst } (leeg bij een fout; nooit gooien, nooit langer dan 3 s wachten)
+function appSpraakHint() {
+  const m = spraakNamenMaak();
+  if (!m) return Promise.resolve({ tekst: '' });
+  return Promise.race([m.hint(), new Promise(function (r) { setTimeout(function () { r(''); }, 3000); })])
+    .then(function (t) { return { tekst: String(t || '') }; }, function (e) { logError('spraak-namen', e); return { tekst: '' }; });
+}
+
 // POST /app/spraak: ruwe WAV (application/octet-stream) -> { tekst }. Invoer: valt onder het invoerslot (vaste plek).
 function appSpraak(req, res, a) {
   const weg = function (st, f, r) { req.resume(); return appWeiger(res, st, f, r); };
@@ -17859,8 +17902,9 @@ function appSpraak(req, res, a) {
     const s = n === lengte ? appWavSeconden(wav) : null;
     if (s === null) return appWeiger(res, 400, 'geen geldige opname', 'spraak wav');
     if (s < 0.3) return appWeiger(res, 400, 'opname te kort', 'spraak te kort');
-    appWhisper(wav).then(function (tekst) {
-      res._app.reden = 'spraak ' + Math.round(s) + ' s -> ' + tekst.length + ' tekens';
+    appSpraakHint().then(function (h) { const M = spraakNamenMod(); return appWhisper(wav, h.tekst, M ? M.MAX_TEKENS : 0).then(function (tekst) { return { tekst: h.tekst && M && M.nagepraat(tekst, 'Socev, ' + h.tekst) ? '' : tekst, namen: h.tekst ? h.tekst.split(', ').length : 0 }; }); }).then(function (u) {
+      const tekst = u.tekst;
+      res._app.reden = 'spraak ' + Math.round(s) + ' s -> ' + tekst.length + ' tekens, namenlijst ' + u.namen;
       appStuur(res, 200, { ok: true, tekst: tekst, seconden: Math.round(s) });
     }, function (e) {
       logError('app-spraak', e);

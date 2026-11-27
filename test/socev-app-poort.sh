@@ -5091,6 +5091,22 @@ async function bewijs(o) {
       spraakStaat.sttTekst = 'Abonneer me op de nieuwsbrief van de LHV';
       r = await upl('/app/spraak', w2, null, { pot: P.jar });
       toets('20 gewone zin met "abonneer" blijft staan (Fable K9)', r.status === 200 && r.j.tekst === spraakStaat.sttTekst, JSON.stringify(r.j));
+      // wv4176 (3C150): de namenlijst gaat mee als initial_prompt (Socev eerst, daarna o.a. de Apps); de lijst zelf nagepraat = niets verstaan
+      // (spraak-namen.js laadt pas bij de eerste opname met __dirname; in dit knipsel zetten we hem hier, zoals verderop bij facturen)
+      const dirVoor4176 = Object.prototype.hasOwnProperty.call(ctx, '__dirname');
+      if (!dirVoor4176) ctx.__dirname = process.cwd();
+      r = await upl('/app/spraak', w2, null, { pot: P.jar });
+      if (!dirVoor4176) delete ctx.__dirname;
+      {
+        const sp = (spraakStaat.stt[spraakStaat.stt.length - 1] || { b: {} }).b.initial_prompt || '';
+        toets('20 wv4176 initial_prompt = Socev + namenlijst (Apps erin, ≤ 570 tekens)', /^Socev, /.test(sp) && /MemoryLane/.test(sp) && /Sleutelbos/.test(sp) && sp.length <= 570, sp.length + ' ' + sp.slice(0, 40));
+        spraakStaat.sttTekst = 'MemoryLane, Tripper, Shopper.';
+        r = await upl('/app/spraak', w2, null, { pot: P.jar });
+        toets('20 wv4176 Whisper zegt alleen de namenlijst na -> lege tekst', r.status === 200 && r.j.tekst === '', JSON.stringify(r.j));
+        spraakStaat.sttTekst = 'Kijk in MemoryLane, Tripper en Shopper';
+        r = await upl('/app/spraak', w2, null, { pot: P.jar });
+        toets('20 wv4176 een zin mét die namen blijft staan', r.status === 200 && r.j.tekst === spraakStaat.sttTekst, JSON.stringify(r.j));
+      }
       spraakStaat.sttTekst = 'Zet het werkoverleg op Tolgaarde om tien uur';
       spraakStaat.sttStatus = 500;
       r = await upl('/app/spraak', w2, null, { pot: P.jar });
