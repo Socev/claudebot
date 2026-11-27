@@ -54,6 +54,16 @@ for k in naad:"F2 NAAD" pod:"F3 knipmaten" vinger:"F4 vergelijk met één vinger
   elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"
   else echo "ROOD  kruisproef ${k%%:*} werd rood, maar niet op ${k#*:}"; grep -E "^ROOD" /tmp/imagine-toets.$$ | head -3; f=1; fi
 done
+# wv4335: MiniMax-H3 als derde vrije opdracht, stuk/voorbeeld (beeld-plus-minimax-<n>), Vergelijk met MiniMax als derde; twee kruisproeven moeten ROOD
+node --no-warnings test/imagine-minimax.test.js > /tmp/imagine-toets.$$ 2>&1; r=$?
+tail -n 1 /tmp/imagine-toets.$$; grep -E "^ROOD" /tmp/imagine-toets.$$
+[ $r = 0 ] || { echo "ROOD  test/imagine-minimax.test.js"; f=1; }
+for k in derde:"M4 vergelijk met MiniMax" half:"M5 MiniMax kan niet"; do
+  IMAGINE_KRUIS=${k%%:*} node --no-warnings test/imagine-minimax.test.js > /tmp/imagine-toets.$$ 2>&1
+  if [ $? = 0 ]; then echo "ROOD  kruisproef ${k%%:*} bleef groen"; f=1
+  elif grep -qF "ROOD  ${k#*:}" /tmp/imagine-toets.$$; then echo "GROEN kruisproef ${k%%:*}: rood op ${k#*:}"
+  else echo "ROOD  kruisproef ${k%%:*} werd rood, maar niet op ${k#*:}"; grep -E "^ROOD" /tmp/imagine-toets.$$ | head -3; f=1; fi
+done
 # wv3044: opdracht uitbreiden (tekst over de websocket, alleen in het procesgeheugen); drie kruisproeven moeten ROOD
 node --no-warnings test/imagine-uitbreiden.test.js > /tmp/imagine-toets.$$ 2>&1; r=$?
 tail -n 1 /tmp/imagine-toets.$$; grep -E "^ROOD" /tmp/imagine-toets.$$

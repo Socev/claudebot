@@ -23,7 +23,7 @@
 // wv3038 (14-11-2026, David): standaard MOSS-Image (flow beeld-tekst-moss), FLUX.2 klein als keuze (body.model 'moss' | 'flux'; zonder
 // model = MOSS). Beide flows met dezelfde velden; het model staat bij de versie (versie.model = ai_model van de flow) en in Immich.
 //
-// FASE 2 (wv3021, 13-11-2026; plan § 2.3, § 4 fase 2). Alleen bij de vrije opdracht (Qwen, FLUX.2 klein):
+// FASE 2 (wv3021, 13-11-2026; plan § 2.3, § 4 fase 2). Alleen bij de vrije opdracht (Qwen, FLUX.2 klein; sinds wv4335 ook MiniMax-H3):
 //   - MASKER ("alleen een stuk"): de app stuurt het getekende stuk als zwart-wit-PNG. studio-beeld.py pijp-pakket maakt er één RGBA-PNG van:
 //     het beeld met in alfa 255 - masker (gegroeid ± 0,8 % van de lange zijde, zacht aan de binnenkant van de groeirand). De Studio-flow
 //     beeld-plus-<model>-<n> leest het masker uit de alfa van LoadImage en zet buiten het masker het origineel terug (ImageCompositeMasked).
@@ -32,7 +32,7 @@
 //   - VOORBEELDEN: 1–2 andere beelden uit de bibliotheek (weergaveversie, ≤ 1 MP) naast het beeld in hetzelfde PNG; de flow knipt ze los
 //     (ImageCrop, maten in de velden pod_*). Eén upload onder de vaste naam: geen nieuw schrijfpunt in ComfyUI, ook niet in incognito.
 //   - VERGELIJK (alleen gewone stand): dezelfde bron en opdracht door Qwen en FLUX.2 klein, twee taken na elkaar in de rij (tellen allebei
-//     voor 5 in de rij en 30 per dag), één vingerafdruk voor allebei. De resultaten zijn versies met versie.vergelijk = groep tot David
+//     voor 5 in de rij en 30 per dag), één vingerafdruk voor allebei. wv4335: met body.minimax === true ook MiniMax-H3 als derde taak. De resultaten zijn versies met versie.vergelijk = groep tot David
 //     links, rechts of beide bewaart (de rest gaat weg).
 //   - BIJSNIJDEN EN DRAAIEN (alleen gewone stand): pijp-snij, zonder videokaart, exact (PNG); nieuwe versie, het origineel blijft.
 //   Incognito: masker en voorbeelden (uit de eigen sessie) via dezelfde pijp en dezelfde upload; niets erbij in merk, wissen of log.
@@ -97,6 +97,9 @@ const STANDEN = [
   { id: 'krassen', flow: 'foto-herstel', naam: 'Krassen en vlekken weg', karakter: 'tekent opnieuw' },
   { id: 'opdracht-qwen', flow: 'beeld-opdracht-qwen', naam: 'Vrije opdracht · Qwen', karakter: 'tekent opnieuw; gezichten blijven trouw', opdracht: true },
   { id: 'opdracht-flux', flow: 'beeld-opdracht-flux', naam: 'Vrije opdracht · FLUX.2 klein', karakter: 'tekent opnieuw; snel, maakt gezichten jonger', opdracht: true },
+  // wv4335 (David 12-11 23:18 "Ik wil Minimax wel er in", privé, alleen lokaal): een KEUZE, niet de standaard. Gemeten wv4079 (27-11, ComfyUI 0.46,
+  // 4 MP): 40–52 s, gezichten trouw zoals Qwen, maar neemt de opdracht ruim (kleurt te veel, vervangt de achtergrond half, laat drukletters staan)
+  { id: 'opdracht-minimax', flow: 'beeld-opdracht-minimax', naam: 'Vrije opdracht · MiniMax-H3', karakter: 'tekent opnieuw; trouw aan gezichten, langzamer; neemt de opdracht ruim', opdracht: true },
 ];
 // wv2990: nieuw beeld uit tekst (geen bewerking: niet in STANDEN, dus niet via /bewerk)
 // wv3038: twee modellen onder dezelfde stand 'tekst'; TEKST = de standaard (MOSS-Image)
@@ -107,11 +110,12 @@ const TEKSTEN = [
 const TEKST = TEKSTEN[0];
 function tekstModel(m) { if (m === undefined || m === null || m === '') return TEKST; return TEKSTEN.find(function (x) { return x.model === m; }) || null; }
 // wv3021: flows voor masker en voorbeelden (generator mk-scripts/ovis-imagine/fase2/maak-plus-flows.py): <basis>-<aantal voorbeelden>
-const PLUS = { 'opdracht-qwen': 'beeld-plus-qwen', 'opdracht-flux': 'beeld-plus-flux' };
+const PLUS = { 'opdracht-qwen': 'beeld-plus-qwen', 'opdracht-flux': 'beeld-plus-flux', 'opdracht-minimax': 'beeld-plus-minimax' };   // wv4335: MiniMax via images.image_2/_3
 // wv3044: opdracht uitbreiden (zie de kop). per_apparaat = tegelijk lopend; dag = per apparaat per dag (telt niet voor de 30 beelden)
 const UITB = { flow: 'opdracht-uitbreiden', ms: 15 * 60 * 1000, per_apparaat: 2, dag: 100, tekst_max: 2000 };
 const REFS_MAX = 2, MASKER_B64_MAX = 4 * 1024 * 1024;
 const VERGELIJK = ['opdracht-qwen', 'opdracht-flux'];   // links, rechts
+const VERGELIJK_DERDE = 'opdracht-minimax';   // wv4335: met body.minimax === true als derde taak (achteraan in de rij)
 const SNIJ = { id: 'snijden', naam: 'Bijsnijden en draaien' };
 const HEX16 = /^[a-f0-9]{16}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -531,13 +535,16 @@ function maak(deps) {
     log('imagine klaar taak=' + taakId + ' versies=' + u.beelden.length);
   }
   // ── wv3021: vergelijk (gewone stand) — Qwen links, FLUX.2 klein rechts, na elkaar in de rij, één vingerafdruk ──
+  // wv4335: met d.minimax === true ook MiniMax-H3 als derde (drie taken, ± 45 s extra); allemaal of geen
   async function vergelijk(d, ctx, apparaat) {
     if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
     const beurt = String(d && d.beurt_id || '');
     if (!/^[A-Za-z0-9-]{8,60}$/.test(beurt)) return { status: 400, fout: 'beurt_id ontbreekt' };
+    const lijst = d && d.minimax === true ? VERGELIJK.concat([VERGELIJK_DERDE]) : VERGELIJK.slice();
+    const n = lijst.length, woord = n === 3 ? 'drie' : 'twee';
     const h = S.health();
-    if (h.in_rij + 2 > GRENS.rij) return { status: 429, fout: 'vergelijken zet twee taken in de rij en daar is nu geen plek voor (hooguit ' + GRENS.rij + '); wacht tot er een klaar is' };
-    if (h.taken_vandaag + 2 > GRENS.dag) return { status: 429, fout: 'vergelijken telt als twee bewerkingen en dan kom je over de ' + GRENS.dag + ' van vandaag' };
+    if (h.in_rij + n > GRENS.rij) return { status: 429, fout: 'vergelijken zet ' + woord + ' taken in de rij en daar is nu geen plek voor (hooguit ' + GRENS.rij + '); wacht tot er een klaar is' };
+    if (h.taken_vandaag + n > GRENS.dag) return { status: 429, fout: 'vergelijken telt als ' + woord + ' bewerkingen en dan kom je over de ' + GRENS.dag + ' van vandaag' };
     // review Codex MOET 1: de vingerafdruk meteen (vóór elke await) verbruiken; beide taken krijgen die ene uitkomst. Een tweede gelijktijdig
     // verzoek ziet hem dan al verbruikt. Mislukt het starten daarna, dan is hij toch op (veilige kant).
     const vers = !!ctx.versOk();
@@ -545,17 +552,22 @@ function maak(deps) {
     const ctx2 = Object.assign({}, ctx, { versOk: function () { return vers; }, versVerbruik: function () {} });
     const groep = hex16();
     const basis = Object.assign({}, d);
-    const r1 = await bewerk(Object.assign({}, basis, { stand: VERGELIJK[0], beurt_id: beurt + '-l' }), ctx2, apparaat, groep);
-    if (r1.status !== 200) return r1;
-    const r2 = await bewerk(Object.assign({}, basis, { stand: VERGELIJK[1], beurt_id: beurt + '-r' }), ctx2, apparaat, groep);
-    if (r2.status !== 200) {
-      // allebei of geen van beide: de eerste weer uit de rij
-      if (!r1.al) { const t = open().prepare('SELECT * FROM taak WHERE id = ?').get(r1.taak.id); if (t && t.studio) { try { S.stopGeheugen(t.studio); } catch (e) {} } }
-      return { status: r2.status, fout: 'vergelijken kon niet: ' + (r2.fout || 'onbekend'), vers_nodig: r2.vers_nodig };
+    delete basis.minimax;
+    const ACHTER = ['-l', '-r', '-m'];   // beurt-id per kant (links, rechts, MiniMax)
+    const rs = [];
+    for (let i = 0; i < n; i++) {
+      const r = await bewerk(Object.assign({}, basis, { stand: lijst[i], beurt_id: beurt + ACHTER[i] }), ctx2, apparaat, groep);
+      if (r.status !== 200) {
+        if (!i) return r;
+        // allemaal of geen: wat al in de rij stond er weer uit
+        for (const x of rs) if (!x.al) { const t = open().prepare('SELECT * FROM taak WHERE id = ?').get(x.taak.id); if (t && t.studio) { try { S.stopGeheugen(t.studio); } catch (e) {} } }
+        return { status: r.status, fout: 'vergelijken kon niet: ' + (r.fout || 'onbekend'), vers_nodig: r.vers_nodig };
+      }
+      rs.push(r);
     }
-    if (r1.al && r2.al) return { status: 200, al: true, groep: r1.taak ? r1.taak.vergelijk : null, taken: [r1.taak, r2.taak] };
-    log('imagine vergelijk groep=' + groep);
-    return { status: 200, groep: groep, taken: [r1.taak, r2.taak] };
+    if (rs.every(function (r) { return r.al; })) return { status: 200, al: true, groep: rs[0].taak ? rs[0].taak.vergelijk : null, taken: rs.map(function (r) { return r.taak; }) };
+    log('imagine vergelijk groep=' + groep + (n === 3 ? ' drie' : ''));
+    return { status: 200, groep: groep, taken: rs.map(function (r) { return r.taak; }) };
   }
   // links, rechts, beide of geen van beide bewaren; wat niet bewaard wordt gaat weg
   function kies(groep, d) {
@@ -976,7 +988,7 @@ function maak(deps) {
         }
         if (album) { const a = await c.album(album); if (!a) return { status: 404, fout: 'dit album bestaat niet (meer)' }; albums = [a]; }
       } catch (e) { fout('imagine-immich', new Error('immich niet bereikbaar')); return { status: 503, fout: 'Immich is nu niet bereikbaar' }; }
-      const generatief = v.stand && ['krassen', 'opdracht-qwen', 'opdracht-flux', TEKST.id, BEWEGEN_STAND].indexOf(v.stand) >= 0;   // wv2990: ook tekst naar beeld; wv3266: filmpje
+      const generatief = v.stand && ['krassen', 'opdracht-qwen', 'opdracht-flux', 'opdracht-minimax', TEKST.id, BEWEGEN_STAND].indexOf(v.stand) >= 0;   // wv2990: ook tekst naar beeld; wv3266: filmpje
       const beschrijving = v.model ? (generatief ? 'Gemaakt met AI (' + v.model + ')' : 'Hersteld met AI (' + v.model + ')') : null;
       let up;
       try { up = await c.uploaden({ data: data, taak: v.id, opname: opname, beschrijving: beschrijving }); }
