@@ -1558,8 +1558,9 @@ function maak(o) {
     const grens = new Date(nu() - CONCEPT_BRON_MS).toISOString();
     tx(function () {
       for (const c of bron.slice(0, 500)) {
-        if (!isObj(c) || !Number.isSafeInteger(c.besluit) || !ID_RE.test(String(c.draad || '')) || typeof c.tijd !== 'string' || !Number.isFinite(Date.parse(c.tijd)) || c.tijd < grens) continue;
-        const b = db.prepare('SELECT * FROM besluit WHERE id = ? AND postvak = ? AND inhaal = 0').get(c.besluit, pv);
+        // wv4105: een bron mag ook het Gmail-id van het bericht geven in plaats van het besluit-id (Socev-label Socev/Antwoord, gmail-opdracht.js)
+        if (!isObj(c) || !(Number.isSafeInteger(c.besluit) || ID_RE.test(String(c.gmail_id || ''))) || !ID_RE.test(String(c.draad || '')) || typeof c.tijd !== 'string' || !Number.isFinite(Date.parse(c.tijd)) || c.tijd < grens) continue;
+        const b = Number.isSafeInteger(c.besluit) ? db.prepare('SELECT * FROM besluit WHERE id = ? AND postvak = ? AND inhaal = 0').get(c.besluit, pv) : besluitVan(pv, String(c.gmail_id));
         if (!b || !ID_RE.test(String(b.gmail_id || '')) || b.thread_id !== String(c.draad) || buitenRij(b)) continue;
         const r = db.prepare('SELECT * FROM concept_klaar WHERE postvak = ? AND gmail_id = ?').get(pv, b.gmail_id);
         if (!r) db.prepare('INSERT INTO concept_klaar (postvak, gmail_id, thread_id, bron_tijd) VALUES (?, ?, ?, ?)').run(pv, b.gmail_id, b.thread_id, c.tijd);

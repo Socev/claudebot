@@ -3555,6 +3555,24 @@ test('wv3092 CONCEPT_KLAAR: erbij na een concept van Socev (met concept in de dr
   assert.equal(Object.keys(mm.mailLabelIds()).includes('CONCEPT_KLAAR'), false, 'Mail-App: geen tik op CONCEPT_KLAAR');
 });
 
+test('wv4105 CONCEPT_KLAAR: bron met gmail_id (Socev-label in Gmail) in plaats van besluit-id; onbekend of verkeerde draad = niets', () => {
+  const { mm, dir, gm, bron, drafts } = ckKamer();
+  const m = mail(), n = mail();
+  const ms = [m, n];
+  draai(mm, 'gmail:david', ms, { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir, { CONCEPT_KLAAR: CK_ID });
+  ms.forEach(function (x) { gm.voeg(x); });
+  const ids = ms.map(function (x) { return x.id; }), pas = conceptPas(gm, drafts);
+  ckRonde(mm, gm, ids, pas);
+  bron.push({ gmail_id: m.id, draad: m.threadId, tijd: new Date(klok).toISOString() });
+  bron.push({ gmail_id: n.id, draad: m.threadId, tijd: new Date(klok).toISOString() });   // draad hoort niet bij dit bericht
+  bron.push({ gmail_id: 'ffffffffffff0000', draad: m.threadId, tijd: new Date(klok).toISOString() }, { gmail_id: 'kapot!', draad: m.threadId, tijd: new Date(klok).toISOString() });
+  drafts.add(m.threadId); drafts.add(n.threadId);
+  const x = ckRonde(mm, gm, ids, pas);
+  assert.deepEqual(x.ck.map(function (a) { return [a.soort, a.gmail_id]; }), [['concept', m.id]]);
+  assert.ok(gm.heeft(m.id, 'CONCEPT_KLAAR') && !gm.heeft(n.id, 'CONCEPT_KLAAR'));
+});
+
 test('wv3092 CONCEPT_KLAAR: concept al weg vóór de ronde → na 5 pogingen opgegeven; nieuwer concept begint opnieuw; David haalt het label weg → nooit terug', () => {
   const { mm, dir, gm, bron, drafts } = ckKamer();
   const m = mail(), d = mail();

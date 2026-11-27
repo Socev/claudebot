@@ -646,6 +646,10 @@ jobs:
       - name: "pod-klok (wv4126, C71 stap a)"
         if: ${{ !cancelled() }}
         run: node --test test/pod-klok.test.js
+      # wv4105: Socev-labels in Gmail (2C62) — één agent per label, tweede label geen tweede agent, herkansing, afloop → CONCEPT_KLAAR-bron.
+      - name: "gmail-opdracht (wv4105, 2C62)"
+        if: ${{ !cancelled() }}
+        run: node --test test/gmail-opdracht.test.js
       # wv2991: OVIS Personeelsscherm fase 0 — proefscherm tekenen, koppelen met IP-eis, intrekken, tik en meldingen (nep-D1, nep-Cloudflare).
       - name: "personeelsscherm (wv2991, OVIS Personeelsscherm fase 0)"
         if: ${{ !cancelled() }}

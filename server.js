@@ -4836,6 +4836,7 @@ function handleRequest(req, res) {
       mailman: typeof mailmanInfo === 'function' ? mailmanInfo() : { aan: false },
       mail_app: { aan: typeof mailApp !== 'undefined' && !!mailApp, auto_voorwerk: typeof mailVoorwerkAuto === 'function' ? mailVoorwerkAuto() : null },   // wv3077: OVIS Mail fase 1
       mail_sluit: typeof mailSluitInfo === 'function' ? mailSluitInfo() : { aan: false },   // wv3091: OVIS Mail fase 2 (sluitcontrole; alleen tellingen)
+      gmail_opdracht: typeof gmailOpdrachtInfo === 'function' ? gmailOpdrachtInfo() : { aan: false },   // wv4105: Socev-labels in Gmail (tellingen, geen inhoud)
       mail_voorwerk: typeof mailVoorwerkInfo === 'function' ? mailVoorwerkInfo() : { aan: false },   // wv2455: voorwerk bij vragen in Mail (tellingen, geen inhoud)   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
       openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
       tabula: typeof tabulaInfo === 'function' ? tabulaInfo() : { aan: false },
@@ -23844,7 +23845,14 @@ const mailman = (function () {
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
       intakeDraden: mailmanIntakeDraden, intakeBerichten: mailmanIntakeBerichten, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt, factuurStap: mailmanFactuurStap, factuurGeen: mailmanFactuurGeen,
       // wv3092: concepten van Socev in Gmail (mailvoorwerk.js) voor CONCEPT_KLAAR; pas bij een ronde aangeroepen (mailVoorwerk staat verderop)
-      conceptKlaar: function (pv) { return pv === 'gmail:david' && mailVoorwerk && typeof mailVoorwerk.conceptKlaar === 'function' ? mailVoorwerk.conceptKlaar() : []; },
+      // wv4105: ook de concepten die Socev op een Gmail-label (Socev/Antwoord) in de draad zette; gmailOpdracht staat verderop (TDZ bij een vroege ronde: try)
+      conceptKlaar: function (pv) {
+        if (pv !== 'gmail:david') return [];
+        const v = mailVoorwerk && typeof mailVoorwerk.conceptKlaar === 'function' ? mailVoorwerk.conceptKlaar() : [];
+        let g = [];
+        try { g = gmailOpdracht && typeof gmailOpdracht.conceptKlaar === 'function' ? gmailOpdracht.conceptKlaar() : []; } catch (e) { g = []; }
+        return v.concat(g);
+      },
       proces: intakeProces, verkoopTmp: '/dev/shm' });
   } catch (e) { logError('mailman', e); return null; }
 })();
@@ -24258,6 +24266,74 @@ if (mailVoorwerk && SERVER_ECHT) {
   setInterval(function () { if (rolPrimair()) mailVoorwerk.tik().catch(function (e) { logError('voorwerk-tik', e); }); }, 5 * 60000).unref();
 }
 // ── einde wv2455 voorwerk ──
+// ── wv4105 (besluitenpagina nr 162 = 2C62): Socev-labels in Gmail. Logica en waarom in gmail-opdracht.js; ontwerp + Codex-ontwerpreview:
+// mk-scripts/wv4105/ontwerp.md. Hier de koppeling: het lees-luik (alleen mail_zoeken), POST /agent op deze pod (vaste socev:-labels, chat 40687,
+// zoals Shopper), het agentregister, het conceptregister van de skill (alleen lezen) en de Jev-scores van MailMan. Schakelaar
+// /opt/data/gmail-opdracht/stand.json {"aan": false} = uit (ontbreekt = aan). De pod schrijft niets in Gmail.
+const GMAIL_OPDRACHT_DIR = process.env.GMAIL_OPDRACHT_DIR || '/opt/data/gmail-opdracht';
+const GMAIL_OPDRACHT_LABELS = ['socev: Antwoord uit Gmail', 'socev: Zoek uit vanuit Gmail', 'socev: Todo uit Gmail'];
+function gmailOpdrachtAan() {
+  try { const j = JSON.parse(fs.readFileSync(path.join(GMAIL_OPDRACHT_DIR, 'stand.json'), 'utf8')); return !(j && j.aan === false); }
+  catch (e) { return !(e && e.code !== 'ENOENT'); }   // ontbreekt = aan; onleesbaar = uit (dicht)
+}
+// Staat er in het conceptregister (01_Ontwikkeling/0b-werkmap/conceptregister.jsonl, regel van de skill mailconcept-aanmaken) een concept in
+// deze draad van na `sinds`? Leest alleen het staartstuk (256 kB).
+function gmailOpdrachtConceptNa(draad, sinds) {
+  const f = path.join(VAULT, '01_Ontwikkeling', '0b-werkmap', 'conceptregister.jsonl');
+  let fd = null;
+  try {
+    fd = fs.openSync(f, 'r');
+    const n = fs.fstatSync(fd).size, len = Math.min(n, 262144), buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, n - len);
+    const grens = Date.parse(sinds) - 60000;
+    return buf.toString('utf8').split('\n').some(function (r) {
+      if (r.indexOf(draad) < 0) return false;
+      let j = null; try { j = JSON.parse(r); } catch (e) { return false; }
+      return j && j.thread_id === draad && Date.parse(j.aangemaakt) >= grens;
+    });
+  } catch (e) { return false; }
+  finally { if (fd != null) try { fs.closeSync(fd); } catch (e) {} }
+}
+const gmailOpdracht = (function () {
+  const p = path.join(__dirname, 'gmail-opdracht.js');
+  if (!fs.existsSync(p) || !fs.existsSync(path.join(__dirname, 'gmail-zoek.js'))) return null;
+  try {
+    return require(p).maak({ dir: GMAIL_OPDRACHT_DIR, fout: logError, log: function (r) { schrijfLog(nu() + ' ' + r); },
+      io: {
+        aan: gmailOpdrachtAan,
+        luik: function (body) { return appAgendaApi(body, { timeoutMs: 20000 }); },
+        grondwet: function () { return typeof autoGrondwet === 'function' ? autoGrondwet() : null; },
+        jev: function (draad) { const z = mailman && typeof mailman.voorwerkBron === 'function' ? mailman.voorwerkBron({ draad: draad }) : []; return z && z[0] && z[0].jev || null; },
+        conceptNa: gmailOpdrachtConceptNa,
+        agentStand: function (job) {
+          const a = agentsReg && agentsReg[job];
+          if (!a) return null;
+          if (a.status === 'pending' || a.status === 'running') return 'loopt';
+          return a.ok === true ? 'klaar' : a.ok === false ? 'mislukt' : (a.ended ? 'klaar' : 'loopt');
+        },
+        startAgent: function (prompt, label) {
+          return new Promise(function (klaar) {
+            if (!SECRET || !GMAIL_OPDRACHT_LABELS.includes(label)) return klaar({ ok: false, status: 0 });
+            const body = JSON.stringify({ secret: SECRET, prompt: prompt, label: label, chat_id: '40687', max_minuten: 30 });
+            const r = http.request({ host: '127.0.0.1', port: PORT, method: 'POST', path: '/agent', timeout: 15000,
+              headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, function (res) {
+              let t = '';
+              res.on('data', function (x) { if (t.length < 4096) t += x; });
+              res.on('end', function () { let j = null; try { j = JSON.parse(t); } catch (e) { j = null; } klaar(res.statusCode === 200 && j && j.ok ? { ok: true, job_id: j.job_id } : { ok: false, status: res.statusCode }); });
+            });
+            r.on('timeout', function () { r.destroy(new Error('timeout')); });
+            r.on('error', function () { klaar({ ok: false, status: 0 }); });
+            r.end(body);
+          });
+        }
+      } });
+  } catch (e) { logError('gmail-opdracht', e); return null; }
+})();
+function gmailOpdrachtInfo() { if (!gmailOpdracht) return { aan: false, module: false }; try { return gmailOpdracht.health(); } catch (e) { return { fout: true }; } }
+if (gmailOpdracht && SERVER_ECHT) {
+  setInterval(function () { if (rolPrimair()) gmailOpdracht.tik().catch(function (e) { logError('gmail-opdracht', e); }); }, 2 * 60000).unref();
+}
+// ── einde wv4105 ──
 // ── wv3077: OVIS Mail fase 1 — Davids eigen privé-Gmail in de Mail-App, met de laag van Socev erover (mail-app.js; plan vault
 // "01_Ontwikkeling/OVIS Mail - opnieuw bekeken (Fable 5.2, 14-11-2026).md"). Hier alleen de koppeling: het leesluik (mail_lijst,
 // mail_gesprek, mail_bijlage; alleen lezen), MailMans zaakregister (mailLaag, mailRegel, mailNaar), het voorwerk (lijst, kandidaat), de
