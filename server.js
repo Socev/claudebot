@@ -18855,7 +18855,7 @@ async function appSleutelWeg(req, res, reg, a, s, d) {
 // geheugen van dit ene verzoek (geen schijf, geen cache); het auditlog krijgt alleen seconden en tekens, nooit tekst.
 const APP_SPRAAK_MAX_S = 120;
 const APP_SPRAAK_MAX_BYTES = 44 + 16000 * 2 * (APP_SPRAAK_MAX_S + 5);   // WAV 16 kHz mono 16 bit (de app maakt hem), 5 s speling
-const APP_SPRAAK_PER_UUR = 60;
+const APP_SPRAAK_PER_UUR = 150;   // wv4188 (3C158): lang inspreken = één stuk per minuut; een uur praten past er ruim in
 const APP_VOORLEES_PER_UUR = 240;          // delen, niet antwoorden
 // Dagplafond (Fable K7): de Gemini-sleutel is die van het kastje; een quotum dat op is, maakt het kastje in de auto stil.
 const APP_VOORLEES_PER_DAG = 300;
