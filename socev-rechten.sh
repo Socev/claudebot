@@ -46,6 +46,9 @@
 #       leest of schrijft zou ze volgen (confused deputy; wv785, Fable wv784)
 #   io                      alleen doorlopen (x); per smalle job zet server.js zelf een ACL (fase 2); bestaande jobmappen o-rwx
 #   bin                     alleen doorlopen (x) + bisync.log lezen (nachtconsolidatie, vault-concierge); niet olares-cli e.d.
+#   scripts                 alleen doorlopen (x, wv4390): releases zijn al r-x voor anderen (scripts-uitrol.sh), zo kan socev
+#                           bin/socev-agendavoorstel, socev-datum en socev-run starten (besluit 312, wv3705). Benoemde regel:
+#                           overleeft de chmod o-rwx hieronder en de chmod 755 van scripts-uitrol.sh. Niet opsommen.
 #   auto-memory             doorlopen tot .claude/projects/-opt-data-AI-SecondBrain/memory, die zelf rwX (gedeeld geheugen)
 # Faalt iets, dan meldt het script dat en gaat het door: de pod mag hier nooit op blijven hangen.
 set -u
@@ -217,6 +220,9 @@ if [ "$WAT" = "vol" ]; then
     acl -m u:socev:x "$IO"
     find "$IO" -mindepth 1 -maxdepth 1 ! -type l -user claude -perm /o=rwx -execdir chmod o-rwx {} + 2>/dev/null || FOUTEN=$((FOUTEN + 1))
   fi
+  # scripts (wv4390): alleen doorlopen; de releases zelf zijn r-x voor anderen. Sinds 23-11 gaf socev-agendavoorstel als socev
+  # Permission denied omdat de o-rwx hierboven de map dichtzette (en scripts-uitrol.sh hem bij een release weer 755 maakte).
+  [ -d "$D/scripts" ] && [ ! -L "$D/scripts" ] && acl -m u:socev:x "$D/scripts"
   # bin: doorlopen, niets opsommen of starten (olares-cli, cloudflared, gitleaks …), bisync.log lezen.
   if [ -d "$BIN" ]; then
     find "$BIN" -mindepth 1 -maxdepth 1 ! -type l -user claude -perm /o=rwx -execdir chmod o-rwx {} + 2>/dev/null || FOUTEN=$((FOUTEN + 1))
