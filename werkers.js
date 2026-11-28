@@ -124,8 +124,9 @@ const POD = [
   { id: 'vaultzoek', naam: 'Zoeken op betekenis (eigen index)', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke nacht 02:10–04:49',
     model: 'geen (embeddings bge-m3 via Workers AI, gratis dagtegoed)', hartslag: ['vaultzoek'], uitkomst: 'brokken + vectoren in de eigen databank (schema vaultzoek) voor vault-rag en Brain op betekenis',
     bron: 'server.js vaultzoekTik → vaultzoek-index.py (wv3295)' },
-  { id: 'vault-r2', naam: 'Vault naar R2', soort: 'routine', trigger: 'pod', rooster: 'elke nacht',
-    model: 'geen', hartslag: ['vault_sync_r2'], uitkomst: 'kopie in de EU-R2-bucket', uitzetbaar: false, bron: 'sync-naar-r2.sh' },
+  // wv4164 (28-11-2026, besluitenpagina nr 26 / C13, David Ja 25-11): 'vault-r2' (sync-naar-r2.sh vanuit de droomronde) is gestopt; AI Search
+  // 'vault' staat sinds 28-11 op pauze (wv3294), de kopie had geen afnemer meer. Hartslag vault_sync_r2 staat op actief=false. Weer aan: rij
+  // terug, hartslag actief=true, stap 5 terug in de droomronde-prompt (n8n DDk9idnKqy6fnRYv).
   { id: 'uitwijk', naam: 'Uitwijk-sync en R230-nachtronde', soort: 'routine', trigger: 'pod', rooster: 'elke nacht',
     model: 'geen', hartslag: ['uitwijk_sync', 'r230_nachtcheck', 'uitwijk_cred', 'uitwijk_sleutelkopie'], uitkomst: 'uitwijkserver bij (ook de versleutelde n8n-credentials, 03:10); versleutelde uitwijksleutels ook op Drive en de NAS thuis (03:15)', uitzetbaar: false,
     bron: 'bouwplan uitwijk § 4.3 en § 13.7; uitwijk-cred.js en uitwijk-sleutelkopie.js (nachtketen)' },
